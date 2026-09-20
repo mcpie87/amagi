@@ -1,7 +1,7 @@
+import { agentLogStore } from '@amagi/core/agent-log'
 import type { StoredEvent } from '@amagi/core/events'
+import { type DashboardState, initialDashboardState, reduceState } from '@amagi/core/view'
 import { createContext, type ReactNode, useContext, useEffect, useReducer } from 'react'
-import { agentLogStore } from './agentLog.ts'
-import { type DashboardState, initialDashboardState, reduceState } from './state.ts'
 
 const DashboardContext = createContext<DashboardState>(initialDashboardState())
 
@@ -22,7 +22,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         const parsed = JSON.parse(event.data) as StoredEvent
         // agent.stream is the hot path: hundreds of lines/sec of assistant
         // text and tool output. It bypasses the reducer entirely so it never
-        // costs a setState per line; the ring buffer in agentLog.ts owns it
+        // costs a setState per line; the agentLogStore ring buffer owns it
         // and batches renders on requestAnimationFrame instead.
         if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
           agentLogStore.append(parsed.taskId, parsed.role, parsed.ts, parsed.event)

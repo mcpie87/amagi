@@ -43,6 +43,8 @@ export const Config = z.object({
     .object({
       kind: ForgeKind.default('github'),
       remote: z.string().default('origin'),
+      /** Forge handle (without the @) the agent is pinged under on PRs; mentions of it trigger responses. */
+      agentHandle: z.string().default('chise-maru'),
     })
     .prefault({}),
   harness: z

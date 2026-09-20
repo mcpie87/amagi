@@ -55,6 +55,35 @@ describe('Store', () => {
     expect(once).toEqual(['bd-3', 'bd-2', 'bd-1'])
   })
 
+  test('reclaiming a stuck task returns it to claimed and keeps the worktree', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'worktree.created',
+      path: '/tmp/wt/amagi-bd-1-add-sse',
+      branch: 'amagi/bd-1-add-sse',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', { type: 'task.reclaimed' })
+    const t = store.task('bd-1')
+    expect(t?.state).toBe('claimed')
+    expect(t?.worktree).toBe('/tmp/wt/amagi-bd-1-add-sse')
+    expect(t?.branch).toBe('amagi/bd-1-add-sse')
+  })
+
+  test('reclaimed tasks can be claimed and worked again', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'worktree.created',
+      path: '/tmp/wt/x',
+      branch: 'amagi/bd-1-x',
+    })
+    store.append('bd-1', { type: 'task.reclaimed' })
+    claim()
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    expect(store.task('bd-1')?.state).toBe('worktree_ready')
+  })
+
   test('worktree creation records path and branch', () => {
     claim()
     store.append('bd-1', {

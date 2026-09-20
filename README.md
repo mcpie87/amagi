@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="70919bb8-6f55-49e4-abc8-8da770c73bba-bluesky-16_9.png" alt="amagi" width="480">
+  <img src="banner.png" alt="amagi" width="480">
 </p>
 
 # amagi
@@ -39,9 +39,11 @@ bun run packages/cli/src/index.ts <command>
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
+| `respond-to-mentions` | Watch open PRs for @agent mentions and respond: fix, explain, or ask for clarification |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
 | `serve` | Serve the HTTP + SSE API and the built dashboard from one process |
+| `tui` | Terminal view of the queue, task detail, and pending questions (needs `amagi serve` running) |
 
 ### Pointing amagi at a repo
 
@@ -87,6 +89,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
 | `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. Only `github` (via `gh`) is implemented today; `forgejo` throws `NotImplementedDriverError` if selected. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
+| `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
 | `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"opus"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
@@ -180,4 +183,5 @@ model = "opus"
 | `@amagi/core` | Runner, drivers, store, and event feed |
 | `@amagi/cli` | The `amagi` command line |
 | `@amagi/server` | HTTP + SSE event server |
-| `@amagi/dashboard` | React dashboard served alongside the API by `amagi serve` |
+| `@amagi/dashboard` | Web dashboard (React) |
+| `@amagi/tui` | Terminal dashboard (Ink) |

@@ -83,6 +83,12 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.repo.persona).toBe('agent-chise')
   })
 
+  test('forge agent handle defaults to the agent account and is overridable', () => {
+    expect(loadConfig(repo).config.forge.agentHandle).toBe('chise-maru')
+    writeRepo('[forge]\nagentHandle = "chise"\n')
+    expect(loadConfig(repo).config.forge.agentHandle).toBe('chise')
+  })
+
   test('accepts a per-harness binary override', () => {
     writeRepo('[harness.implement]\nkind = "opencode"\nbin = "opencode-unconfined"\n')
     expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')

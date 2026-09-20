@@ -36,6 +36,7 @@ async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<voi
       worktreeRoot: config.repo.worktreeRoot,
       baseBranch: config.repo.baseBranch,
       pr,
+      persona: config.repo.persona,
     })
     console.log(dim(`  worktree: ${wt.path}`))
 
