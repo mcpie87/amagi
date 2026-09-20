@@ -35,10 +35,27 @@ export async function changesSinceBase(run: Exec, cwd: string, base: string): Pr
     })
 }
 
+/** Heading an agent appends to the task description to document a user-facing feature. */
+const HOW_TO_USE_HEADING = /^###\s+How to use\s*$/m
+
+/**
+ * Splits a task description into its summary and an optional `### How to use`
+ * section (agent-authored when the PR adds a user-facing feature). howToUse is
+ * null when the description has no such heading.
+ */
+function splitDescription(description: string): { summary: string; howToUse: string | null } {
+  const match = description.match(HOW_TO_USE_HEADING)
+  if (match?.index === undefined) return { summary: description.trim(), howToUse: null }
+  const summary = description.slice(0, match.index).trim()
+  const howToUse = description.slice(match.index).replace(HOW_TO_USE_HEADING, '').trim()
+  return { summary, howToUse: howToUse === '' ? null : howToUse }
+}
+
 export function formatPrBody(task: TrackerTask, changes: readonly PrChange[]): string {
   const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
-  const description = task.description.trim()
-  if (description !== '') lines.push('', '### 📝 Summary', '', description)
+  const { summary, howToUse } = splitDescription(task.description)
+  if (summary !== '') lines.push('', '### 📝 Summary', '', summary)
+  if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
     for (const change of changes) {

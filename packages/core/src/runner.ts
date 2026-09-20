@@ -280,14 +280,23 @@ export class Runner {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    // The agent may have appended a how-to-use section to the task description
+    // while implementing; re-read it so the PR body is not built from the stale
+    // claim. Best effort: a failed re-read falls back to the claimed task.
+    let current = task
+    try {
+      current = (await this.deps.tracker.get(task.id)) ?? task
+    } catch {
+      current = task
+    }
     const opts: CreatePrOptions = {
       cwd,
       branch,
       base: config.repo.baseBranch,
       remote: config.forge.remote,
-      title: prTitle(task),
-      body: formatPrBody(task, changes),
-      labels: amagiLabels(task.type),
+      title: prTitle(current),
+      body: formatPrBody(current, changes),
+      labels: amagiLabels(current.type),
     }
     try {
       const pr = await forge.createPr(opts)
