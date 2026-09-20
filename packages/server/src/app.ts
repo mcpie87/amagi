@@ -1,4 +1,4 @@
-import type { Store } from '@amagi/core'
+import type { Notifier, Store } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -18,6 +18,7 @@ import { eventStream } from './stream.ts'
 
 export type ServerDeps = {
   store: Store
+  notify?: Notifier[]
 }
 
 /**
@@ -39,7 +40,28 @@ const valid = <T extends z.ZodType, Target extends keyof ValidationTargets>(
 const authorized = (c: Context, store: Store, id: string): boolean =>
   c.req.header('X-Amagi-Token') === store.token(id)
 
-export function createApp({ store }: ServerDeps) {
+/**
+ * Best effort: a notifier (e.g. a missing notify-send) must never break the
+ * ask request, so failures are logged and still recorded as notify.sent so
+ * the dashboard shows what was attempted.
+ */
+async function notifyChannels(
+  notifiers: Notifier[],
+  store: Store,
+  title: string,
+  body: string,
+): Promise<void> {
+  for (const notifier of notifiers) {
+    try {
+      await notifier.notify(title, body)
+    } catch (err) {
+      console.warn(`notify ${notifier.kind}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
+  }
+}
+
+export function createApp({ store, notify = [] }: ServerDeps) {
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
 
@@ -66,6 +88,7 @@ export function createApp({ store }: ServerDeps) {
         from: task.state,
         to: 'awaiting_answer',
       })
+      void notifyChannels(notify, store, `question from ${id}`, question)
       return c.json({ task: store.task(id), question: store.question(questionId) }, 201)
     })
 

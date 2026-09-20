@@ -13,7 +13,6 @@ beforeEach(() => {
   store = new Store(openDatabase(':memory:'))
   app = createApp({ store })
 })
-
 describe('GET /api/tasks', () => {
   test('returns the store projection newest first', async () => {
     claim('bd-1')
@@ -215,6 +214,40 @@ describe('question channel', () => {
     const body = (await res.json()) as { question: QuestionRow }
     expect(body.question.resolvedAt).not.toBeNull()
     expect(store.question(q.id)?.answer).toBeNull()
+  })
+
+  test('asking fires the notifiers and records notify.sent', async () => {
+    const delivered: string[] = []
+    const failing = {
+      kind: 'broken',
+      notify: async () => {
+        throw new Error('channel down')
+      },
+    }
+    app = createApp({
+      store,
+      notify: [
+        {
+          kind: 'spy',
+          notify: async (title: string) => {
+            delivered.push(title)
+          },
+        },
+        failing,
+      ],
+    })
+    claim('bd-1')
+    implementing('bd-1')
+
+    const res = await ask('bd-1', 'which registry?')
+    expect(res.status).toBe(201)
+    await Bun.sleep(10)
+
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('bd-1')
+    const sent = store.events().filter((e) => e.type === 'notify.sent')
+    expect(sent).toHaveLength(2)
+    expect(sent.map((e) => e.type === 'notify.sent' && e.channel).sort()).toEqual(['broken', 'spy'])
   })
 })
 
