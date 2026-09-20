@@ -1,0 +1,8 @@
+[install]
+exact = true
+# Pinned explicitly: a global ~/.npmrc pointing at a corporate registry would
+# otherwise capture this personal project, and leak its auth tokens with it.
+registry = "https://registry.npmjs.org"
+
+[test]
+coverage = false
