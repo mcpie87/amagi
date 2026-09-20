@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from 'citty'
+import { askCommand } from './commands/ask.ts'
 import { cleanCommand } from './commands/clean.ts'
 import { configCommand } from './commands/config.ts'
 import { runCommand } from './commands/run.ts'
@@ -15,6 +16,7 @@ const main = defineCommand({
     status: statusCommand,
     config: configCommand,
     clean: cleanCommand,
+    ask: askCommand,
   },
 })
 

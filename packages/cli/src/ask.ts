@@ -1,0 +1,44 @@
+export type AskOutcome = { kind: 'answered'; answer: string } | { kind: 'no_answer' }
+
+export type AskOptions = {
+  baseUrl: string
+  taskId: string
+  token: string
+  question: string
+  options: string[]
+  deadlineMs: number
+}
+
+/** `amagi/<id>-<slug>` from the worktree branch is the agent's own task id. */
+export function taskIdFromBranch(branch: string): string | null {
+  return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
+}
+
+async function errorOf(res: Response): Promise<string> {
+  try {
+    return ((await res.json()) as { error?: string }).error ?? `HTTP ${res.status}`
+  } catch {
+    return `HTTP ${res.status}`
+  }
+}
+
+export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
+  const headers = { 'content-type': 'application/json', 'X-Amagi-Token': opts.token }
+
+  const asked = await fetch(`${opts.baseUrl}/api/tasks/${opts.taskId}/questions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ question: opts.question, options: opts.options }),
+  })
+  if (!asked.ok) throw new Error(`amagi ask: ${await errorOf(asked)}`)
+  const question = ((await asked.json()) as { question: { id: string } }).question
+
+  const awaited = await fetch(
+    `${opts.baseUrl}/api/tasks/${opts.taskId}/questions/${question.id}/await?deadlineMs=${opts.deadlineMs}`,
+    { headers },
+  )
+  if (!awaited.ok) throw new Error(`amagi ask: ${await errorOf(awaited)}`)
+  const answer = ((await awaited.json()) as { question: { answer: string | null } }).question.answer
+
+  return answer === null ? { kind: 'no_answer' } : { kind: 'answered', answer }
+}
