@@ -311,10 +311,14 @@ describe('Runner.runOnce', () => {
     expect(mainLog).toContain('init')
   })
 
-  test('an agent that changes nothing is escalated, not silently committed', async () => {
+  test('an agent that changes nothing lands in no_pr, not silently committed', async () => {
     const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([{}])).runOnce()
-    expect(result?.state).toBe('needs_human')
+    expect(result?.state).toBe('no_pr')
     expect(types(TASK.id)).not.toContain('commit.created')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
   })
 
   test('a reclaimed task reuses the recorded worktree and branch', async () => {

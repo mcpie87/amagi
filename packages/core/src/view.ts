@@ -198,7 +198,7 @@ export function activeTasks(state: DashboardState): TaskView[] {
 
 export function tasksNeedingAttention(state: DashboardState): TaskView[] {
   return Object.values(state.tasks)
-    .filter((t) => t.state === 'needs_human')
+    .filter((t) => t.state === 'needs_human' || t.state === 'no_pr')
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 

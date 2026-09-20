@@ -81,7 +81,8 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `reviewing` | Review harness runs against the PR | `fixing`, `done` |
 | `fixing` | Implement harness addresses review findings | `awaiting_answer`, `checks`, `reviewing` |
 | `done` | Terminal: task complete | — |
-| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, no PR, agent crash, etc.) | — |
+| `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
+| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.

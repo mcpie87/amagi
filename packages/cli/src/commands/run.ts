@@ -129,9 +129,10 @@ export const runCommand = defineCommand({
       }
 
       const { task, state } = result
-      const paint = state === 'needs_human' ? red : isTerminal(state) ? green : yellow
+      const needsHuman = state === 'needs_human' || state === 'no_pr'
+      const paint = needsHuman ? red : isTerminal(state) ? green : yellow
       console.log(`\n${bold(task.id)}  ${paint(state)}  ${task.title}`)
-      if (state === 'needs_human') process.exitCode = 1
+      if (needsHuman) process.exitCode = 1
     } finally {
       unsubscribe()
       store.close()

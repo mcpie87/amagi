@@ -30,6 +30,14 @@ import {
   Time,
 } from './ui.tsx'
 
+function taskAttentionText(task: TaskView): string {
+  if (task.lastError) return task.lastError
+  if (task.state === 'no_pr') {
+    return 'No changes were made. Verify the task is already done, then close it explicitly.'
+  }
+  return 'The run stopped and needs your attention.'
+}
+
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 const navigation = [
   { to: '/', label: 'Overview', icon: 'overview' },
@@ -460,7 +468,7 @@ function Overview() {
                 >
                   <span className="eyebrow">NEEDS ATTENTION</span>
                   <h3>{task.title}</h3>
-                  <p>{task.lastError ?? 'This run needs a closer look.'}</p>
+                  <p>{taskAttentionText(task)}</p>
                 </Link>
               ))}
             </div>
@@ -517,7 +525,9 @@ function RunRow({ task }: { task: TaskView }) {
   const agent = currentAgentFor(state, task.id)
   return (
     <Link to="/tasks/$id" params={{ id: task.id }} className="run-row">
-      <span className={`run-avatar ${task.state === 'needs_human' ? 'attention-avatar' : ''}`}>
+      <span
+        className={`run-avatar ${task.state === 'needs_human' || task.state === 'no_pr' ? 'attention-avatar' : ''}`}
+      >
         <Icon name="agent" size={21} />
       </span>
       <span className="run-info">
@@ -556,7 +566,8 @@ function RunsView() {
     {
       id: 'attention',
       label: 'Needs attention',
-      match: (task: TaskView) => task.state === 'needs_human' || task.state === 'awaiting_answer',
+      match: (task: TaskView) =>
+        task.state === 'needs_human' || task.state === 'no_pr' || task.state === 'awaiting_answer',
     },
     { id: 'prs', label: 'Pull requests', match: (task: TaskView) => task.state === 'pr_open' },
     { id: 'completed', label: 'Completed', match: (task: TaskView) => task.state === 'done' },
@@ -928,7 +939,7 @@ function InboxView() {
               </div>
               <div className="card-body">
                 <h2>{task.title}</h2>
-                <p>{task.lastError ?? 'The run stopped and needs your attention.'}</p>
+                <p>{taskAttentionText(task)}</p>
                 <Link to="/tasks/$id" params={{ id: task.id }} className="button secondary">
                   Inspect run
                   <Icon name="arrow" size={16} />
@@ -1294,7 +1305,11 @@ function TaskDetailView() {
       {task.lastError && (
         <div className="error-banner">
           <strong>
-            {task.state === 'needs_human' ? 'This run needs attention' : 'Last recorded error'}
+            {task.state === 'needs_human'
+              ? 'This run needs attention'
+              : task.state === 'no_pr'
+                ? 'No changes made — confirm before closing'
+                : 'Last recorded error'}
           </strong>
           <p>{task.lastError}</p>
         </div>
