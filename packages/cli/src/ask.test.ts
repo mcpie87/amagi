@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { openDatabase, type QuestionRow, Store } from '@amagi/core'
 import { serve } from '../../server/src/serve.ts'
-import { askQuestion, taskIdFromBranch } from './ask.ts'
+import { answerQuestion, askQuestion, listOpenQuestions, taskIdFromBranch } from './ask.ts'
 
 let store: Store
 let server: ReturnType<typeof serve>
@@ -84,4 +84,76 @@ test('timed out: reports no answer yet and parks the task', async () => {
   const q = asked?.type === 'question.asked' ? store.question(asked.questionId) : null
   expect(q?.answer).toBeNull()
   expect(q?.resolvedAt).not.toBeNull()
+})
+
+test('answerQuestion answers and unparks the task', async () => {
+  claim('bd-1')
+  implementing('bd-1')
+  const token = store.token('bd-1')
+  store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'awaiting_answer' })
+  store.append('bd-1', {
+    type: 'question.asked',
+    questionId: 'q1',
+    question: 'which registry?',
+    options: ['npm', 'nexus'],
+    gateRef: null,
+  })
+
+  const question = await answerQuestion({
+    baseUrl,
+    questionId: 'q1',
+    taskId: 'bd-1',
+    token,
+    answer: 'npm',
+  })
+
+  expect(question.answer).toBe('npm')
+  expect(question.answeredVia).toBe('cli')
+  expect(store.task('bd-1')?.state).toBe('implementing')
+})
+
+test('answerQuestion rejects a token mismatch', async () => {
+  claim('bd-1')
+  implementing('bd-1')
+  store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'awaiting_answer' })
+  store.append('bd-1', {
+    type: 'question.asked',
+    questionId: 'q1',
+    question: 'which registry?',
+    options: [],
+    gateRef: null,
+  })
+
+  await expect(
+    answerQuestion({
+      baseUrl,
+      questionId: 'q1',
+      taskId: 'bd-1',
+      token: 'wrong-token',
+      answer: 'npm',
+    }),
+  ).rejects.toThrow(/token mismatch/)
+})
+
+test('listOpenQuestions returns only unresolved questions', async () => {
+  claim('bd-1')
+  store.append('bd-1', {
+    type: 'question.asked',
+    questionId: 'q1',
+    question: 'which registry?',
+    options: ['npm', 'nexus'],
+    gateRef: null,
+  })
+  store.append('bd-1', {
+    type: 'question.asked',
+    questionId: 'q2',
+    question: 'which color?',
+    options: [],
+    gateRef: null,
+  })
+  store.append('bd-1', { type: 'question.answered', questionId: 'q1', answer: 'npm', via: 'cli' })
+
+  const questions = await listOpenQuestions(baseUrl)
+  expect(questions.map((q) => q.id)).toEqual(['q2'])
+  expect(questions[0]?.taskId).toBe('bd-1')
 })

@@ -1,3 +1,5 @@
+import type { QuestionRow } from '@amagi/core'
+
 export type AskOutcome = { kind: 'answered'; answer: string } | { kind: 'no_answer' }
 
 export type AskOptions = {
@@ -41,4 +43,31 @@ export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
   const answer = ((await awaited.json()) as { question: { answer: string | null } }).question.answer
 
   return answer === null ? { kind: 'no_answer' } : { kind: 'answered', answer }
+}
+
+export type AnswerOptions = {
+  baseUrl: string
+  questionId: string
+  taskId: string
+  token: string
+  answer: string
+}
+
+export async function answerQuestion(opts: AnswerOptions): Promise<QuestionRow> {
+  const res = await fetch(
+    `${opts.baseUrl}/api/tasks/${opts.taskId}/questions/${opts.questionId}/answer`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Amagi-Token': opts.token },
+      body: JSON.stringify({ answer: opts.answer, via: 'cli' }),
+    },
+  )
+  if (!res.ok) throw new Error(`amagi answer: ${await errorOf(res)}`)
+  return ((await res.json()) as { question: QuestionRow }).question
+}
+
+export async function listOpenQuestions(baseUrl: string): Promise<QuestionRow[]> {
+  const res = await fetch(`${baseUrl}/api/questions`)
+  if (!res.ok) throw new Error(`amagi ask --list: ${await errorOf(res)}`)
+  return (await res.json()) as QuestionRow[]
 }

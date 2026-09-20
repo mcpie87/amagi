@@ -32,7 +32,8 @@ bun run packages/cli/src/index.ts <command>
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree |
 | `status` | Show the run queue and any open questions |
-| `ask` | Ask the human a question and block for the answer |
+| `ask` | Ask the human a question and block for the answer; `--list` shows open questions for fzf picking |
+| `answer` | Answer an open question (`amagi answer <id> "<text>"`) |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
 
