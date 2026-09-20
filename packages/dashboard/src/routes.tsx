@@ -1,5 +1,12 @@
 import type { AgentEvent, StoredEvent, TaskState } from '@amagi/core/events'
-import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from '@amagi/core/view'
+import {
+  activeTasks,
+  currentAgentFor,
+  openQuestionsFor,
+  type QuestionView,
+  type TaskView,
+  tasksNeedingAttention,
+} from '@amagi/core/view'
 import {
   createRootRoute,
   createRoute,
@@ -8,12 +15,27 @@ import {
   Outlet,
   useParams,
 } from '@tanstack/react-router'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
+
+type Issue = {
+  id: string
+  title: string
+  description: string
+  acceptanceCriteria: string | null
+  status: 'open' | 'in_progress' | 'blocked' | 'closed'
+  priority: number | null
+  type: string | null
+  assignee: string | null
+  labels: string[]
+  parent: string | null
+}
+
+const PAGE_SIZE = 10
 
 const stateBadge: Record<TaskState, string> = {
   claimed: 'bg-zinc-500',
@@ -22,6 +44,7 @@ const stateBadge: Record<TaskState, string> = {
   awaiting_answer: 'bg-amber-500',
   checks: 'bg-violet-600',
   committed: 'bg-cyan-600',
+  retrying: 'bg-orange-500',
   pr_open: 'bg-sky-600',
   reviewing: 'bg-purple-600',
   fixing: 'bg-blue-600',
@@ -44,9 +67,19 @@ function RootLayout() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-800 px-6 py-3">
-        <Link to="/" className="text-lg font-semibold tracking-tight">
-          amagi
-        </Link>
+        <div className="mx-auto flex max-w-5xl items-center gap-5">
+          <Link to="/" className="text-lg font-semibold tracking-tight">
+            amagi
+          </Link>
+          <nav className="flex gap-3 text-sm text-zinc-400">
+            <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
+              Queue
+            </Link>
+            <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
+              Tasks
+            </Link>
+          </nav>
+        </div>
       </header>
       <main className="mx-auto max-w-5xl px-6 py-6">
         <Outlet />
@@ -55,48 +88,248 @@ function RootLayout() {
   )
 }
 
-function QueueView() {
-  const state = useDashboard()
-  const queue = activeTasks(state)
+function IssueBadge({ issue }: { issue: Issue }) {
+  const color =
+    issue.status === 'closed'
+      ? 'bg-emerald-600'
+      : issue.status === 'blocked'
+        ? 'bg-red-600'
+        : issue.status === 'in_progress'
+          ? 'bg-blue-600'
+          : 'bg-zinc-600'
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs font-medium text-white ${color}`}>
+      {issue.status}
+    </span>
+  )
+}
 
+function IssuesView() {
+  const [issues, setIssues] = useState<Issue[]>([])
+  const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
+  const [selected, setSelected] = useState<Issue | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+
+  useEffect(() => {
+    fetch(`${apiBase}/api/issues`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+        return res.json() as Promise<Issue[]>
+      })
+      .then(setIssues)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  const visible = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+  const pageItems = visible.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
+  if (selected !== null) {
+    return (
+      <section>
+        <button
+          type="button"
+          onClick={() => setSelected(null)}
+          className="text-sm text-sky-400 hover:underline"
+        >
+          &larr; tasks
+        </button>
+        <div className="mt-3 flex items-center gap-3">
+          <h1 className="text-xl font-semibold">{selected.title}</h1>
+          <IssueBadge issue={selected} />
+        </div>
+        <p className="mt-1 text-sm text-zinc-500">
+          {selected.id}
+          {selected.parent ? ` · child of ${selected.parent}` : ''}
+        </p>
+        <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+          <DetailRow
+            label="priority"
+            value={selected.priority === null ? null : `P${selected.priority}`}
+          />
+          <DetailRow label="type" value={selected.type} />
+          <DetailRow label="assignee" value={selected.assignee} />
+          <DetailRow label="labels" value={selected.labels.join(', ') || null} />
+        </dl>
+        <div className="mt-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Description
+          </h2>
+          <p className="whitespace-pre-wrap text-zinc-300">
+            {selected.description || 'No description.'}
+          </p>
+        </div>
+        {selected.acceptanceCriteria !== null && (
+          <div className="mt-6">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              Acceptance criteria
+            </h2>
+            <p className="whitespace-pre-wrap text-zinc-300">{selected.acceptanceCriteria}</p>
+          </div>
+        )}
+      </section>
+    )
+  }
   return (
     <section>
-      <h1 className="mb-4 text-xl font-semibold">Queue</h1>
-      {queue.length === 0 ? (
-        <p className="text-zinc-500">No active tasks.</p>
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Tasks</h1>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-zinc-500">
+            {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
+            {status !== 'all' && ` · ${visible.length} shown`}
+          </span>
+          <select
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value as typeof status)
+              setPage(0)
+            }}
+            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+          >
+            <option value="all">All statuses</option>
+            <option value="open">Open</option>
+            <option value="in_progress">In progress</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+      </div>
+      {error !== null ? (
+        <p className="text-red-400">{error}</p>
       ) : (
         <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
-          {queue.map((task) => (
-            <li key={task.id}>
-              <Link
-                to="/tasks/$id"
-                params={{ id: task.id }}
-                className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+          {pageItems.map((issue) => (
+            <li key={issue.id}>
+              <button
+                type="button"
+                onClick={() => setSelected(issue)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
               >
-                <Badge state={task.state} />
+                <IssueBadge issue={issue} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{task.title}</span>
+                  <span className="block truncate font-medium">{issue.title}</span>
                   <span className="block truncate text-xs text-zinc-500">
-                    {task.id}
-                    {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
+                    {issue.id}
+                    {issue.priority === null ? '' : ` · P${issue.priority}`}
+                    {issue.type === null ? '' : ` · ${issue.type}`}
                   </span>
                 </span>
-              </Link>
+              </button>
             </li>
           ))}
         </ul>
+      )}
+      {pageCount > 1 && (
+        <div className="mt-4 flex items-center justify-between">
+          <button
+            type="button"
+            disabled={currentPage === 0}
+            onClick={() => setPage(currentPage - 1)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
+          >
+            &larr; prev
+          </button>
+          <span className="text-sm text-zinc-500">
+            page {currentPage + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            disabled={currentPage >= pageCount - 1}
+            onClick={() => setPage(currentPage + 1)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
+          >
+            next &rarr;
+          </button>
+        </div>
       )}
     </section>
   )
 }
 
-function DetailRow({ label, value }: { label: string; value: string | null }) {
+function QueueView() {
+  const state = useDashboard()
+  const queue = activeTasks(state)
+  const attention = tasksNeedingAttention(state)
+
+  const taskList = (tasks: TaskView[]) => (
+    <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+      {tasks.map((task) => (
+        <li key={task.id}>
+          <Link
+            to="/tasks/$id"
+            params={{ id: task.id }}
+            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+          >
+            <Badge state={task.state} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium">{task.title}</span>
+              <span className="block truncate text-xs text-zinc-500">
+                {task.id}
+                {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
+              </span>
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  )
+
+  return (
+    <section>
+      <h1 className="mb-4 text-xl font-semibold">Queue</h1>
+      {attention.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
+            Needs attention ({attention.length})
+          </h2>
+          {taskList(attention)}
+        </div>
+      )}
+      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
+    </section>
+  )
+}
+
+function DetailRow({ label, value }: { label: string; value: string | ReactNode | null }) {
   if (value === null) return null
   return (
     <div className="flex gap-2 py-1">
       <dt className="w-28 shrink-0 text-zinc-500">{label}</dt>
       <dd className="min-w-0 break-all">{value}</dd>
     </div>
+  )
+}
+
+function GithubIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+    </svg>
+  )
+}
+
+function ForgejoIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M16.7773 0c1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.1175a7.0759 7.0759 0 0 1 4.148-1.4205l.1176-.001 1.3385.0002c.4973-.8827 1.4434-1.4788 2.5288-1.4788 1.6018 0 2.9004 1.2986 2.9004 2.9005s-1.2986 2.9004-2.9004 2.9004c-1.0854 0-2.0315-.596-2.5288-1.4787H12.91c-2.3322 0-4.2272 1.8718-4.2649 4.195l-.0007 2.319c.8827.4973 1.4788 1.4434 1.4788 2.5287 0 1.602-1.2986 2.9005-2.9005 2.9005-1.6018 0-2.9004-1.2986-2.9004-2.9005 0-1.0853.596-2.0314 1.4788-2.5287l-.0002-9.9831c0-3.887 3.1195-7.0453 6.9915-7.108l.1176-.001h1.3385C14.7458.5962 15.692 0 16.7773 0ZM7.2227 19.9052c-.6596 0-1.1943.5347-1.1943 1.1943s.5347 1.1943 1.1943 1.1943 1.1944-.5347 1.1944-1.1943-.5348-1.1943-1.1944-1.1943Zm9.5546-10.4644c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Zm0-7.7346c-.6596 0-1.1944.5347-1.1944 1.1943s.5348 1.1943 1.1944 1.1943c.6596 0 1.1943-.5347 1.1943-1.1943s-.5347-1.1943-1.1943-1.1943Z" />
+    </svg>
+  )
+}
+
+function PrLink({ url }: { url: string }) {
+  const isGithub = new URL(url).hostname.endsWith('github.com')
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center gap-1.5 text-sky-400 hover:underline"
+    >
+      {isGithub ? <GithubIcon className="h-4 w-4" /> : <ForgejoIcon className="h-4 w-4" />}
+      {url}
+    </a>
   )
 }
 
@@ -240,17 +473,7 @@ function TaskDetailView() {
   const agentEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .slice(-500)
-  const agentStarts = state.events.filter(
-    (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
-      e.taskId === id && e.type === 'agent.started',
-  )
-  const agents = [...new Set(agentStarts.map((e) => `${e.role}: ${e.harness}`))].join(', ')
-  const models = [
-    ...new Set(agentStarts.map((e) => e.model).filter((m): m is string => m !== null)),
-  ].join(', ')
-  const efforts = [
-    ...new Set(agentStarts.map((e) => e.effort).filter((e): e is string => e !== null)),
-  ].join(', ')
+  const currentAgent = currentAgentFor(state, id)
   const usageEvents = agentEvents
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
@@ -290,13 +513,16 @@ function TaskDetailView() {
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
-        <DetailRow label="agent" value={agents || null} />
-        <DetailRow label="model" value={models || null} />
-        <DetailRow label="effort" value={efforts || null} />
+        <DetailRow
+          label="agent"
+          value={currentAgent ? `${currentAgent.role}: ${currentAgent.harness}` : null}
+        />
+        <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
+        <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
-        <DetailRow label="PR" value={task.prUrl} />
+        <DetailRow label="PR" value={task.prUrl === null ? null : <PrLink url={task.prUrl} />} />
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"
@@ -370,11 +596,16 @@ function TaskDetailView() {
 
 const rootRoute = createRootRoute({ component: RootLayout })
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: QueueView })
+const issuesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/issues',
+  component: IssuesView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute, taskRoute])
+const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, taskRoute])
 export const router = createRouter({ routeTree })

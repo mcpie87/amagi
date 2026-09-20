@@ -1,15 +1,24 @@
 import type { Config } from './config.ts'
-import { type CreatePrOptions, gitTokenConfig, makePrDriver, type PrDriver } from './drivers/pr.ts'
+import {
+  amagiLabels,
+  type CreatePrOptions,
+  gitTokenConfig,
+  makePrDriver,
+  type PrDriver,
+} from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { CheckResult, TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { changesSinceBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
   commitMessage,
   fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prTitle,
 } from './prompt.ts'
+import { backoffDelayMs, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
 import { createWorktree } from './worktree.ts'
 
@@ -93,6 +102,10 @@ export class Runner {
       type: 'task.claimed',
       title: task.title,
       tracker: this.deps.tracker.kind,
+      description: task.description,
+      priority: task.priority,
+      taskType: task.type,
+      url: task.url,
     })
 
     try {
@@ -141,6 +154,7 @@ export class Runner {
       baseBranch: base,
       worktreeRoot: config.repo.worktreeRoot,
       setupCmd: config.repo.setupCmd,
+      persona: config.repo.persona,
       exec: this.exec,
     })
     store.append(task.id, {
@@ -169,19 +183,26 @@ export class Runner {
     const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
 
     this.transition(task.id, 'implementing')
-    let sessionId = await this.runAgent(task.id, null, {
-      cwd,
-      prompt: implementPrompt(promptCtx),
-      systemPrompt: implementSystemPrompt(promptCtx),
-      ...(config.harness.implement.model === undefined
-        ? {}
-        : { model: config.harness.implement.model }),
-      ...(config.harness.implement.effort === undefined
-        ? {}
-        : { effort: config.harness.implement.effort }),
-      permissions: config.harness.implement.permissions,
-      extraArgs: config.harness.implement.extraArgs,
-    })
+    const first = await this.runAgentWithRetry(
+      task.id,
+      null,
+      {
+        cwd,
+        prompt: implementPrompt(promptCtx),
+        systemPrompt: implementSystemPrompt(promptCtx),
+        ...(config.harness.implement.model === undefined
+          ? {}
+          : { model: config.harness.implement.model }),
+        ...(config.harness.implement.effort === undefined
+          ? {}
+          : { effort: config.harness.implement.effort }),
+        permissions: config.harness.implement.permissions,
+        extraArgs: config.harness.implement.extraArgs,
+      },
+      lease,
+    )
+    if (first.stopped) return
+    let sessionId = first.sessionId
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
@@ -210,12 +231,19 @@ export class Runner {
       }
 
       this.transition(task.id, 'implementing')
-      sessionId = await this.runAgent(task.id, sessionId, {
-        cwd,
-        prompt: fixChecksPrompt(results),
-        permissions: config.harness.implement.permissions,
-        extraArgs: config.harness.implement.extraArgs,
-      })
+      const fix = await this.runAgentWithRetry(
+        task.id,
+        sessionId,
+        {
+          cwd,
+          prompt: fixChecksPrompt(results),
+          permissions: config.harness.implement.permissions,
+          extraArgs: config.harness.implement.extraArgs,
+        },
+        lease,
+      )
+      if (fix.stopped) return
+      sessionId = fix.sessionId
       if (lease.isLost) throw new LeaseLostError(task.id)
 
       const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease)
@@ -240,13 +268,15 @@ export class Runner {
   private async openPullRequest(task: TrackerTask, cwd: string, branch: string): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
+    const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
     const opts: CreatePrOptions = {
       cwd,
       branch,
       base: config.repo.baseBranch,
       remote: config.forge.remote,
-      title: task.title,
-      body: `Task: ${task.id}\n\n${task.description}`,
+      title: prTitle(task),
+      body: formatPrBody(task, changes),
+      labels: amagiLabels(task.type),
     }
     try {
       const pr = await forge.createPr(opts)
@@ -300,12 +330,19 @@ export class Runner {
           )
           return null
         }
-        return this.runAgent(taskId, sessionId, {
-          cwd,
-          prompt: answerPrompt(question.question, q.answer),
-          permissions: config.harness.implement.permissions,
-          extraArgs: config.harness.implement.extraArgs,
-        })
+        const resumed = await this.runAgentWithRetry(
+          taskId,
+          sessionId,
+          {
+            cwd,
+            prompt: answerPrompt(question.question, q.answer),
+            permissions: config.harness.implement.permissions,
+            extraArgs: config.harness.implement.extraArgs,
+          },
+          lease,
+        )
+        if (resumed.stopped) return null
+        return resumed.sessionId
       }
       await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
     }
@@ -318,7 +355,7 @@ export class Runner {
     taskId: string,
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
-  ): Promise<string | null> {
+  ): Promise<{ sessionId: string | null; ok: boolean; detail: string | null }> {
     const { store, harness } = this.deps
     const spawn = {
       ...opts,
@@ -354,11 +391,53 @@ export class Runner {
       sessionId: outcome.sessionId,
     })
 
+    let detail: string | null = null
     if (!outcome.ok) {
-      const detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
+      detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
       store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
     }
-    return outcome.sessionId
+    return { sessionId: outcome.sessionId, ok: outcome.ok, detail }
+  }
+
+  /**
+   * Runs the agent, retrying transient failures (quota, rate limit, overloaded
+   * model, flaky network) with an exponential backoff until the budget is
+   * spent. The task sits in `retrying` between attempts so a crashed run is
+   * visibly parked rather than silently committed. `stopped` means the run
+   * must end: either the failure was operator-actionable, or retries ran out.
+   */
+  private async runAgentWithRetry(
+    taskId: string,
+    resumeFrom: string | null,
+    opts: Parameters<Harness['start']>[0],
+    lease: Lease,
+  ): Promise<{ sessionId: string | null; stopped: boolean }> {
+    const { store, config } = this.deps
+    let sessionId = resumeFrom
+
+    for (let attempt = 1; ; attempt++) {
+      const run = await this.runAgent(taskId, sessionId, opts)
+      sessionId = run.sessionId
+      if (run.ok) return { sessionId, stopped: false }
+      if (lease.isLost) throw new LeaseLostError(taskId)
+
+      if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
+        this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
+        return { sessionId, stopped: true }
+      }
+      const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
+      store.append(taskId, {
+        type: 'retry.scheduled',
+        attempt,
+        delayMs,
+        reason: 'transient harness failure',
+        detail: run.detail ?? '',
+      })
+      this.transition(taskId, 'retrying')
+      await Bun.sleep(delayMs)
+      if (lease.isLost) throw new LeaseLostError(taskId)
+      this.transition(taskId, 'implementing')
+    }
   }
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {

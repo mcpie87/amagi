@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { loadConfig, repoRoot, Store } from '@amagi/core'
+import { BeadsTracker, loadConfig, makePrDriver, makeTracker, repoRoot, Store } from '@amagi/core'
 import { serve } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
@@ -13,11 +13,16 @@ export const serveCommand = defineCommand({
     const root = repoRoot()
     const { config } = loadConfig(root)
     const store = new Store()
+    const tracker = makeTracker(config, root)
     const server = serve({
       store,
       host: config.server.host,
       port: config.server.port,
       staticDir: join(root, 'packages', 'dashboard', 'dist'),
+      forge: makePrDriver(config.forge.kind),
+      forgeCwd: root,
+      tracker,
+      ...(tracker instanceof BeadsTracker ? { listIssues: () => tracker.list() } : {}),
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     console.log(dim('ctrl-c to stop'))

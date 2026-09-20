@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrDriver, PullRequest } from './drivers/pr.ts'
+import type { CreatePrOptions, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -125,6 +125,10 @@ class FakePr implements PrDriver {
     if (this.failWith !== null) throw this.failWith
     return { url: 'https://example.com/demo/pull/7', number: 7 }
   }
+
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
+  }
 }
 
 let repo: string
@@ -151,6 +155,12 @@ const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = 
 
 const types = (taskId: string): EventType[] =>
   store.events({ taskId, limit: 999 }).map((e) => e.type)
+
+const states = (taskId: string): (string | null | undefined)[] =>
+  store
+    .events({ taskId, limit: 999 })
+    .filter((e) => e.type === 'task.state')
+    .map((e) => (e as Extract<StoredEvent, { type: 'task.state' }>).to)
 
 beforeEach(async () => {
   delete process.env.GH_TOKEN
@@ -251,7 +261,11 @@ describe('Runner.runOnce', () => {
     ).runOnce()
 
     expect(pr.calls).toHaveLength(1)
-    expect(pr.calls[0]?.title).toBe('Add a greeting file')
+    expect(pr.calls[0]?.title).toBe('bd-a1b2: Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('## ✨ Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('**Task:** `bd-a1b2`')
+    expect(pr.calls[0]?.body).toContain('Write hello.txt')
+    expect(pr.calls[0]?.body).toContain('- `hello.txt` +1 -0')
     expect(pr.calls[0]?.base).toBe('main')
     expect(pr.calls[0]?.branch).toContain('amagi/')
     const created = store.events({ taskId: TASK.id }).find((e) => e.type === 'pr.created')
@@ -334,16 +348,82 @@ describe('Runner.runOnce', () => {
   })
 
   test('a crashing agent still leaves an auditable trail', async () => {
-    const result = await makeRunner(
-      new FakeTracker([TASK]),
-      new FakeHarness([{ outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' } }]),
-    ).runOnce()
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(1)
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(errors.some((e) => e.type === 'error' && e.message.includes('model unavailable'))).toBe(
       true,
     )
+  })
+
+  test('a transient failure backs off and retries, then commits', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { retryBaseMs: 0, retryMaxMs: 0 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    const scheduled = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'retry.scheduled' }> => e.type === 'retry.scheduled',
+      )
+    expect(scheduled).toHaveLength(1)
+    expect(scheduled[0]?.attempt).toBe(1)
+    expect(scheduled[0]?.delayMs).toBe(0)
+    expect(scheduled[0]?.detail).toBe('rate limit exceeded')
+    expect(store.task(TASK.id)?.retryCount).toBe(1)
+    expect(states(TASK.id)).toContain('retrying')
+  })
+
+  test('transient failures escalate only after the retry budget is spent', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'quota exceeded' } },
+      { outcome: { ok: false, exitCode: 1, stderr: 'quota exceeded' } },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxRetries: 1, retryBaseMs: 0, retryMaxMs: 0 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(2)
+    const scheduled = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'retry.scheduled' }> => e.type === 'retry.scheduled',
+      )
+    expect(scheduled).toHaveLength(1)
+    expect(store.task(TASK.id)?.retryCount).toBe(1)
+    expect(states(TASK.id)).toContain('retrying')
+    expect(types(TASK.id)).not.toContain('commit.created')
+  })
+
+  test('an operator-actionable failure escalates without retrying', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'model not installed' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(1)
+    expect(
+      store.events({ taskId: TASK.id }).filter((e) => e.type === 'retry.scheduled'),
+    ).toHaveLength(0)
   })
 
   test('an unusable base branch escalates instead of throwing out of runOnce', async () => {

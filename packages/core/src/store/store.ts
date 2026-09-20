@@ -14,6 +14,7 @@ export type TaskRow = {
   prNumber: number | null
   reviewRound: number
   lastError: string | null
+  retryCount: number
   createdAt: number
   updatedAt: number
 }
@@ -42,6 +43,7 @@ type RawTask = {
   pr_number: number | null
   review_round: number
   last_error: string | null
+  retry_count: number
   created_at: number
   updated_at: number
 }
@@ -70,6 +72,7 @@ const toTask = (r: RawTask): TaskRow => ({
   prNumber: r.pr_number,
   reviewRound: r.review_round,
   lastError: r.last_error,
+  retryCount: r.retry_count,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 })
@@ -139,7 +142,9 @@ export class Store {
           .query(
             `insert into tasks (id, title, tracker, state, created_at, updated_at)
              values (?, ?, ?, 'claimed', ?, ?)
-             on conflict(id) do update set title = excluded.title, updated_at = excluded.updated_at`,
+             on conflict(id) do update
+               set title = excluded.title, state = 'claimed',
+                   retry_count = 0, updated_at = excluded.updated_at`,
           )
           .run(taskId, body.title, body.tracker, ts, ts)
         break
@@ -204,6 +209,12 @@ export class Store {
 
       case 'question.timedout':
         this.db.query('update questions set resolved_at = ? where id = ?').run(ts, body.questionId)
+        break
+
+      case 'retry.scheduled':
+        this.db
+          .query('update tasks set retry_count = retry_count + 1, updated_at = ? where id = ?')
+          .run(ts, taskId)
         break
 
       case 'error':

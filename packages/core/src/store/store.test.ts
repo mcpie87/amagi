@@ -27,6 +27,16 @@ describe('Store', () => {
     expect(b.seq).toBeGreaterThan(a.seq)
   })
 
+  test('re-claiming a terminal task resets it to claimed', () => {
+    claim()
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'needs_human' })
+    expect(store.task('bd-1')?.state).toBe('needs_human')
+    claim()
+    expect(store.task('bd-1')?.state).toBe('claimed')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    expect(store.task('bd-1')?.state).toBe('worktree_ready')
+  })
+
   test('illegal transitions are rejected and leave no event behind', () => {
     claim()
     expect(() =>
@@ -109,6 +119,26 @@ describe('Store', () => {
     store.append('bd-1', { type: 'question.timedout', questionId: 'q1' })
     expect(store.openQuestions()).toHaveLength(0)
     expect(store.question('q1')?.answer).toBeNull()
+  })
+
+  test('retry.scheduled increments the persisted retry counter', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 1000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    expect(store.task('bd-1')?.retryCount).toBe(1)
+    store.append('bd-1', {
+      type: 'retry.scheduled',
+      attempt: 2,
+      delayMs: 2000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    expect(store.task('bd-1')?.retryCount).toBe(2)
   })
 
   test('an unanswered question outlives its timeout until answered', () => {
