@@ -155,3 +155,7 @@ permissions = "bypass"
 | `@amagi/cli` | The `amagi` command line |
 | `@amagi/server` | HTTP + SSE event server |
 | `@amagi/dashboard` | React dashboard served alongside the API by `amagi serve` |
+
+## License
+
+[MIT](LICENSE). Chosen over Apache-2.0 for a single-owner, patent-free tool: Apache's patent grant and trademark clauses add obligations no one here needs, and MIT is the shortest widely understood permissive license. Copyright (c) 2026 Mcpie.
