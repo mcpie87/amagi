@@ -42,6 +42,7 @@ const stateBadge: Record<TaskState, string> = {
   awaiting_answer: 'bg-amber-500',
   checks: 'bg-violet-600',
   committed: 'bg-cyan-600',
+  retrying: 'bg-orange-500',
   pr_open: 'bg-sky-600',
   reviewing: 'bg-purple-600',
   fixing: 'bg-blue-600',

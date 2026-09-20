@@ -53,4 +53,10 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
       alter table tasks add column task_token text;
     `,
   },
+  {
+    name: '003_retry_count',
+    sql: `
+      alter table tasks add column retry_count integer not null default 0;
+    `,
+  },
 ]

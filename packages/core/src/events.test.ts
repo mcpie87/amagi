@@ -28,6 +28,11 @@ describe('state machine', () => {
     expect(canTransition('awaiting_answer', 'implementing')).toBe(true)
   })
 
+  test('a transient failure parks the task in retrying until the retry runs', () => {
+    expect(canTransition('implementing', 'retrying')).toBe(true)
+    expect(canTransition('retrying', 'implementing')).toBe(true)
+  })
+
   test('any non-terminal state may fall to a terminal state', () => {
     for (const s of TASK_STATES) {
       if (isTerminal(s)) continue

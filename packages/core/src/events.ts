@@ -10,6 +10,7 @@ export const TASK_STATES = [
   'pr_open',
   'reviewing',
   'fixing',
+  'retrying',
   'done',
   'needs_human',
   'abandoned',
@@ -35,9 +36,10 @@ export function isTerminal(state: TaskState): boolean {
 const FORWARD: Record<TaskState, readonly TaskState[]> = {
   claimed: ['worktree_ready'],
   worktree_ready: ['implementing'],
-  implementing: ['awaiting_answer', 'checks'],
+  implementing: ['awaiting_answer', 'checks', 'retrying'],
   awaiting_answer: ['implementing'],
   checks: ['implementing', 'committed'],
+  retrying: ['implementing'],
   committed: ['pr_open'],
   pr_open: ['reviewing'],
   reviewing: ['fixing', 'done'],
@@ -158,6 +160,14 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('question.timedout'), questionId: z.string() }),
   z.object({ type: z.literal('question.parked'), questionId: z.string() }),
+  z.object({
+    type: z.literal('retry.scheduled'),
+    /** 1-based retry attempt about to run. */
+    attempt: z.number().int().positive(),
+    delayMs: z.number().int().nonnegative(),
+    reason: z.string(),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
   z.object({ type: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 ])
