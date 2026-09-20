@@ -83,4 +83,22 @@ describe('githubPr', () => {
     expect(calls).toContainEqual(['<stdin>', 'Task: am-1'])
     expect(pr).toEqual({ number: 7, url: 'https://github.com/x/y/pull/7' })
   })
+
+  test('resolves the remote pr state from gh', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('view') && c.includes('pr') ? ok('MERGED\n') : undefined,
+    )
+    const state = await makePrDriver('github', exec).getPr('/repo', 7)
+
+    expect(calls).toContainEqual(['gh', 'pr', 'view', '7', '--json', 'state', '--jq', '.state'])
+    expect(state).toBe('merged')
+  })
+
+  test('maps gh state: closed stays closed, anything else is open', async () => {
+    const closed = fake((c) => (c.includes('view') ? ok('CLOSED\n') : undefined))
+    const open = fake((c) => (c.includes('view') ? ok('OPEN\n') : undefined))
+
+    expect(await makePrDriver('github', closed.exec).getPr('/repo', 7)).toBe('closed')
+    expect(await makePrDriver('github', open.exec).getPr('/repo', 7)).toBe('open')
+  })
 })

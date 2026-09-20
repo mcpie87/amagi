@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrDriver, PullRequest } from './drivers/pr.ts'
+import type { CreatePrOptions, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -124,6 +124,10 @@ class FakePr implements PrDriver {
     this.calls.push(opts)
     if (this.failWith !== null) throw this.failWith
     return { url: 'https://example.com/demo/pull/7', number: 7 }
+  }
+
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
   }
 }
 
