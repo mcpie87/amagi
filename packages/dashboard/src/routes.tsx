@@ -7,8 +7,12 @@ import {
   Outlet,
   useParams,
 } from '@tanstack/react-router'
-import { activeTasks, openQuestionsFor, type TaskView } from './state.ts'
+import type { FormEvent } from 'react'
+import { useEffect, useState } from 'react'
+import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from './state.ts'
 import { useDashboard } from './store.tsx'
+
+const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
 const stateBadge: Record<TaskState, string> = {
   claimed: 'bg-zinc-500',
@@ -95,6 +99,91 @@ function DetailRow({ label, value }: { label: string; value: string | null }) {
   )
 }
 
+function AnswerBox({ taskId, question }: { taskId: string; question: QuestionView }) {
+  const [token, setToken] = useState<string | null>(null)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    fetch(`${apiBase}/api/tasks/${taskId}`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ token?: string }>) : null))
+      .then((body) => {
+        if (alive) setToken(body?.token ?? null)
+      })
+      .catch(() => {
+        if (alive) setToken(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [taskId])
+
+  const send = async (answer: string) => {
+    if (token === null || answer.trim() === '' || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${taskId}/questions/${question.id}/answer`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
+        body: JSON.stringify({ answer, via: 'web' }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    void send(text)
+  }
+
+  if (token === null) {
+    return <p className="mt-2 text-sm text-zinc-500">answer box unavailable</p>
+  }
+
+  return (
+    <div className="mt-2">
+      {question.options.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {question.options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              disabled={busy}
+              onClick={() => void send(option)}
+              className="rounded border border-amber-700 bg-amber-900/40 px-3 py-1 text-sm hover:bg-amber-800 disabled:opacity-50"
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
+      <form onSubmit={submit} className="mt-2 flex gap-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="answer"
+          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm"
+        />
+        <button
+          type="submit"
+          disabled={busy || text.trim() === ''}
+          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-zinc-950 disabled:opacity-50"
+        >
+          Answer
+        </button>
+      </form>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const state = useDashboard()
@@ -152,9 +241,7 @@ function TaskDetailView() {
                 className="rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3"
               >
                 <p className="font-medium">{q.question}</p>
-                {q.options.length > 0 && (
-                  <p className="mt-1 text-sm text-zinc-400">{q.options.join(' · ')}</p>
-                )}
+                <AnswerBox taskId={id} question={q} />
               </li>
             ))}
           </ul>
