@@ -152,7 +152,7 @@ export class Runner {
     lease: Lease,
   ): Promise<void> {
     const { store, config } = this.deps
-    const promptCtx = { task, worktree: cwd, branch, askCommand: null }
+    const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
 
     this.transition(task.id, 'implementing')
     let sessionId = await this.runAgent(task.id, null, {
