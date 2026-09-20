@@ -1,6 +1,8 @@
 import { AsyncQueue } from '../../async-queue.ts'
 import type { AgentEvent } from '../../events.ts'
+import { CommandError, exec } from '../../exec.ts'
 import { jsonLines } from '../../jsonl.ts'
+import { parseModelLines } from '../../models.ts'
 import { killTree } from '../../process.ts'
 import type {
   AgentOutcome,
@@ -149,6 +151,13 @@ export class OpencodeHarness implements Harness {
 
   start(opts: AgentStartOptions): AgentProcess {
     return this.spawn(this.argv(opts, null), opts)
+  }
+
+  async listModels(): Promise<string[]> {
+    const cmd = [this.bin, 'models']
+    const result = await exec(cmd)
+    if (result.exitCode !== 0) throw new CommandError(cmd, result)
+    return parseModelLines(result.stdout)
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {

@@ -88,6 +88,19 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
   })
 
+  test('accepts named harness definitions for the interactive picker', () => {
+    writeRepo(
+      '[harness.definitions.fast]\nkind = "opencode"\npermissions = "bypass"\nmodel = "local/x"\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.harness.definitions.fast).toMatchObject({
+      kind: 'opencode',
+      permissions: 'bypass',
+      model: 'local/x',
+    })
+    expect(config.harness.implement.kind).toBe('claude')
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)

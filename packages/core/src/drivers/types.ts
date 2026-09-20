@@ -97,4 +97,6 @@ export interface Harness {
   start(opts: AgentStartOptions): AgentProcess
   /** Continues an existing session so a fix round keeps the original context. */
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess
+  /** Models the harness can run, listed the way the harness lists them. */
+  listModels(): Promise<string[]>
 }

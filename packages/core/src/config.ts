@@ -8,7 +8,7 @@ export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
 
-const HarnessConfig = z.object({
+export const HarnessConfig = z.object({
   kind: HarnessKind,
   /** Command used to invoke the harness. Defaults to the harness name. */
   bin: z.string().min(1).optional(),
@@ -47,6 +47,12 @@ export const Config = z.object({
     .prefault({}),
   harness: z
     .object({
+      /**
+       * Named harness definitions offered by the `amagi run` interactive
+       * picker, e.g. `[harness.definitions.fast]`. Each is a full harness
+       * config; the picker falls back to the three known kinds when empty.
+       */
+      definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
       review: HarnessConfig.prefault({ kind: 'codex' }),
     })
