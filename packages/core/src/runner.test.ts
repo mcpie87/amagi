@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrDriver, PullRequest } from './drivers/pr.ts'
+import type { CreatePrOptions, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -124,6 +124,10 @@ class FakePr implements PrDriver {
     this.calls.push(opts)
     if (this.failWith !== null) throw this.failWith
     return { url: 'https://example.com/demo/pull/7', number: 7 }
+  }
+
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
   }
 }
 
@@ -252,6 +256,10 @@ describe('Runner.runOnce', () => {
 
     expect(pr.calls).toHaveLength(1)
     expect(pr.calls[0]?.title).toBe('Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('## ✨ Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('**Task:** `bd-a1b2`')
+    expect(pr.calls[0]?.body).toContain('Write hello.txt')
+    expect(pr.calls[0]?.body).toContain('- `hello.txt` +1 -0')
     expect(pr.calls[0]?.base).toBe('main')
     expect(pr.calls[0]?.branch).toContain('amagi/')
     const created = store.events({ taskId: TASK.id }).find((e) => e.type === 'pr.created')

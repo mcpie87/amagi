@@ -27,6 +27,16 @@ describe('Store', () => {
     expect(b.seq).toBeGreaterThan(a.seq)
   })
 
+  test('re-claiming a terminal task resets it to claimed', () => {
+    claim()
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'needs_human' })
+    expect(store.task('bd-1')?.state).toBe('needs_human')
+    claim()
+    expect(store.task('bd-1')?.state).toBe('claimed')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    expect(store.task('bd-1')?.state).toBe('worktree_ready')
+  })
+
   test('illegal transitions are rejected and leave no event behind', () => {
     claim()
     expect(() =>

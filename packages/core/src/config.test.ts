@@ -74,6 +74,20 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.permissions).toBe('workspace-write')
   })
 
+  test('repo persona defaults to none', () => {
+    expect(loadConfig(repo).config.repo.persona).toBeNull()
+  })
+
+  test('accepts a repo persona', () => {
+    writeRepo('[repo]\npersona = "agent-chise"\n')
+    expect(loadConfig(repo).config.repo.persona).toBe('agent-chise')
+  })
+
+  test('accepts a per-harness binary override', () => {
+    writeRepo('[harness.implement]\nkind = "opencode"\nbin = "opencode-unconfined"\n')
+    expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)

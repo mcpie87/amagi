@@ -1,4 +1,4 @@
-import type { Notifier, Question, Store, Tracker } from '@amagi/core'
+import type { BeadsIssue, Notifier, Question, Store, Tracker } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -25,6 +25,7 @@ export type ServerDeps = {
    * the agent. Absent in tests that exercise the question channel alone.
    */
   tracker?: Tracker
+  listIssues?: () => Promise<BeadsIssue[]>
 }
 
 /**
@@ -98,9 +99,14 @@ async function resolveQuestionGate(
   }
 }
 
-export function createApp({ store, notify = [], tracker }: ServerDeps) {
+export function createApp({ store, notify = [], tracker, listIssues }: ServerDeps) {
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
+
+    .get('/api/issues', async (c) => {
+      if (listIssues === undefined) return c.json({ error: 'issue browser is unavailable' }, 501)
+      return c.json(await listIssues())
+    })
 
     .get('/api/tasks', valid('query', TaskListQuery), (c) => {
       const { state, limit } = c.req.valid('query')

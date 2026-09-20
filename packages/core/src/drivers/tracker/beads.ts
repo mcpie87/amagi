@@ -5,10 +5,20 @@ type BdIssue = {
   id: string
   title: string
   description?: string
+  acceptance_criteria?: string
   status?: string
   priority?: number
   issue_type?: string
-  await_type?: string
+  assignee?: string
+  labels?: string[]
+  parent?: string
+}
+
+export type BeadsIssue = TrackerTask & {
+  acceptanceCriteria: string | null
+  assignee: string | null
+  labels: string[]
+  parent: string | null
 }
 
 export type BeadsOptions = {
@@ -46,6 +56,16 @@ function toTask(issue: BdIssue): TrackerTask {
     priority: issue.priority ?? null,
     type: issue.issue_type ?? null,
     url: null,
+  }
+}
+
+function toIssue(issue: BdIssue): BeadsIssue {
+  return {
+    ...toTask(issue),
+    acceptanceCriteria: issue.acceptance_criteria ?? null,
+    assignee: issue.assignee ?? null,
+    labels: issue.labels ?? [],
+    parent: issue.parent ?? null,
   }
 }
 
@@ -91,6 +111,10 @@ export class BeadsTracker implements Tracker {
       HUMAN_ONLY_LABEL,
     ])
     return parseIssues(out).map(toTask)
+  }
+
+  async list(limit = 200): Promise<BeadsIssue[]> {
+    return parseIssues(await this.bd(['list', '--json', '--limit', String(limit)])).map(toIssue)
   }
 
   async claim(id?: string): Promise<TrackerTask | null> {

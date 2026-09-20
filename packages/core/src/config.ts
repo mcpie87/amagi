@@ -10,6 +10,8 @@ export const ForgeKind = z.enum(['github', 'forgejo'])
 
 const HarnessConfig = z.object({
   kind: HarnessKind,
+  /** Command used to invoke the harness. Defaults to the harness name. */
+  bin: z.string().min(1).optional(),
   model: z.string().optional(),
   /** Reasoning effort (e.g. low/medium/high/xhigh for claude), passed through. */
   effort: z.string().optional(),
@@ -28,6 +30,12 @@ export const Config = z.object({
       baseBranch: z.string().default('main'),
       worktreeRoot: z.string().default(join(cacheHome(), 'amagi', 'worktrees')),
       setupCmd: z.string().nullable().default(null),
+      /**
+       * Git persona applied to fresh worktrees: the name of a gitconfig
+       * fragment under ~/.config/git/personas/<name>.gitconfig, included via
+       * the worktree's own config so commits and PRs carry that identity.
+       */
+      persona: z.string().nullable().default(null),
     })
     .prefault({}),
   tracker: z.object({ kind: TrackerKind.default('beads') }).prefault({}),

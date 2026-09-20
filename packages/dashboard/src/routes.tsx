@@ -10,10 +10,30 @@ import {
 import type { FormEvent } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from './state.ts'
+import {
+  activeTasks,
+  currentAgentFor,
+  openQuestionsFor,
+  type QuestionView,
+  type TaskView,
+  tasksNeedingAttention,
+} from './state.ts'
 import { useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
+
+type Issue = {
+  id: string
+  title: string
+  description: string
+  acceptanceCriteria: string | null
+  status: 'open' | 'in_progress' | 'blocked' | 'closed'
+  priority: number | null
+  type: string | null
+  assignee: string | null
+  labels: string[]
+  parent: string | null
+}
 
 const stateBadge: Record<TaskState, string> = {
   claimed: 'bg-zinc-500',
@@ -44,9 +64,19 @@ function RootLayout() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-800 px-6 py-3">
-        <Link to="/" className="text-lg font-semibold tracking-tight">
-          amagi
-        </Link>
+        <div className="mx-auto flex max-w-5xl items-center gap-5">
+          <Link to="/" className="text-lg font-semibold tracking-tight">
+            amagi
+          </Link>
+          <nav className="flex gap-3 text-sm text-zinc-400">
+            <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
+              Queue
+            </Link>
+            <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
+              Tasks
+            </Link>
+          </nav>
+        </div>
       </header>
       <main className="mx-auto max-w-5xl px-6 py-6">
         <Outlet />
@@ -55,37 +85,170 @@ function RootLayout() {
   )
 }
 
-function QueueView() {
-  const state = useDashboard()
-  const queue = activeTasks(state)
+function IssueBadge({ issue }: { issue: Issue }) {
+  const color =
+    issue.status === 'closed'
+      ? 'bg-emerald-600'
+      : issue.status === 'blocked'
+        ? 'bg-red-600'
+        : issue.status === 'in_progress'
+          ? 'bg-blue-600'
+          : 'bg-zinc-600'
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs font-medium text-white ${color}`}>
+      {issue.status}
+    </span>
+  )
+}
 
+function IssuesView() {
+  const [issues, setIssues] = useState<Issue[]>([])
+  const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
+  const [selected, setSelected] = useState<Issue | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch(`${apiBase}/api/issues`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+        return res.json() as Promise<Issue[]>
+      })
+      .then(setIssues)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  const visible = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
+  if (selected !== null) {
+    return (
+      <section>
+        <button
+          type="button"
+          onClick={() => setSelected(null)}
+          className="text-sm text-sky-400 hover:underline"
+        >
+          &larr; tasks
+        </button>
+        <div className="mt-3 flex items-center gap-3">
+          <h1 className="text-xl font-semibold">{selected.title}</h1>
+          <IssueBadge issue={selected} />
+        </div>
+        <p className="mt-1 text-sm text-zinc-500">
+          {selected.id}
+          {selected.parent ? ` · child of ${selected.parent}` : ''}
+        </p>
+        <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+          <DetailRow
+            label="priority"
+            value={selected.priority === null ? null : `P${selected.priority}`}
+          />
+          <DetailRow label="type" value={selected.type} />
+          <DetailRow label="assignee" value={selected.assignee} />
+          <DetailRow label="labels" value={selected.labels.join(', ') || null} />
+        </dl>
+        <div className="mt-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Description
+          </h2>
+          <p className="whitespace-pre-wrap text-zinc-300">
+            {selected.description || 'No description.'}
+          </p>
+        </div>
+        {selected.acceptanceCriteria !== null && (
+          <div className="mt-6">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              Acceptance criteria
+            </h2>
+            <p className="whitespace-pre-wrap text-zinc-300">{selected.acceptanceCriteria}</p>
+          </div>
+        )}
+      </section>
+    )
+  }
   return (
     <section>
-      <h1 className="mb-4 text-xl font-semibold">Queue</h1>
-      {queue.length === 0 ? (
-        <p className="text-zinc-500">No active tasks.</p>
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Tasks</h1>
+        <select
+          value={status}
+          onChange={(event) => setStatus(event.target.value as typeof status)}
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+        >
+          <option value="all">All statuses</option>
+          <option value="open">Open</option>
+          <option value="in_progress">In progress</option>
+          <option value="blocked">Blocked</option>
+          <option value="closed">Closed</option>
+        </select>
+      </div>
+      {error !== null ? (
+        <p className="text-red-400">{error}</p>
       ) : (
         <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
-          {queue.map((task) => (
-            <li key={task.id}>
-              <Link
-                to="/tasks/$id"
-                params={{ id: task.id }}
-                className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+          {visible.map((issue) => (
+            <li key={issue.id}>
+              <button
+                type="button"
+                onClick={() => setSelected(issue)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
               >
-                <Badge state={task.state} />
+                <IssueBadge issue={issue} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{task.title}</span>
+                  <span className="block truncate font-medium">{issue.title}</span>
                   <span className="block truncate text-xs text-zinc-500">
-                    {task.id}
-                    {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
+                    {issue.id}
+                    {issue.priority === null ? '' : ` · P${issue.priority}`}
+                    {issue.type === null ? '' : ` · ${issue.type}`}
                   </span>
                 </span>
-              </Link>
+              </button>
             </li>
           ))}
         </ul>
       )}
+    </section>
+  )
+}
+
+function QueueView() {
+  const state = useDashboard()
+  const queue = activeTasks(state)
+  const attention = tasksNeedingAttention(state)
+
+  const taskList = (tasks: TaskView[]) => (
+    <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+      {tasks.map((task) => (
+        <li key={task.id}>
+          <Link
+            to="/tasks/$id"
+            params={{ id: task.id }}
+            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+          >
+            <Badge state={task.state} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium">{task.title}</span>
+              <span className="block truncate text-xs text-zinc-500">
+                {task.id}
+                {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
+              </span>
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  )
+
+  return (
+    <section>
+      <h1 className="mb-4 text-xl font-semibold">Queue</h1>
+      {attention.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
+            Needs attention ({attention.length})
+          </h2>
+          {taskList(attention)}
+        </div>
+      )}
+      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
     </section>
   )
 }
@@ -240,17 +403,7 @@ function TaskDetailView() {
   const agentEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .slice(-500)
-  const agentStarts = state.events.filter(
-    (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
-      e.taskId === id && e.type === 'agent.started',
-  )
-  const agents = [...new Set(agentStarts.map((e) => `${e.role}: ${e.harness}`))].join(', ')
-  const models = [
-    ...new Set(agentStarts.map((e) => e.model).filter((m): m is string => m !== null)),
-  ].join(', ')
-  const efforts = [
-    ...new Set(agentStarts.map((e) => e.effort).filter((e): e is string => e !== null)),
-  ].join(', ')
+  const currentAgent = currentAgentFor(state, id)
   const usageEvents = agentEvents
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
@@ -290,9 +443,12 @@ function TaskDetailView() {
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
-        <DetailRow label="agent" value={agents || null} />
-        <DetailRow label="model" value={models || null} />
-        <DetailRow label="effort" value={efforts || null} />
+        <DetailRow
+          label="agent"
+          value={currentAgent ? `${currentAgent.role}: ${currentAgent.harness}` : null}
+        />
+        <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
+        <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
@@ -370,11 +526,16 @@ function TaskDetailView() {
 
 const rootRoute = createRootRoute({ component: RootLayout })
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: QueueView })
+const issuesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/issues',
+  component: IssuesView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute, taskRoute])
+const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, taskRoute])
 export const router = createRouter({ routeTree })
