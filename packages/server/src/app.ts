@@ -1,9 +1,19 @@
 import type { Store } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
-import type { ValidationTargets } from 'hono'
+import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
 import * as z from 'zod'
-import { EventQuery, QuestionQuery, StreamQuery, TaskIdParam, TaskListQuery } from './schemas.ts'
+import {
+  AnswerBody,
+  AskBody,
+  AwaitQuery,
+  EventQuery,
+  QuestionQuery,
+  StreamQuery,
+  TaskIdParam,
+  TaskListQuery,
+  TaskQuestionParam,
+} from './schemas.ts'
 import { eventStream } from './stream.ts'
 
 export type ServerDeps = {
@@ -22,6 +32,13 @@ const valid = <T extends z.ZodType, Target extends keyof ValidationTargets>(
     if (!result.success) return c.json({ error: z.prettifyError(result.error) }, 400)
   })
 
+/**
+ * The agent carries AMAGI_TASK_TOKEN in its environment; a question is bound
+ * to the task that spawned it, so one agent cannot answer for another.
+ */
+const authorized = (c: Context, store: Store, id: string): boolean =>
+  c.req.header('X-Amagi-Token') === store.token(id)
+
 export function createApp({ store }: ServerDeps) {
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -36,6 +53,92 @@ export function createApp({ store }: ServerDeps) {
       if (!task) return c.json({ error: `unknown task ${c.req.valid('param').id}` }, 404)
       return c.json({ task, questions: store.openQuestions(task.id) })
     })
+
+    .post('/api/tasks/:id/questions', valid('param', TaskIdParam), valid('json', AskBody), (c) => {
+      const { id } = c.req.valid('param')
+      const { question, options } = c.req.valid('json')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      const questionId = crypto.randomUUID()
+      store.append(id, { type: 'question.asked', questionId, question, options, gateRef: null })
+      store.append(id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'awaiting_answer',
+      })
+      return c.json({ task: store.task(id), question: store.question(questionId) }, 201)
+    })
+
+    .get(
+      '/api/tasks/:id/questions/:questionId/await',
+      valid('param', TaskQuestionParam),
+      valid('query', AwaitQuery),
+      (c) => {
+        const { id, questionId } = c.req.valid('param')
+        const { deadlineMs } = c.req.valid('query')
+        const question = store.question(questionId)
+        if (!question) return c.json({ error: `unknown question ${questionId}` }, 404)
+        if (question.taskId !== id) {
+          return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
+        }
+        if (!authorized(c, store, id)) {
+          return c.json({ error: 'task token mismatch' }, 401)
+        }
+        // An answer that landed before the poll started is not lost.
+        if (question.resolvedAt !== null) return c.json({ question })
+
+        return new Promise<Response>((resolve) => {
+          let unsub: () => void = () => {}
+          let timer: ReturnType<typeof setTimeout> | null = null
+          function cleanup(): void {
+            if (timer !== null) clearTimeout(timer)
+            unsub()
+            c.req.raw.signal.removeEventListener('abort', cleanup)
+          }
+          unsub = store.subscribe((event) => {
+            if (event.taskId !== id) return
+            const resolved =
+              event.type === 'question.timedout' ||
+              (event.type === 'question.answered' && event.questionId === questionId)
+            if (!resolved) return
+            cleanup()
+            resolve(c.json({ question: store.question(questionId) }))
+          })
+          timer = setTimeout(() => {
+            store.append(id, { type: 'question.timedout', questionId })
+            cleanup()
+            resolve(c.json({ question: store.question(questionId) }))
+          }, deadlineMs)
+          c.req.raw.signal.addEventListener('abort', cleanup, { once: true })
+        })
+      },
+    )
+
+    .post(
+      '/api/tasks/:id/questions/:questionId/answer',
+      valid('param', TaskQuestionParam),
+      valid('json', AnswerBody),
+      (c) => {
+        const { id, questionId } = c.req.valid('param')
+        const { answer, via } = c.req.valid('json')
+        const task = store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        if (!authorized(c, store, id)) {
+          return c.json({ error: 'task token mismatch' }, 401)
+        }
+        const question = store.question(questionId)
+        if (!question) return c.json({ error: `unknown question ${questionId}` }, 404)
+        if (question.taskId !== id) {
+          return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
+        }
+        if (question.resolvedAt !== null) {
+          return c.json({ error: `question ${questionId} already resolved` }, 409)
+        }
+        store.append(id, { type: 'question.answered', questionId, answer, via })
+        store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
+        return c.json({ task: store.task(id), question: store.question(questionId) })
+      },
+    )
 
     .get('/api/events', valid('query', EventQuery), (c) => {
       const { taskId, sinceSeq, limit } = c.req.valid('query')

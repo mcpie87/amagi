@@ -203,8 +203,12 @@ export class Runner {
     opts: Parameters<Harness['start']>[0],
   ): Promise<string | null> {
     const { store, harness } = this.deps
+    const spawn = {
+      ...opts,
+      env: { AMAGI_TASK_TOKEN: store.token(taskId) },
+    }
     const proc: AgentProcess =
-      resumeFrom === null ? harness.start(opts) : harness.resume(resumeFrom, opts)
+      resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
 
     store.append(taskId, {
       type: 'agent.started',

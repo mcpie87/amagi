@@ -111,6 +111,113 @@ describe('GET /api/questions', () => {
   })
 })
 
+describe('question channel', () => {
+  const token = (id: string) => store.token(id)
+  const implementing = (id: string) => {
+    for (const to of ['worktree_ready', 'implementing'] as const) {
+      store.append(id, { type: 'task.state', from: null, to })
+    }
+  }
+  const ask = (id: string, question: string, options: string[] = []) =>
+    app.request(`/api/tasks/${id}/questions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ question, options }),
+    })
+  const answer = (id: string, questionId: string, text: string, token?: string) =>
+    app.request(`/api/tasks/${id}/questions/${questionId}/answer`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token === undefined ? {} : { 'X-Amagi-Token': token }),
+      },
+      body: JSON.stringify({ answer: text }),
+    })
+  const awaitQ = (id: string, questionId: string, t: string, deadlineMs?: number) =>
+    app.request(
+      `/api/tasks/${id}/questions/${questionId}/await${deadlineMs ? `?deadlineMs=${deadlineMs}` : ''}`,
+      { headers: { 'X-Amagi-Token': t } },
+    )
+
+  test('asking persists the question and parks the task', async () => {
+    claim('bd-1')
+    implementing('bd-1')
+    const res = await ask('bd-1', 'which registry?', ['npm', 'nexus'])
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { task: TaskRow; question: QuestionRow }
+    expect(body.task.state).toBe('awaiting_answer')
+    expect(body.question.question).toBe('which registry?')
+    expect(store.task('bd-1')?.state).toBe('awaiting_answer')
+  })
+
+  test('asking an unknown task is a 404', async () => {
+    const res = await ask('nope', 'which registry?')
+    expect(res.status).toBe(404)
+  })
+
+  test('one task cannot see or answer another tasks question', async () => {
+    claim('bd-1')
+    claim('bd-2')
+    implementing('bd-1')
+    const asked = await ask('bd-1', 'which registry?')
+    const q = ((await asked.json()) as { question: QuestionRow }).question
+
+    const spied = await awaitQ('bd-1', q.id, token('bd-2'))
+    expect(spied.status).toBe(401)
+
+    const stolen = await answer('bd-1', q.id, 'yes', token('bd-2'))
+    expect(stolen.status).toBe(401)
+    expect(store.question(q.id)?.answer).toBeNull()
+
+    const own = await answer('bd-1', q.id, 'npm', token('bd-1'))
+    expect(own.status).toBe(200)
+    expect(store.question(q.id)?.answer).toBe('npm')
+  })
+
+  test('an answer landing before the poll starts is not lost', async () => {
+    claim('bd-1')
+    implementing('bd-1')
+    const asked = await ask('bd-1', 'which registry?')
+    const q = ((await asked.json()) as { question: QuestionRow }).question
+    await answer('bd-1', q.id, 'npm', token('bd-1'))
+
+    const res = await awaitQ('bd-1', q.id, token('bd-1'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { question: QuestionRow }
+    expect(body.question.answer).toBe('npm')
+    expect(body.question.resolvedAt).not.toBeNull()
+  })
+
+  test('awaiting holds the request open until the answer arrives', async () => {
+    claim('bd-1')
+    implementing('bd-1')
+    const asked = await ask('bd-1', 'which registry?')
+    const q = ((await asked.json()) as { question: QuestionRow }).question
+
+    const pending = awaitQ('bd-1', q.id, token('bd-1'))
+    const answered = await answer('bd-1', q.id, 'npm', token('bd-1'))
+    expect(answered.status).toBe(200)
+
+    const res = await pending
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { question: QuestionRow }
+    expect(body.question.answer).toBe('npm')
+    expect(store.task('bd-1')?.state).toBe('implementing')
+  })
+
+  test('awaiting times out and marks the question resolved', async () => {
+    claim('bd-1')
+    implementing('bd-1')
+    const asked = await ask('bd-1', 'which registry?')
+    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const res = await awaitQ('bd-1', q.id, token('bd-1'), 20)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { question: QuestionRow }
+    expect(body.question.resolvedAt).not.toBeNull()
+    expect(store.question(q.id)?.answer).toBeNull()
+  })
+})
+
 test('unknown routes answer with the shared error shape', async () => {
   const res = await app.request('/api/nope')
   expect(res.status).toBe(404)

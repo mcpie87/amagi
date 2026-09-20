@@ -33,5 +33,28 @@ export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
 })
 
+export const TaskQuestionParam = z.object({
+  id: z.string().min(1),
+  questionId: z.string().min(1),
+})
+
+export const AskBody = z.object({
+  question: z.string().min(1),
+  options: z.array(z.string()).default([]),
+})
+export type AskBody = z.infer<typeof AskBody>
+
+export const AnswerBody = z.object({
+  answer: z.string().min(1),
+  via: z.enum(['web', 'cli', 'gate']).default('web'),
+})
+export type AnswerBody = z.infer<typeof AnswerBody>
+
+/** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
+export const AwaitQuery = z.object({
+  deadlineMs: z.coerce.number().int().min(1).default(540_000),
+})
+export type AwaitQuery = z.infer<typeof AwaitQuery>
+
 export const ApiError = z.object({ error: z.string() })
 export type ApiError = z.infer<typeof ApiError>

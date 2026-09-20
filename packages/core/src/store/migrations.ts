@@ -47,4 +47,10 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
       create index questions_open_idx on questions (task_id, resolved_at);
     `,
   },
+  {
+    name: '002_task_token',
+    sql: `
+      alter table tasks add column task_token text;
+    `,
+  },
 ]

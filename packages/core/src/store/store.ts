@@ -262,6 +262,21 @@ export class Store {
     return row ? toQuestion(row) : null
   }
 
+  /**
+   * Lazily minted credential that binds an ask/answer to its task. A column
+   * rather than an event so the secret never reaches the SSE stream; the cost
+   * is that a manual rebuild mints a fresh one.
+   */
+  token(id: string): string {
+    const row = this.db.query('select task_token from tasks where id = ?').get(id) as {
+      task_token: string | null
+    } | null
+    if (row?.task_token) return row.task_token
+    const token = crypto.randomUUID()
+    this.db.query('update tasks set task_token = ? where id = ?').run(token, id)
+    return token
+  }
+
   openQuestions(taskId?: string): QuestionRow[] {
     const rows = (
       taskId
