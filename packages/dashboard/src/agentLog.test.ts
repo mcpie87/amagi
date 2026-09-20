@@ -26,9 +26,9 @@ describe('linesForAgentEvent', () => {
   })
 
   test('formats usage with and without cost', () => {
-    expect(
-      linesForAgentEvent({ kind: 'usage', inputTokens: 10, outputTokens: 20 }),
-    ).toEqual(['tokens in=10 out=20'])
+    expect(linesForAgentEvent({ kind: 'usage', inputTokens: 10, outputTokens: 20 })).toEqual([
+      'tokens in=10 out=20',
+    ])
     expect(
       linesForAgentEvent({ kind: 'usage', inputTokens: 10, outputTokens: 20, costUsd: 0.005 }),
     ).toEqual(['tokens in=10 out=20 cost=$0.0050'])
