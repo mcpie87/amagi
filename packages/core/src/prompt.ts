@@ -117,3 +117,80 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
   parts.push('', 'Then finish the merge with `git add -A` and `git commit`, and stop.')
   return parts.join('\n')
 }
+
+export type MentionPromptContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+  worktree: string
+  branch: string
+  baseBranch: string
+  checks: readonly string[]
+}
+
+export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string {
+  const lines = [
+    'You are working inside a dedicated git worktree on a pull request, responding to review feedback from a human.',
+    `Worktree: ${ctx.worktree}`,
+    `Branch: ${ctx.branch}`,
+    `Pull request: #${ctx.pr.number} ${ctx.pr.title} (${ctx.pr.url})`,
+    `Base branch: ${ctx.baseBranch}`,
+    '',
+    'Rules:',
+    '- Stay inside this worktree. Do not touch other checkouts of this repository.',
+    '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
+    '- Commit your changes. Do not push; the dispatcher pushes.',
+  ]
+  return lines.join('\n')
+}
+
+export function respondToMentionPrompt(ctx: MentionPromptContext): string {
+  const parts = [
+    `A human (@${ctx.mention.user}) left feedback on PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+  ]
+  if (ctx.checks.length > 0) {
+    parts.push(
+      '',
+      'Run the project checks and make sure they pass before committing:',
+      ...ctx.checks.map((c) => `- ${c}`),
+    )
+  }
+  parts.push(
+    '',
+    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+  )
+  return parts.join('\n')
+}
+
+export type ExplainMentionContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+  diff: string
+  outPath: string
+}
+
+export function explainMentionSystemPrompt(): string {
+  return [
+    'You are explaining changes made in a pull request to a human reviewer.',
+    'Read the review comment and the diff, then write a clear explanation.',
+    'Do not modify any files in the repository.',
+  ].join('\n')
+}
+
+export function explainMentionPrompt(ctx: ExplainMentionContext): string {
+  return [
+    `A human (@${ctx.mention.user}) asked about PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+    '',
+    `Write your explanation to this file: ${ctx.outPath}`,
+    'It will be posted as a comment on the PR. Be concrete: what the changes do, why they were made, and how they fit together.',
+    '',
+    'Pull request diff:',
+    '',
+    ctx.diff,
+    '',
+    'Write the explanation to the file and stop.',
+  ].join('\n')
+}

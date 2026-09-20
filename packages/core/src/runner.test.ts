@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
+import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -129,6 +129,12 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
 }
 
 let repo: string
