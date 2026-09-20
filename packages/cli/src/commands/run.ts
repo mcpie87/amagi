@@ -28,7 +28,7 @@ export const runCommand = defineCommand({
     const runner = new Runner({
       store,
       tracker: makeTracker(config, root),
-      harness: makeHarness(config.harness.implement.kind),
+      harness: makeHarness(config.harness.implement),
       config,
       repoRoot: root,
       repoName: repoName(root),

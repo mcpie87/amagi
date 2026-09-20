@@ -1,6 +1,7 @@
 import type { Config } from './config.ts'
 import { ClaudeHarness } from './drivers/harness/claude.ts'
 import { CodexHarness } from './drivers/harness/codex.ts'
+import { OpenCodeHarness } from './drivers/harness/opencode.ts'
 import { BeadsTracker } from './drivers/tracker/beads.ts'
 import { ForgejoTracker, GithubTracker } from './drivers/tracker/forge.ts'
 import type { Harness, Tracker } from './drivers/types.ts'
@@ -25,13 +26,15 @@ export function makeTracker(config: Config, repoRoot: string, actor = 'amagi'): 
   }
 }
 
-export function makeHarness(kind: string): Harness {
-  switch (kind) {
+export function makeHarness(config: Config['harness']['implement']): Harness {
+  switch (config.kind) {
     case 'claude':
-      return new ClaudeHarness()
+      return new ClaudeHarness(config.bin === undefined ? {} : { bin: config.bin })
+    case 'opencode':
+      return new OpenCodeHarness(config.bin === undefined ? {} : { bin: config.bin })
     case 'codex':
-      return new CodexHarness()
+      return new CodexHarness(config.bin === undefined ? {} : { bin: config.bin })
     default:
-      throw new NotImplementedDriverError('harness', kind)
+      throw new NotImplementedDriverError('harness', config.kind)
   }
 }

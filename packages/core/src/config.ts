@@ -10,6 +10,8 @@ export const ForgeKind = z.enum(['github', 'forgejo'])
 
 const HarnessConfig = z.object({
   kind: HarnessKind,
+  /** Command used to invoke the harness. Defaults to the harness name. */
+  bin: z.string().min(1).optional(),
   model: z.string().optional(),
   /** Reasoning effort (e.g. low/medium/high/xhigh for claude), passed through. */
   effort: z.string().optional(),

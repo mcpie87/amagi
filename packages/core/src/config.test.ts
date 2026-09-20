@@ -74,6 +74,11 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.permissions).toBe('workspace-write')
   })
 
+  test('accepts a per-harness binary override', () => {
+    writeRepo('[harness.implement]\nkind = "opencode"\nbin = "opencode-unconfined"\n')
+    expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)

@@ -130,6 +130,18 @@ commands = ["just check"]
 | `AMAGI_TASK_TOKEN` | Set by the runner in the harness's environment; `amagi ask` uses it to authenticate its request to the server. Not meant to be set by hand. |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Standard XDG overrides that relocate the global config, the SQLite store, and the default worktree root, respectively. |
 
+For OpenCode with a local provider, select the provider/model name OpenCode already knows and, when NixOS wraps the default executable, set `bin` to the unconfined wrapper:
+
+```toml
+[harness.implement]
+kind = "opencode"
+bin = "opencode-unconfined"
+model = "local/deepseek-ai/DeepSeek-V4-Flash-0731"
+permissions = "bypass"
+```
+
+`permissions = "bypass"` passes `--auto` to OpenCode. The agent runs in Amagi's dedicated worktree, but OpenCode's own permission checks are otherwise disabled.
+
 ## Packages
 
 | Package | Purpose |
