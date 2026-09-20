@@ -36,6 +36,15 @@ describe('Store', () => {
     expect(store.events({ taskId: 'bd-1' })).toHaveLength(1)
   })
 
+  test('tasks touched in the same millisecond keep a stable order', () => {
+    claim('bd-1')
+    claim('bd-2')
+    claim('bd-3')
+    const once = store.tasks().map((t) => t.id)
+    expect(store.tasks().map((t) => t.id)).toEqual(once)
+    expect(once).toEqual(['bd-3', 'bd-2', 'bd-1'])
+  })
+
   test('worktree creation records path and branch', () => {
     claim()
     store.append('bd-1', {

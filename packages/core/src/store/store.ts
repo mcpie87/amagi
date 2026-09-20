@@ -218,18 +218,21 @@ export class Store {
     return row ? toTask(row) : null
   }
 
+  /**
+   * `updated_at` is only millisecond resolution, so tasks touched in the same
+   * tick need the rowid tie break or the queue view reshuffles between reads.
+   */
   tasks(opts: { states?: readonly TaskState[]; limit?: number } = {}): TaskRow[] {
     const limit = opts.limit ?? 200
+    const order = 'order by updated_at desc, rowid desc limit ?'
     if (opts.states?.length) {
       const holes = opts.states.map(() => '?').join(', ')
       const rows = this.db
-        .query(`select * from tasks where state in (${holes}) order by updated_at desc limit ?`)
+        .query(`select * from tasks where state in (${holes}) ${order}`)
         .all(...opts.states, limit) as RawTask[]
       return rows.map(toTask)
     }
-    const rows = this.db
-      .query('select * from tasks order by updated_at desc limit ?')
-      .all(limit) as RawTask[]
+    const rows = this.db.query(`select * from tasks ${order}`).all(limit) as RawTask[]
     return rows.map(toTask)
   }
 

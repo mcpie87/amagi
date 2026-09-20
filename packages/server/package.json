@@ -1,0 +1,16 @@
+{
+  "name": "@amagi/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@amagi/core": "workspace:*",
+    "@hono/zod-validator": "^0.7.0",
+    "hono": "^4.6.0",
+    "zod": "^4.0.0"
+  }
+}

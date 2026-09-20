@@ -18,7 +18,9 @@
     "exactOptionalPropertyTypes": true,
     "paths": {
       "@amagi/core": ["./packages/core/src/index.ts"],
-      "@amagi/core/*": ["./packages/core/src/*"]
+      "@amagi/core/*": ["./packages/core/src/*"],
+      "@amagi/server": ["./packages/server/src/index.ts"],
+      "@amagi/server/*": ["./packages/server/src/*"]
     }
   },
   "include": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx"]
