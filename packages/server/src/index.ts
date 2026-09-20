@@ -1,5 +1,6 @@
 export * from './app.ts'
 export * from './gate-poller.ts'
+export * from './pr-poller.ts'
 export * from './schemas.ts'
 export * from './serve.ts'
 export * from './stream.ts'
