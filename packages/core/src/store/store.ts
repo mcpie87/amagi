@@ -165,7 +165,9 @@ export class Store {
         break
 
       case 'worktree.removed':
-        set('worktree', null)
+        this.db
+          .query('update tasks set worktree = null, branch = null, updated_at = ? where id = ?')
+          .run(ts, taskId)
         break
 
       case 'agent.exited':

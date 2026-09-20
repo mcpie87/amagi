@@ -55,7 +55,7 @@ export type CreateWorktreeOptions = {
   exec?: Exec
 }
 
-async function branchExists(run: Exec, repoRoot: string, branch: string): Promise<boolean> {
+export async function branchExists(run: Exec, repoRoot: string, branch: string): Promise<boolean> {
   const r = await run(['git', 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], {
     cwd: repoRoot,
   })
