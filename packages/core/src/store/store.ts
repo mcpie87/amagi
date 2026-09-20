@@ -139,7 +139,8 @@ export class Store {
           .query(
             `insert into tasks (id, title, tracker, state, created_at, updated_at)
              values (?, ?, ?, 'claimed', ?, ?)
-             on conflict(id) do update set title = excluded.title, updated_at = excluded.updated_at`,
+             on conflict(id) do update
+               set title = excluded.title, state = 'claimed', updated_at = excluded.updated_at`,
           )
           .run(taskId, body.title, body.tracker, ts, ts)
         break
