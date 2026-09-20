@@ -1,5 +1,6 @@
 import type { Config } from './config.ts'
 import { ClaudeHarness } from './drivers/harness/claude.ts'
+import { CodexHarness } from './drivers/harness/codex.ts'
 import { BeadsTracker } from './drivers/tracker/beads.ts'
 import { ForgejoTracker, GithubTracker } from './drivers/tracker/forge.ts'
 import type { Harness, Tracker } from './drivers/types.ts'
@@ -28,6 +29,8 @@ export function makeHarness(kind: string): Harness {
   switch (kind) {
     case 'claude':
       return new ClaudeHarness()
+    case 'codex':
+      return new CodexHarness()
     default:
       throw new NotImplementedDriverError('harness', kind)
   }
