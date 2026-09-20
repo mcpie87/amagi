@@ -13,12 +13,13 @@ import {
   createRouter,
   Link,
   Outlet,
+  useNavigate,
   useParams,
 } from '@tanstack/react-router'
 import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { useDashboard } from './store.tsx'
+import { RunnerProvider, useDashboard, useRunner } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
@@ -67,6 +68,7 @@ const stateBadge: Record<TaskState, string> = {
   done: 'bg-emerald-600',
   needs_human: 'bg-red-600',
   abandoned: 'bg-zinc-700',
+  cancelled: 'bg-zinc-800',
 }
 
 function Badge({ state }: { state: TaskState }) {
@@ -79,28 +81,48 @@ function Badge({ state }: { state: TaskState }) {
   )
 }
 
+function RunnerIndicator() {
+  const { status } = useRunner()
+  if (status === null) {
+    return <span className="text-xs text-zinc-500">runner: unknown</span>
+  }
+  return (
+    <span
+      className={`text-xs ${status.available ? 'text-emerald-400' : 'text-amber-400'}`}
+      title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
+    >
+      runner: {status.running.length}/{status.capacity} {status.available ? 'free' : 'busy'}
+    </span>
+  )
+}
+
 function RootLayout() {
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <header className="border-b border-zinc-800 px-6 py-3">
-        <div className="mx-auto flex max-w-5xl items-center gap-5">
-          <Link to="/" className="text-lg font-semibold tracking-tight">
-            amagi
-          </Link>
-          <nav className="flex gap-3 text-sm text-zinc-400">
-            <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
-              Queue
+    <RunnerProvider>
+      <div className="min-h-screen bg-zinc-950 text-zinc-100">
+        <header className="border-b border-zinc-800 px-6 py-3">
+          <div className="mx-auto flex max-w-5xl items-center gap-5">
+            <Link to="/" className="text-lg font-semibold tracking-tight">
+              amagi
             </Link>
-            <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
-              Tasks
-            </Link>
-          </nav>
-        </div>
-      </header>
-      <main className="mx-auto max-w-5xl px-6 py-6">
-        <Outlet />
-      </main>
-    </div>
+            <nav className="flex gap-3 text-sm text-zinc-400">
+              <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
+                Queue
+              </Link>
+              <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
+                Tasks
+              </Link>
+            </nav>
+            <div className="ml-auto">
+              <RunnerIndicator />
+            </div>
+          </div>
+        </header>
+        <main className="mx-auto max-w-5xl px-6 py-6">
+          <Outlet />
+        </main>
+      </div>
+    </RunnerProvider>
   )
 }
 
@@ -121,6 +143,74 @@ function IssueBadge({ issue }: { issue: Issue }) {
 }
 
 type IssuesViewMode = 'kanban' | 'list'
+
+const NOT_WORK_TYPES = ['epic', 'milestone', 'gate']
+
+function RunButton({ taskId }: { taskId: string }) {
+  const { start } = useRunner()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await start(taskId)
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error ?? 'launch failed')
+      return
+    }
+    navigate({ to: '/tasks/$id', params: { id: res.taskId } })
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run()}
+        className="rounded border border-emerald-700 bg-emerald-900/40 px-2 py-0.5 text-xs text-emerald-300 hover:bg-emerald-800 disabled:opacity-50"
+      >
+        Run
+      </button>
+      {error !== null && <p className="mt-1 text-xs text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+function RunNextButton() {
+  const { start } = useRunner()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await start()
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error ?? 'launch failed')
+      return
+    }
+    navigate({ to: '/tasks/$id', params: { id: res.taskId } })
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run()}
+        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-emerald-500 disabled:opacity-50"
+      >
+        Run next
+      </button>
+      {error !== null && <span className="text-xs text-red-400">{error}</span>}
+    </div>
+  )
+}
 
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
@@ -160,6 +250,11 @@ function IssuesView() {
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const currentPage = Math.min(page, pageCount - 1)
   const pageItems = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
+
+  const isRunnable = (issue: Issue) =>
+    issue.status === 'open' &&
+    !NOT_WORK_TYPES.includes(issue.type ?? '') &&
+    !issue.labels.includes('human')
 
   if (selected !== null) {
     return (
@@ -216,6 +311,7 @@ function IssuesView() {
             {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
             {status !== 'all' && ` · ${filtered.length} shown`}
           </span>
+          <RunNextButton />
           <div className="flex rounded-lg border border-zinc-700 p-0.5">
             <button
               type="button"
@@ -276,7 +372,7 @@ function IssuesView() {
                 </div>
                 <ul className="flex flex-col gap-2 p-2">
                   {columnIssues.map((issue) => (
-                    <li key={issue.id}>
+                    <li key={issue.id} className="flex flex-col gap-1">
                       <button
                         type="button"
                         onClick={() => setSelected(issue)}
@@ -292,6 +388,7 @@ function IssuesView() {
                             .join(' · ') || '\u00a0'}
                         </span>
                       </button>
+                      {isRunnable(issue) && <RunButton taskId={issue.id} />}
                     </li>
                   ))}
                   {columnIssues.length === 0 && (
@@ -306,11 +403,11 @@ function IssuesView() {
         <>
           <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
             {pageItems.map((issue) => (
-              <li key={issue.id}>
+              <li key={issue.id} className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800">
                 <button
                   type="button"
                   onClick={() => setSelected(issue)}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
                 >
                   <IssueBadge issue={issue} />
                   <span className="min-w-0 flex-1">
@@ -322,6 +419,7 @@ function IssuesView() {
                     </span>
                   </span>
                 </button>
+                {isRunnable(issue) && <RunButton taskId={issue.id} />}
               </li>
             ))}
           </ul>
@@ -535,7 +633,7 @@ function ReclaimButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (worktree === null || isTerminal(state)) return null
+  if (worktree === null || (isTerminal(state) && state !== 'cancelled')) return null
 
   const reclaim = async () => {
     setBusy(true)
@@ -559,6 +657,35 @@ function ReclaimButton({
         className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
       >
         Reclaim
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+function StopButton({ taskId }: { taskId: string }) {
+  const { status, stop } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (status === null || !status.running.includes(taskId)) return null
+
+  const doStop = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await stop(taskId)
+    setBusy(false)
+    if (!res.ok) setError(res.error ?? 'stop failed')
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void doStop()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Stop
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
     </div>
@@ -655,6 +782,7 @@ function TaskDetailView() {
         {task.reviewRound > 0 && (
           <span className="text-sm text-zinc-400">review round {task.reviewRound}</span>
         )}
+        <StopButton taskId={task.id} />
         <ReclaimButton taskId={task.id} state={task.state} worktree={task.worktree} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>

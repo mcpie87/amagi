@@ -4,6 +4,7 @@ import {
   openDatabase,
   type Question,
   type QuestionRow,
+  type RunServiceApi,
   Store,
   type TaskRow,
   type Tracker,
@@ -180,6 +181,119 @@ describe('POST /api/tasks/:id/reclaim', () => {
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'needs_human' })
     const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(409)
+  })
+
+  test('reclaims a cancelled task so its preserved worktree can be resumed', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
+    stuckTask('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('claimed')
+    expect(body.task.worktree).toBe('/tmp/wt/bd-1')
+    expect(tracker.released).toEqual(['bd-1'])
+  })
+})
+
+describe('runner endpoints', () => {
+  const stubRunner = (over: Partial<RunServiceApi> = {}): RunServiceApi => ({
+    status: () => ({ available: true, capacity: 1, running: [] }),
+    start: async () => ({ ok: true, taskId: 'bd-1' }),
+    stop: async () => ({ ok: true, taskId: 'bd-1' }),
+    ...over,
+  })
+  const post = (path: string, body?: string) =>
+    app.request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body }),
+    })
+
+  test('GET /api/runner reports availability and capacity', async () => {
+    app = createApp({
+      store,
+      runner: stubRunner({
+        status: () => ({ available: false, capacity: 1, running: ['bd-1'] }),
+      }),
+    })
+    const res = await app.request('/api/runner')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ available: false, capacity: 1, running: ['bd-1'] })
+  })
+
+  test('runner endpoints are 501 without a runner service', async () => {
+    expect((await app.request('/api/runner')).status).toBe(501)
+    expect((await post('/api/runs', '{}')).status).toBe(501)
+    expect((await post('/api/runs/bd-1/stop')).status).toBe(501)
+  })
+
+  test('POST /api/runs launches the next ready task', async () => {
+    const started: (string | undefined)[] = []
+    app = createApp({
+      store,
+      runner: stubRunner({
+        start: async (taskId) => {
+          started.push(taskId)
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    const res = await post('/api/runs', '{}')
+    expect(res.status).toBe(201)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(started).toEqual([undefined])
+  })
+
+  test('POST /api/runs forwards a task id and rejects an invalid body', async () => {
+    const started: (string | undefined)[] = []
+    app = createApp({
+      store,
+      runner: stubRunner({
+        start: async (taskId) => {
+          started.push(taskId)
+          return { ok: true, taskId: 'bd-9' }
+        },
+      }),
+    })
+    const specific = await post('/api/runs', '{"taskId":"bd-9"}')
+    expect(specific.status).toBe(201)
+    expect(started).toEqual(['bd-9'])
+    expect((await post('/api/runs', '{"taskId":123}')).status).toBe(400)
+  })
+
+  test('POST /api/runs propagates a launch failure', async () => {
+    app = createApp({
+      store,
+      runner: stubRunner({
+        start: async () => ({ ok: false, status: 409, error: 'runner at capacity (1/1)' }),
+      }),
+    })
+    const res = await post('/api/runs', '{}')
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({ error: 'runner at capacity (1/1)' })
+  })
+
+  test('POST /api/runs/:id/stop forwards to the runner and propagates failures', async () => {
+    const stopped: string[] = []
+    app = createApp({
+      store,
+      runner: stubRunner({
+        stop: async (id) => {
+          stopped.push(id)
+          return id === 'bd-1'
+            ? { ok: true, taskId: id }
+            : { ok: false, status: 404, error: `task ${id} is not running here` }
+        },
+      }),
+    })
+    const ok = await post('/api/runs/bd-1/stop')
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ taskId: 'bd-1' })
+    expect(stopped).toEqual(['bd-1'])
+
+    expect((await post('/api/runs/bd-9/stop')).status).toBe(404)
   })
 })
 

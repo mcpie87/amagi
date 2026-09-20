@@ -1,0 +1,286 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { AsyncQueue } from './async-queue.ts'
+import { Config } from './config.ts'
+import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
+import type {
+  AgentOutcome,
+  AgentProcess,
+  AgentStartOptions,
+  GateRef,
+  Harness,
+  Question,
+  Tracker,
+  TrackerStatus,
+  TrackerTask,
+} from './drivers/types.ts'
+import type { AgentEvent } from './events.ts'
+import { exec, execOk } from './exec.ts'
+import { RunService } from './run-service.ts'
+import { openDatabase } from './store/db.ts'
+import { Store } from './store/store.ts'
+
+const TASK: TrackerTask = {
+  id: 'bd-a1b2',
+  title: 'Add a greeting file',
+  description: 'Write hello.txt',
+  status: 'open',
+  priority: 1,
+  type: 'task',
+  url: null,
+}
+
+const TASK2: TrackerTask = { ...TASK, id: 'bd-c3d4', title: 'Add a second file' }
+
+class FakeTracker implements Tracker {
+  readonly kind = 'fake'
+  readonly leaseTtlMs = 300_000
+  readonly released: string[] = []
+
+  constructor(private readonly queue: TrackerTask[] = []) {}
+
+  async ready(): Promise<TrackerTask[]> {
+    return this.queue
+  }
+  async claim(id?: string): Promise<TrackerTask | null> {
+    if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
+    return this.queue[0] ?? null
+  }
+  async get(): Promise<TrackerTask | null> {
+    return null
+  }
+  async heartbeat(): Promise<boolean> {
+    return true
+  }
+  async comment(): Promise<void> {}
+  async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
+  async release(id: string): Promise<void> {
+    this.released.push(id)
+  }
+  async close(): Promise<void> {}
+  async openGate(_id: string, _q: Question): Promise<GateRef> {
+    return { id: 'gate', advisory: false }
+  }
+  async gateResolved(): Promise<boolean> {
+    return true
+  }
+  async resolveGate(): Promise<void> {}
+}
+
+class FakeHarness implements Harness {
+  readonly kind = 'fake'
+
+  constructor(private readonly effect?: (cwd: string) => void) {}
+
+  start(opts: AgentStartOptions): AgentProcess {
+    this.effect?.(opts.cwd)
+    const queue = new AsyncQueue<AgentEvent>()
+    queue.push({ kind: 'text', text: 'done' })
+    queue.close()
+    const outcome: AgentOutcome = {
+      exitCode: 0,
+      ok: true,
+      sessionId: 'sess-1',
+      summary: 'done',
+      usage: null,
+      stderr: '',
+    }
+    return {
+      pid: -1,
+      events: () => queue,
+      done: Promise.resolve(outcome),
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+  }
+  resume(): AgentProcess {
+    throw new Error('no resume in run-service tests')
+  }
+}
+
+class BlockingHarness implements Harness {
+  readonly kind = 'fake'
+  starts = 0
+
+  start(opts: AgentStartOptions): AgentProcess {
+    this.starts++
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    return {
+      pid: 12345,
+      events: () => queue,
+      done,
+      kill: async () => {
+        queue.close()
+        resolveDone({
+          exitCode: 130,
+          ok: false,
+          sessionId: null,
+          summary: null,
+          usage: null,
+          stderr: 'killed',
+        })
+      },
+      model: null,
+      effort: opts.effort ?? null,
+    }
+  }
+  resume(): AgentProcess {
+    throw new Error('no resume in run-service tests')
+  }
+}
+
+class FakePr implements PrDriver {
+  async createPr(opts: CreatePrOptions): Promise<PullRequest> {
+    return { url: `https://example.com/pull/${opts.branch}`, number: 1 }
+  }
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
+  }
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+}
+
+let repo: string
+let wtRoot: string
+let store: Store
+
+const config = (over: Record<string, unknown> = {}) =>
+  Config.parse({
+    repo: { baseBranch: 'main', worktreeRoot: wtRoot },
+    checks: { commands: [] },
+    ...over,
+  })
+
+const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = config()) =>
+  new RunService({
+    store,
+    tracker,
+    harness,
+    config: cfg,
+    repoRoot: repo,
+    repoName: 'demo',
+    forge: new FakePr(),
+    maxParallel,
+  })
+
+const waitFor = async (fn: () => boolean, timeoutMs = 2000): Promise<void> => {
+  const started = Date.now()
+  while (!fn()) {
+    if (Date.now() - started > timeoutMs) throw new Error('waitFor timed out')
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+beforeEach(async () => {
+  delete process.env.GH_TOKEN
+  delete process.env.GITHUB_TOKEN
+  repo = mkdtempSync(join(tmpdir(), 'amagi-runservice-repo-'))
+  wtRoot = mkdtempSync(join(tmpdir(), 'amagi-runservice-wt-'))
+  store = new Store(openDatabase(':memory:'))
+  await execOk(exec, ['git', 'init', '-q', '-b', 'main', '.'], { cwd: repo })
+  await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
+  await execOk(exec, ['git', 'config', 'user.email', 'test@example.com'], { cwd: repo })
+  writeFileSync(join(repo, 'README.md'), '# demo\n')
+  await execOk(exec, ['git', 'add', '.'], { cwd: repo })
+  await execOk(exec, ['git', 'commit', '-q', '-m', 'init'], { cwd: repo })
+})
+
+afterEach(() => {
+  store.close()
+  rmSync(repo, { recursive: true, force: true })
+  rmSync(wtRoot, { recursive: true, force: true })
+})
+
+describe('RunService', () => {
+  test('status reports availability and capacity', () => {
+    const service = makeService(new FakeTracker(), new FakeHarness(), 2)
+    expect(service.status()).toEqual({ available: true, capacity: 2, running: [] })
+  })
+
+  test('start launches the next ready task and it completes', async () => {
+    const service = makeService(
+      new FakeTracker([TASK]),
+      new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+    )
+    const res = await service.start()
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    await waitFor(() => service.status().running.length === 0)
+  })
+
+  test('start launches a specific ready task', async () => {
+    const service = makeService(
+      new FakeTracker([TASK2, TASK]),
+      new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+    )
+    const res = await service.start(TASK.id)
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(store.task(TASK2.id)).toBeNull()
+  })
+
+  test('start refuses a task the tracker does not see as ready', async () => {
+    const service = makeService(new FakeTracker([]), new FakeHarness())
+    const res = await service.start('bd-x')
+    expect(res).toEqual({ ok: false, status: 409, error: 'task bd-x is not ready to run' })
+  })
+
+  test('start refuses to exceed capacity', async () => {
+    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 1)
+    const first = await service.start()
+    expect(first.ok).toBe(true)
+    const second = await service.start()
+    expect(second).toEqual({ ok: false, status: 409, error: 'runner at capacity (1/1)' })
+    await service.stop(TASK.id)
+  })
+
+  test('start refuses to launch the same task twice', async () => {
+    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 2)
+    const first = await service.start(TASK.id)
+    expect(first.ok).toBe(true)
+    const again = await service.start(TASK.id)
+    expect(again).toEqual({ ok: false, status: 409, error: `task ${TASK.id} is already running` })
+    await service.stop(TASK.id)
+  })
+
+  test('concurrent launches of the same task cannot double-claim', async () => {
+    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 2)
+    const [a, b] = await Promise.all([service.start(TASK.id), service.start(TASK.id)])
+    const launched = [a, b].filter((r): r is { ok: true; taskId: string } => r.ok)
+    expect(launched).toHaveLength(1)
+    if (launched[0]) await service.stop(launched[0].taskId)
+  })
+
+  test('stop of a task not running here is a 404', async () => {
+    const service = makeService(new FakeTracker([TASK]), new FakeHarness())
+    const res = await service.stop('bd-x')
+    expect(res).toEqual({ ok: false, status: 404, error: 'task bd-x is not running here' })
+  })
+
+  test('stop kills the run, releases the lease, and preserves the worktree', async () => {
+    const tracker = new FakeTracker([TASK])
+    const service = makeService(tracker, new BlockingHarness())
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    const stopped = await service.stop(TASK.id)
+    expect(stopped).toEqual({ ok: true, taskId: TASK.id })
+
+    expect(store.task(TASK.id)?.state).toBe('cancelled')
+    expect(tracker.released).toEqual([TASK.id])
+    expect(store.task(TASK.id)?.worktree).not.toBeNull()
+    expect(store.task(TASK.id)?.branch).not.toBeNull()
+    await waitFor(() => service.status().running.length === 0)
+  })
+})

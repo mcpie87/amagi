@@ -38,7 +38,14 @@ describe('state machine', () => {
       if (isTerminal(s)) continue
       expect(canTransition(s, 'needs_human')).toBe(true)
       expect(canTransition(s, 'abandoned')).toBe(true)
+      expect(canTransition(s, 'cancelled')).toBe(true)
     }
+  })
+
+  test('cancelled is terminal and only reclaim can resume it', () => {
+    expect(isTerminal('cancelled')).toBe(true)
+    expect(canTransition('cancelled', 'claimed')).toBe(false)
+    expect(canTransition('cancelled', 'implementing')).toBe(false)
   })
 
   test('terminal states are absorbing', () => {

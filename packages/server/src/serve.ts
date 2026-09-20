@@ -1,5 +1,5 @@
 import { resolve, sep } from 'node:path'
-import type { BeadsIssue, PrDriver, Store, Tracker } from '@amagi/core'
+import type { BeadsIssue, PrDriver, RunServiceApi, Store, Tracker } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
 import { startPrPoller } from './pr-poller.ts'
@@ -21,6 +21,8 @@ export type ServeOptions = {
   prPollIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
+  /** When present, the launch/stop runner endpoints are live. */
+  runner?: RunServiceApi
 }
 
 /**
@@ -53,11 +55,13 @@ export function serve({
   prPollIntervalMs,
   staticDir,
   listIssues,
+  runner,
 }: ServeOptions) {
   const app = createApp({
     store,
     ...(tracker === undefined ? {} : { tracker }),
     ...(listIssues === undefined ? {} : { listIssues }),
+    ...(runner === undefined ? {} : { runner }),
   })
   const poller =
     tracker === undefined

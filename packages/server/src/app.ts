@@ -3,6 +3,7 @@ import {
   isTerminal,
   type Notifier,
   type Question,
+  type RunServiceApi,
   type Store,
   type Tracker,
 } from '@amagi/core'
@@ -16,6 +17,7 @@ import {
   AwaitQuery,
   EventQuery,
   QuestionQuery,
+  RunBody,
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
@@ -33,6 +35,8 @@ export type ServerDeps = {
    */
   tracker?: Tracker
   listIssues?: () => Promise<BeadsIssue[]>
+  /** When present, the launch/stop runner endpoints are live. */
+  runner?: RunServiceApi
 }
 
 /**
@@ -106,7 +110,7 @@ async function resolveQuestionGate(
   }
 }
 
-export function createApp({ store, notify = [], tracker, listIssues }: ServerDeps) {
+export function createApp({ store, notify = [], tracker, listIssues, runner }: ServerDeps) {
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
 
@@ -135,7 +139,9 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
       if (task.worktree === null || task.branch === null) {
         return c.json({ error: `task ${id} has no worktree to resume` }, 409)
       }
-      if (isTerminal(task.state)) {
+      // A cancelled run keeps its worktree for exactly this path: the operator
+      // stops a run and later reclaims it to resume where it left off.
+      if (isTerminal(task.state) && task.state !== 'cancelled') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
@@ -149,6 +155,27 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
       }
       store.append(id, { type: 'task.reclaimed' })
       return c.json({ task: store.task(id) })
+    })
+
+    .get('/api/runner', (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      return c.json(runner.status())
+    })
+
+    .post('/api/runs', valid('json', RunBody), async (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const { taskId } = c.req.valid('json')
+      const result = await runner.start(taskId)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      return c.json({ taskId: result.taskId }, 201)
+    })
+
+    .post('/api/runs/:id/stop', valid('param', TaskIdParam), async (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const { id } = c.req.valid('param')
+      const result = await runner.stop(id)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      return c.json({ taskId: result.taskId })
     })
 
     .post(

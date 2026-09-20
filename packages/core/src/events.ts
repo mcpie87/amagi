@@ -14,6 +14,7 @@ export const TASK_STATES = [
   'done',
   'needs_human',
   'abandoned',
+  'cancelled',
 ] as const
 
 export const TaskState = z.enum(TASK_STATES)
@@ -23,6 +24,7 @@ export const TERMINAL_STATES = [
   'done',
   'needs_human',
   'abandoned',
+  'cancelled',
 ] as const satisfies readonly TaskState[]
 
 export function isTerminal(state: TaskState): boolean {
@@ -47,6 +49,7 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   done: [],
   needs_human: [],
   abandoned: [],
+  cancelled: [],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
