@@ -145,6 +145,7 @@ export class Runner {
       baseBranch: base,
       worktreeRoot: config.repo.worktreeRoot,
       setupCmd: config.repo.setupCmd,
+      persona: config.repo.persona,
       exec: this.exec,
     })
     store.append(task.id, {
