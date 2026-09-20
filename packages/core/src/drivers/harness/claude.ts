@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { AsyncQueue } from '../../async-queue.ts'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
@@ -43,7 +45,8 @@ type ClaudeMessage = {
   is_error?: boolean
   result?: string
   total_cost_usd?: number
-  message?: { content?: ContentBlock[] }
+  model?: string
+  message?: { model?: string; content?: ContentBlock[] }
   usage?: { input_tokens?: number; output_tokens?: number }
 }
 
@@ -70,6 +73,8 @@ export class ClaudeTranslator {
   summary: string | null = null
   usage: AgentUsage | null = null
   ok = false
+  /** The model claude reports it resolved to; the init line carries it. */
+  model: string | null = null
 
   /** tool_result carries only the tool_use_id, so names are remembered here. */
   private readonly toolNames = new Map<string, string>()
@@ -79,6 +84,8 @@ export class ClaudeTranslator {
     const msg = raw as ClaudeMessage
 
     if (typeof msg.session_id === 'string') this.sessionId = msg.session_id
+    const model = msg.model ?? msg.message?.model
+    if (typeof model === 'string') this.model = model
 
     switch (msg.type) {
       case 'assistant':
@@ -153,9 +160,23 @@ export type ClaudeHarnessOptions = {
 export class ClaudeHarness implements Harness {
   readonly kind = 'claude'
   private readonly bin: string
+  private readonly defaultEffort: string | null
 
   constructor(opts: ClaudeHarnessOptions = {}) {
     this.bin = opts.bin ?? 'claude'
+    // claude does not report effort over the stream, so the harness reads the
+    // same settings file claude reads to know what effort is in effect.
+    this.defaultEffort = ClaudeHarness.effortFromSettings()
+  }
+
+  private static effortFromSettings(): string | null {
+    try {
+      const path = join(process.env.HOME ?? '', '.claude', 'settings.json')
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as { effortLevel?: unknown }
+      return typeof raw.effortLevel === 'string' ? raw.effortLevel : null
+    } catch {
+      return null
+    }
   }
 
   start(opts: AgentStartOptions): AgentProcess {
@@ -186,9 +207,12 @@ export class ClaudeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
+    let env = opts.env ? { ...process.env, ...opts.env } : process.env
+    if (opts.effort) env = { ...env, CLAUDE_EFFORT: opts.effort }
+
     const proc = Bun.spawn(argv, {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      env,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
@@ -227,6 +251,10 @@ export class ClaudeHarness implements Harness {
       kill: async () => {
         await killTree(proc.pid)
       },
+      get model() {
+        return translator.model
+      },
+      effort: opts.effort ?? this.defaultEffort,
     }
   }
 }

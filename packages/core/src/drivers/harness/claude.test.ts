@@ -31,6 +31,11 @@ describe('ClaudeTranslator against a recorded transcript', () => {
     expect(translator.sessionId).toBe('b1be85f4-3be3-4f96-98da-a3902391aacf')
   })
 
+  test('the resolved model is captured from the init message', async () => {
+    const { translator } = await replay()
+    expect(translator.model).toBe('claude-opus-5')
+  })
+
   test('tool results are joined back to the tool that produced them', async () => {
     const { events } = await replay()
     const result = events.find((e) => e.kind === 'tool_result')

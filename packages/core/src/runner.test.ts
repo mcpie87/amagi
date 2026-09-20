@@ -16,7 +16,7 @@ import type {
   TrackerStatus,
   TrackerTask,
 } from './drivers/types.ts'
-import type { AgentEvent, EventType } from './events.ts'
+import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
@@ -70,6 +70,8 @@ type Turn = {
   effect?: (cwd: string) => void
   events?: AgentEvent[]
   outcome?: Partial<AgentOutcome>
+  model?: string | null
+  effort?: string | null
 }
 
 class FakeHarness implements Harness {
@@ -108,6 +110,8 @@ class FakeHarness implements Harness {
       events: () => queue,
       done: Promise.resolve(outcome),
       kill: async () => {},
+      model: turn.model ?? null,
+      effort: turn.effort ?? null,
     }
   }
 }
@@ -222,6 +226,21 @@ describe('Runner.runOnce', () => {
       'pr.created',
       'task.state',
     ])
+  })
+
+  test('the agent.started event carries the harness-reported model and effort', async () => {
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([{ ...writesAFile, model: 'claude-sonnet-5', effort: 'high' }]),
+    ).runOnce()
+
+    const started = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find(
+        (e): e is Extract<StoredEvent, { type: 'agent.started' }> => e.type === 'agent.started',
+      )
+    expect(started?.model).toBe('claude-sonnet-5')
+    expect(started?.effort).toBe('high')
   })
 
   test('opens the pull request with the task title and base branch', async () => {

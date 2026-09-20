@@ -244,15 +244,24 @@ function TaskDetailView() {
     (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
       e.taskId === id && e.type === 'agent.started',
   )
-  const agents = [...new Set(agentStarts.map((e) => `${e.role}: ${e.harness}`))].join(', ')
-  const usage = agentEvents
+  const agents = [
+    ...new Set(
+      agentStarts.map((e) => {
+        const parts = [`${e.role}: ${e.harness}`]
+        if (e.model) parts.push(e.model)
+        if (e.effort) parts.push(`effort ${e.effort}`)
+        return parts.join(' · ')
+      }),
+    ),
+  ].join(', ')
+  const usageEvents = agentEvents
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
-  const effIn = usage.reduce((sum, u) => sum + u.inputTokens, 0)
-  const effOut = usage.reduce((sum, u) => sum + u.outputTokens, 0)
-  const effCost = usage.reduce((sum, u) => sum + (u.costUsd ?? 0), 0)
-  const effort =
-    usage.length === 0
+  const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
+  const effOut = usageEvents.reduce((sum, u) => sum + u.outputTokens, 0)
+  const effCost = usageEvents.reduce((sum, u) => sum + (u.costUsd ?? 0), 0)
+  const usage =
+    usageEvents.length === 0
       ? 'no usage reported yet'
       : `${fmtTokens(effIn)} in · ${fmtTokens(effOut)} out` +
         (effCost > 0 ? ` · $${effCost.toFixed(2)}` : '')
@@ -285,7 +294,7 @@ function TaskDetailView() {
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow label="agent" value={agents || null} />
-        <DetailRow label="effort" value={effort} />
+        <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow label="PR" value={task.prUrl} />

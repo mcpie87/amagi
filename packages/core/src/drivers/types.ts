@@ -58,6 +58,8 @@ export type AgentStartOptions = {
   prompt: string
   systemPrompt?: string
   model?: string
+  /** Reasoning effort, passed to the harness when the harness honors it. */
+  effort?: string
   permissions?: Permissions
   allowedTools?: readonly string[]
   env?: Record<string, string>
@@ -84,6 +86,10 @@ export interface AgentProcess {
   events(): AsyncIterable<AgentEvent>
   readonly done: Promise<AgentOutcome>
   kill(): Promise<void>
+  /** The model the harness reports using, once known (null until then). */
+  readonly model: string | null
+  /** The reasoning effort in effect, or null when unknown. */
+  readonly effort: string | null
 }
 
 export interface Harness {

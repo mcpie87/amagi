@@ -176,6 +176,9 @@ export class Runner {
       ...(config.harness.implement.model === undefined
         ? {}
         : { model: config.harness.implement.model }),
+      ...(config.harness.implement.effort === undefined
+        ? {}
+        : { effort: config.harness.implement.effort }),
       permissions: config.harness.implement.permissions,
       extraArgs: config.harness.implement.extraArgs,
     })
@@ -324,15 +327,22 @@ export class Runner {
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
 
-    store.append(taskId, {
-      type: 'agent.started',
-      role: 'implement',
-      harness: harness.kind,
-      cwd: opts.cwd,
-      resumed: resumeFrom !== null,
-    })
-
+    // The resolved model only exists once the harness reports it (claude's
+    // init line), so the started event lands on the first stream event.
+    let started = false
     for await (const event of proc.events()) {
+      if (!started) {
+        started = true
+        store.append(taskId, {
+          type: 'agent.started',
+          role: 'implement',
+          harness: harness.kind,
+          model: proc.model ?? opts.model ?? null,
+          effort: proc.effort ?? null,
+          cwd: opts.cwd,
+          resumed: resumeFrom !== null,
+        })
+      }
       store.append(taskId, { type: 'agent.stream', role: 'implement', event })
     }
 

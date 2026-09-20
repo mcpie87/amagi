@@ -46,9 +46,7 @@ describe('githubPr', () => {
   test('pushes over the token rewrite and creates the pr with the title', async () => {
     process.env.GH_TOKEN = 'ghp_abc'
     const { exec, calls } = fake((c) =>
-      c.includes('create') && c.includes('pr')
-        ? ok('{"number":7,"url":"https://github.com/x/y/pull/7"}')
-        : undefined,
+      c.includes('create') && c.includes('pr') ? ok('https://github.com/x/y/pull/7\n') : undefined,
     )
     const pr = await makePrDriver('github', exec).createPr({
       cwd: '/wt',
@@ -81,8 +79,6 @@ describe('githubPr', () => {
       'Do the thing',
       '--body-file',
       '-',
-      '--json',
-      'number,url',
     ])
     expect(calls).toContainEqual(['<stdin>', 'Task: am-1'])
     expect(pr).toEqual({ number: 7, url: 'https://github.com/x/y/pull/7' })

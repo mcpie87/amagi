@@ -11,6 +11,8 @@ export const ForgeKind = z.enum(['github', 'forgejo'])
 const HarnessConfig = z.object({
   kind: HarnessKind,
   model: z.string().optional(),
+  /** Reasoning effort (e.g. low/medium/high/xhigh for claude), passed through. */
+  effort: z.string().optional(),
   /**
    * Least blast radius that still lets an unattended agent work. Raising this
    * to 'bypass' disables the harness permission system entirely; a worktree is

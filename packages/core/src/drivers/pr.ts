@@ -45,13 +45,11 @@ function githubPr(exec: Exec): PrDriver {
           title,
           '--body-file',
           '-',
-          '--json',
-          'number,url',
         ],
         { cwd, stdin: body },
       )
-      const parsed = JSON.parse(out) as { number?: number; url?: string }
-      return { number: parsed.number ?? 0, url: parsed.url ?? '' }
+      const url = out.trim()
+      return { url, number: Number(url.split('/').pop() ?? 0) }
     },
   }
 }

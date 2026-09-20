@@ -113,6 +113,10 @@ export const EventBody = z.discriminatedUnion('type', [
     type: z.literal('agent.started'),
     role: AgentRole,
     harness: z.string(),
+    /** The model the harness resolved at spawn, if it reports one. */
+    model: z.string().nullable(),
+    /** The reasoning effort the harness resolved at spawn, if known. */
+    effort: z.string().nullable(),
     cwd: z.string(),
     resumed: z.boolean(),
   }),
