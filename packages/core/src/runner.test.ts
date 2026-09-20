@@ -9,12 +9,15 @@ import type {
   AgentOutcome,
   AgentProcess,
   AgentStartOptions,
+  CreateTrackerTask,
   GateRef,
   Harness,
   Question,
   Tracker,
+  TrackerCapabilities,
   TrackerStatus,
   TrackerTask,
+  UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
@@ -35,6 +38,7 @@ const TASK: TrackerTask = {
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
   readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   heartbeats = 0
   leaseAlive = true
   /** Returned by get() in place of the null default, to simulate a re-read. */
@@ -50,6 +54,12 @@ class FakeTracker implements Tracker {
   }
   async get(): Promise<TrackerTask | null> {
     return this.freshTask
+  }
+  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
+  }
+  async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
   }
   async heartbeat(): Promise<boolean> {
     this.heartbeats++

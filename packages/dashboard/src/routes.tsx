@@ -628,6 +628,14 @@ type Issue = {
   assignee: string | null
   labels: string[]
   parent: string | null
+  dependencies: Dependency[]
+}
+
+type Dependency = {
+  id: string
+  title: string
+  status: Issue['status']
+  priority: number | null
 }
 const issueStates = ['open', 'in_progress', 'blocked', 'closed'] as const
 const issueLabels = {
@@ -637,9 +645,189 @@ const issueLabels = {
   closed: 'Completed',
 }
 
+function IssueFormModal({
+  mode,
+  initial,
+  onClose,
+  onSaved,
+}: {
+  mode: 'create' | 'edit'
+  initial: Issue | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [title, setTitle] = useState(initial?.title ?? '')
+  const [description, setDescription] = useState(initial?.description ?? '')
+  const [acceptance, setAcceptance] = useState(initial?.acceptanceCriteria ?? '')
+  const [priority, setPriority] = useState(
+    initial?.priority === undefined || initial?.priority === null ? '' : String(initial.priority),
+  )
+  const [labels, setLabels] = useState((initial?.labels ?? []).join(', '))
+  const [dependencies, setDependencies] = useState(
+    (initial?.dependencies ?? []).map((d) => d.id).join(', '),
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (busy || title.trim() === '') return
+    setBusy(true)
+    setError(null)
+    const payload = {
+      title: title.trim(),
+      description,
+      acceptanceCriteria: acceptance.trim() === '' ? null : acceptance,
+      priority: priority === '' ? null : Number(priority),
+      labels: labels
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s !== ''),
+      dependencies: dependencies
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s !== ''),
+    }
+    try {
+      const url =
+        mode === 'create' ? `${apiBase}/api/issues` : `${apiBase}/api/issues/${initial?.id}`
+      const res = await fetch(url, {
+        method: mode === 'create' ? 'POST' : 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      onSaved()
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const input = 'w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm text-zinc-100'
+  const label = 'mb-1 block text-sm text-zinc-400'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-900 p-4"
+      >
+        <h2 className="mb-3 text-lg font-semibold">
+          {mode === 'create' ? 'New task' : `Edit ${initial?.id ?? ''}`}
+        </h2>
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="issue-title">
+              Title
+            </label>
+            <input
+              id="issue-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className={input}
+            />
+          </div>
+          <div>
+            <label className={label} htmlFor="issue-description">
+              Description
+            </label>
+            <textarea
+              id="issue-description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={4}
+              className={input}
+            />
+          </div>
+          <div>
+            <label className={label} htmlFor="issue-acceptance">
+              Acceptance criteria
+            </label>
+            <textarea
+              id="issue-acceptance"
+              value={acceptance}
+              onChange={(e) => setAcceptance(e.target.value)}
+              rows={3}
+              className={input}
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className={label} htmlFor="issue-priority">
+                Priority
+              </label>
+              <select
+                id="issue-priority"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+                className={input}
+              >
+                <option value="">None</option>
+                <option value="0">P0</option>
+                <option value="1">P1</option>
+                <option value="2">P2</option>
+                <option value="3">P3</option>
+                <option value="4">P4</option>
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="issue-labels">
+                Labels (comma separated)
+              </label>
+              <input
+                id="issue-labels"
+                value={labels}
+                onChange={(e) => setLabels(e.target.value)}
+                className={input}
+              />
+            </div>
+          </div>
+          <div>
+            <label className={label} htmlFor="issue-dependencies">
+              Blocked by issue ids (comma separated)
+            </label>
+            <input
+              id="issue-dependencies"
+              value={dependencies}
+              onChange={(e) => setDependencies(e.target.value)}
+              className={input}
+              placeholder="am-abc, am-123"
+            />
+            <p className={label}>The task waits on these issues before it can run.</p>
+          </div>
+        </div>
+        {error !== null && <p className="mt-3 text-sm text-red-400">{error}</p>}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy || title.trim() === ''}
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+          >
+            {mode === 'create' ? 'Create task' : 'Save changes'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
   const [selected, setSelected] = useState<Issue | null>(null)
+  const [form, setForm] = useState<{ mode: 'create' } | { mode: 'edit'; issue: Issue } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refresh, setRefresh] = useState(0)
@@ -665,7 +853,12 @@ function IssuesView() {
         return response.json() as Promise<Issue[]>
       })
       .then((items) => {
-        if (!controller.signal.aborted) setIssues(items)
+        if (controller.signal.aborted) return
+        setIssues(items)
+        setSelected((current) => {
+          if (current === null) return current
+          return items.find((issue) => issue.id === current.id) ?? current
+        })
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err))
@@ -680,6 +873,10 @@ function IssuesView() {
     try {
       localStorage.setItem('amagi:issue-view', next)
     } catch {}
+  }
+  const saved = () => {
+    setForm(null)
+    setRefresh((value) => value + 1)
   }
   const visible = issues.filter(
     (issue) =>
@@ -700,6 +897,13 @@ function IssuesView() {
           description={selected.parent ? `Part of ${selected.parent}` : 'Task details'}
         >
           <IssueBadge issue={selected} />
+          <button
+            type="button"
+            className="button secondary"
+            onClick={() => setForm({ mode: 'edit', issue: selected })}
+          >
+            Edit
+          </button>
         </PageHeading>
         <div className="detail-columns">
           <section className="panel prose-panel">
@@ -733,6 +937,14 @@ function IssuesView() {
             )}
           </section>
         </div>
+        {form !== null && (
+          <IssueFormModal
+            mode={form.mode}
+            initial={form.mode === 'edit' ? form.issue : null}
+            onClose={() => setForm(null)}
+            onSaved={saved}
+          />
+        )}
       </>
     )
   return (
@@ -742,6 +954,13 @@ function IssuesView() {
         title="Make room for progress."
         description="The shared backlog. A clear path from idea to done."
       >
+        <button
+          type="button"
+          className="button primary"
+          onClick={() => setForm({ mode: 'create' })}
+        >
+          New task
+        </button>
         <button
           type="button"
           className="button secondary"
@@ -888,6 +1107,14 @@ function IssuesView() {
             </button>
           ))}
         </section>
+      )}
+      {form !== null && (
+        <IssueFormModal
+          mode={form.mode}
+          initial={form.mode === 'edit' ? form.issue : null}
+          onClose={() => setForm(null)}
+          onSaved={saved}
+        />
       )}
     </>
   )
