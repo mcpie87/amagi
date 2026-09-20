@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from 'citty'
 import { askCommand } from './commands/ask.ts'
+import { checkPrsCommand } from './commands/check-prs.ts'
 import { cleanCommand } from './commands/clean.ts'
 import { configCommand } from './commands/config.ts'
 import { runCommand } from './commands/run.ts'
@@ -19,6 +20,7 @@ const main = defineCommand({
     clean: cleanCommand,
     ask: askCommand,
     serve: serveCommand,
+    'check-prs': checkPrsCommand,
   },
 })
 
