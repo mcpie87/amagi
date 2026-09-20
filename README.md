@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="70919bb8-6f55-49e4-abc8-8da770c73bba-bluesky-16_9.png" alt="amagi" width="480">
+  <img src="banner.png" alt="amagi" width="480">
 </p>
 
 # amagi
