@@ -3,7 +3,8 @@ import { zValidator } from '@hono/zod-validator'
 import type { ValidationTargets } from 'hono'
 import { Hono } from 'hono'
 import * as z from 'zod'
-import { EventQuery, QuestionQuery, TaskIdParam, TaskListQuery } from './schemas.ts'
+import { EventQuery, QuestionQuery, StreamQuery, TaskIdParam, TaskListQuery } from './schemas.ts'
+import { eventStream } from './stream.ts'
 
 export type ServerDeps = {
   store: Store
@@ -39,6 +40,19 @@ export function createApp({ store }: ServerDeps) {
     .get('/api/events', valid('query', EventQuery), (c) => {
       const { taskId, sinceSeq, limit } = c.req.valid('query')
       return c.json(store.events(taskId ? { taskId, sinceSeq, limit } : { sinceSeq, limit }))
+    })
+
+    .get('/api/stream', valid('query', StreamQuery), (c) => {
+      const { taskId, sinceSeq } = c.req.valid('query')
+      // A browser resends the last id it saw on reconnect; that beats whatever
+      // sinceSeq was baked into the EventSource url when it first connected.
+      const resumed = Number(c.req.header('Last-Event-ID'))
+      const from = Number.isInteger(resumed) && resumed >= 0 ? resumed : sinceSeq
+      return eventStream(
+        c,
+        store,
+        taskId === undefined ? { sinceSeq: from } : { taskId, sinceSeq: from },
+      )
     })
 
     .get('/api/questions', valid('query', QuestionQuery), (c) => {

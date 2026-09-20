@@ -23,6 +23,12 @@ export const EventQuery = z.object({
 })
 export type EventQuery = z.infer<typeof EventQuery>
 
+export const StreamQuery = z.object({
+  taskId: z.string().min(1).optional(),
+  sinceSeq: z.coerce.number().int().min(0).default(0),
+})
+export type StreamQuery = z.infer<typeof StreamQuery>
+
 export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
 })

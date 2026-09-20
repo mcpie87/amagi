@@ -278,6 +278,11 @@ export class Store {
     return () => this.listeners.delete(listener)
   }
 
+  /** Long lived streams leak the store if they forget to unsubscribe. */
+  get listenerCount(): number {
+    return this.listeners.size
+  }
+
   /** Drops the projections and folds the whole log back over them. */
   rebuild(): void {
     this.db.transaction(() => {
