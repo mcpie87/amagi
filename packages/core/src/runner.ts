@@ -1,5 +1,11 @@
 import type { Config } from './config.ts'
-import { type CreatePrOptions, gitTokenConfig, makePrDriver, type PrDriver } from './drivers/pr.ts'
+import {
+  amagiLabels,
+  type CreatePrOptions,
+  gitTokenConfig,
+  makePrDriver,
+  type PrDriver,
+} from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { CheckResult, TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -269,6 +275,7 @@ export class Runner {
       remote: config.forge.remote,
       title: task.title,
       body: formatPrBody(task, changes),
+      labels: amagiLabels(task.type),
     }
     try {
       const pr = await forge.createPr(opts)
