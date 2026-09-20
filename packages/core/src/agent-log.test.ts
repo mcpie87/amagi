@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { AgentLogBuffer, AgentLogStore, linesForAgentEvent } from './agentLog.ts'
+import { AgentLogBuffer, AgentLogStore, linesForAgentEvent } from './agent-log.ts'
 
 describe('linesForAgentEvent', () => {
   test('splits a multi-line text chunk into one row per line', () => {
