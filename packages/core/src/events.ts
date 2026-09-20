@@ -12,6 +12,7 @@ export const TASK_STATES = [
   'fixing',
   'retrying',
   'done',
+  'no_pr',
   'needs_human',
   'abandoned',
 ] as const
@@ -21,6 +22,7 @@ export type TaskState = z.infer<typeof TaskState>
 
 export const TERMINAL_STATES = [
   'done',
+  'no_pr',
   'needs_human',
   'abandoned',
 ] as const satisfies readonly TaskState[]
@@ -45,6 +47,7 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   reviewing: ['fixing', 'done'],
   fixing: ['awaiting_answer', 'checks', 'reviewing'],
   done: [],
+  no_pr: [],
   needs_human: [],
   abandoned: [],
 }

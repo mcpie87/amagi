@@ -264,7 +264,12 @@ export class Runner {
 
     const committed = await this.commit(task, cwd)
     if (!committed) {
-      this.transition(task.id, 'needs_human', 'the agent produced no changes to commit')
+      this.transition(
+        task.id,
+        'no_pr',
+        'the agent produced no changes; the task may already be done or need no PR — ' +
+          'verify and close it explicitly, it will not be closed automatically',
+      )
       return
     }
     this.transition(task.id, 'committed')
