@@ -93,6 +93,10 @@ export class Runner {
       type: 'task.claimed',
       title: task.title,
       tracker: this.deps.tracker.kind,
+      description: task.description,
+      priority: task.priority,
+      taskType: task.type,
+      url: task.url,
     })
 
     try {
