@@ -236,9 +236,7 @@ describe('Runner.runOnce', () => {
 
     const started = store
       .events({ taskId: TASK.id, limit: 999 })
-      .find(
-        (e): e is Extract<StoredEvent, { type: 'agent.started' }> => e.type === 'agent.started',
-      )
+      .find((e): e is Extract<StoredEvent, { type: 'agent.started' }> => e.type === 'agent.started')
     expect(started?.model).toBe('claude-sonnet-5')
     expect(started?.effort).toBe('high')
   })
