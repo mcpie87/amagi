@@ -1,5 +1,6 @@
 import {
   isTerminal,
+  listModelsCached,
   loadConfig,
   makeHarness,
   makeTracker,
@@ -10,26 +11,64 @@ import {
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, red, yellow } from '../format.ts'
+import { input, openTty, select } from '../picker.ts'
+import { pickRunSelection, type RunSelection } from '../select-run.ts'
 
 function printBlock(text: string): void {
   for (const line of text.trim().split('\n')) console.log(`  ${line}`)
+}
+
+const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
+  const harness = makeHarness(cfg)
+  return listModelsCached(harness.kind, () => harness.listModels())
 }
 
 export const runCommand = defineCommand({
   meta: { name: 'run', description: 'Claim the next ready task and work it in its own worktree' },
   args: {
     once: { type: 'boolean', description: 'Work a single task and exit', default: true },
+    harness: {
+      type: 'string',
+      description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
+    },
+    model: { type: 'string', description: 'Model to pass to the harness' },
   },
-  async run() {
+  async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
+    const flags = { harness: args.harness, model: args.model }
+
+    const tty = flags.harness === undefined ? openTty() : null
+    let selection: RunSelection
+    try {
+      selection = await pickRunSelection(
+        config,
+        flags,
+        tty === null
+          ? null
+          : {
+              select: (title, options) => select(title, options, tty.read, tty.write),
+              input: (prompt) => input(prompt, tty.read, tty.write),
+            },
+        listModelsFor,
+      )
+    } finally {
+      tty?.close()
+    }
+
     const store = new Store()
+    const implement = selection.harness
+    if (selection.interactive) {
+      console.log(
+        dim(`harness: ${implement.kind}${implement.model ? ` (model ${implement.model})` : ''}`),
+      )
+    }
 
     const runner = new Runner({
       store,
       tracker: makeTracker(config, root),
-      harness: makeHarness(config.harness.implement),
-      config,
+      harness: makeHarness(implement),
+      config: { ...config, harness: { ...config.harness, implement } },
       repoRoot: root,
       repoName: repoName(root),
     })

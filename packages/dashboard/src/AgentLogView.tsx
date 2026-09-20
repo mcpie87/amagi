@@ -1,6 +1,7 @@
 import { type AgentLogLine, agentLogStore } from '@amagi/core/agent-log'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { EmptyState } from './ui.tsx'
 
 const ROW_HEIGHT = 18
 // how close to the bottom counts as "at the bottom" for autoscroll purposes
@@ -27,6 +28,7 @@ const kindClass: Record<AgentLogLine['kind'], string> = {
 export function AgentLogView({ taskId }: { taskId: string }) {
   const parentRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
+  const [following, setFollowing] = useState(true)
 
   useSyncExternalStore(
     (listener) => agentLogStore.subscribe(taskId, listener),
@@ -41,6 +43,7 @@ export function AgentLogView({ taskId }: { taskId: string }) {
     overscan: 30,
   })
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A full ring buffer changes version without changing length.
   useEffect(() => {
     if (!stickToBottom.current || buffer.length === 0) return
     rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })
@@ -50,20 +53,33 @@ export function AgentLogView({ taskId }: { taskId: string }) {
     const el = parentRef.current
     if (!el) return
     stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD
+    setFollowing(stickToBottom.current)
   }
 
-  if (buffer.length === 0) return null
+  if (buffer.length === 0)
+    return (
+      <EmptyState icon="agent" title="Waiting for agent output">
+        Live output will appear here when the agent starts working.
+      </EmptyState>
+    )
 
   return (
-    <div className="mt-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-        Agent log
-      </h2>
-      <div
-        ref={parentRef}
-        onScroll={handleScroll}
-        className="h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 font-mono text-xs leading-[18px]"
-      >
+    <div>
+      <div className="agent-log-header">
+        <span>{buffer.length} buffered lines</span>
+        <button
+          type="button"
+          aria-pressed={following}
+          onClick={() => {
+            stickToBottom.current = !following
+            setFollowing(!following)
+            if (!following) rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })
+          }}
+        >
+          {following ? 'Following output' : 'Follow output'}
+        </button>
+      </div>
+      <div ref={parentRef} onScroll={handleScroll} className="agent-log-scroll">
         <div style={{ height: rowVirtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
           {rowVirtualizer.getVirtualItems().map((item) => {
             const line = buffer.at(item.index)

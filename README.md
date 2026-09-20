@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="70919bb8-6f55-49e4-abc8-8da770c73bba-bluesky-16_9.png" alt="amagi" width="480">
+  <img src="banner.png" alt="amagi" width="480">
 </p>
 
 # amagi
@@ -27,6 +27,20 @@ the dashboard Vite server with hot module replacement. Open the dashboard at
 the URL Vite prints (normally `http://localhost:5173`); `/api` requests proxy
 to the API at `http://127.0.0.1:7777`.
 
+### Dashboard
+
+The dashboard is the shared control room for the connected server:
+
+- **Overview** brings active runs, open pull requests, questions, and recent activity together.
+- **Runs** searches and filters running, completed, and attention-needed work. Each run has live agent output with follow/pause, check results, a timeline, and workspace context.
+- **Task board** browses tracker tasks with search, status filters, and a saved board/list preference.
+- **Inbox** collects agent questions and stopped runs. Answer questions directly to resume waiting agents.
+- **Activity** shows a searchable timeline of run milestones and decisions.
+
+Use Ctrl+K or Cmd+K to find a page or run. Connection status shows when the event stream is reconnecting and displayed data may be stale. On small screens, navigation opens from the menu button.
+
+Starting and stopping runs, editing tracker tasks, and registering multiple repositories still require backend support. The dashboard currently operates on the repository connected to its server.
+
 ## Usage
 
 ```bash
@@ -35,7 +49,7 @@ bun run packages/cli/src/index.ts <command>
 
 | Command | Description |
 | --- | --- |
-| `run` | Claim the next ready task and work it in its own worktree |
+| `run` | Claim the next ready task and work it in its own worktree. `--harness <name>` and `--model <name>` pin the harness and model; without them, a TTY run prompts for both (see [Harness and model selection](#harness-and-model-selection)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -90,7 +104,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. Only `github` (via `gh`) is implemented today; `forgejo` throws `NotImplementedDriverError` if selected. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
-| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code. Only `claude` is implemented today. |
+| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
 | `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"opus"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
@@ -100,6 +114,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
 | `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
 | `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
+| `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxReviewRounds` | integer >= 0 | `3` | Review/fix rounds before escalating to `needs_human`. Reserved for the review loop. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
@@ -151,6 +166,29 @@ permissions = "bypass"
 ```
 
 `permissions = "bypass"` passes `--auto` to OpenCode. The agent runs in Amagi's dedicated worktree, but OpenCode's own permission checks are otherwise disabled.
+
+### Harness and model selection
+
+`amagi run` can pick the harness and model at dispatch time, either from flags or an interactive picker. When neither `--harness` nor `--model` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined) and then a model. Model lists are fetched the way each harness lists them (`claude model list`, `codex models`, `opencode models`) and cached under `$XDG_CACHE_HOME/amagi/models/` for 24h, so the prompt is fast and still offers the last known models offline. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model` override.
+
+```bash
+amagi run                      # interactive picker
+amagi run --harness opencode   # pin the harness, pick the model
+amagi run --harness fast --model local/deepseek-ai/DeepSeek-V4-Flash-0731
+```
+
+Define the choices the picker offers per repo:
+
+```toml
+[harness.definitions.fast]
+kind = "opencode"
+bin = "opencode-unconfined"
+permissions = "bypass"
+
+[harness.definitions.careful]
+kind = "claude"
+model = "opus"
+```
 
 ## Packages
 
