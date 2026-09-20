@@ -133,3 +133,19 @@ export function loadConfig(repoRoot: string): LoadedConfig {
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return { config, sources }
 }
+
+/**
+ * The server-wide settings (host, port) come from the global config alone,
+ * because `serve` now hosts every registered repo, not just the cwd one.
+ */
+export function loadGlobalConfig(): Config {
+  const path = globalConfigPath()
+  const merged = existsSync(path) ? readToml(path) : {}
+  const parsed = Config.safeParse(merged)
+  if (!parsed.success) {
+    throw new Error(`invalid amagi config (${path}):\n${z.prettifyError(parsed.error)}`)
+  }
+  const config = parsed.data
+  config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
+  return config
+}

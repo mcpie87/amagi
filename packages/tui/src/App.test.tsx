@@ -50,11 +50,11 @@ const EVENTS: StoredEvent[] = [
 describe('App', () => {
   test('renders the queue, opens a task, and shows its pending question', async () => {
     globalThis.fetch = (async (url: string) => {
-      if (url.toString().includes('/api/stream')) return sseResponse(EVENTS)
+      if (url.toString().includes('/api/repos/repo1/stream')) return sseResponse(EVENTS)
       throw new Error(`unexpected fetch ${url}`)
     }) as unknown as typeof fetch
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('Fix the thing'))
       expect(instance.lastFrame()).toContain('implementing')
@@ -75,8 +75,8 @@ describe('App', () => {
     const posted: { url: string; body: unknown }[] = []
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       const href = url.toString()
-      if (href.includes('/api/stream')) return sseResponse(EVENTS)
-      if (href.endsWith('/api/tasks/am-1')) {
+      if (href.includes('/api/repos/repo1/stream')) return sseResponse(EVENTS)
+      if (href.endsWith('/api/repos/repo1/tasks/am-1')) {
         return new Response(JSON.stringify({ token: 'secret' }), { status: 200 })
       }
       if (href.includes('/answer')) {
@@ -86,7 +86,7 @@ describe('App', () => {
       throw new Error(`unexpected fetch ${href}`)
     }) as unknown as typeof fetch
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('Fix the thing'))
       instance.stdin.write('\r')
@@ -94,7 +94,9 @@ describe('App', () => {
 
       instance.stdin.write('1')
       await waitFor(() => posted.length > 0)
-      expect(posted[0]?.url).toBe('http://amagi.test/api/tasks/am-1/questions/q-1/answer')
+      expect(posted[0]?.url).toBe(
+        'http://amagi.test/api/repos/repo1/tasks/am-1/questions/q-1/answer',
+      )
       expect(posted[0]?.body).toEqual({ answer: 'npm', via: 'cli' })
     } finally {
       instance.unmount()

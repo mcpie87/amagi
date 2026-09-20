@@ -6,10 +6,10 @@ import {
   Runner,
   repoName,
   repoRoot,
-  Store,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, red, yellow } from '../format.ts'
+import { currentRepo } from '../repo.ts'
 
 function printBlock(text: string): void {
   for (const line of text.trim().split('\n')) console.log(`  ${line}`)
@@ -23,7 +23,7 @@ export const runCommand = defineCommand({
   async run() {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const store = new Store()
+    const { key, store } = currentRepo()
 
     const runner = new Runner({
       store,
@@ -82,7 +82,7 @@ export const runCommand = defineCommand({
     })
 
     try {
-      console.log(dim('claiming next ready task...'))
+      console.log(dim(`claiming next ready task in ${key}...`))
       const result = await runner.runOnce()
       if (result === null) {
         console.log(dim('nothing ready to work on'))

@@ -18,7 +18,7 @@ import {
 import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { useDashboard } from './store.tsx'
+import { type RepoInfo, useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
@@ -79,26 +79,136 @@ function Badge({ state }: { state: TaskState }) {
   )
 }
 
+function readyOk(repo: RepoInfo): boolean {
+  return repo.ready.every((d) => d.ok)
+}
+
+function AddRepoForm() {
+  const { addRepo } = useDashboard()
+  const [path, setPath] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<RepoInfo | { error: string } | null>(null)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (path.trim() === '' || busy) return
+    setBusy(true)
+    setResult(null)
+    try {
+      setResult(await addRepo(path.trim()))
+    } catch {
+      setResult({ error: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const ready = result !== null && 'ready' in result
+  return (
+    <div>
+      <form onSubmit={submit} className="flex gap-2">
+        <input
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          placeholder="/path/to/repository"
+          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm"
+        />
+        <button
+          type="submit"
+          disabled={busy || path.trim() === ''}
+          className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-zinc-950 disabled:opacity-50"
+        >
+          Add repository
+        </button>
+      </form>
+      {result !== null && 'error' in result && (
+        <p className="mt-2 text-sm text-red-400">{result.error}</p>
+      )}
+      {ready && (
+        <ul className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm">
+          {result.ready.map((d) => (
+            <li key={d.name} className="flex gap-2 py-0.5">
+              <span className={d.ok ? 'text-emerald-400' : 'text-red-400'}>
+                {d.ok ? 'ok' : '!!'}
+              </span>
+              <span className="w-40 shrink-0 text-zinc-400">{d.name}</span>
+              <span className="min-w-0 break-all text-zinc-300">{d.detail ?? ''}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function RootLayout() {
+  const { repos, selected, selectRepo } = useDashboard()
+  const [adding, setAdding] = useState(false)
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-800 px-6 py-3">
-        <div className="mx-auto flex max-w-5xl items-center gap-5">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-4">
           <Link to="/" className="text-lg font-semibold tracking-tight">
             amagi
           </Link>
-          <nav className="flex gap-3 text-sm text-zinc-400">
-            <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
-              Queue
-            </Link>
-            <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
-              Tasks
-            </Link>
-          </nav>
+          {repos !== null && repos.length > 0 && (
+            <>
+              <nav className="flex gap-3 text-sm text-zinc-400">
+                <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
+                  Queue
+                </Link>
+                <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
+                  Tasks
+                </Link>
+              </nav>
+              <div className="ml-auto flex items-center gap-2">
+                <select
+                  value={selected ?? ''}
+                  onChange={(e) => selectRepo(e.target.value)}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+                >
+                  {repos.map((repo) => (
+                    <option key={repo.key} value={repo.key}>
+                      {readyOk(repo) ? '' : '! '}
+                      {repo.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setAdding((v) => !v)}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-300 hover:bg-zinc-800"
+                >
+                  {adding ? 'close' : '+ add'}
+                </button>
+              </div>
+            </>
+          )}
         </div>
+        {adding && (
+          <div className="mx-auto mt-3 max-w-5xl">
+            <AddRepoForm />
+          </div>
+        )}
       </header>
       <main className="mx-auto max-w-5xl px-6 py-6">
-        <Outlet />
+        {repos === null ? (
+          <p className="text-zinc-500">loading repositories...</p>
+        ) : repos.length === 0 ? (
+          <section className="mx-auto max-w-xl pt-12">
+            <h1 className="text-xl font-semibold">Add a repository to start</h1>
+            <p className="mt-1 text-sm text-zinc-500">
+              Point amagi at a git repository; its own .amagi/config.toml picks the tracker, forge,
+              harness and checks. No restart needed.
+            </p>
+            <div className="mt-4">
+              <AddRepoForm />
+            </div>
+          </section>
+        ) : (
+          <Outlet />
+        )}
       </main>
     </div>
   )
@@ -123,8 +233,9 @@ function IssueBadge({ issue }: { issue: Issue }) {
 type IssuesViewMode = 'kanban' | 'list'
 
 function IssuesView() {
+  const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
-  const [selected, setSelected] = useState<Issue | null>(null)
+  const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
   const [page, setPage] = useState(0)
@@ -147,61 +258,65 @@ function IssuesView() {
   }
 
   useEffect(() => {
-    fetch(`${apiBase}/api/issues`)
+    if (selected === null) return
+    setIssues([])
+    setError(null)
+    setSelectedIssue(null)
+    fetch(`${apiBase}/api/repos/${selected}/issues`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
         return res.json() as Promise<Issue[]>
       })
       .then(setIssues)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-  }, [])
+  }, [selected])
 
   const filtered = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const currentPage = Math.min(page, pageCount - 1)
   const pageItems = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
 
-  if (selected !== null) {
+  if (selectedIssue !== null) {
     return (
       <section>
         <button
           type="button"
-          onClick={() => setSelected(null)}
+          onClick={() => setSelectedIssue(null)}
           className="text-sm text-sky-400 hover:underline"
         >
           &larr; tasks
         </button>
         <div className="mt-3 flex items-center gap-3">
-          <h1 className="text-xl font-semibold">{selected.title}</h1>
-          <IssueBadge issue={selected} />
+          <h1 className="text-xl font-semibold">{selectedIssue.title}</h1>
+          <IssueBadge issue={selectedIssue} />
         </div>
         <p className="mt-1 text-sm text-zinc-500">
-          {selected.id}
-          {selected.parent ? ` · child of ${selected.parent}` : ''}
+          {selectedIssue.id}
+          {selectedIssue.parent ? ` · child of ${selectedIssue.parent}` : ''}
         </p>
         <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
           <DetailRow
             label="priority"
-            value={selected.priority === null ? null : `P${selected.priority}`}
+            value={selectedIssue.priority === null ? null : `P${selectedIssue.priority}`}
           />
-          <DetailRow label="type" value={selected.type} />
-          <DetailRow label="assignee" value={selected.assignee} />
-          <DetailRow label="labels" value={selected.labels.join(', ') || null} />
+          <DetailRow label="type" value={selectedIssue.type} />
+          <DetailRow label="assignee" value={selectedIssue.assignee} />
+          <DetailRow label="labels" value={selectedIssue.labels.join(', ') || null} />
         </dl>
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
             Description
           </h2>
           <p className="whitespace-pre-wrap text-zinc-300">
-            {selected.description || 'No description.'}
+            {selectedIssue.description || 'No description.'}
           </p>
         </div>
-        {selected.acceptanceCriteria !== null && (
+        {selectedIssue.acceptanceCriteria !== null && (
           <div className="mt-6">
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
               Acceptance criteria
             </h2>
-            <p className="whitespace-pre-wrap text-zinc-300">{selected.acceptanceCriteria}</p>
+            <p className="whitespace-pre-wrap text-zinc-300">{selectedIssue.acceptanceCriteria}</p>
           </div>
         )}
       </section>
@@ -279,7 +394,7 @@ function IssuesView() {
                     <li key={issue.id}>
                       <button
                         type="button"
-                        onClick={() => setSelected(issue)}
+                        onClick={() => setSelectedIssue(issue)}
                         className="w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left hover:bg-zinc-800"
                       >
                         <span className="block text-xs text-zinc-500">{issue.id}</span>
@@ -309,7 +424,7 @@ function IssuesView() {
               <li key={issue.id}>
                 <button
                   type="button"
-                  onClick={() => setSelected(issue)}
+                  onClick={() => setSelectedIssue(issue)}
                   className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
                 >
                   <IssueBadge issue={issue} />
@@ -354,8 +469,41 @@ function IssuesView() {
   )
 }
 
+function RunButton({ repo }: { repo: string }) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/run`, { method: 'POST' })
+      if (!res.ok) setMessage((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setMessage('run started')
+    } catch {
+      setMessage('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {message !== null && <span className="text-sm text-zinc-400">{message}</span>}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run()}
+        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+      >
+        Run
+      </button>
+    </div>
+  )
+}
+
 function QueueView() {
-  const state = useDashboard()
+  const { state, selected } = useDashboard()
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
@@ -384,7 +532,10 @@ function QueueView() {
 
   return (
     <section>
-      <h1 className="mb-4 text-xl font-semibold">Queue</h1>
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Queue</h1>
+        {selected !== null && <RunButton repo={selected} />}
+      </div>
       {attention.length > 0 && (
         <div className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
@@ -439,7 +590,15 @@ function PrLink({ url }: { url: string }) {
   )
 }
 
-function AnswerBox({ taskId, question }: { taskId: string; question: QuestionView }) {
+function AnswerBox({
+  repo,
+  taskId,
+  question,
+}: {
+  repo: string
+  taskId: string
+  question: QuestionView
+}) {
   const [token, setToken] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -447,7 +606,7 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
 
   useEffect(() => {
     let alive = true
-    fetch(`${apiBase}/api/tasks/${taskId}`)
+    fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}`)
       .then((r) => (r.ok ? (r.json() as Promise<{ token?: string }>) : null))
       .then((body) => {
         if (alive) setToken(body?.token ?? null)
@@ -458,18 +617,21 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
     return () => {
       alive = false
     }
-  }, [taskId])
+  }, [repo, taskId])
 
   const send = async (answer: string) => {
     if (token === null || answer.trim() === '' || busy) return
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(`${apiBase}/api/tasks/${taskId}/questions/${question.id}/answer`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
-        body: JSON.stringify({ answer, via: 'web' }),
-      })
+      const res = await fetch(
+        `${apiBase}/api/repos/${repo}/tasks/${taskId}/questions/${question.id}/answer`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
+          body: JSON.stringify({ answer, via: 'web' }),
+        },
+      )
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
     } catch {
       setError('could not reach the amagi server')
@@ -525,10 +687,12 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
 }
 
 function ReclaimButton({
+  repo,
   taskId,
   state,
   worktree,
 }: {
+  repo: string
   taskId: string
   state: TaskState
   worktree: string | null
@@ -541,7 +705,9 @@ function ReclaimButton({
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(`${apiBase}/api/tasks/${taskId}/reclaim`, { method: 'POST' })
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
     } catch {
       setError('could not reach the amagi server')
@@ -613,7 +779,7 @@ function AgentLog({ events }: { events: AgentStreamEvent[] }) {
 
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
-  const state = useDashboard()
+  const { state, selected } = useDashboard()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
   // ponytail: last 500 rendered, the virtualization task (am-b2z.4) removes the cap
@@ -655,7 +821,14 @@ function TaskDetailView() {
         {task.reviewRound > 0 && (
           <span className="text-sm text-zinc-400">review round {task.reviewRound}</span>
         )}
-        <ReclaimButton taskId={task.id} state={task.state} worktree={task.worktree} />
+        {selected !== null && (
+          <ReclaimButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
 
@@ -681,9 +854,9 @@ function TaskDetailView() {
         <DetailRow label="error" value={task.lastError} />
       </dl>
 
-      <AgentLogView taskId={id} />
+      {selected !== null && <AgentLogView repo={selected} taskId={id} />}
 
-      {questions.length > 0 && (
+      {questions.length > 0 && selected !== null && (
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
             Questions
@@ -695,7 +868,7 @@ function TaskDetailView() {
                 className="rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3"
               >
                 <p className="font-medium">{q.question}</p>
-                <AnswerBox taskId={id} question={q} />
+                <AnswerBox repo={selected} taskId={id} question={q} />
               </li>
             ))}
           </ul>

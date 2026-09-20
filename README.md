@@ -42,12 +42,32 @@ bun run packages/cli/src/index.ts <command>
 | `respond-to-mentions` | Watch open PRs for @agent mentions and respond: fix, explain, or ask for clarification |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
-| `serve` | Serve the HTTP + SSE API and the built dashboard from one process |
+| `repos` | List registered repositories and their readiness diagnostics |
+| `add <path>` | Register a repository with the orchestration workspace |
+| `remove <key>` | Unregister a repository |
+| `serve` | Serve the HTTP + SSE API and the built dashboard for every registered repo |
 | `tui` | Terminal view of the queue, task detail, and pending questions (needs `amagi serve` running) |
 
-### Pointing amagi at a repo
+### The repository registry
 
-Amagi has no `--repo` flag: it resolves the repo root from your current working directory with `git rev-parse --show-toplevel`, the same way `git` itself does. Run the `amagi` CLI from anywhere inside the repo you want it to work on. Everything else — the tracker, the worktree location, the checks it runs — comes from that repo's config (see below), so a single amagi install can drive any number of repos, one `cd` at a time.
+Amagi manages any number of repositories from one orchestration workspace. Repos are
+registered in a registry (`~/.local/state/amagi/registry.json`) with `amagi add <path>` or
+through the dashboard's onboarding form; each entry is scoped by a key (the repo directory
+name unless you pass `--key`). `amagi repos` shows every registered repo and its readiness
+(git root, config, tracker/forge CLIs on PATH, worktree root), and `amagi remove <key>`
+drops one.
+
+`amagi serve` hosts the dashboard and API for every registered repo. The dashboard's
+workspace selector streams one repo at a time; tasks, tokens, logs, SSE subscriptions and
+run actions are scoped per repo, so identical issue ids in different repos never collide.
+Adding a repo while the server runs takes effect immediately, without a restart: the
+server re-reads the registry on demand.
+
+For the repo being served, its own `.amagi/config.toml` (merged with the global config)
+picks the tracker, forge, harness and checks. The CLI (`run`, `status`, `clean`, `tui`,
+`ask`) resolves the repo from your current working directory with
+`git rev-parse --show-toplevel`, reads and writes that repo's own store, and addresses the
+server's repo-scoped routes by that key.
 
 The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default) and, for the `github` tracker/forge, a `GH_TOKEN` or `GITHUB_TOKEN` in the environment so `gh` and the unattended `git push`/`fetch` never block on interactive auth.
 
@@ -111,6 +131,9 @@ Every key is optional; the table below is the complete schema with its default.
 | `notify.ntfyServer` | string | `"https://ntfy.sh"` | ntfy server base URL, for self-hosted instances. |
 | `server.host` | string | `"127.0.0.1"` | Bind address for `amagi serve` and the address the CLI (`amagi ask`) talks to. |
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
+
+`server.host`/`server.port` are read from the global config only: `serve` hosts every
+registered repo, so there is no single repo config to draw them from.
 
 ### Example
 

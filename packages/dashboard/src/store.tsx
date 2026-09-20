@@ -1,31 +1,126 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import type { StoredEvent } from '@amagi/core/events'
 import { type DashboardState, initialDashboardState, reduceState } from '@amagi/core/view'
-import { createContext, type ReactNode, useContext, useEffect, useReducer } from 'react'
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useReducer,
+  useState,
+} from 'react'
 
-const DashboardContext = createContext<DashboardState>(initialDashboardState())
+const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
+
+export type RepoInfo = {
+  key: string
+  name: string
+  path: string
+  ready: { name: string; ok: boolean; detail?: string }[]
+}
+
+export type DashboardValue = {
+  repos: RepoInfo[] | null
+  selected: string | null
+  selectRepo: (key: string) => void
+  refreshRepos: () => void
+  addRepo: (path: string) => Promise<RepoInfo | { error: string }>
+}
+
+const ReposContext = createContext<DashboardValue>({
+  repos: null,
+  selected: null,
+  selectRepo: () => {},
+  refreshRepos: () => {},
+  addRepo: async () => ({ error: 'no provider' }),
+})
+
+const StreamContext = createContext<DashboardState>(initialDashboardState())
+
+function readStored(): string | null {
+  try {
+    return localStorage.getItem('amagi:repo')
+  } catch {
+    return null
+  }
+}
 
 /**
- * One EventSource carries the whole store. The server replays from
- * `sinceSeq` and honours the browser's Last-Event-ID on reconnect, so a page
- * reload reconstructs identical state by folding the replay back over the
- * reducer. No query cache: the API list endpoints are not consulted.
+ * One EventSource per selected repository, replayed from seq 0 and resumed
+ * from the browser's Last-Event-ID on reconnect. The reducer state is scoped
+ * to the repo (the stream component is keyed by repo, so switching resets it)
+ * and agent logs are namespaced by repo, so identical issue ids across repos
+ * never collide in the dashboard.
  */
 export function DashboardProvider({ children }: { children: ReactNode }) {
+  const [repos, setRepos] = useState<RepoInfo[] | null>(null)
+  const [selected, setSelected] = useState<string | null>(readStored)
+
+  const refreshRepos = useCallback(() => {
+    fetch(`${apiBase}/api/repos`)
+      .then((res) => (res.ok ? (res.json() as Promise<RepoInfo[]>) : []))
+      .then((list) => {
+        setRepos(list)
+        setSelected((prev) =>
+          prev !== null && list.some((r) => r.key === prev) ? prev : (list[0]?.key ?? null),
+        )
+      })
+      .catch(() => setRepos([]))
+  }, [])
+
+  useEffect(refreshRepos, [refreshRepos])
+
+  const selectRepo = useCallback((key: string) => {
+    setSelected(key)
+    try {
+      localStorage.setItem('amagi:repo', key)
+    } catch {
+      // storage unavailable, the choice just won't persist
+    }
+  }, [])
+
+  const addRepo = useCallback(
+    async (path: string): Promise<RepoInfo | { error: string }> => {
+      const res = await fetch(`${apiBase}/api/repos`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      })
+      const body = (await res.json()) as RepoInfo | { error: string }
+      if (!res.ok) return body
+      await refreshRepos()
+      if ('key' in body) selectRepo(body.key)
+      return body
+    },
+    [refreshRepos, selectRepo],
+  )
+
+  return (
+    <ReposContext.Provider value={{ repos, selected, selectRepo, refreshRepos, addRepo }}>
+      {selected === null ? (
+        <StreamContext.Provider value={initialDashboardState()}>{children}</StreamContext.Provider>
+      ) : (
+        <RepoStream key={selected} repo={selected}>
+          {children}
+        </RepoStream>
+      )}
+    </ReposContext.Provider>
+  )
+}
+
+function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
 
   useEffect(() => {
-    const base = (import.meta.env.VITE_API_BASE ?? '') as string
-    const source = new EventSource(`${base}/api/stream?sinceSeq=0`)
+    const source = new EventSource(`${apiBase}/api/repos/${repo}/stream?sinceSeq=0`)
     source.addEventListener('message', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data) as StoredEvent
-        // agent.stream is the hot path: hundreds of lines/sec of assistant
-        // text and tool output. It bypasses the reducer entirely so it never
-        // costs a setState per line; the agentLogStore ring buffer owns it
-        // and batches renders on requestAnimationFrame instead.
+        // agent.stream is the hot path: it bypasses the reducer entirely, and
+        // the agentLogStore ring buffer owns it, batching renders per frame.
         if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
-          agentLogStore.append(parsed.taskId, parsed.role, parsed.ts, parsed.event)
+          agentLogStore.append(`${repo}/${parsed.taskId}`, parsed.role, parsed.ts, parsed.event)
         } else {
           dispatch(parsed)
         }
@@ -34,11 +129,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
     })
     return () => source.close()
-  }, [])
+  }, [repo])
 
-  return <DashboardContext.Provider value={state}>{children}</DashboardContext.Provider>
+  return <StreamContext.Provider value={state}>{children}</StreamContext.Provider>
 }
 
-export function useDashboard(): DashboardState {
-  return useContext(DashboardContext)
+export function useDashboard(): DashboardValue & { state: DashboardState } {
+  return { ...useContext(ReposContext), state: useContext(StreamContext) }
 }

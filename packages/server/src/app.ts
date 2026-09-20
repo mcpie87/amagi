@@ -1,14 +1,19 @@
 import {
-  type BeadsIssue,
   isTerminal,
+  makeHarness,
   type Notifier,
   type Question,
+  type RegistryEntry,
+  Runner,
   type Store,
   type Tracker,
+  type Workspace,
+  type Workspaces,
 } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
+import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import * as z from 'zod'
 import {
   AnswerBody,
@@ -16,23 +21,18 @@ import {
   AwaitQuery,
   EventQuery,
   QuestionQuery,
+  RepoParam,
+  RepoQuestionParam,
+  RepoRegisterBody,
+  RepoTaskIdParam,
   StreamQuery,
-  TaskIdParam,
   TaskListQuery,
-  TaskQuestionParam,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
 
 export type ServerDeps = {
-  store: Store
+  workspaces: Workspaces
   notify?: Notifier[]
-  /**
-   * When present, questions open a blocking gate on the tracker issue so a
-   * human answering outside amagi (e.g. `bd gate resolve`) can still unblock
-   * the agent. Absent in tests that exercise the question channel alone.
-   */
-  tracker?: Tracker
-  listIssues?: () => Promise<BeadsIssue[]>
 }
 
 /**
@@ -106,31 +106,119 @@ async function resolveQuestionGate(
   }
 }
 
-export function createApp({ store, notify = [], tracker, listIssues }: ServerDeps) {
+/** Thrown by repo resolution so handlers keep a single typed return. */
+class RepoError extends Error {
+  constructor(
+    readonly status: ContentfulStatusCode,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'RepoError'
+  }
+}
+
+/** Resolves a repo param to its workspace, throwing a RepoError on failure. */
+function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
+  let ws: Workspace | null
+  try {
+    ws = workspaces.get(repo)
+  } catch (err) {
+    throw new RepoError(500, `repo ${repo}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
+  return ws
+}
+
+export function createApp({ workspaces, notify = [] }: ServerDeps) {
   return new Hono()
+
     .get('/api/health', (c) => c.json({ ok: true }))
 
-    .get('/api/issues', async (c) => {
-      if (listIssues === undefined) return c.json({ error: 'issue browser is unavailable' }, 501)
-      return c.json(await listIssues())
+    .get('/api/repos', async (c) => {
+      const out = []
+      for (const entry of workspaces.list()) {
+        try {
+          const ready = await workspaces.diagnose(entry)
+          out.push({ key: entry.key, name: entry.name, path: entry.path, ready })
+        } catch (err) {
+          out.push({
+            key: entry.key,
+            name: entry.name,
+            path: entry.path,
+            ready: [
+              {
+                name: 'workspace',
+                ok: false,
+                detail: err instanceof Error ? err.message : String(err),
+              },
+            ],
+          })
+        }
+      }
+      return c.json(out)
     })
 
-    .get('/api/tasks', valid('query', TaskListQuery), (c) => {
-      const { state, limit } = c.req.valid('query')
-      return c.json(store.tasks(state ? { states: state, limit } : { limit }))
+    .post('/api/repos', valid('json', RepoRegisterBody), async (c) => {
+      const { path, key } = c.req.valid('json')
+      let entry: RegistryEntry
+      try {
+        entry = workspaces.add(path, key)
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+      }
+      const ready = await workspaces.diagnose(entry)
+      return c.json({ ...entry, ready }, 201)
     })
 
-    .get('/api/tasks/:id', valid('param', TaskIdParam), (c) => {
-      const task = store.task(c.req.valid('param').id)
-      if (!task) return c.json({ error: `unknown task ${c.req.valid('param').id}` }, 404)
+    .delete('/api/repos/:repo', valid('param', RepoParam), (c) => {
+      if (!workspaces.remove(c.req.valid('param').repo)) {
+        return c.json({ error: `unknown repository ${c.req.valid('param').repo}` }, 404)
+      }
+      return c.json({ ok: true })
+    })
+
+    .get('/api/repos/:repo/ready', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const entry = workspaces.list().find((e) => e.key === repo)
+      if (!entry) return c.json({ error: `unknown repository ${repo}` }, 404)
+      return c.json(await workspaces.diagnose(entry))
+    })
+
+    .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.listIssues === undefined) {
+        return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
+      }
+      return c.json(await ws.listIssues())
+    })
+
+    .get(
+      '/api/repos/:repo/tasks',
+      valid('param', RepoParam),
+      valid('query', TaskListQuery),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const { state, limit } = c.req.valid('query')
+        return c.json(ws.store.tasks(state ? { states: state, limit } : { limit }))
+      },
+    )
+
+    .get('/api/repos/:repo/tasks/:id', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
       // The dashboard answers via the token-bound endpoint but has no other
       // channel for the credential, so the task detail doubles as its source.
-      return c.json({ task, token: store.token(task.id), questions: store.openQuestions(task.id) })
+      return c.json({ task, token: ws.store.token(id), questions: ws.store.openQuestions(id) })
     })
 
-    .post('/api/tasks/:id/reclaim', valid('param', TaskIdParam), async (c) => {
-      const { id } = c.req.valid('param')
-      const task = store.task(id)
+    .post('/api/repos/:repo/tasks/:id/reclaim', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
       if (task.worktree === null || task.branch === null) {
         return c.json({ error: `task ${id} has no worktree to resume` }, 409)
@@ -140,56 +228,56 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
       }
       // Best effort: the runner only re-claims issues the tracker sees as
       // ready, so a lapsed or still-live claim is released for it to pick up.
-      if (tracker !== undefined) {
-        try {
-          await tracker.release(id)
-        } catch (err) {
-          console.warn(`release ${id}: ${err instanceof Error ? err.message : String(err)}`)
-        }
+      try {
+        await ws.tracker.release(id)
+      } catch (err) {
+        console.warn(`release ${id}: ${err instanceof Error ? err.message : String(err)}`)
       }
-      store.append(id, { type: 'task.reclaimed' })
-      return c.json({ task: store.task(id) })
+      ws.store.append(id, { type: 'task.reclaimed' })
+      return c.json({ task: ws.store.task(id) })
     })
 
     .post(
-      '/api/tasks/:id/questions',
-      valid('param', TaskIdParam),
+      '/api/repos/:repo/tasks/:id/questions',
+      valid('param', RepoTaskIdParam),
       valid('json', AskBody),
       async (c) => {
-        const { id } = c.req.valid('param')
+        const { repo, id } = c.req.valid('param')
         const { question, options } = c.req.valid('json')
-        const task = store.task(id)
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
         const questionId = crypto.randomUUID()
-        const gateRef = await openQuestionGate(tracker, id, {
+        const gateRef = await openQuestionGate(ws.tracker, id, {
           id: questionId,
           text: question,
           options,
         })
-        store.append(id, { type: 'question.asked', questionId, question, options, gateRef })
-        store.append(id, {
+        ws.store.append(id, { type: 'question.asked', questionId, question, options, gateRef })
+        ws.store.append(id, {
           type: 'task.state',
           from: task.state,
           to: 'awaiting_answer',
         })
-        void notifyChannels(notify, store, `question from ${id}`, question)
-        return c.json({ task: store.task(id), question: store.question(questionId) }, 201)
+        void notifyChannels(notify, ws.store, `question from ${id}`, question)
+        return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) }, 201)
       },
     )
 
     .get(
-      '/api/tasks/:id/questions/:questionId/await',
-      valid('param', TaskQuestionParam),
+      '/api/repos/:repo/tasks/:id/questions/:questionId/await',
+      valid('param', RepoQuestionParam),
       valid('query', AwaitQuery),
       (c) => {
-        const { id, questionId } = c.req.valid('param')
+        const { repo, id, questionId } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
         const { deadlineMs } = c.req.valid('query')
-        const question = store.question(questionId)
+        const question = ws.store.question(questionId)
         if (!question) return c.json({ error: `unknown question ${questionId}` }, 404)
         if (question.taskId !== id) {
           return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
         }
-        if (!authorized(c, store, id)) {
+        if (!authorized(c, ws.store, id)) {
           return c.json({ error: 'task token mismatch' }, 401)
         }
         // An answer that landed before the poll started is not lost.
@@ -203,19 +291,19 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
             unsub()
             c.req.raw.signal.removeEventListener('abort', cleanup)
           }
-          unsub = store.subscribe((event) => {
+          unsub = ws.store.subscribe((event) => {
             if (event.taskId !== id) return
             const resolved =
               event.type === 'question.timedout' ||
               (event.type === 'question.answered' && event.questionId === questionId)
             if (!resolved) return
             cleanup()
-            resolve(c.json({ question: store.question(questionId) }))
+            resolve(c.json({ question: ws.store.question(questionId) }))
           })
           timer = setTimeout(() => {
-            store.append(id, { type: 'question.timedout', questionId })
+            ws.store.append(id, { type: 'question.timedout', questionId })
             cleanup()
-            resolve(c.json({ question: store.question(questionId) }))
+            resolve(c.json({ question: ws.store.question(questionId) }))
           }, deadlineMs)
           c.req.raw.signal.addEventListener('abort', cleanup, { once: true })
         })
@@ -223,18 +311,19 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
     )
 
     .post(
-      '/api/tasks/:id/questions/:questionId/answer',
-      valid('param', TaskQuestionParam),
+      '/api/repos/:repo/tasks/:id/questions/:questionId/answer',
+      valid('param', RepoQuestionParam),
       valid('json', AnswerBody),
       async (c) => {
-        const { id, questionId } = c.req.valid('param')
+        const { repo, id, questionId } = c.req.valid('param')
         const { answer, via } = c.req.valid('json')
-        const task = store.task(id)
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        if (!authorized(c, store, id)) {
+        if (!authorized(c, ws.store, id)) {
           return c.json({ error: 'task token mismatch' }, 401)
         }
-        const question = store.question(questionId)
+        const question = ws.store.question(questionId)
         if (!question) return c.json({ error: `unknown question ${questionId}` }, 404)
         if (question.taskId !== id) {
           return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
@@ -243,23 +332,27 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
         if (question.answer !== null) {
           return c.json({ error: `question ${questionId} already answered` }, 409)
         }
-        store.append(id, { type: 'question.answered', questionId, answer, via })
+        ws.store.append(id, { type: 'question.answered', questionId, answer, via })
         // Only an awaiting task moves; a question answered after the runner
         // escalated is recorded but must not yank the task out of needs_human.
         if (task.state === 'awaiting_answer') {
-          store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
+          ws.store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
         }
-        await resolveQuestionGate(tracker, question.gateRef)
-        return c.json({ task: store.task(id), question: store.question(questionId) })
+        await resolveQuestionGate(ws.tracker, question.gateRef)
+        return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) })
       },
     )
 
-    .get('/api/events', valid('query', EventQuery), (c) => {
+    .get('/api/repos/:repo/events', valid('param', RepoParam), valid('query', EventQuery), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
       const { taskId, sinceSeq, limit } = c.req.valid('query')
-      return c.json(store.events(taskId ? { taskId, sinceSeq, limit } : { sinceSeq, limit }))
+      return c.json(ws.store.events(taskId ? { taskId, sinceSeq, limit } : { sinceSeq, limit }))
     })
 
-    .get('/api/stream', valid('query', StreamQuery), (c) => {
+    .get('/api/repos/:repo/stream', valid('param', RepoParam), valid('query', StreamQuery), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
       const { taskId, sinceSeq } = c.req.valid('query')
       // A browser resends the last id it saw on reconnect; that beats whatever
       // sinceSeq was baked into the EventSource url when it first connected.
@@ -267,19 +360,48 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
       const from = Number.isInteger(resumed) && resumed >= 0 ? resumed : sinceSeq
       return eventStream(
         c,
-        store,
+        ws.store,
         taskId === undefined ? { sinceSeq: from } : { taskId, sinceSeq: from },
       )
     })
 
-    .get('/api/questions', valid('query', QuestionQuery), (c) => {
-      const { taskId } = c.req.valid('query')
-      return c.json(store.openQuestions(taskId))
+    .get(
+      '/api/repos/:repo/questions',
+      valid('param', RepoParam),
+      valid('query', QuestionQuery),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const { taskId } = c.req.valid('query')
+        return c.json(ws.store.openQuestions(taskId))
+      },
+    )
+
+    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const runner = new Runner({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.implement),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // A full agent run takes minutes, so the request returns immediately and
+      // the run reports through the repo's own event stream.
+      void runner.runOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
     })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 
     .onError((err, c) => {
+      if (err instanceof RepoError) return c.json({ error: err.message }, err.status)
       console.error(err)
       return c.json({ error: err.message }, 500)
     })
