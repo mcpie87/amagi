@@ -11,6 +11,7 @@ import type {
   AgentUsage,
   Harness,
 } from '../types.ts'
+import { harnessEnv } from './env.ts'
 
 /**
  * Enough to implement a task and call `amagi ask`, without handing over the
@@ -207,7 +208,7 @@ export class ClaudeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    let env = opts.env ? { ...process.env, ...opts.env } : process.env
+    let env = { ...harnessEnv(), ...opts.env }
     if (opts.effort) env = { ...env, CLAUDE_EFFORT: opts.effort }
 
     const proc = Bun.spawn(argv, {

@@ -9,6 +9,7 @@ import type {
   AgentUsage,
   Harness,
 } from '../types.ts'
+import { harnessEnv } from './env.ts'
 
 type OpenCodePart = {
   type?: string
@@ -130,7 +131,7 @@ export class OpenCodeHarness implements Harness {
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
     const proc = Bun.spawn(argv, {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      env: { ...harnessEnv(), ...opts.env },
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',

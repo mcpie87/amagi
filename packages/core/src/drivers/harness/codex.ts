@@ -9,6 +9,7 @@ import type {
   AgentUsage,
   Harness,
 } from '../types.ts'
+import { harnessEnv } from './env.ts'
 
 type FileChange = { path: string; kind: string }
 
@@ -197,7 +198,9 @@ export class CodexTranslator {
       case 'error':
         // Non-fatal error surfaced as an item (config warnings, deprecation
         // notices, model reroutes); distinct from the fatal top-level "error".
-        return phase === 'completed' && item.message ? [{ kind: 'error', message: item.message }] : []
+        return phase === 'completed' && item.message
+          ? [{ kind: 'error', message: item.message }]
+          : []
       default:
         return []
     }
@@ -220,14 +223,20 @@ export class CodexTranslator {
         outputTokens: this.usage.outputTokens,
       })
     }
-    events.push({ kind: 'result', ok: true, ...(this.summary === null ? {} : { summary: this.summary }) })
+    events.push({
+      kind: 'result',
+      ok: true,
+      ...(this.summary === null ? {} : { summary: this.summary }),
+    })
     return events
   }
 
   private fromTurnFailed(msg: CodexMessage): AgentEvent[] {
     this.ok = false
     this.summary = msg.error?.message ?? null
-    return [{ kind: 'result', ok: false, ...(this.summary === null ? {} : { summary: this.summary }) }]
+    return [
+      { kind: 'result', ok: false, ...(this.summary === null ? {} : { summary: this.summary }) },
+    ]
   }
 }
 
@@ -284,7 +293,7 @@ export class CodexHarness implements Harness {
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
     const proc = Bun.spawn(argv, {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      env: { ...harnessEnv(), ...opts.env },
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
