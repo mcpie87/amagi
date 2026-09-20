@@ -27,6 +27,20 @@ the dashboard Vite server with hot module replacement. Open the dashboard at
 the URL Vite prints (normally `http://localhost:5173`); `/api` requests proxy
 to the API at `http://127.0.0.1:7777`.
 
+### Dashboard
+
+The dashboard is the shared control room for the connected server:
+
+- **Overview** brings active runs, open pull requests, questions, and recent activity together.
+- **Runs** searches and filters running, completed, and attention-needed work. Each run has live agent output with follow/pause, check results, a timeline, and workspace context.
+- **Task board** browses tracker tasks with search, status filters, and a saved board/list preference.
+- **Inbox** collects agent questions and stopped runs. Answer questions directly to resume waiting agents.
+- **Activity** shows a searchable timeline of run milestones and decisions.
+
+Use Ctrl+K or Cmd+K to find a page or run. Connection status shows when the event stream is reconnecting and displayed data may be stale. On small screens, navigation opens from the menu button.
+
+Starting and stopping runs, editing tracker tasks, and registering multiple repositories still require backend support. The dashboard currently operates on the repository connected to its server.
+
 ## Usage
 
 ```bash
