@@ -35,6 +35,8 @@ type Issue = {
   parent: string | null
 }
 
+const PAGE_SIZE = 10
+
 const stateBadge: Record<TaskState, string> = {
   claimed: 'bg-zinc-500',
   worktree_ready: 'bg-sky-600',
@@ -107,6 +109,7 @@ function IssuesView() {
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
   const [selected, setSelected] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
 
   useEffect(() => {
     fetch(`${apiBase}/api/issues`)
@@ -119,6 +122,9 @@ function IssuesView() {
   }, [])
 
   const visible = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+  const pageItems = visible.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
   if (selected !== null) {
     return (
       <section>
@@ -169,23 +175,32 @@ function IssuesView() {
     <section>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Tasks</h1>
-        <select
-          value={status}
-          onChange={(event) => setStatus(event.target.value as typeof status)}
-          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
-        >
-          <option value="all">All statuses</option>
-          <option value="open">Open</option>
-          <option value="in_progress">In progress</option>
-          <option value="blocked">Blocked</option>
-          <option value="closed">Closed</option>
-        </select>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-zinc-500">
+            {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
+            {status !== 'all' && ` · ${visible.length} shown`}
+          </span>
+          <select
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value as typeof status)
+              setPage(0)
+            }}
+            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+          >
+            <option value="all">All statuses</option>
+            <option value="open">Open</option>
+            <option value="in_progress">In progress</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
       </div>
       {error !== null ? (
         <p className="text-red-400">{error}</p>
       ) : (
         <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
-          {visible.map((issue) => (
+          {pageItems.map((issue) => (
             <li key={issue.id}>
               <button
                 type="button"
@@ -205,6 +220,29 @@ function IssuesView() {
             </li>
           ))}
         </ul>
+      )}
+      {pageCount > 1 && (
+        <div className="mt-4 flex items-center justify-between">
+          <button
+            type="button"
+            disabled={currentPage === 0}
+            onClick={() => setPage(currentPage - 1)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
+          >
+            &larr; prev
+          </button>
+          <span className="text-sm text-zinc-500">
+            page {currentPage + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            disabled={currentPage >= pageCount - 1}
+            onClick={() => setPage(currentPage + 1)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
+          >
+            next &rarr;
+          </button>
+        </div>
       )}
     </section>
   )

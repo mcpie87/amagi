@@ -78,6 +78,18 @@ export function commitMessage(task: TrackerTask): string {
   return `${task.title}\n\nTask: ${task.id}\n`
 }
 
+/**
+ * PR title in `code: short name` form, not the full issue sentence. The short
+ * name drops a milestone-style `M5: ` prefix and any trailing clauses, so
+ * "PR titles should use task code, not full sentences" becomes
+ * "am-544: PR titles should use task code".
+ */
+export function prTitle(task: TrackerTask): string {
+  const withoutMilestone = task.title.replace(/^M\d+(?:\.\d+)*\s*:\s*/, '')
+  const shortName = withoutMilestone.split(/[.,;]/)[0]?.trim() ?? withoutMilestone.trim()
+  return `${task.id}: ${shortName}`
+}
+
 export type ConflictPromptContext = {
   pr: { number: number; title: string; url: string }
   worktree: string
