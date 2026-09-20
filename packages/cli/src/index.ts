@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from 'citty'
 import { configCommand } from './commands/config.ts'
+import { runCommand } from './commands/run.ts'
 import { statusCommand } from './commands/status.ts'
 
 const main = defineCommand({
@@ -9,6 +10,7 @@ const main = defineCommand({
     description: 'Orchestrates AI coding agents over an issue tracker',
   },
   subCommands: {
+    run: runCommand,
     status: statusCommand,
     config: configCommand,
   },
