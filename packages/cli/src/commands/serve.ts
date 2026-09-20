@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { loadConfig, repoRoot, Store } from '@amagi/core'
+import { loadConfig, makePrDriver, repoRoot, Store } from '@amagi/core'
 import { serve } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
@@ -18,6 +18,8 @@ export const serveCommand = defineCommand({
       host: config.server.host,
       port: config.server.port,
       staticDir: join(root, 'packages', 'dashboard', 'dist'),
+      forge: makePrDriver(config.forge.kind),
+      forgeCwd: root,
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     console.log(dim('ctrl-c to stop'))

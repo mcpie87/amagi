@@ -332,6 +332,12 @@ export class CodexHarness implements Harness {
       kill: async () => {
         await killTree(proc.pid)
       },
+      // codex reports no resolved model over the stream, so the requested one
+      // is all the harness knows.
+      get model() {
+        return opts.model ?? null
+      },
+      effort: opts.effort ?? null,
     }
   }
 }

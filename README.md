@@ -67,7 +67,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, no PR, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn | — |
 
-**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet — a task that reaches `pr_open` today stops there rather than continuing to `done`.
+**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 A task also carries a `reviewRound` counter (visible in `amagi status`) for when that loop lands.
 

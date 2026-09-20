@@ -109,9 +109,9 @@ describe('CodexTranslator against a recorded transcript', () => {
   test('unknown message and item types are ignored rather than crashing', () => {
     const translator = new CodexTranslator()
     expect(translator.push({ type: 'something_new_in_a_later_version' })).toEqual([])
-    expect(translator.push({ type: 'item.completed', item: { id: 'i', type: 'a_new_kind' } })).toEqual(
-      [],
-    )
+    expect(
+      translator.push({ type: 'item.completed', item: { id: 'i', type: 'a_new_kind' } }),
+    ).toEqual([])
     expect(translator.push(null)).toEqual([])
     expect(translator.push('not an object')).toEqual([])
   })
@@ -122,7 +122,16 @@ describe('CodexHarness argv', () => {
 
   test('a fresh start uses exec --json with -C for the worktree', () => {
     const argv = new CodexHarness().argv(base, null)
-    expect(argv).toEqual(['codex', 'exec', '--json', '-C', '/wt', '-s', 'workspace-write', 'do the thing'])
+    expect(argv).toEqual([
+      'codex',
+      'exec',
+      '--json',
+      '-C',
+      '/wt',
+      '-s',
+      'workspace-write',
+      'do the thing',
+    ])
   })
 
   test('resume drops -C and -s, which codex exec resume does not accept', () => {
