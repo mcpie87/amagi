@@ -41,6 +41,20 @@ export function implementPrompt(ctx: PromptContext): string {
   return parts.join('\n')
 }
 
+/** A previously interrupted run was reclaimed and its worktree resumed. */
+export function reclaimPrompt(ctx: PromptContext): string {
+  const parts = [
+    `Task ${ctx.task.id}: ${ctx.task.title}`,
+    '',
+    'This task was interrupted mid-run and is being resumed. Existing work is',
+    'already in the worktree and branch; inspect the current state, continue',
+    'where it left off, and finish what is missing.',
+  ]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push('', 'Continue this task completely, then stop.')
+  return parts.join('\n')
+}
+
 export function answerPrompt(question: string, answer: string): string {
   return [
     'A human answered the question you were waiting on. Continue the task.',

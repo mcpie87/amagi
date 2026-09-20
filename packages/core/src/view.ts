@@ -94,6 +94,11 @@ export function reduceState(state: DashboardState, event: StoredEvent): Dashboar
         }
         break
       }
+      case 'task.reclaimed':
+        if (current) {
+          tasks[event.taskId] = { ...current, state: 'claimed', updatedAt: event.ts }
+        }
+        break
       case 'worktree.created':
         if (current) {
           tasks[event.taskId] = {
