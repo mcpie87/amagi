@@ -79,4 +79,23 @@ describe('formatPrBody', () => {
     expect(body).toContain('## ✨ Add a greeting file')
     expect(body).not.toContain('What changed')
   })
+
+  test('renders the how-to-use part of the description as its own section', () => {
+    const body = formatPrBody(
+      { ...TASK, description: 'Write hello.txt\n\n### How to use\n\nRun `hello` to greet' },
+      [],
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Write hello.txt')
+    expect(body).toContain('### 🚀 How to use')
+    expect(body).toContain('Run `hello` to greet')
+  })
+
+  test('treats a description without a how-to-use heading as a plain summary', () => {
+    const body = formatPrBody({ ...TASK, description: 'Write hello.txt' }, [])
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Write hello.txt')
+    expect(body).not.toContain('How to use')
+  })
 })
