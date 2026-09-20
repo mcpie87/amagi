@@ -82,6 +82,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `repo.baseBranch` | string | `"main"` | Branch new worktrees and PRs are based on. |
 | `repo.worktreeRoot` | string | `~/.cache/amagi/worktrees` (`$XDG_CACHE_HOME/amagi/worktrees`) | Where per-task worktrees are created. `~` is expanded. |
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
+| `repo.persona` | string \| null | `null` | Git persona for commits/PRs: the name of a gitconfig fragment under `~/.config/git/personas/<name>.gitconfig` (e.g. `"agent-chise"`), included in each fresh worktree's own config so its `user.name`/`user.email` apply there without touching the main repo. |
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
 | `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. Only `github` (via `gh`) is implemented today; `forgejo` throws `NotImplementedDriverError` if selected. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
