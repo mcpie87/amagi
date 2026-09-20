@@ -30,6 +30,12 @@ export const Config = z.object({
       baseBranch: z.string().default('main'),
       worktreeRoot: z.string().default(join(cacheHome(), 'amagi', 'worktrees')),
       setupCmd: z.string().nullable().default(null),
+      /**
+       * Git persona applied to fresh worktrees: the name of a gitconfig
+       * fragment under ~/.config/git/personas/<name>.gitconfig, included via
+       * the worktree's own config so commits and PRs carry that identity.
+       */
+      persona: z.string().nullable().default(null),
     })
     .prefault({}),
   tracker: z.object({ kind: TrackerKind.default('beads') }).prefault({}),

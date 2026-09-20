@@ -5,6 +5,7 @@
 [repo]
 baseBranch = "main"
 setupCmd = "bun install"
+persona = "agent-chise"
 
 [tracker]
 kind = "beads"

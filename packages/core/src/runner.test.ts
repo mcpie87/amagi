@@ -262,6 +262,10 @@ describe('Runner.runOnce', () => {
 
     expect(pr.calls).toHaveLength(1)
     expect(pr.calls[0]?.title).toBe('Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('## ✨ Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('**Task:** `bd-a1b2`')
+    expect(pr.calls[0]?.body).toContain('Write hello.txt')
+    expect(pr.calls[0]?.body).toContain('- `hello.txt` +1 -0')
     expect(pr.calls[0]?.base).toBe('main')
     expect(pr.calls[0]?.branch).toContain('amagi/')
     const created = store.events({ taskId: TASK.id }).find((e) => e.type === 'pr.created')
