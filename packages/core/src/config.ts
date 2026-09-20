@@ -55,6 +55,15 @@ export const Config = z.object({
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */
       questionParkTimeoutSec: z.number().int().min(1).default(3600),
+      /**
+       * Retries for transient harness failures (quota, rate limit, overloaded
+       * model, flaky network). Backoff starts at retryBaseMs and doubles per
+       * attempt, capped at retryMaxMs; the task escalates once maxRetries is
+       * spent.
+       */
+      maxRetries: z.number().int().min(0).default(3),
+      retryBaseMs: z.number().int().min(0).default(10_000),
+      retryMaxMs: z.number().int().min(0).default(300_000),
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),

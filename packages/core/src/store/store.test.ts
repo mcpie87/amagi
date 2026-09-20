@@ -121,6 +121,26 @@ describe('Store', () => {
     expect(store.question('q1')?.answer).toBeNull()
   })
 
+  test('retry.scheduled increments the persisted retry counter', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 1000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    expect(store.task('bd-1')?.retryCount).toBe(1)
+    store.append('bd-1', {
+      type: 'retry.scheduled',
+      attempt: 2,
+      delayMs: 2000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    expect(store.task('bd-1')?.retryCount).toBe(2)
+  })
+
   test('an unanswered question outlives its timeout until answered', () => {
     claim()
     store.append('bd-1', {
