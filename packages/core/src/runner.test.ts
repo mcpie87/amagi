@@ -86,6 +86,9 @@ class FakeHarness implements Harness {
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.run(sessionId, opts)
   }
+  async listModels(): Promise<string[]> {
+    return []
+  }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
     this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
