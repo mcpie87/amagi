@@ -92,6 +92,38 @@ describe('GET /api/tasks', () => {
   })
 })
 
+describe('GET /api/issues', () => {
+  test('returns tracker issues when the tracker supports browsing', async () => {
+    const issueApp = createApp({
+      store,
+      listIssues: async () => [
+        {
+          id: 'bd-1',
+          title: 'Browse issues',
+          description: 'Show tracker issues in the dashboard.',
+          status: 'open',
+          priority: 2,
+          type: 'feature',
+          url: null,
+          acceptanceCriteria: null,
+          assignee: null,
+          labels: [],
+          parent: null,
+        },
+      ],
+    })
+    const res = await issueApp.request('/api/issues')
+    expect(res.status).toBe(200)
+    expect((await res.json()) as { id: string }[]).toEqual([
+      expect.objectContaining({ id: 'bd-1' }),
+    ])
+  })
+
+  test('reports when issue browsing is unavailable', async () => {
+    expect((await app.request('/api/issues')).status).toBe(501)
+  })
+})
+
 describe('GET /api/tasks/:id', () => {
   test('returns the task with its open questions', async () => {
     claim('bd-1')

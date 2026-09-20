@@ -1,5 +1,5 @@
 import { resolve, sep } from 'node:path'
-import type { PrDriver, Store, Tracker } from '@amagi/core'
+import type { BeadsIssue, PrDriver, Store, Tracker } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
 import { startPrPoller } from './pr-poller.ts'
@@ -9,6 +9,7 @@ export type ServeOptions = {
   host: string
   port: number
   tracker?: Tracker
+  listIssues?: () => Promise<BeadsIssue[]>
   gatePollIntervalMs?: number
   /**
    * When present, park tasks at pr_open are reconciled against the remote PR
@@ -51,10 +52,12 @@ export function serve({
   forgeCwd,
   prPollIntervalMs,
   staticDir,
+  listIssues,
 }: ServeOptions) {
   const app = createApp({
     store,
     ...(tracker === undefined ? {} : { tracker }),
+    ...(listIssues === undefined ? {} : { listIssues }),
   })
   const poller =
     tracker === undefined
