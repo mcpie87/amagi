@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Exec, ExecResult } from '../../exec.ts'
-import { BeadsTracker, gateTitle } from './beads.ts'
+import { BeadsTracker, gateTitle, HUMAN_ONLY_LABEL } from './beads.ts'
 
 /** Recorded from bd 1.3.0. */
 const READY_JSON = `[
@@ -106,7 +106,30 @@ describe('BeadsTracker', () => {
 
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
-    expect(calls[0]).toEqual(['bd', 'ready', '--claim', '--json'])
+    expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
+  })
+
+  test('epics, milestones and gates are never handed out as work', async () => {
+    const { exec, calls } = fake(() => ok('[]'))
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.ready()
+    await tracker.claim()
+
+    for (const call of calls) {
+      const excluded = call[call.indexOf('--exclude-type') + 1]
+      expect(excluded).toBe('epic,milestone,gate')
+    }
+  })
+
+  test('work labelled for a human is left alone', async () => {
+    const { exec, calls } = fake(() => ok('[]'))
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.ready()
+    await tracker.claim()
+
+    for (const call of calls) {
+      expect(call[call.indexOf('--exclude-label') + 1]).toBe(HUMAN_ONLY_LABEL)
+    }
   })
 
   test('actor is threaded through for provenance', async () => {

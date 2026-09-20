@@ -21,6 +21,15 @@ export type BeadsOptions = {
 /** bd grants a five minute lease on claim and expects heartbeats under that. */
 const LEASE_TTL_MS = 5 * 60_000
 
+/**
+ * Containers and coordination primitives, not work. bd reports them as ready,
+ * so without this an agent is handed an epic title and told to implement it.
+ */
+const NOT_WORK_TYPES = ['epic', 'milestone', 'gate'] as const
+
+/** Opt out marker for work that is the operator's to do, not an agent's. */
+export const HUMAN_ONLY_LABEL = 'human'
+
 const STATUS_MAP: Record<string, TrackerStatus> = {
   open: 'open',
   in_progress: 'in_progress',
@@ -71,7 +80,16 @@ export class BeadsTracker implements Tracker {
   }
 
   async ready(limit = 20): Promise<TrackerTask[]> {
-    const out = await this.bd(['ready', '--json', '--limit', String(limit)])
+    const out = await this.bd([
+      'ready',
+      '--json',
+      '--limit',
+      String(limit),
+      '--exclude-type',
+      NOT_WORK_TYPES.join(','),
+      '--exclude-label',
+      HUMAN_ONLY_LABEL,
+    ])
     return parseIssues(out).map(toTask)
   }
 
@@ -80,7 +98,15 @@ export class BeadsTracker implements Tracker {
       await this.bd(['update', id, '--status', 'in_progress'])
       return this.get(id)
     }
-    const out = await this.bd(['ready', '--claim', '--json'])
+    const out = await this.bd([
+      'ready',
+      '--claim',
+      '--json',
+      '--exclude-type',
+      NOT_WORK_TYPES.join(','),
+      '--exclude-label',
+      HUMAN_ONLY_LABEL,
+    ])
     const issues = parseIssues(out)
     return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
   }
