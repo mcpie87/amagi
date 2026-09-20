@@ -1,0 +1,17 @@
+# Amagi config for its own repo: dogfood the backlog under the "am" bd prefix.
+# See README.md#configuration for the full schema; `amagi config` prints the
+# resolved result and where each value came from.
+
+[repo]
+baseBranch = "main"
+setupCmd = "bun install"
+
+[tracker]
+kind = "beads"
+
+[forge]
+kind = "github"
+remote = "origin"
+
+[checks]
+commands = ["just check"]
