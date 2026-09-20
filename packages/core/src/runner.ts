@@ -3,6 +3,7 @@ import { type CreatePrOptions, gitTokenConfig, makePrDriver, type PrDriver } fro
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { CheckResult, TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { changesSinceBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
   commitMessage,
@@ -145,6 +146,7 @@ export class Runner {
       baseBranch: base,
       worktreeRoot: config.repo.worktreeRoot,
       setupCmd: config.repo.setupCmd,
+      persona: config.repo.persona,
       exec: this.exec,
     })
     store.append(task.id, {
@@ -244,13 +246,14 @@ export class Runner {
   private async openPullRequest(task: TrackerTask, cwd: string, branch: string): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
+    const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
     const opts: CreatePrOptions = {
       cwd,
       branch,
       base: config.repo.baseBranch,
       remote: config.forge.remote,
       title: task.title,
-      body: `Task: ${task.id}\n\n${task.description}`,
+      body: formatPrBody(task, changes),
     }
     try {
       const pr = await forge.createPr(opts)
