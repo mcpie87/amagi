@@ -244,15 +244,12 @@ function TaskDetailView() {
     (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
       e.taskId === id && e.type === 'agent.started',
   )
-  const agents = [
-    ...new Set(
-      agentStarts.map((e) => {
-        const parts = [`${e.role}: ${e.harness}`]
-        if (e.model) parts.push(e.model)
-        if (e.effort) parts.push(`effort ${e.effort}`)
-        return parts.join(' · ')
-      }),
-    ),
+  const agents = [...new Set(agentStarts.map((e) => `${e.role}: ${e.harness}`))].join(', ')
+  const models = [
+    ...new Set(agentStarts.map((e) => e.model).filter((m): m is string => m !== null)),
+  ].join(', ')
+  const efforts = [
+    ...new Set(agentStarts.map((e) => e.effort).filter((e): e is string => e !== null)),
   ].join(', ')
   const usageEvents = agentEvents
     .map((e) => e.event)
@@ -294,6 +291,8 @@ function TaskDetailView() {
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow label="agent" value={agents || null} />
+        <DetailRow label="model" value={models || null} />
+        <DetailRow label="effort" value={efforts || null} />
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
