@@ -17,8 +17,13 @@ typecheck:
 build:
     cd packages/dashboard && bun run build
 
-test:
+# serve.test.ts fetches real files under packages/dashboard/dist, which is
+# gitignored build output, not checked-in source.
+test: build-dashboard
     bun test
+
+build-dashboard:
+    bun run --filter @amagi/dashboard build
 
 status:
     bun run packages/cli/src/index.ts status
