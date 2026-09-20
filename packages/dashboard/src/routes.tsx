@@ -9,6 +9,7 @@ import {
 } from '@tanstack/react-router'
 import type { FormEvent } from 'react'
 import { useEffect, useState } from 'react'
+import { AgentLogView } from './AgentLogView.tsx'
 import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from './state.ts'
 import { useDashboard } from './store.tsx'
 
@@ -228,6 +229,8 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      <AgentLogView taskId={id} />
 
       {questions.length > 0 && (
         <div className="mt-6">
