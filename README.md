@@ -22,6 +22,11 @@ bun install
 just check   # lint + typecheck + tests
 ```
 
+For development, run `bun serve`. It starts the API with source watching and
+the dashboard Vite server with hot module replacement. Open the dashboard at
+the URL Vite prints (normally `http://localhost:5173`); `/api` requests proxy
+to the API at `http://127.0.0.1:7777`.
+
 ## Usage
 
 ```bash

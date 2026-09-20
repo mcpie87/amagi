@@ -16,6 +16,7 @@ import {
   openQuestionsFor,
   type QuestionView,
   type TaskView,
+  tasksNeedingAttention,
 } from './state.ts'
 import { useDashboard } from './store.tsx'
 
@@ -64,34 +65,43 @@ function RootLayout() {
 function QueueView() {
   const state = useDashboard()
   const queue = activeTasks(state)
+  const attention = tasksNeedingAttention(state)
+
+  const taskList = (tasks: TaskView[]) => (
+    <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+      {tasks.map((task) => (
+        <li key={task.id}>
+          <Link
+            to="/tasks/$id"
+            params={{ id: task.id }}
+            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+          >
+            <Badge state={task.state} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium">{task.title}</span>
+              <span className="block truncate text-xs text-zinc-500">
+                {task.id}
+                {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
+              </span>
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  )
 
   return (
     <section>
       <h1 className="mb-4 text-xl font-semibold">Queue</h1>
-      {queue.length === 0 ? (
-        <p className="text-zinc-500">No active tasks.</p>
-      ) : (
-        <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
-          {queue.map((task) => (
-            <li key={task.id}>
-              <Link
-                to="/tasks/$id"
-                params={{ id: task.id }}
-                className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
-              >
-                <Badge state={task.state} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{task.title}</span>
-                  <span className="block truncate text-xs text-zinc-500">
-                    {task.id}
-                    {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
-                  </span>
-                </span>
-              </Link>
-            </li>
-          ))}
-        </ul>
+      {attention.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
+            Needs attention ({attention.length})
+          </h2>
+          {taskList(attention)}
+        </div>
       )}
+      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
     </section>
   )
 }

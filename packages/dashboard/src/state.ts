@@ -191,6 +191,12 @@ export function activeTasks(state: DashboardState): TaskView[] {
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
+export function tasksNeedingAttention(state: DashboardState): TaskView[] {
+  return Object.values(state.tasks)
+    .filter((t) => t.state === 'needs_human')
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
 export function openQuestionsFor(state: DashboardState, taskId: string): QuestionView[] {
   return Object.values(state.questions)
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)

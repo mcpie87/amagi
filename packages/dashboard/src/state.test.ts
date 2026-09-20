@@ -6,6 +6,7 @@ import {
   initialDashboardState,
   openQuestionsFor,
   reduceState,
+  tasksNeedingAttention,
 } from './state.ts'
 
 function ev(seq: number, taskId: string | null, ts: number, body: object): StoredEvent {
@@ -97,6 +98,16 @@ describe('dashboard state reducer', () => {
     const queue = activeTasks(state)
     expect(queue.map((t) => t.id)).toEqual(['am-2'])
     expect(queue[0]?.state).toBe('claimed')
+  })
+
+  test('attention list includes only tasks stopped for a human', () => {
+    const state = [
+      ...recorded,
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'done', to: 'needs_human' }),
+      ev(17, 'am-3', 2600, { type: 'task.claimed', title: 'Still running', tracker: 'bd' }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
   })
 
   test('questions resolve from events', () => {
