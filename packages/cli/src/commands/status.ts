@@ -4,6 +4,7 @@ import { bold, dim, green, magenta, red, relTime, table, yellow } from '../forma
 
 const STATE_COLOR: Partial<Record<TaskState, (s: string) => string>> = {
   awaiting_answer: yellow,
+  retrying: yellow,
   needs_human: red,
   done: green,
   reviewing: magenta,
