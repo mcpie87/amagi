@@ -103,8 +103,9 @@ describe('GET /api/tasks/:id', () => {
       gateRef: null,
     })
     const res = await app.request('/api/tasks/bd-1')
-    const body = (await res.json()) as { task: TaskRow; questions: QuestionRow[] }
+    const body = (await res.json()) as { task: TaskRow; token: string; questions: QuestionRow[] }
     expect(body.task.id).toBe('bd-1')
+    expect(body.token).toBe(store.token('bd-1'))
     expect(body.questions).toHaveLength(1)
     expect(body.questions[0]?.options).toEqual(['npm', 'nexus'])
   })

@@ -110,7 +110,9 @@ export function createApp({ store, notify = [], tracker }: ServerDeps) {
     .get('/api/tasks/:id', valid('param', TaskIdParam), (c) => {
       const task = store.task(c.req.valid('param').id)
       if (!task) return c.json({ error: `unknown task ${c.req.valid('param').id}` }, 404)
-      return c.json({ task, questions: store.openQuestions(task.id) })
+      // The dashboard answers via the token-bound endpoint but has no other
+      // channel for the credential, so the task detail doubles as its source.
+      return c.json({ task, token: store.token(task.id), questions: store.openQuestions(task.id) })
     })
 
     .post(

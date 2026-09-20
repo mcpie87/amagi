@@ -11,6 +11,7 @@
   "dependencies": {
     "@amagi/core": "workspace:*",
     "@tanstack/react-router": "1.170.38",
+    "@tanstack/react-virtual": "3.14.13",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

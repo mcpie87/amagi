@@ -1,5 +1,6 @@
 import type { StoredEvent } from '@amagi/core/events'
 import { createContext, type ReactNode, useContext, useEffect, useReducer } from 'react'
+import { agentLogStore } from './agentLog.ts'
 import { type DashboardState, initialDashboardState, reduceState } from './state.ts'
 
 const DashboardContext = createContext<DashboardState>(initialDashboardState())
@@ -18,7 +19,16 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const source = new EventSource(`${base}/api/stream?sinceSeq=0`)
     source.addEventListener('message', (event: MessageEvent) => {
       try {
-        dispatch(JSON.parse(event.data) as StoredEvent)
+        const parsed = JSON.parse(event.data) as StoredEvent
+        // agent.stream is the hot path: hundreds of lines/sec of assistant
+        // text and tool output. It bypasses the reducer entirely so it never
+        // costs a setState per line; the ring buffer in agentLog.ts owns it
+        // and batches renders on requestAnimationFrame instead.
+        if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
+          agentLogStore.append(parsed.taskId, parsed.role, parsed.ts, parsed.event)
+        } else {
+          dispatch(parsed)
+        }
       } catch {
         // a malformed event must not drop the stream
       }
