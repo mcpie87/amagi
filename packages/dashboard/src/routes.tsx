@@ -10,7 +10,13 @@ import {
 import type { FormEvent } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from './state.ts'
+import {
+  activeTasks,
+  currentAgentFor,
+  openQuestionsFor,
+  type QuestionView,
+  type TaskView,
+} from './state.ts'
 import { useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
@@ -240,17 +246,7 @@ function TaskDetailView() {
   const agentEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .slice(-500)
-  const agentStarts = state.events.filter(
-    (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
-      e.taskId === id && e.type === 'agent.started',
-  )
-  const agents = [...new Set(agentStarts.map((e) => `${e.role}: ${e.harness}`))].join(', ')
-  const models = [
-    ...new Set(agentStarts.map((e) => e.model).filter((m): m is string => m !== null)),
-  ].join(', ')
-  const efforts = [
-    ...new Set(agentStarts.map((e) => e.effort).filter((e): e is string => e !== null)),
-  ].join(', ')
+  const currentAgent = currentAgentFor(state, id)
   const usageEvents = agentEvents
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
@@ -290,9 +286,12 @@ function TaskDetailView() {
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
-        <DetailRow label="agent" value={agents || null} />
-        <DetailRow label="model" value={models || null} />
-        <DetailRow label="effort" value={efforts || null} />
+        <DetailRow
+          label="agent"
+          value={currentAgent ? `${currentAgent.role}: ${currentAgent.harness}` : null}
+        />
+        <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
+        <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />

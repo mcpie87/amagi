@@ -196,3 +196,14 @@ export function openQuestionsFor(state: DashboardState, taskId: string): Questio
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)
     .sort((a, b) => a.askedAt - b.askedAt)
 }
+
+export function currentAgentFor(
+  state: DashboardState,
+  taskId: string,
+): Extract<StoredEvent, { type: 'agent.started' }> | null {
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const event = state.events[i]
+    if (event?.taskId === taskId && event.type === 'agent.started') return event
+  }
+  return null
+}
