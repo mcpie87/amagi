@@ -1,4 +1,4 @@
-import type { TaskState } from '@amagi/core/events'
+import type { AgentEvent, StoredEvent, TaskState } from '@amagi/core/events'
 import {
   createRootRoute,
   createRoute,
@@ -8,7 +8,7 @@ import {
   useParams,
 } from '@tanstack/react-router'
 import type { FormEvent } from 'react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from './state.ts'
 import { useDashboard } from './store.tsx'
@@ -185,11 +185,77 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
   )
 }
 
+type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
+
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+function lineFor(event: AgentStreamEvent): string {
+  const ev = event.event
+  switch (ev.kind) {
+    case 'text':
+    case 'reasoning':
+      return ev.text
+    case 'tool_use':
+      return `[tool] ${ev.name}`
+    case 'tool_result':
+      return `[${ev.ok ? 'ok' : 'FAIL'}] ${ev.name}`
+    case 'usage':
+      return `[usage] in=${ev.inputTokens} out=${ev.outputTokens}`
+    case 'result':
+      return `[result] ${ev.summary ?? (ev.ok ? 'ok' : 'failed')}`
+    case 'error':
+      return `[error] ${ev.message}`
+  }
+}
+
+/** Plain recent log. The virtualization task (am-b2z.4) replaces this. */
+function AgentLog({ events }: { events: AgentStreamEvent[] }) {
+  const ref = useRef<HTMLDivElement>(null)
+  // no deps on purpose: tail the log after every render, not just on mount
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight
+  })
+  return (
+    <div
+      ref={ref}
+      className="max-h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs text-zinc-300"
+    >
+      {events.map((e) => (
+        <div key={e.seq} className="whitespace-pre-wrap break-words">
+          {lineFor(e)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const state = useDashboard()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
+  // ponytail: last 500 rendered, the virtualization task (am-b2z.4) removes the cap
+  const agentEvents = state.events
+    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
+    .slice(-500)
+  const agentStarts = state.events.filter(
+    (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
+      e.taskId === id && e.type === 'agent.started',
+  )
+  const agents = [...new Set(agentStarts.map((e) => `${e.role}: ${e.harness}`))].join(', ')
+  const usage = agentEvents
+    .map((e) => e.event)
+    .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
+  const effIn = usage.reduce((sum, u) => sum + u.inputTokens, 0)
+  const effOut = usage.reduce((sum, u) => sum + u.outputTokens, 0)
+  const effCost = usage.reduce((sum, u) => sum + (u.costUsd ?? 0), 0)
+  const effort =
+    usage.length === 0
+      ? 'no usage reported yet'
+      : `${fmtTokens(effIn)} in · ${fmtTokens(effOut)} out` +
+        (effCost > 0 ? ` · $${effCost.toFixed(2)}` : '')
 
   if (!task) {
     return (
@@ -217,6 +283,9 @@ function TaskDetailView() {
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+        <DetailRow label="tracker" value={task.tracker} />
+        <DetailRow label="agent" value={agents || null} />
+        <DetailRow label="effort" value={effort} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow label="PR" value={task.prUrl} />
@@ -248,6 +317,15 @@ function TaskDetailView() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {agentEvents.length > 0 && (
+        <div className="mt-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Agent output
+          </h2>
+          <AgentLog events={agentEvents} />
         </div>
       )}
 
