@@ -45,6 +45,8 @@ export const Config = z.object({
     .object({
       maxParallel: z.number().int().min(1).default(1),
       maxReviewRounds: z.number().int().min(0).default(3),
+      /** Extra attempts handed back to the implementer when project checks fail. */
+      maxCheckRounds: z.number().int().min(0).default(2),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
     })
