@@ -1,4 +1,4 @@
-import type { AgentEvent, StoredEvent, TaskState } from '@amagi/core/events'
+import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import {
   activeTasks,
   currentAgentFor,
@@ -34,6 +34,8 @@ type Issue = {
   labels: string[]
   parent: string | null
 }
+
+const PAGE_SIZE = 10
 
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
@@ -118,10 +120,31 @@ function IssueBadge({ issue }: { issue: Issue }) {
   )
 }
 
+type IssuesViewMode = 'kanban' | 'list'
+
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
   const [selected, setSelected] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
+  const [page, setPage] = useState(0)
+  const [view, setView] = useState<IssuesViewMode>(() => {
+    try {
+      return localStorage.getItem('issues:view') === 'list' ? 'list' : 'kanban'
+    } catch {
+      // storage unavailable (private mode, blocked), keep the default
+      return 'kanban'
+    }
+  })
+
+  const setMode = (mode: IssuesViewMode) => {
+    setView(mode)
+    try {
+      localStorage.setItem('issues:view', mode)
+    } catch {
+      // storage unavailable, the choice just won't persist
+    }
+  }
 
   useEffect(() => {
     fetch(`${apiBase}/api/issues`)
@@ -132,6 +155,11 @@ function IssuesView() {
       .then(setIssues)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
   }, [])
+
+  const filtered = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+  const pageItems = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
 
   if (selected !== null) {
     return (
@@ -183,16 +211,56 @@ function IssuesView() {
     <section>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Tasks</h1>
-        <span className="text-sm text-zinc-500">
-          {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-zinc-500">
+            {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
+            {status !== 'all' && ` · ${filtered.length} shown`}
+          </span>
+          <div className="flex rounded-lg border border-zinc-700 p-0.5">
+            <button
+              type="button"
+              onClick={() => setMode('kanban')}
+              className={`rounded px-2 py-1 text-sm ${
+                view === 'kanban'
+                  ? 'bg-zinc-700 text-zinc-100'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              Kanban
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('list')}
+              className={`rounded px-2 py-1 text-sm ${
+                view === 'list' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              List
+            </button>
+          </div>
+          <select
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value as typeof status)
+              setPage(0)
+            }}
+            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+          >
+            <option value="all">All statuses</option>
+            <option value="open">Open</option>
+            <option value="in_progress">In progress</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
       </div>
       {error !== null ? (
         <p className="text-red-400">{error}</p>
-      ) : (
+      ) : view === 'kanban' ? (
         <div className="flex gap-4 overflow-x-auto pb-2">
           {ISSUE_STATES.map((state) => {
-            const columnIssues = issues.filter((issue) => issue.status === state)
+            if (status !== 'all' && status !== state) return null
+            const columnIssues = filtered.filter((issue) => issue.status === state)
             return (
               <div
                 key={state}
@@ -234,6 +302,53 @@ function IssuesView() {
             )
           })}
         </div>
+      ) : (
+        <>
+          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+            {pageItems.map((issue) => (
+              <li key={issue.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelected(issue)}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
+                >
+                  <IssueBadge issue={issue} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{issue.title}</span>
+                    <span className="block truncate text-xs text-zinc-500">
+                      {issue.id}
+                      {issue.priority === null ? '' : ` · P${issue.priority}`}
+                      {issue.type === null ? '' : ` · ${issue.type}`}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {pageCount > 1 && (
+            <div className="mt-4 flex items-center justify-between">
+              <button
+                type="button"
+                disabled={currentPage === 0}
+                onClick={() => setPage(currentPage - 1)}
+                className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
+              >
+                &larr; prev
+              </button>
+              <span className="text-sm text-zinc-500">
+                page {currentPage + 1} of {pageCount}
+              </span>
+              <button
+                type="button"
+                disabled={currentPage >= pageCount - 1}
+                onClick={() => setPage(currentPage + 1)}
+                className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
+              >
+                next &rarr;
+              </button>
+            </div>
+          )}
+        </>
       )}
     </section>
   )
@@ -409,6 +524,47 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
   )
 }
 
+function ReclaimButton({
+  taskId,
+  state,
+  worktree,
+}: {
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree === null || isTerminal(state)) return null
+
+  const reclaim = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${taskId}/reclaim`, { method: 'POST' })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void reclaim()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Reclaim
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
 
 function fmtTokens(n: number): string {
@@ -499,6 +655,7 @@ function TaskDetailView() {
         {task.reviewRound > 0 && (
           <span className="text-sm text-zinc-400">review round {task.reviewRound}</span>
         )}
+        <ReclaimButton taskId={task.id} state={task.state} worktree={task.worktree} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
 

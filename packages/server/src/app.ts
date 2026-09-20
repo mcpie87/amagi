@@ -1,4 +1,11 @@
-import type { BeadsIssue, Notifier, Question, Store, Tracker } from '@amagi/core'
+import {
+  type BeadsIssue,
+  isTerminal,
+  type Notifier,
+  type Question,
+  type Store,
+  type Tracker,
+} from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -119,6 +126,29 @@ export function createApp({ store, notify = [], tracker, listIssues }: ServerDep
       // The dashboard answers via the token-bound endpoint but has no other
       // channel for the credential, so the task detail doubles as its source.
       return c.json({ task, token: store.token(task.id), questions: store.openQuestions(task.id) })
+    })
+
+    .post('/api/tasks/:id/reclaim', valid('param', TaskIdParam), async (c) => {
+      const { id } = c.req.valid('param')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (task.worktree === null || task.branch === null) {
+        return c.json({ error: `task ${id} has no worktree to resume` }, 409)
+      }
+      if (isTerminal(task.state)) {
+        return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
+      }
+      // Best effort: the runner only re-claims issues the tracker sees as
+      // ready, so a lapsed or still-live claim is released for it to pick up.
+      if (tracker !== undefined) {
+        try {
+          await tracker.release(id)
+        } catch (err) {
+          console.warn(`release ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+      store.append(id, { type: 'task.reclaimed' })
+      return c.json({ task: store.task(id) })
     })
 
     .post(
