@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import {
+  type BeadsIssue,
+  type CreateTrackerTask,
   type GateRef,
   openDatabase,
   type Question,
@@ -7,8 +9,10 @@ import {
   Store,
   type TaskRow,
   type Tracker,
+  type TrackerCapabilities,
   type TrackerStatus,
   type TrackerTask,
+  type UpdateTrackerTask,
 } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
@@ -22,6 +26,7 @@ const claim = (id: string, title = `work on ${id}`) =>
 class FakeGateTracker implements Tracker {
   readonly kind = 'fake'
   readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   readonly opened: Question[] = []
   readonly resolved: string[] = []
   readonly released: string[] = []
@@ -35,6 +40,12 @@ class FakeGateTracker implements Tracker {
   }
   async get(): Promise<TrackerTask | null> {
     return null
+  }
+  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
+  }
+  async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
   }
   async heartbeat(): Promise<boolean> {
     return true
@@ -114,6 +125,7 @@ describe('GET /api/issues', () => {
           assignee: null,
           labels: [],
           parent: null,
+          dependencies: [],
         },
       ],
     })
@@ -126,6 +138,253 @@ describe('GET /api/issues', () => {
 
   test('reports when issue browsing is unavailable', async () => {
     expect((await app.request('/api/issues')).status).toBe(501)
+  })
+})
+
+class FakeIssueTracker implements Tracker {
+  readonly kind = 'fake'
+  readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
+  readonly created: CreateTrackerTask[] = []
+  readonly updated: { id: string; input: UpdateTrackerTask }[] = []
+  issues = new Map<string, BeadsIssue>()
+  private seq = 0
+
+  seed(partial: Partial<BeadsIssue>): BeadsIssue {
+    const issue: BeadsIssue = {
+      id: `bd-${this.seq++}`,
+      title: 'Seeded',
+      description: '',
+      status: 'open',
+      priority: null,
+      type: 'task',
+      url: null,
+      acceptanceCriteria: null,
+      assignee: null,
+      labels: [],
+      parent: null,
+      dependencies: [],
+      ...partial,
+    }
+    this.issues.set(issue.id, issue)
+    return issue
+  }
+
+  getIssue(id: string): BeadsIssue | null {
+    return this.issues.get(id) ?? null
+  }
+
+  async ready(): Promise<TrackerTask[]> {
+    return [...this.issues.values()]
+  }
+  async claim(): Promise<TrackerTask | null> {
+    return null
+  }
+  async get(id: string): Promise<TrackerTask | null> {
+    return this.issues.get(id) ?? null
+  }
+  async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+    this.created.push(input)
+    const blocker = (id: string): TrackerTask => ({
+      id,
+      title: id,
+      description: '',
+      status: 'open',
+      priority: null,
+      type: null,
+      url: null,
+    })
+    return this.seed({
+      title: input.title,
+      description: input.description,
+      priority: input.priority,
+      acceptanceCriteria: input.acceptanceCriteria,
+      labels: input.labels,
+      dependencies: input.dependencies.map(blocker),
+    })
+  }
+  async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
+    this.updated.push({ id, input })
+    const issue = this.issues.get(id)
+    if (issue === undefined) throw new Error(`unknown issue ${id}`)
+    const { dependencies, ...fields } = input
+    const next: BeadsIssue = {
+      ...issue,
+      ...fields,
+      // keep the seeded blocker objects when the ids are unchanged
+      dependencies:
+        dependencies === undefined
+          ? issue.dependencies
+          : [
+              ...dependencies.add.map((id) => ({
+                id,
+                title: id,
+                description: '',
+                status: 'open' as const,
+                priority: null,
+                type: null,
+                url: null,
+              })),
+              ...issue.dependencies.filter((d) => !dependencies.remove.includes(d.id)),
+            ],
+    }
+    this.issues.set(id, next)
+    return next
+  }
+  async heartbeat(): Promise<boolean> {
+    return true
+  }
+  async comment(): Promise<void> {}
+  async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
+  async release(): Promise<void> {}
+  async close(): Promise<void> {}
+  async openGate(_id: string, _q: Question): Promise<GateRef> {
+    return { id: 'g', advisory: false }
+  }
+  async gateResolved(): Promise<boolean> {
+    return false
+  }
+  async resolveGate(): Promise<void> {}
+}
+
+function issueApp(tracker: Tracker) {
+  return createApp({
+    store,
+    tracker,
+    listIssues: async () => [],
+    getIssue: async (id) => {
+      if (tracker instanceof FakeIssueTracker) return tracker.getIssue(id)
+      return null
+    },
+  })
+}
+
+describe('issue mutations', () => {
+  test('POST /api/issues creates through the tracker and returns the issue', async () => {
+    const tracker = new FakeIssueTracker()
+    app = issueApp(tracker)
+    const res = await app.request('/api/issues', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Plan the board',
+        description: 'Make it writable',
+        acceptanceCriteria: 'It saves',
+        priority: 1,
+        labels: ['ui'],
+        dependencies: [],
+      }),
+    })
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as BeadsIssue
+    expect(body.title).toBe('Plan the board')
+    expect(body.priority).toBe(1)
+    expect(body.labels).toEqual(['ui'])
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]).toMatchObject({ title: 'Plan the board' })
+  })
+
+  test('POST /api/issues surfaces an unsupported tracker explicitly', async () => {
+    app = createApp({ store, tracker: new FakeGateTracker() })
+    const res = await app.request('/api/issues', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x' }),
+    })
+    expect(res.status).toBe(501)
+    expect(((await res.json()) as { error: string }).error).toContain('does not support')
+  })
+
+  test('POST /api/issues rejects an empty title', async () => {
+    const tracker = new FakeIssueTracker()
+    app = issueApp(tracker)
+    const res = await app.request('/api/issues', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '   ' }),
+    })
+    expect(res.status).toBe(400)
+    expect(tracker.created).toHaveLength(0)
+  })
+
+  test('PATCH /api/issues/:id updates fields and diffs dependencies', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({
+      id: 'bd-1',
+      title: 'Old',
+      dependencies: [
+        {
+          id: 'bd-0',
+          title: 'd0',
+          description: '',
+          status: 'open',
+          priority: null,
+          type: null,
+          url: null,
+        },
+      ],
+    })
+    app = issueApp(tracker)
+
+    const res = await app.request('/api/issues/bd-1', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        title: 'New',
+        priority: 2,
+        labels: ['y'],
+        dependencies: ['bd-0', 'bd-9'],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as BeadsIssue
+    expect(body.title).toBe('New')
+    expect(tracker.updated).toHaveLength(1)
+    expect(tracker.updated[0]?.input).toMatchObject({
+      title: 'New',
+      dependencies: { add: ['bd-9'], remove: [] },
+    })
+  })
+
+  test('PATCH /api/issues/:id rejects dependency edits on a tracker without them', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
+    const res = await app.request('/api/issues/bd-1', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dependencies: ['bd-9'] }),
+    })
+    expect(res.status).toBe(501)
+    expect(((await res.json()) as { error: string }).error).toContain('managing dependencies')
+  })
+
+  test('PATCH /api/issues/:id surfaces an unsupported tracker explicitly', async () => {
+    app = createApp({ store, tracker: new FakeGateTracker() })
+    const res = await app.request('/api/issues/bd-1', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x' }),
+    })
+    expect(res.status).toBe(501)
+    expect(((await res.json()) as { error: string }).error).toContain('does not support')
+  })
+
+  test('GET /api/issues/:id returns the issue detail', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', labels: ['x'] })
+    app = issueApp(tracker)
+    const res = await app.request('/api/issues/bd-1')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as BeadsIssue
+    expect(body.id).toBe('bd-1')
+    expect(body.labels).toEqual(['x'])
+  })
+
+  test('GET /api/issues/:id 404s on an unknown issue', async () => {
+    const tracker = new FakeIssueTracker()
+    app = issueApp(tracker)
+    const res = await app.request('/api/issues/nope')
+    expect(res.status).toBe(404)
   })
 })
 
