@@ -9,6 +9,14 @@ export type PrState = 'open' | 'closed' | 'merged'
 /** A PR conversation comment, review summary, or inline review comment. */
 export type PrComment = { id: string; user: string; body: string }
 
+/** Marks a PR as agent-generated, so humans can tell it from their own. */
+export const AMAGI_LABEL = 'amagi'
+
+/** Provenance plus an amagi/<type> intent label mirroring the source task. */
+export function amagiLabels(type: string | null): string[] {
+  return type === null || type === '' ? [AMAGI_LABEL] : [AMAGI_LABEL, `amagi/${type}`]
+}
+
 export type CreatePrOptions = {
   cwd: string
   branch: string
@@ -16,6 +24,8 @@ export type CreatePrOptions = {
   remote: string
   title: string
   body: string
+  /** Labels applied to the PR; each is created on demand, best effort. */
+  labels: readonly string[]
 }
 
 export type PrDriver = {
@@ -56,8 +66,12 @@ function githubPr(exec: Exec): PrDriver {
   }
 
   return {
-    async createPr({ cwd, branch, base, remote, title, body }) {
+    async createPr({ cwd, branch, base, remote, title, body, labels }) {
       await execOk(exec, ['git', ...gitTokenConfig(), 'push', '-u', remote, branch], { cwd })
+      for (const label of labels) {
+        // --force makes create idempotent; failure (e.g. no write perms) is best effort
+        await exec(['gh', 'label', 'create', label, '--force'], { cwd })
+      }
       const out = await execOk(
         exec,
         [
@@ -72,6 +86,7 @@ function githubPr(exec: Exec): PrDriver {
           title,
           '--body-file',
           '-',
+          ...labels.flatMap((label) => ['--label', label]),
         ],
         { cwd, stdin: body },
       )

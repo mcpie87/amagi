@@ -1,7 +1,6 @@
+import { type AgentLogLine, agentLogStore } from '@amagi/core/agent-log'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef, useSyncExternalStore } from 'react'
-import type { AgentLogLine } from './agentLog.ts'
-import { agentLogStore } from './agentLog.ts'
 
 const ROW_HEIGHT = 18
 // how close to the bottom counts as "at the bottom" for autoscroll purposes

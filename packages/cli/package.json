@@ -9,6 +9,7 @@
   "dependencies": {
     "@amagi/core": "workspace:*",
     "@amagi/server": "workspace:*",
+    "@amagi/tui": "workspace:*",
     "citty": "^0.1.6"
   }
 }
