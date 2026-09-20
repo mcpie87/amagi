@@ -1,5 +1,13 @@
 import { isTerminal, type StoredEvent } from '@amagi/core/events'
 import {
+  activeTasks,
+  currentAgentFor,
+  openQuestionsFor,
+  type QuestionView,
+  type TaskView,
+  tasksNeedingAttention,
+} from '@amagi/core/view'
+import {
   createRootRoute,
   createRoute,
   createRouter,
@@ -10,14 +18,6 @@ import {
 } from '@tanstack/react-router'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import {
-  activeTasks,
-  currentAgentFor,
-  openQuestionsFor,
-  type QuestionView,
-  type TaskView,
-  tasksNeedingAttention,
-} from './state.ts'
 import { useConnection, useDashboard } from './store.tsx'
 import {
   Badge,
@@ -1090,6 +1090,8 @@ function eventDescription(event: StoredEvent): string {
   switch (event.type) {
     case 'task.claimed':
       return 'Run added to the queue'
+    case 'task.reclaimed':
+      return 'Run reclaimed'
     case 'task.state':
       return `Moved to ${stateLabels[event.to].toLowerCase()}${event.reason ? `: ${event.reason}` : ''}`
     case 'agent.started':

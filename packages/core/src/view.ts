@@ -1,4 +1,4 @@
-import { type CheckResult, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import { type CheckResult, isTerminal, type StoredEvent, type TaskState } from './events.ts'
 
 export type TaskView = {
   id: string
@@ -44,9 +44,9 @@ export const initialDashboardState = (): DashboardState => ({
 })
 
 /**
- * The wire contract from @amagi/core is the single source of truth; the
- * server-side `store.apply` projection is mirrored here so the dashboard
- * renders exactly what the API would answer, from events alone.
+ * The wire contract from the event log is the single source of truth; the
+ * server-side `store.apply` projection is mirrored here so any client (web
+ * dashboard, TUI) renders exactly what the API would answer, from events alone.
  */
 export function reduceState(state: DashboardState, event: StoredEvent): DashboardState {
   const tasks = { ...state.tasks }
@@ -94,6 +94,11 @@ export function reduceState(state: DashboardState, event: StoredEvent): Dashboar
         }
         break
       }
+      case 'task.reclaimed':
+        if (current) {
+          tasks[event.taskId] = { ...current, state: 'claimed', updatedAt: event.ts }
+        }
+        break
       case 'worktree.created':
         if (current) {
           tasks[event.taskId] = {

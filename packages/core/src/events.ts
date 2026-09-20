@@ -117,6 +117,7 @@ export const EventBody = z.discriminatedUnion('type', [
     to: TaskState,
     reason: z.string().optional(),
   }),
+  z.object({ type: z.literal('task.reclaimed') }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
   z.object({

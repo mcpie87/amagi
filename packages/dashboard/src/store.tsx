@@ -1,7 +1,7 @@
+import { agentLogStore } from '@amagi/core/agent-log'
 import type { StoredEvent } from '@amagi/core/events'
+import { type DashboardState, initialDashboardState, reduceState } from '@amagi/core/view'
 import { createContext, type ReactNode, useContext, useEffect, useReducer, useState } from 'react'
-import { agentLogStore } from './agentLog.ts'
-import { type DashboardState, initialDashboardState, reduceState } from './state.ts'
 
 const DashboardContext = createContext<DashboardState>(initialDashboardState())
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'

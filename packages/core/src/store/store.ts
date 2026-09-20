@@ -163,6 +163,12 @@ export class Store {
         break
       }
 
+      case 'task.reclaimed':
+        // Back to a claimable state; the recorded worktree and branch are kept
+        // so the next run resumes them instead of creating a fresh worktree.
+        set('state', 'claimed')
+        break
+
       case 'worktree.created':
         this.db
           .query('update tasks set worktree = ?, branch = ?, updated_at = ? where id = ?')

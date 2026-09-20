@@ -138,4 +138,40 @@ describe('githubPr', () => {
     expect(await makePrDriver('github', closed.exec).getPr('/repo', 7)).toBe('closed')
     expect(await makePrDriver('github', open.exec).getPr('/repo', 7)).toBe('open')
   })
+
+  test('collects conversation, review, and inline comments from the api', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('repo') && c.includes('view') && c.includes('nameWithOwner')) {
+        return ok('owner/repo\n')
+      }
+      if (c[2] === 'repos/owner/repo/issues/7/comments') {
+        return ok('{"id":"1","user":"bob","body":"hello"}\n')
+      }
+      if (c[2] === 'repos/owner/repo/pulls/7/reviews') {
+        return ok('{"id":"2","user":"bob","body":"@chise-maru this is wrong"}\n')
+      }
+      if (c[2] === 'repos/owner/repo/pulls/7/comments') {
+        return ok('{"id":"3","user":"bob","body":"remove this file"}\n')
+      }
+      return undefined
+    })
+    const comments = await makePrDriver('github', exec).listComments('/repo', 7)
+
+    expect(calls.some((c) => c[0] === 'gh' && c[1] === 'repo' && c.includes('nameWithOwner'))).toBe(
+      true,
+    )
+    expect(comments).toEqual([
+      { id: '1', user: 'bob', body: 'hello' },
+      { id: '2', user: 'bob', body: '@chise-maru this is wrong' },
+      { id: '3', user: 'bob', body: 'remove this file' },
+    ])
+  })
+
+  test('posts a comment to the pr conversation', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await makePrDriver('github', exec).postComment('/repo', 7, 'explanation')
+
+    expect(calls).toContainEqual(['gh', 'pr', 'comment', '7', '--body-file', '-'])
+    expect(calls).toContainEqual(['<stdin>', 'explanation'])
+  })
 })
