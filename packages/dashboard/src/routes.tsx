@@ -1,4 +1,4 @@
-import type { AgentEvent, StoredEvent, TaskState } from '@amagi/core/events'
+import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import {
   createRootRoute,
   createRoute,
@@ -380,6 +380,47 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
   )
 }
 
+function ReclaimButton({
+  taskId,
+  state,
+  worktree,
+}: {
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree === null || isTerminal(state)) return null
+
+  const reclaim = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${taskId}/reclaim`, { method: 'POST' })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void reclaim()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Reclaim
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
 
 function fmtTokens(n: number): string {
@@ -470,6 +511,7 @@ function TaskDetailView() {
         {task.reviewRound > 0 && (
           <span className="text-sm text-zinc-400">review round {task.reviewRound}</span>
         )}
+        <ReclaimButton taskId={task.id} state={task.state} worktree={task.worktree} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
 

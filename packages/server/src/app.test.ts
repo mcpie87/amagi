@@ -24,6 +24,8 @@ class FakeGateTracker implements Tracker {
   readonly leaseTtlMs = 300_000
   readonly opened: Question[] = []
   readonly resolved: string[] = []
+  readonly released: string[] = []
+  releaseError: Error | null = null
 
   async ready(): Promise<TrackerTask[]> {
     return []
@@ -39,7 +41,10 @@ class FakeGateTracker implements Tracker {
   }
   async comment(): Promise<void> {}
   async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
-  async release(): Promise<void> {}
+  async release(id: string): Promise<void> {
+    this.released.push(id)
+    if (this.releaseError !== null) throw this.releaseError
+  }
   async close(): Promise<void> {}
   async openGate(_id: string, question: Question): Promise<GateRef> {
     this.opened.push(question)
@@ -121,6 +126,60 @@ describe('GET /api/issues', () => {
 
   test('reports when issue browsing is unavailable', async () => {
     expect((await app.request('/api/issues')).status).toBe(501)
+  })
+})
+
+describe('POST /api/tasks/:id/reclaim', () => {
+  const stuckTask = (id: string) => {
+    claim(id)
+    store.append(id, {
+      type: 'worktree.created',
+      path: `/tmp/wt/${id}`,
+      branch: `amagi/${id}-x`,
+    })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+  }
+
+  test('returns a stuck task with a recorded worktree to the queue and releases it', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
+    stuckTask('bd-1')
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('claimed')
+    expect(body.task.worktree).toBe('/tmp/wt/bd-1')
+    expect(body.task.branch).toBe('amagi/bd-1-x')
+    expect(tracker.released).toEqual(['bd-1'])
+  })
+
+  test('reclaims even when releasing the tracker claim fails', async () => {
+    const tracker = new FakeGateTracker()
+    tracker.releaseError = new Error('bd down')
+    app = createApp({ store, tracker })
+    stuckTask('bd-1')
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect((await res.json()) as { task: TaskRow }).toMatchObject({ task: { state: 'claimed' } })
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/tasks/nope/reclaim', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('409s when the task has no worktree to resume', async () => {
+    claim('bd-1')
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
+  test('409s when the task already reached a terminal state', async () => {
+    stuckTask('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'needs_human' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
+    expect(res.status).toBe(409)
   })
 })
 

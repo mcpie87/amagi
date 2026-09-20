@@ -10,10 +10,11 @@ import {
   fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
+  reclaimPrompt,
 } from './prompt.ts'
 import { backoffDelayMs, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
-import { createWorktree } from './worktree.ts'
+import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 export type RunnerDeps = {
   store: Store
@@ -128,28 +129,37 @@ export class Runner {
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
-    // With a token present, base the worktree on a fresh origin fetch over
-    // https; without one, fall back to the local base branch so the ssh key
-    // never prompts during an unattended run.
-    const tokenCfg = config.forge.kind === 'github' ? gitTokenConfig() : []
-    if (tokenCfg.length > 0) {
-      await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
-        cwd: this.deps.repoRoot,
+    // A reclaimed task already has its worktree and branch recorded in the
+    // store; reuse them instead of creating a fresh worktree.
+    const recorded = store.task(task.id)
+    const resume = recorded !== null && recorded.worktree !== null && recorded.branch !== null
+
+    let worktree: WorktreeSpec
+    if (recorded !== null && recorded.worktree !== null && recorded.branch !== null) {
+      worktree = { path: recorded.worktree, branch: recorded.branch }
+    } else {
+      // With a token present, base the worktree on a fresh origin fetch over
+      // https; without one, fall back to the local base branch so the ssh key
+      // never prompts during an unattended run.
+      const tokenCfg = config.forge.kind === 'github' ? gitTokenConfig() : []
+      if (tokenCfg.length > 0) {
+        await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+          cwd: this.deps.repoRoot,
+        })
+      }
+      const base = tokenCfg.length > 0 ? `origin/${config.repo.baseBranch}` : config.repo.baseBranch
+      worktree = await createWorktree({
+        repoRoot: this.deps.repoRoot,
+        repoName: this.deps.repoName,
+        taskId: task.id,
+        title: task.title,
+        baseBranch: base,
+        worktreeRoot: config.repo.worktreeRoot,
+        setupCmd: config.repo.setupCmd,
+        persona: config.repo.persona,
+        exec: this.exec,
       })
     }
-    const base = tokenCfg.length > 0 ? `origin/${config.repo.baseBranch}` : config.repo.baseBranch
-
-    const worktree = await createWorktree({
-      repoRoot: this.deps.repoRoot,
-      repoName: this.deps.repoName,
-      taskId: task.id,
-      title: task.title,
-      baseBranch: base,
-      worktreeRoot: config.repo.worktreeRoot,
-      setupCmd: config.repo.setupCmd,
-      persona: config.repo.persona,
-      exec: this.exec,
-    })
     store.append(task.id, {
       type: 'worktree.created',
       path: worktree.path,
@@ -160,7 +170,7 @@ export class Runner {
     const lease = new Lease(this.deps.tracker, task.id, () => {})
     lease.start()
     try {
-      await this.implementAndCheck(task, worktree.path, worktree.branch, lease)
+      await this.implementAndCheck(task, worktree.path, worktree.branch, lease, resume)
     } finally {
       lease.stop()
     }
@@ -171,6 +181,7 @@ export class Runner {
     cwd: string,
     branch: string,
     lease: Lease,
+    resume = false,
   ): Promise<void> {
     const { store, config } = this.deps
     const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
@@ -181,7 +192,7 @@ export class Runner {
       null,
       {
         cwd,
-        prompt: implementPrompt(promptCtx),
+        prompt: resume ? reclaimPrompt(promptCtx) : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
         ...(config.harness.implement.model === undefined
           ? {}

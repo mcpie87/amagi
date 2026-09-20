@@ -93,6 +93,20 @@ describe('dashboard state reducer', () => {
     expect(state.tasks['am-1']?.reviewRound).toBe(2)
   })
 
+  test('reclaim returns a stuck task to the queue while keeping its worktree', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'worktree.created', path: '/tmp/am-1', branch: 'x' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(5, 'am-1', 1400, { type: 'task.reclaimed' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(state.tasks['am-1']?.state).toBe('claimed')
+    expect(state.tasks['am-1']?.worktree).toBe('/tmp/am-1')
+    expect(state.tasks['am-1']?.branch).toBe('x')
+    expect(activeTasks(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
   test('queue view lists only in-flight tasks, most recent first', () => {
     const state = recorded.reduce(reduceState, initialDashboardState())
     const queue = activeTasks(state)

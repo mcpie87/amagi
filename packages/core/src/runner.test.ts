@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
@@ -76,7 +76,7 @@ type Turn = {
 
 class FakeHarness implements Harness {
   readonly kind = 'fake'
-  readonly calls: { resumeFrom: string | null; prompt: string }[] = []
+  readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
 
   constructor(private readonly turns: Turn[]) {}
 
@@ -88,7 +88,7 @@ class FakeHarness implements Harness {
   }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
-    this.calls.push({ resumeFrom, prompt: opts.prompt })
+    this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
     const turn = this.turns.shift() ?? {}
     turn.effect?.(opts.cwd)
 
@@ -306,6 +306,30 @@ describe('Runner.runOnce', () => {
     const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([{}])).runOnce()
     expect(result?.state).toBe('needs_human')
     expect(types(TASK.id)).not.toContain('commit.created')
+  })
+
+  test('a reclaimed task reuses the recorded worktree and branch', async () => {
+    const wtPath = join(wtRoot, 'resume-worktree')
+    const branch = 'amagi/bd-a1b2-add-a-greeting-file'
+    await execOk(exec, ['git', 'worktree', 'add', '-b', branch, wtPath, 'main'], { cwd: repo })
+
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    store.append(TASK.id, { type: 'worktree.created', path: wtPath, branch })
+    store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(TASK.id, { type: 'task.reclaimed' })
+
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls[0]?.cwd).toBe(wtPath)
+    expect(harness.calls[0]?.prompt).toContain('resumed')
+    expect(harness.calls[0]?.prompt).toContain('continue')
+    expect(store.task(TASK.id)?.worktree).toBe(wtPath)
+    expect(store.task(TASK.id)?.branch).toBe(branch)
+    expect(existsSync(join(wtPath, 'hello.txt'))).toBe(true)
+    expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
   })
 
   test('failing checks are handed back to the same session and then commit', async () => {
