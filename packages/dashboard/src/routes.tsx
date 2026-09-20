@@ -190,13 +190,13 @@ function IssuesView() {
       {error !== null ? (
         <p className="text-red-400">{error}</p>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="flex gap-4 overflow-x-auto pb-2">
           {ISSUE_STATES.map((state) => {
             const columnIssues = issues.filter((issue) => issue.status === state)
             return (
               <div
                 key={state}
-                className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
+                className="flex h-[70vh] w-72 shrink-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
               >
                 <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
                   <span
@@ -206,7 +206,7 @@ function IssuesView() {
                   </span>
                   <span className="text-xs text-zinc-500">{columnIssues.length}</span>
                 </div>
-                <ul className="flex flex-col gap-2 p-2">
+                <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
                   {columnIssues.map((issue) => (
                     <li key={issue.id}>
                       <button
