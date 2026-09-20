@@ -10,7 +10,7 @@ afterEach(() => {
 
 test('removes forge credentials while retaining task-scoped values', () => {
   process.env.GH_TOKEN = 'secret'
-  const env = { ...harnessEnv(), AMAGI_TASK_TOKEN: 'task-token' }
+  const env: Record<string, string> = { ...harnessEnv(), AMAGI_TASK_TOKEN: 'task-token' }
   expect(env.GH_TOKEN).toBeUndefined()
   expect(env.AMAGI_TASK_TOKEN).toBe('task-token')
 })

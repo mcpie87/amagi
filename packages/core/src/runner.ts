@@ -9,6 +9,7 @@ import {
   fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prTitle,
 } from './prompt.ts'
 import type { Store, TaskRow } from './store/store.ts'
 import { createWorktree } from './worktree.ts'
@@ -249,7 +250,7 @@ export class Runner {
       branch,
       base: config.repo.baseBranch,
       remote: config.forge.remote,
-      title: task.title,
+      title: prTitle(task),
       body: `Task: ${task.id}\n\n${task.description}`,
     }
     try {
