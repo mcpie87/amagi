@@ -1,3 +1,5 @@
+import type { AgentEvent } from '../events.ts'
+
 export type TrackerStatus = 'open' | 'in_progress' | 'blocked' | 'closed'
 
 export type TrackerTask = {
@@ -47,4 +49,46 @@ export interface Tracker {
   openGate(taskId: string, question: Question): Promise<GateRef>
   gateResolved(ref: GateRef): Promise<boolean>
   resolveGate(ref: GateRef): Promise<void>
+}
+
+export type Permissions = 'workspace-write' | 'bypass'
+
+export type AgentStartOptions = {
+  cwd: string
+  prompt: string
+  systemPrompt?: string
+  model?: string
+  permissions?: Permissions
+  allowedTools?: readonly string[]
+  env?: Record<string, string>
+  extraArgs?: readonly string[]
+}
+
+export type AgentUsage = {
+  inputTokens: number
+  outputTokens: number
+  costUsd: number | null
+}
+
+export type AgentOutcome = {
+  exitCode: number
+  ok: boolean
+  sessionId: string | null
+  summary: string | null
+  usage: AgentUsage | null
+  stderr: string
+}
+
+export interface AgentProcess {
+  readonly pid: number
+  events(): AsyncIterable<AgentEvent>
+  readonly done: Promise<AgentOutcome>
+  kill(): Promise<void>
+}
+
+export interface Harness {
+  readonly kind: string
+  start(opts: AgentStartOptions): AgentProcess
+  /** Continues an existing session so a fix round keeps the original context. */
+  resume(sessionId: string, opts: AgentStartOptions): AgentProcess
 }
