@@ -10,6 +10,7 @@ import {
   fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prTitle,
 } from './prompt.ts'
 import { backoffDelayMs, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
@@ -267,7 +268,7 @@ export class Runner {
       branch,
       base: config.repo.baseBranch,
       remote: config.forge.remote,
-      title: task.title,
+      title: prTitle(task),
       body: formatPrBody(task, changes),
     }
     try {
