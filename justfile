@@ -27,3 +27,6 @@ build-dashboard:
 
 status:
     bun run packages/cli/src/index.ts status
+
+run:
+    bun run packages/cli/src/index.ts run
