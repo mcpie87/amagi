@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import {
   type CreatePrOptions,
   openDatabase,
+  type PrComment,
   type PrDriver,
   type PrState,
   type PullRequest,
@@ -20,6 +21,10 @@ class FakePr implements PrDriver {
     this.calls.push(number)
     return this.state
   }
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
 }
 
 /** Claims a task and drives it to pr_open with a recorded pr number. */
