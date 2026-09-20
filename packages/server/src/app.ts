@@ -1,4 +1,4 @@
-import type { Notifier, Store } from '@amagi/core'
+import type { Notifier, Question, Store, Tracker } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -19,6 +19,12 @@ import { eventStream } from './stream.ts'
 export type ServerDeps = {
   store: Store
   notify?: Notifier[]
+  /**
+   * When present, questions open a blocking gate on the tracker issue so a
+   * human answering outside amagi (e.g. `bd gate resolve`) can still unblock
+   * the agent. Absent in tests that exercise the question channel alone.
+   */
+  tracker?: Tracker
 }
 
 /**
@@ -61,7 +67,38 @@ async function notifyChannels(
   }
 }
 
-export function createApp({ store, notify = [] }: ServerDeps) {
+/**
+ * A gate is a courtesy, not a prerequisite: if the tracker cannot open one the
+ * question still lands in the store and the notifiers still fire, so the agent
+ * is never stranded by a tracker hiccup.
+ */
+async function openQuestionGate(
+  tracker: Tracker | undefined,
+  taskId: string,
+  question: Question,
+): Promise<string | null> {
+  if (tracker === undefined) return null
+  try {
+    return (await tracker.openGate(taskId, question)).id
+  } catch (err) {
+    console.warn(`openGate ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+}
+
+async function resolveQuestionGate(
+  tracker: Tracker | undefined,
+  gateRef: string | null,
+): Promise<void> {
+  if (tracker === undefined || gateRef === null) return
+  try {
+    await tracker.resolveGate({ id: gateRef, advisory: false })
+  } catch (err) {
+    console.warn(`resolveGate ${gateRef}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+export function createApp({ store, notify = [], tracker }: ServerDeps) {
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
 
@@ -76,21 +113,31 @@ export function createApp({ store, notify = [] }: ServerDeps) {
       return c.json({ task, questions: store.openQuestions(task.id) })
     })
 
-    .post('/api/tasks/:id/questions', valid('param', TaskIdParam), valid('json', AskBody), (c) => {
-      const { id } = c.req.valid('param')
-      const { question, options } = c.req.valid('json')
-      const task = store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      const questionId = crypto.randomUUID()
-      store.append(id, { type: 'question.asked', questionId, question, options, gateRef: null })
-      store.append(id, {
-        type: 'task.state',
-        from: task.state,
-        to: 'awaiting_answer',
-      })
-      void notifyChannels(notify, store, `question from ${id}`, question)
-      return c.json({ task: store.task(id), question: store.question(questionId) }, 201)
-    })
+    .post(
+      '/api/tasks/:id/questions',
+      valid('param', TaskIdParam),
+      valid('json', AskBody),
+      async (c) => {
+        const { id } = c.req.valid('param')
+        const { question, options } = c.req.valid('json')
+        const task = store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        const questionId = crypto.randomUUID()
+        const gateRef = await openQuestionGate(tracker, id, {
+          id: questionId,
+          text: question,
+          options,
+        })
+        store.append(id, { type: 'question.asked', questionId, question, options, gateRef })
+        store.append(id, {
+          type: 'task.state',
+          from: task.state,
+          to: 'awaiting_answer',
+        })
+        void notifyChannels(notify, store, `question from ${id}`, question)
+        return c.json({ task: store.task(id), question: store.question(questionId) }, 201)
+      },
+    )
 
     .get(
       '/api/tasks/:id/questions/:questionId/await',
@@ -141,7 +188,7 @@ export function createApp({ store, notify = [] }: ServerDeps) {
       '/api/tasks/:id/questions/:questionId/answer',
       valid('param', TaskQuestionParam),
       valid('json', AnswerBody),
-      (c) => {
+      async (c) => {
         const { id, questionId } = c.req.valid('param')
         const { answer, via } = c.req.valid('json')
         const task = store.task(id)
@@ -159,6 +206,7 @@ export function createApp({ store, notify = [] }: ServerDeps) {
         }
         store.append(id, { type: 'question.answered', questionId, answer, via })
         store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
+        await resolveQuestionGate(tracker, question.gateRef)
         return c.json({ task: store.task(id), question: store.question(questionId) })
       },
     )

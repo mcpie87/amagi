@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { openDatabase, type QuestionRow, Store, type TaskRow } from '@amagi/core'
+import {
+  type GateRef,
+  openDatabase,
+  type Question,
+  type QuestionRow,
+  Store,
+  type TaskRow,
+  type Tracker,
+  type TrackerStatus,
+  type TrackerTask,
+} from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 
@@ -8,6 +18,40 @@ let app: AppType
 
 const claim = (id: string, title = `work on ${id}`) =>
   store.append(id, { type: 'task.claimed', title, tracker: 'beads' })
+
+class FakeGateTracker implements Tracker {
+  readonly kind = 'fake'
+  readonly leaseTtlMs = 300_000
+  readonly opened: Question[] = []
+  readonly resolved: string[] = []
+
+  async ready(): Promise<TrackerTask[]> {
+    return []
+  }
+  async claim(): Promise<TrackerTask | null> {
+    return null
+  }
+  async get(): Promise<TrackerTask | null> {
+    return null
+  }
+  async heartbeat(): Promise<boolean> {
+    return true
+  }
+  async comment(): Promise<void> {}
+  async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
+  async release(): Promise<void> {}
+  async close(): Promise<void> {}
+  async openGate(_id: string, question: Question): Promise<GateRef> {
+    this.opened.push(question)
+    return { id: 'gate-7', advisory: false }
+  }
+  async gateResolved(): Promise<boolean> {
+    return false
+  }
+  async resolveGate(ref: GateRef): Promise<void> {
+    this.resolved.push(ref.id)
+  }
+}
 
 beforeEach(() => {
   store = new Store(openDatabase(':memory:'))
@@ -248,6 +292,34 @@ describe('question channel', () => {
     const sent = store.events().filter((e) => e.type === 'notify.sent')
     expect(sent).toHaveLength(2)
     expect(sent.map((e) => e.type === 'notify.sent' && e.channel).sort()).toEqual(['broken', 'spy'])
+  })
+
+  test('asking opens a gate on the issue and records its ref', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
+    claim('bd-1')
+    implementing('bd-1')
+    const res = await ask('bd-1', 'which registry?', ['npm', 'nexus'])
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { question: QuestionRow }
+
+    expect(tracker.opened).toHaveLength(1)
+    expect(tracker.opened[0]?.id).toBe(body.question.id)
+    expect(tracker.opened[0]?.text).toBe('which registry?')
+    expect(store.question(body.question.id)?.gateRef).toBe('gate-7')
+  })
+
+  test('answering resolves the gate', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
+    claim('bd-1')
+    implementing('bd-1')
+    const asked = await ask('bd-1', 'which registry?')
+    const q = ((await asked.json()) as { question: QuestionRow }).question
+
+    const res = await answer('bd-1', q.id, 'npm', token('bd-1'))
+    expect(res.status).toBe(200)
+    expect(tracker.resolved).toEqual(['gate-7'])
   })
 })
 
