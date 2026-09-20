@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
 import {
   isConflicting,
@@ -139,6 +142,48 @@ describe('prepareConflictWorktree', () => {
     })
 
     expect(wt.conflicted).toBe(false)
+  })
+
+  test('scopes the persona to the conflict worktree when configured', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'amagi-home-'))
+    const savedXdg = process.env.XDG_CONFIG_HOME
+    try {
+      process.env.XDG_CONFIG_HOME = home
+      const dir = join(home, 'git', 'personas')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'agent.gitconfig'),
+        '[user]\n  name = Chise\n  email = chise@example.com\n',
+      )
+      const { exec, calls } = fake((c) => {
+        if (c.includes('rev-parse')) return fail('')
+        if (c.includes('merge')) return fail('conflict')
+        return undefined
+      })
+
+      await prepareConflictWorktree({
+        repoRoot: '/repo',
+        repoName: 'amagi',
+        worktreeRoot: '/wt',
+        baseBranch: 'main',
+        pr: pr(),
+        persona: 'agent',
+        exec,
+      })
+
+      expect(calls).toContainEqual(['git', 'config', 'extensions.worktreeConfig', 'true'])
+      expect(calls).toContainEqual([
+        'git',
+        'config',
+        '--worktree',
+        'include.path',
+        join(dir, 'agent.gitconfig'),
+      ])
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
+      else process.env.XDG_CONFIG_HOME = savedXdg
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 
