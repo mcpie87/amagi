@@ -1,3 +1,4 @@
+import { resolve, sep } from 'node:path'
 import type { Store, Tracker } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
@@ -8,9 +9,30 @@ export type ServeOptions = {
   port: number
   tracker?: Tracker
   gatePollIntervalMs?: number
+  /** Directory holding the built dashboard, served as an SPA behind the API. */
+  staticDir?: string
 }
 
-export function serve({ store, host, port, tracker, gatePollIntervalMs }: ServeOptions) {
+/**
+ * Serves one built asset, falling back to index.html so router paths like
+ * /tasks/:id deep-link. Traversal is refused: a served path must stay inside
+ * staticDir, which matters once host is anything other than loopback.
+ */
+async function staticAsset(dir: string, pathname: string): Promise<Response> {
+  const root = resolve(dir)
+  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
+  const target = resolve(root, rel)
+  if (!target.startsWith(root + sep)) {
+    return new Response('not found', { status: 404 })
+  }
+  const file = Bun.file(target)
+  if (await file.exists()) return new Response(file)
+  const index = Bun.file(resolve(root, 'index.html'))
+  if (await index.exists()) return new Response(index)
+  return new Response('dashboard not built', { status: 404 })
+}
+
+export function serve({ store, host, port, tracker, gatePollIntervalMs, staticDir }: ServeOptions) {
   const app = createApp({
     store,
     ...(tracker === undefined ? {} : { tracker }),
@@ -23,7 +45,16 @@ export function serve({ store, host, port, tracker, gatePollIntervalMs }: ServeO
           tracker,
           ...(gatePollIntervalMs === undefined ? {} : { intervalMs: gatePollIntervalMs }),
         })
-  const server = Bun.serve({ hostname: host, port, fetch: app.fetch })
+  const server = Bun.serve({
+    hostname: host,
+    port,
+    async fetch(req) {
+      if (staticDir !== undefined && !new URL(req.url).pathname.startsWith('/api')) {
+        return staticAsset(staticDir, new URL(req.url).pathname)
+      }
+      return app.fetch(req)
+    },
+  })
   return {
     hostname: server.hostname,
     port: server.port,

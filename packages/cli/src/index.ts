@@ -4,6 +4,7 @@ import { askCommand } from './commands/ask.ts'
 import { cleanCommand } from './commands/clean.ts'
 import { configCommand } from './commands/config.ts'
 import { runCommand } from './commands/run.ts'
+import { serveCommand } from './commands/serve.ts'
 import { statusCommand } from './commands/status.ts'
 
 const main = defineCommand({
@@ -17,6 +18,7 @@ const main = defineCommand({
     config: configCommand,
     clean: cleanCommand,
     ask: askCommand,
+    serve: serveCommand,
   },
 })
 
