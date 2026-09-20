@@ -201,11 +201,16 @@ export function createApp({ store, notify = [], tracker }: ServerDeps) {
         if (question.taskId !== id) {
           return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
         }
-        if (question.resolvedAt !== null) {
-          return c.json({ error: `question ${questionId} already resolved` }, 409)
+        // Timed out is not answered: a late reply still resumes the parked runner.
+        if (question.answer !== null) {
+          return c.json({ error: `question ${questionId} already answered` }, 409)
         }
         store.append(id, { type: 'question.answered', questionId, answer, via })
-        store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
+        // Only an awaiting task moves; a question answered after the runner
+        // escalated is recorded but must not yank the task out of needs_human.
+        if (task.state === 'awaiting_answer') {
+          store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
+        }
         await resolveQuestionGate(tracker, question.gateRef)
         return c.json({ task: store.task(id), question: store.question(questionId) })
       },

@@ -40,6 +40,8 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
     expect(config.harness.review.kind).toBe('codex')
     expect(config.loop.maxParallel).toBe(1)
+    expect(config.loop.questionTimeoutSec).toBe(540)
+    expect(config.loop.questionParkTimeoutSec).toBe(3600)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {

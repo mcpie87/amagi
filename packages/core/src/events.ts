@@ -145,6 +145,7 @@ export const EventBody = z.discriminatedUnion('type', [
     via: z.enum(['web', 'cli', 'gate']),
   }),
   z.object({ type: z.literal('question.timedout'), questionId: z.string() }),
+  z.object({ type: z.literal('question.parked'), questionId: z.string() }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
   z.object({ type: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 ])

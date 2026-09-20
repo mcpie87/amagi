@@ -151,6 +151,28 @@ const writesAFile: Turn = {
   events: [{ kind: 'text', text: 'wrote hello.txt' }],
 }
 
+const waitFor = async (fn: () => boolean, timeoutMs = 2000): Promise<void> => {
+  const started = Date.now()
+  while (!fn()) {
+    if (Date.now() - started > timeoutMs) throw new Error('waitFor timed out')
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+const parksOnQuestion: Turn = {
+  effect: (cwd) => {
+    writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+    store.append(TASK.id, {
+      type: 'question.asked',
+      questionId: 'q1',
+      question: 'which registry?',
+      options: ['npm', 'nexus'],
+      gateRef: null,
+    })
+    store.append(TASK.id, { type: 'task.state', from: 'implementing', to: 'awaiting_answer' })
+  },
+}
+
 describe('Runner.runOnce', () => {
   test('an empty queue is not an error', async () => {
     expect(await makeRunner(new FakeTracker([]), new FakeHarness([])).runOnce()).toBeNull()
@@ -256,5 +278,49 @@ describe('Runner.runOnce', () => {
 
     expect(result?.state).toBe('needs_human')
     expect(store.task(TASK.id)?.lastError).toBeTruthy()
+  })
+
+  test('parks on an unanswered question and resumes the session with the answer', async () => {
+    const harness = new FakeHarness([
+      parksOnQuestion,
+      { effect: (cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi answer\n') },
+    ])
+    const pending = makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'question.parked'))
+    store.append(TASK.id, {
+      type: 'question.answered',
+      questionId: 'q1',
+      answer: 'npm',
+      via: 'web',
+    })
+    store.append(TASK.id, { type: 'task.state', from: 'awaiting_answer', to: 'implementing' })
+
+    const result = await pending
+    expect(result?.state).toBe('committed')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('which registry?')
+    expect(harness.calls[1]?.prompt).toContain('npm')
+    expect(types(TASK.id)).toContain('question.parked')
+  })
+
+  test('escalates to needs_human when the answer never lands', async () => {
+    const harness = new FakeHarness([parksOnQuestion])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { questionParkTimeoutSec: 1 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(store.task(TASK.id)?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(1)
+    expect(types(TASK.id)).toContain('question.parked')
+    const lastState = store
+      .events({ taskId: TASK.id })
+      .filter((e) => e.type === 'task.state')
+      .at(-1)
+    expect(lastState?.type === 'task.state' && lastState.to).toBe('needs_human')
   })
 })

@@ -260,6 +260,23 @@ describe('question channel', () => {
     expect(store.question(q.id)?.answer).toBeNull()
   })
 
+  test('a question that timed out can still be answered later', async () => {
+    claim('bd-1')
+    implementing('bd-1')
+    const asked = await ask('bd-1', 'which registry?')
+    const q = ((await asked.json()) as { question: QuestionRow }).question
+    await awaitQ('bd-1', q.id, token('bd-1'), 20)
+    expect(store.question(q.id)?.resolvedAt).not.toBeNull()
+
+    const res = await answer('bd-1', q.id, 'npm', token('bd-1'))
+    expect(res.status).toBe(200)
+    expect(store.question(q.id)?.answer).toBe('npm')
+    expect(store.task('bd-1')?.state).toBe('implementing')
+
+    const twice = await answer('bd-1', q.id, 'again', token('bd-1'))
+    expect(twice.status).toBe(409)
+  })
+
   test('asking fires the notifiers and records notify.sent', async () => {
     const delivered: string[] = []
     const failing = {

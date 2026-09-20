@@ -27,7 +27,10 @@ export function startGatePoller({
   let timer: ReturnType<typeof setTimeout> | null = null
 
   async function tick(): Promise<void> {
-    for (const question of store.openQuestions()) {
+    // unansweredQuestions, not openQuestions: a question whose await poll timed
+    // out is still unanswered, and the parked runner must be able to resume on
+    // a gate the human resolves out of band.
+    for (const question of store.unansweredQuestions()) {
       if (question.gateRef === null) continue
       try {
         const resolved = await tracker.gateResolved({

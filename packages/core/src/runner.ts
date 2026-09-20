@@ -2,7 +2,13 @@ import type { Config } from './config.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { CheckResult, TaskState } from './events.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
-import { commitMessage, fixChecksPrompt, implementPrompt, implementSystemPrompt } from './prompt.ts'
+import {
+  answerPrompt,
+  commitMessage,
+  fixChecksPrompt,
+  implementPrompt,
+  implementSystemPrompt,
+} from './prompt.ts'
 import type { Store, TaskRow } from './store/store.ts'
 import { createWorktree } from './worktree.ts'
 
@@ -20,6 +26,9 @@ export type RunOnceResult = {
   task: TaskRow
   state: TaskState
 } | null
+
+/** How often the parked runner re-checks the store for an answer. */
+const PARK_POLL_MS = 100
 
 class LeaseLostError extends Error {
   constructor(taskId: string) {
@@ -159,6 +168,10 @@ export class Runner {
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
+    const parked = await this.parkAndResume(task.id, sessionId, cwd, lease)
+    if (parked === null) return
+    sessionId = parked
+
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.transition(task.id, 'checks')
       const results = await this.runChecks(cwd)
@@ -187,6 +200,10 @@ export class Runner {
         extraArgs: config.harness.implement.extraArgs,
       })
       if (lease.isLost) throw new LeaseLostError(task.id)
+
+      const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease)
+      if (resumed === null) return
+      sessionId = resumed
     }
 
     const committed = await this.commit(task, cwd)
@@ -195,6 +212,54 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
+  }
+
+  /**
+   * When the agent stopped because a question went unanswered, park and poll
+   * the store until a human answers, then resume the recorded session with the
+   * answer. Never answered within the window: escalate to needs_human.
+   * Returns null to stop the whole run. The server and the runner share one
+   * SQLite file but not one process, so this polls rather than subscribes.
+   */
+  private async parkAndResume(
+    taskId: string,
+    sessionId: string | null,
+    cwd: string,
+    lease: Lease,
+  ): Promise<string | null> {
+    const { store, config } = this.deps
+    if (store.task(taskId)?.state !== 'awaiting_answer') return sessionId
+
+    const question = store.unansweredQuestions(taskId)[0]
+    if (question === undefined) return sessionId
+    store.append(taskId, { type: 'question.parked', questionId: question.id })
+
+    const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
+    while (Date.now() < deadline) {
+      if (lease.isLost) throw new LeaseLostError(taskId)
+      const q = store.question(question.id)
+      if (q !== null && q.answer !== null) {
+        this.transition(taskId, 'implementing')
+        if (sessionId === null) {
+          this.transition(
+            taskId,
+            'needs_human',
+            'the agent left no session to resume with the answer',
+          )
+          return null
+        }
+        return this.runAgent(taskId, sessionId, {
+          cwd,
+          prompt: answerPrompt(question.question, q.answer),
+          permissions: config.harness.implement.permissions,
+          extraArgs: config.harness.implement.extraArgs,
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
+    }
+
+    this.transition(taskId, 'needs_human', 'no answer within the parking window')
+    return null
   }
 
   private async runAgent(

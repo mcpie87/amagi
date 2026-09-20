@@ -111,6 +111,29 @@ describe('Store', () => {
     expect(store.question('q1')?.answer).toBeNull()
   })
 
+  test('an unanswered question outlives its timeout until answered', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'question.asked',
+      questionId: 'q1',
+      question: 'which?',
+      options: [],
+      gateRef: null,
+    })
+    store.append('bd-1', { type: 'question.timedout', questionId: 'q1' })
+    expect(store.unansweredQuestions()).toHaveLength(1)
+    expect(store.openQuestions()).toHaveLength(0)
+
+    store.append('bd-1', {
+      type: 'question.answered',
+      questionId: 'q1',
+      answer: 'npm',
+      via: 'web',
+    })
+    expect(store.unansweredQuestions()).toHaveLength(0)
+    expect(store.openQuestions()).toHaveLength(0)
+  })
+
   test('agent exit captures the session id for later resume', () => {
     claim()
     store.append('bd-1', {

@@ -49,6 +49,8 @@ export const Config = z.object({
       maxCheckRounds: z.number().int().min(0).default(2),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
+      /** How long the runner waits for an answer once the agent parks on a question. */
+      questionParkTimeoutSec: z.number().int().min(1).default(3600),
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),

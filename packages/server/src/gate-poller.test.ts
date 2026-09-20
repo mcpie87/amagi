@@ -104,6 +104,33 @@ test('a gate closed with bd alone resolves the question', async () => {
   expect(store.openQuestions()).toHaveLength(0)
 })
 
+test('a gate resolved after the question timed out still unblocks the parked runner', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+  claim(store)
+  implementing(store)
+  store.append('bd-1', {
+    type: 'question.asked',
+    questionId: 'q1',
+    question: 'which?',
+    options: [],
+    gateRef: 'gate-7',
+  })
+  store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'awaiting_answer' })
+  store.append('bd-1', { type: 'question.timedout', questionId: 'q1' })
+  expect(store.unansweredQuestions()).toHaveLength(1)
+
+  pollers.push(startGatePoller({ store, tracker, intervalMs: 10 }))
+  await Bun.sleep(40)
+  tracker.setResolved('gate-7')
+  await Bun.sleep(40)
+
+  expect(store.question('q1')?.answer).toBe('')
+  expect(store.question('q1')?.answeredVia).toBe('gate')
+  expect(store.task('bd-1')?.state).toBe('implementing')
+  expect(store.unansweredQuestions()).toHaveLength(0)
+})
+
 test('await unblocks within one poll interval after the gate resolves', async () => {
   const store = new Store(openDatabase(':memory:'))
   const tracker = new FakeTracker()

@@ -41,6 +41,17 @@ export function implementPrompt(ctx: PromptContext): string {
   return parts.join('\n')
 }
 
+export function answerPrompt(question: string, answer: string): string {
+  return [
+    'A human answered the question you were waiting on. Continue the task.',
+    '',
+    `Question: ${question}`,
+    `Answer: ${answer}`,
+    '',
+    'Apply the answer and finish the task, then stop.',
+  ].join('\n')
+}
+
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)

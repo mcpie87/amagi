@@ -290,6 +290,18 @@ export class Store {
     return rows.map(toQuestion)
   }
 
+  /** Questions still expecting an answer, including ones whose await poll timed out. */
+  unansweredQuestions(taskId?: string): QuestionRow[] {
+    const rows = (
+      taskId
+        ? this.db
+            .query('select * from questions where answer is null and task_id = ? order by asked_at')
+            .all(taskId)
+        : this.db.query('select * from questions where answer is null order by asked_at').all()
+    ) as RawQuestion[]
+    return rows.map(toQuestion)
+  }
+
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
