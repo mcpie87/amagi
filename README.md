@@ -42,6 +42,7 @@ bun run packages/cli/src/index.ts <command>
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
 | `serve` | Serve the HTTP + SSE API and the built dashboard from one process |
+| `tui` | Terminal view of the queue, task detail, and pending questions (needs `amagi serve` running) |
 
 ### Pointing amagi at a repo
 
@@ -156,7 +157,8 @@ permissions = "bypass"
 | `@amagi/core` | Runner, drivers, store, and event feed |
 | `@amagi/cli` | The `amagi` command line |
 | `@amagi/server` | HTTP + SSE event server |
-| `@amagi/dashboard` | React dashboard served alongside the API by `amagi serve` |
+| `@amagi/dashboard` | Web dashboard (React) |
+| `@amagi/tui` | Terminal dashboard (Ink) |
 
 ## License
 

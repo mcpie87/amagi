@@ -1,5 +1,11 @@
 import type { Config } from './config.ts'
-import { type CreatePrOptions, gitTokenConfig, makePrDriver, type PrDriver } from './drivers/pr.ts'
+import {
+  amagiLabels,
+  type CreatePrOptions,
+  gitTokenConfig,
+  makePrDriver,
+  type PrDriver,
+} from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { CheckResult, TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -10,6 +16,7 @@ import {
   fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prTitle,
 } from './prompt.ts'
 import { backoffDelayMs, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
@@ -267,8 +274,9 @@ export class Runner {
       branch,
       base: config.repo.baseBranch,
       remote: config.forge.remote,
-      title: task.title,
+      title: prTitle(task),
       body: formatPrBody(task, changes),
+      labels: amagiLabels(task.type),
     }
     try {
       const pr = await forge.createPr(opts)

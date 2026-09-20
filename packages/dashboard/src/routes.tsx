@@ -1,5 +1,13 @@
 import type { AgentEvent, StoredEvent, TaskState } from '@amagi/core/events'
 import {
+  activeTasks,
+  currentAgentFor,
+  openQuestionsFor,
+  type QuestionView,
+  type TaskView,
+  tasksNeedingAttention,
+} from '@amagi/core/view'
+import {
   createRootRoute,
   createRoute,
   createRouter,
@@ -10,14 +18,6 @@ import {
 import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import {
-  activeTasks,
-  currentAgentFor,
-  openQuestionsFor,
-  type QuestionView,
-  type TaskView,
-  tasksNeedingAttention,
-} from './state.ts'
 import { useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
@@ -33,6 +33,22 @@ type Issue = {
   assignee: string | null
   labels: string[]
   parent: string | null
+}
+
+const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
+
+const columnHeader: Record<Issue['status'], string> = {
+  open: 'Open',
+  in_progress: 'In progress',
+  blocked: 'Blocked',
+  closed: 'Closed',
+}
+
+const columnColor: Record<Issue['status'], string> = {
+  open: 'bg-zinc-600',
+  in_progress: 'bg-blue-600',
+  blocked: 'bg-red-600',
+  closed: 'bg-emerald-600',
 }
 
 const stateBadge: Record<TaskState, string> = {
@@ -104,7 +120,6 @@ function IssueBadge({ issue }: { issue: Issue }) {
 
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
-  const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
   const [selected, setSelected] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -118,7 +133,6 @@ function IssuesView() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
   }, [])
 
-  const visible = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
   if (selected !== null) {
     return (
       <section>
@@ -169,42 +183,57 @@ function IssuesView() {
     <section>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Tasks</h1>
-        <select
-          value={status}
-          onChange={(event) => setStatus(event.target.value as typeof status)}
-          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
-        >
-          <option value="all">All statuses</option>
-          <option value="open">Open</option>
-          <option value="in_progress">In progress</option>
-          <option value="blocked">Blocked</option>
-          <option value="closed">Closed</option>
-        </select>
+        <span className="text-sm text-zinc-500">
+          {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
+        </span>
       </div>
       {error !== null ? (
         <p className="text-red-400">{error}</p>
       ) : (
-        <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
-          {visible.map((issue) => (
-            <li key={issue.id}>
-              <button
-                type="button"
-                onClick={() => setSelected(issue)}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {ISSUE_STATES.map((state) => {
+            const columnIssues = issues.filter((issue) => issue.status === state)
+            return (
+              <div
+                key={state}
+                className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
               >
-                <IssueBadge issue={issue} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{issue.title}</span>
-                  <span className="block truncate text-xs text-zinc-500">
-                    {issue.id}
-                    {issue.priority === null ? '' : ` · P${issue.priority}`}
-                    {issue.type === null ? '' : ` · ${issue.type}`}
+                <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
+                  <span
+                    className={`truncate rounded px-2 py-0.5 text-xs font-medium text-white ${columnColor[state]}`}
+                  >
+                    {columnHeader[state]}
                   </span>
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
+                  <span className="text-xs text-zinc-500">{columnIssues.length}</span>
+                </div>
+                <ul className="flex flex-col gap-2 p-2">
+                  {columnIssues.map((issue) => (
+                    <li key={issue.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelected(issue)}
+                        className="w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left hover:bg-zinc-800"
+                      >
+                        <span className="block text-xs text-zinc-500">{issue.id}</span>
+                        <span className="mt-0.5 block break-words font-medium leading-snug">
+                          {issue.title}
+                        </span>
+                        <span className="mt-1 block text-xs text-zinc-500">
+                          {[issue.priority === null ? null : `P${issue.priority}`, issue.type]
+                            .filter(Boolean)
+                            .join(' · ') || '\u00a0'}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                  {columnIssues.length === 0 && (
+                    <li className="px-1 py-2 text-xs text-zinc-600">No tasks.</li>
+                  )}
+                </ul>
+              </div>
+            )
+          })}
+        </div>
       )}
     </section>
   )
