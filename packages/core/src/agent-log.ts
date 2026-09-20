@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentRole } from '@amagi/core/events'
+import type { AgentEvent, AgentRole } from './events.ts'
 
 export type AgentLogLine = {
   id: number
