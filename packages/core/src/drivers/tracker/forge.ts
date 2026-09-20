@@ -1,5 +1,15 @@
 import { exec as defaultExec, type Exec, execOk } from '../../exec.ts'
-import type { GateRef, Question, Tracker, TrackerStatus, TrackerTask } from '../types.ts'
+import {
+  type CreateTrackerTask,
+  type GateRef,
+  type Question,
+  type Tracker,
+  type TrackerCapabilities,
+  type TrackerStatus,
+  type TrackerTask,
+  UnsupportedCapabilityError,
+  type UpdateTrackerTask,
+} from '../types.ts'
 
 export type ForgeOptions = {
   cwd: string
@@ -55,6 +65,10 @@ function parseGate(ref: GateRef): { taskId: string; questionId: string } {
 export abstract class ForgeTracker implements Tracker {
   abstract readonly kind: string
   readonly leaseTtlMs = LEASE_TTL_MS
+  // gh/tea store title, body and labels only; the planned-work fields
+  // (acceptance criteria, priority, dependencies) have no forge equivalent,
+  // so writes are surfaced as unsupported instead of silently dropping data.
+  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   protected readonly cwd: string
   protected readonly exec: Exec
 
@@ -86,6 +100,14 @@ export abstract class ForgeTracker implements Tracker {
   async get(id: string): Promise<TrackerTask | null> {
     const issue = await this.getIssue(id)
     return issue === null ? null : toTask(issue)
+  }
+
+  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
+    throw new UnsupportedCapabilityError('create', this.kind)
+  }
+
+  async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
+    throw new UnsupportedCapabilityError('edit', this.kind)
   }
 
   async heartbeat(_id: string): Promise<boolean> {
