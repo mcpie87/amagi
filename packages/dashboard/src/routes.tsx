@@ -1,4 +1,5 @@
 import type { AgentEvent, StoredEvent, TaskState } from '@amagi/core/events'
+import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from '@amagi/core/view'
 import {
   createRootRoute,
   createRoute,
@@ -10,7 +11,6 @@ import {
 import type { FormEvent } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { activeTasks, openQuestionsFor, type QuestionView, type TaskView } from './state.ts'
 import { useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string

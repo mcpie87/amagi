@@ -35,6 +35,8 @@ bun run packages/cli/src/index.ts <command>
 | `ask` | Ask the human a question and block for the answer |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
+| `serve` | Serve the API and the built dashboard from one process |
+| `tui` | Terminal view of the queue, task detail, and pending questions (needs `amagi serve` running) |
 
 ## Configuration
 
@@ -47,3 +49,5 @@ Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/ama
 | `@amagi/core` | Runner, drivers, store, and event feed |
 | `@amagi/cli` | The `amagi` command line |
 | `@amagi/server` | HTTP + SSE event server |
+| `@amagi/dashboard` | Web dashboard (React) |
+| `@amagi/tui` | Terminal dashboard (Ink) |

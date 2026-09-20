@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import type { StoredEvent } from '@amagi/core'
-import { activeTasks, initialDashboardState, openQuestionsFor, reduceState } from './state.ts'
+import type { StoredEvent } from './events.ts'
+import { activeTasks, initialDashboardState, openQuestionsFor, reduceState } from './view.ts'
 
 function ev(seq: number, taskId: string | null, ts: number, body: object): StoredEvent {
   return { seq, ts, taskId, ...body } as StoredEvent

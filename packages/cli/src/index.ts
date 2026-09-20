@@ -6,6 +6,7 @@ import { configCommand } from './commands/config.ts'
 import { runCommand } from './commands/run.ts'
 import { serveCommand } from './commands/serve.ts'
 import { statusCommand } from './commands/status.ts'
+import { tuiCommand } from './commands/tui.ts'
 
 const main = defineCommand({
   meta: {
@@ -19,6 +20,7 @@ const main = defineCommand({
     clean: cleanCommand,
     ask: askCommand,
     serve: serveCommand,
+    tui: tuiCommand,
   },
 })
 
