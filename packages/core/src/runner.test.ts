@@ -41,6 +41,8 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   heartbeats = 0
   leaseAlive = true
+  /** Returned by get() in place of the null default, to simulate a re-read. */
+  freshTask: TrackerTask | null = null
 
   constructor(private queue: TrackerTask[] = []) {}
 
@@ -51,7 +53,7 @@ class FakeTracker implements Tracker {
     return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
-    return null
+    return this.freshTask
   }
   async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
     throw new Error('unsupported')
@@ -95,6 +97,9 @@ class FakeHarness implements Harness {
   }
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.run(sessionId, opts)
+  }
+  async listModels(): Promise<string[]> {
+    return []
   }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
@@ -286,6 +291,16 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.branch).toContain('amagi/')
     const created = store.events({ taskId: TASK.id }).find((e) => e.type === 'pr.created')
     expect(created?.type === 'pr.created' && created.url).toBe('https://example.com/demo/pull/7')
+  })
+
+  test('builds the PR body from a re-fetched task description', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = { ...TASK, description: 'Write hello.txt\n\n### How to use\n\nRun `hello`' }
+    const pr = new FakePr()
+    await makeRunner(tracker, new FakeHarness([writesAFile]), config(), pr).runOnce()
+
+    expect(pr.calls[0]?.body).toContain('### 🚀 How to use')
+    expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
   test('a failed pull request escalates but keeps the commit', async () => {

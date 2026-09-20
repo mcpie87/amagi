@@ -69,7 +69,7 @@ export function personaGitconfig(name: string): string | null {
  * config, so commits in this worktree (and any PR opened from it) carry the
  * persona's user identity without touching the shared repo config.
  */
-async function applyPersona(run: Exec, cwd: string, persona: string): Promise<void> {
+export async function applyPersona(run: Exec, cwd: string, persona: string): Promise<void> {
   const file = personaGitconfig(persona)
   if (file === null) throw new Error(`persona not found: ${persona}`)
   await execOk(run, ['git', 'config', 'extensions.worktreeConfig', 'true'], { cwd })
