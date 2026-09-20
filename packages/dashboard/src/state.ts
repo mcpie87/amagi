@@ -191,8 +191,25 @@ export function activeTasks(state: DashboardState): TaskView[] {
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
+export function tasksNeedingAttention(state: DashboardState): TaskView[] {
+  return Object.values(state.tasks)
+    .filter((t) => t.state === 'needs_human')
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
 export function openQuestionsFor(state: DashboardState, taskId: string): QuestionView[] {
   return Object.values(state.questions)
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)
     .sort((a, b) => a.askedAt - b.askedAt)
+}
+
+export function currentAgentFor(
+  state: DashboardState,
+  taskId: string,
+): Extract<StoredEvent, { type: 'agent.started' }> | null {
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const event = state.events[i]
+    if (event?.taskId === taskId && event.type === 'agent.started') return event
+  }
+  return null
 }

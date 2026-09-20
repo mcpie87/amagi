@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import type { StoredEvent } from '@amagi/core'
-import { activeTasks, initialDashboardState, openQuestionsFor, reduceState } from './state.ts'
+import {
+  activeTasks,
+  currentAgentFor,
+  initialDashboardState,
+  openQuestionsFor,
+  reduceState,
+  tasksNeedingAttention,
+} from './state.ts'
 
 function ev(seq: number, taskId: string | null, ts: number, body: object): StoredEvent {
   return { seq, ts, taskId, ...body } as StoredEvent
@@ -93,11 +100,56 @@ describe('dashboard state reducer', () => {
     expect(queue[0]?.state).toBe('claimed')
   })
 
+  test('attention list includes only tasks stopped for a human', () => {
+    const state = [
+      ...recorded,
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'done', to: 'needs_human' }),
+      ev(17, 'am-3', 2600, { type: 'task.claimed', title: 'Still running', tracker: 'bd' }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
   test('questions resolve from events', () => {
     const state = recorded.reduce(reduceState, initialDashboardState())
     expect(openQuestionsFor(state, 'am-2')).toEqual([])
     const before = recorded.filter((e) => e.seq !== 15).reduce(reduceState, initialDashboardState())
     expect(openQuestionsFor(before, 'am-2').map((q) => q.id)).toEqual(['q-1'])
     expect(before.questions['q-1']?.answer).toBeNull()
+  })
+
+  test('current agent uses the latest start for the requested task', () => {
+    const starts = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'old-model',
+        effort: 'low',
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+      ev(2, 'am-2', 1100, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'other-model',
+        effort: 'high',
+        cwd: '/tmp/am-2',
+        resumed: false,
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'current-model',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+    ]
+    const state = starts.reduce(reduceState, initialDashboardState())
+    expect(currentAgentFor(state, 'am-1')).toMatchObject({ model: 'current-model', effort: null })
+    expect(currentAgentFor(state, 'missing')).toBeNull()
   })
 })

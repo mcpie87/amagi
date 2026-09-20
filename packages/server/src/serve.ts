@@ -1,14 +1,24 @@
 import { resolve, sep } from 'node:path'
-import type { Store, Tracker } from '@amagi/core'
+import type { BeadsIssue, PrDriver, Store, Tracker } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
+import { startPrPoller } from './pr-poller.ts'
 
 export type ServeOptions = {
   store: Store
   host: string
   port: number
   tracker?: Tracker
+  listIssues?: () => Promise<BeadsIssue[]>
   gatePollIntervalMs?: number
+  /**
+   * When present, park tasks at pr_open are reconciled against the remote PR
+   * state, settling merged and closed PRs. `forgeCwd` is the repo the PRs live
+   * in, so the forge CLI can resolve them.
+   */
+  forge?: PrDriver
+  forgeCwd?: string
+  prPollIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
 }
@@ -32,10 +42,22 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
   return new Response('dashboard not built', { status: 404 })
 }
 
-export function serve({ store, host, port, tracker, gatePollIntervalMs, staticDir }: ServeOptions) {
+export function serve({
+  store,
+  host,
+  port,
+  tracker,
+  gatePollIntervalMs,
+  forge,
+  forgeCwd,
+  prPollIntervalMs,
+  staticDir,
+  listIssues,
+}: ServeOptions) {
   const app = createApp({
     store,
     ...(tracker === undefined ? {} : { tracker }),
+    ...(listIssues === undefined ? {} : { listIssues }),
   })
   const poller =
     tracker === undefined
@@ -44,6 +66,15 @@ export function serve({ store, host, port, tracker, gatePollIntervalMs, staticDi
           store,
           tracker,
           ...(gatePollIntervalMs === undefined ? {} : { intervalMs: gatePollIntervalMs }),
+        })
+  const prPoller =
+    forge === undefined || forgeCwd === undefined
+      ? null
+      : startPrPoller({
+          store,
+          forge,
+          cwd: forgeCwd,
+          ...(prPollIntervalMs === undefined ? {} : { intervalMs: prPollIntervalMs }),
         })
   const server = Bun.serve({
     hostname: host,
@@ -61,6 +92,7 @@ export function serve({ store, host, port, tracker, gatePollIntervalMs, staticDi
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
       poller?.stop()
+      prPoller?.stop()
       return server.stop(closeActiveConnections)
     },
   }

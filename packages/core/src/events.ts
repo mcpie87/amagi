@@ -100,7 +100,15 @@ export const CheckResult = z.object({
 export type CheckResult = z.infer<typeof CheckResult>
 
 export const EventBody = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('task.claimed'), title: z.string(), tracker: z.string() }),
+  z.object({
+    type: z.literal('task.claimed'),
+    title: z.string(),
+    tracker: z.string(),
+    description: z.string().optional(),
+    priority: z.number().nullable().optional(),
+    taskType: z.string().nullable().optional(),
+    url: z.string().nullable().optional(),
+  }),
   z.object({
     type: z.literal('task.state'),
     from: TaskState.nullable(),

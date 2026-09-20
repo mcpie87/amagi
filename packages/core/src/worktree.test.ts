@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec, execOk } from './exec.ts'
@@ -123,5 +123,62 @@ describe('createWorktree', () => {
     await removeWorktree(repo, wt.path, { force: true })
     expect(existsSync(wt.path)).toBe(false)
     expect((await listWorktrees(repo)).map((w) => w.path)).not.toContain(wt.path)
+  })
+
+  describe('persona', () => {
+    let home: string
+    const savedXdg = process.env.XDG_CONFIG_HOME
+
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), 'amagi-home-'))
+      process.env.XDG_CONFIG_HOME = home
+      const dir = join(home, 'git', 'personas')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'agent.gitconfig'),
+        '[user]\n  name = Chise\n  email = chise@example.com\n',
+      )
+    })
+
+    afterEach(() => {
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
+      else process.env.XDG_CONFIG_HOME = savedXdg
+      rmSync(home, { recursive: true, force: true })
+    })
+
+    test('scopes the persona to the worktree, leaving the repo identity alone', async () => {
+      const wt = await createWorktree({
+        repoRoot: repo,
+        repoName: 'amagi',
+        taskId: 'bd-a1b2',
+        title: 'Add SSE endpoint',
+        baseBranch: 'main',
+        worktreeRoot: wtRoot,
+        persona: 'agent',
+      })
+      writeFileSync(join(wt.path, 'work.txt'), 'x\n')
+      await execOk(exec, ['git', 'add', '-A'], { cwd: wt.path })
+      await execOk(exec, ['git', 'commit', '-q', '-m', 'work'], { cwd: wt.path })
+      expect(
+        (await exec(['git', 'log', '-1', '--format=%an <%ae>'], { cwd: wt.path })).stdout.trim(),
+      ).toBe('Chise <chise@example.com>')
+      expect(
+        (await exec(['git', 'log', '-1', '--format=%an <%ae>'], { cwd: repo })).stdout.trim(),
+      ).toBe('Test <test@example.com>')
+    })
+
+    test('a missing persona fails loudly', async () => {
+      expect(
+        createWorktree({
+          repoRoot: repo,
+          repoName: 'amagi',
+          taskId: 'bd-a1b2',
+          title: 'Add SSE endpoint',
+          baseBranch: 'main',
+          worktreeRoot: wtRoot,
+          persona: 'nobody',
+        }),
+      ).rejects.toThrow(/persona not found/)
+    })
   })
 })
