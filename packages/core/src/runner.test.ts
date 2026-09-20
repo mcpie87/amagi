@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
+import type { CreatePrOptions, PrDriver, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -111,6 +112,17 @@ class FakeHarness implements Harness {
   }
 }
 
+class FakePr implements PrDriver {
+  readonly calls: CreatePrOptions[] = []
+  failWith: Error | null = null
+
+  async createPr(opts: CreatePrOptions): Promise<PullRequest> {
+    this.calls.push(opts)
+    if (this.failWith !== null) throw this.failWith
+    return { url: 'https://example.com/demo/pull/7', number: 7 }
+  }
+}
+
 let repo: string
 let wtRoot: string
 let store: Store
@@ -122,13 +134,23 @@ const config = (over: Record<string, unknown> = {}) =>
     ...over,
   })
 
-const makeRunner = (tracker: Tracker, harness: Harness, cfg = config()) =>
-  new Runner({ store, tracker, harness, config: cfg, repoRoot: repo, repoName: 'demo' })
+const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = new FakePr()) =>
+  new Runner({
+    store,
+    tracker,
+    harness,
+    config: cfg,
+    repoRoot: repo,
+    repoName: 'demo',
+    forge,
+  })
 
 const types = (taskId: string): EventType[] =>
   store.events({ taskId, limit: 999 }).map((e) => e.type)
 
 beforeEach(async () => {
+  delete process.env.GH_TOKEN
+  delete process.env.GITHUB_TOKEN
   repo = mkdtempSync(join(tmpdir(), 'amagi-run-repo-'))
   wtRoot = mkdtempSync(join(tmpdir(), 'amagi-run-wt-'))
   store = new Store(openDatabase(':memory:'))
@@ -178,13 +200,13 @@ describe('Runner.runOnce', () => {
     expect(await makeRunner(new FakeTracker([]), new FakeHarness([])).runOnce()).toBeNull()
   })
 
-  test('drives claim to commit and records the whole story', async () => {
+  test('drives claim to a pull request and records the whole story', async () => {
     const result = await makeRunner(
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile]),
     ).runOnce()
 
-    expect(result?.state).toBe('committed')
+    expect(result?.state).toBe('pr_open')
     expect(types(TASK.id)).toEqual([
       'task.claimed',
       'worktree.created',
@@ -197,7 +219,45 @@ describe('Runner.runOnce', () => {
       'checks.finished',
       'commit.created',
       'task.state',
+      'pr.created',
+      'task.state',
     ])
+  })
+
+  test('opens the pull request with the task title and base branch', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(pr.calls).toHaveLength(1)
+    expect(pr.calls[0]?.title).toBe('Add a greeting file')
+    expect(pr.calls[0]?.base).toBe('main')
+    expect(pr.calls[0]?.branch).toContain('amagi/')
+    const created = store.events({ taskId: TASK.id }).find((e) => e.type === 'pr.created')
+    expect(created?.type === 'pr.created' && created.url).toBe('https://example.com/demo/pull/7')
+  })
+
+  test('a failed pull request escalates but keeps the commit', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('gh not authenticated')
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(types(TASK.id)).toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
+    expect(
+      errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
+    ).toBe(true)
   })
 
   test('the commit lands in the worktree branch, not the main checkout', async () => {
@@ -228,7 +288,7 @@ describe('Runner.runOnce', () => {
       config({ checks: { commands: ['grep -q good flag'] } }),
     ).runOnce()
 
-    expect(result?.state).toBe('committed')
+    expect(result?.state).toBe('pr_open')
     expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
     expect(harness.calls[1]?.prompt).toContain('grep -q good flag')
     expect(harness.calls[1]?.prompt).toContain('checks failed')
@@ -297,7 +357,7 @@ describe('Runner.runOnce', () => {
     store.append(TASK.id, { type: 'task.state', from: 'awaiting_answer', to: 'implementing' })
 
     const result = await pending
-    expect(result?.state).toBe('committed')
+    expect(result?.state).toBe('pr_open')
     expect(harness.calls).toHaveLength(2)
     expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
     expect(harness.calls[1]?.prompt).toContain('which registry?')

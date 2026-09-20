@@ -5,6 +5,10 @@ dist/
 result
 result-*
 
+# secrets
+.env
+.env.*
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

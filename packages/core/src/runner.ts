@@ -1,7 +1,8 @@
 import type { Config } from './config.ts'
+import { type CreatePrOptions, gitTokenConfig, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { CheckResult, TaskState } from './events.ts'
-import { exec as defaultExec, type Exec } from './exec.ts'
+import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import {
   answerPrompt,
   commitMessage,
@@ -20,6 +21,8 @@ export type RunnerDeps = {
   repoRoot: string
   repoName: string
   exec?: Exec
+  /** Overridable so tests do not need gh installed. Defaults to the configured forge driver. */
+  forge?: PrDriver
 }
 
 export type RunOnceResult = {
@@ -119,12 +122,23 @@ export class Runner {
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
+    // With a token present, base the worktree on a fresh origin fetch over
+    // https; without one, fall back to the local base branch so the ssh key
+    // never prompts during an unattended run.
+    const tokenCfg = config.forge.kind === 'github' ? gitTokenConfig() : []
+    if (tokenCfg.length > 0) {
+      await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+        cwd: this.deps.repoRoot,
+      })
+    }
+    const base = tokenCfg.length > 0 ? `origin/${config.repo.baseBranch}` : config.repo.baseBranch
+
     const worktree = await createWorktree({
       repoRoot: this.deps.repoRoot,
       repoName: this.deps.repoName,
       taskId: task.id,
       title: task.title,
-      baseBranch: config.repo.baseBranch,
+      baseBranch: base,
       worktreeRoot: config.repo.worktreeRoot,
       setupCmd: config.repo.setupCmd,
       exec: this.exec,
@@ -212,6 +226,41 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
+    await this.openPullRequest(task, cwd, branch)
+  }
+
+  /**
+   * Pushes the worktree branch and opens a pull request. A failed PR (gh not
+   * authenticated, remote gone) leaves the commit in place and escalates, so
+   * the operator can push and open it by hand.
+   */
+  private async openPullRequest(task: TrackerTask, cwd: string, branch: string): Promise<void> {
+    const { store, config } = this.deps
+    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
+    const opts: CreatePrOptions = {
+      cwd,
+      branch,
+      base: config.repo.baseBranch,
+      remote: config.forge.remote,
+      title: task.title,
+      body: `Task: ${task.id}\n\n${task.description}`,
+    }
+    try {
+      const pr = await forge.createPr(opts)
+      store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
+      this.transition(task.id, 'pr_open')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const hint = /auth|login|token|not logged/i.test(message)
+        ? ' (gh needs auth: set GH_TOKEN in .env or run gh auth login)'
+        : ''
+      store.append(task.id, {
+        type: 'error',
+        message: `pull request: ${message}${hint}`,
+        fatal: false,
+      })
+      this.transition(task.id, 'needs_human', 'pull request creation failed')
+    }
   }
 
   /**
