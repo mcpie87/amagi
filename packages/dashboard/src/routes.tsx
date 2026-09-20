@@ -13,8 +13,10 @@ import {
   createRouter,
   Link,
   Outlet,
+  useNavigate,
   useParams,
   useRouterState,
+  useSearch,
 } from '@tanstack/react-router'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
@@ -628,7 +630,6 @@ const issueLabels = {
 
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
-  const [selected, setSelected] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refresh, setRefresh] = useState(0)
@@ -642,6 +643,9 @@ function IssuesView() {
     }
   })
   const state = useDashboard()
+  const navigate = useNavigate()
+  const { issue: selectedId } = useSearch({ from: issuesRoute.id })
+  const selected = issues.find((issue) => issue.id === selectedId) ?? null
   // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh deliberately re-fetches the tracker snapshot.
   useEffect(() => {
     const controller = new AbortController()
@@ -680,7 +684,11 @@ function IssuesView() {
   if (selected)
     return (
       <>
-        <button type="button" className="back-link" onClick={() => setSelected(null)}>
+        <button
+          type="button"
+          className="back-link"
+          onClick={() => navigate({ to: '/issues', search: {} })}
+        >
           ← Back to task board
         </button>
         <PageHeading
@@ -830,7 +838,7 @@ function IssuesView() {
                         key={issue.id}
                         type="button"
                         className="issue-card"
-                        onClick={() => setSelected(issue)}
+                        onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
                       >
                         <span className="issue-card-top">
                           <span className="mono">{issue.id}</span>
@@ -867,7 +875,7 @@ function IssuesView() {
               key={issue.id}
               type="button"
               className="issue-list-row"
-              onClick={() => setSelected(issue)}
+              onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
             >
               <span className="mono">{issue.id}</span>
               <strong>{issue.title}</strong>
@@ -1393,6 +1401,9 @@ const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
   component: IssuesView,
+  validateSearch: (search: Record<string, unknown>) => ({
+    issue: typeof search.issue === 'string' ? search.issue : undefined,
+  }),
 })
 const inboxRoute = createRoute({
   getParentRoute: () => rootRoute,
