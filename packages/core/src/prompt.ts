@@ -28,8 +28,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '  description is built from that description.',
     '- The task description is rendered verbatim into the PR body as markdown, so',
     '  wrap paths, identifiers and commands in `backticks` where you mean code.',
-    '- End your final message with a short summary of what was done; it is used as',
-    '  the reason when no pull request is opened.',
+    '- End your final message with a short summary of what was done; when the task',
+    '  has no description it is used as the PR summary, and it is the reason when',
+    '  no pull request is opened.',
   ]
 
   if (ctx.askCommand) {
