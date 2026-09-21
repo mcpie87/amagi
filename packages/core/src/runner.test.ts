@@ -383,10 +383,25 @@ describe('Runner.runOnce', () => {
     expect(mainLog).toContain('init')
   })
 
-  test('an agent that changes nothing lands in no_pr, not silently committed', async () => {
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([{}])).runOnce()
+  test('an agent that changes nothing lands in no_pr with its summary as the reason', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: 'already implemented upstream: nothing to do' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
     expect(result?.state).toBe('no_pr')
     expect(types(TASK.id)).not.toContain('commit.created')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'already implemented upstream',
+    )
+  })
+
+  test('no_pr falls back to the canned reason when the agent left no summary', async () => {
+    const harness = new FakeHarness([{ outcome: { summary: null } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
     const stateEvent = store
       .events({ taskId: TASK.id, limit: 999 })
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')

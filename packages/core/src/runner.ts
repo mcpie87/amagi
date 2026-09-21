@@ -264,12 +264,14 @@ export class Runner {
     )
     if (first.stopped) return
     let sessionId = first.sessionId
+    let summary = first.summary
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
     const parked = await this.parkAndResume(task.id, sessionId, cwd, lease)
     if (parked === null) return
-    sessionId = parked
+    sessionId = parked.sessionId
+    summary = parked.summary ?? summary
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
@@ -306,21 +308,23 @@ export class Runner {
       )
       if (fix.stopped) return
       sessionId = fix.sessionId
+      summary = fix.summary
       if (lease.isLost) throw new LeaseLostError(task.id)
 
       const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease)
       if (resumed === null) return
-      sessionId = resumed
+      sessionId = resumed.sessionId
+      summary = resumed.summary ?? summary
     }
 
     const committed = await this.commit(task, cwd)
     if (!committed) {
-      this.transition(
-        task.id,
-        'no_pr',
-        'the agent produced no changes; the task may already be done or need no PR — ' +
-          'verify and close it explicitly, it will not be closed automatically',
-      )
+      const reason =
+        summary !== null && summary.trim() !== ''
+          ? summary
+          : 'the agent produced no changes; the task may already be done or need no PR — ' +
+            'verify and close it explicitly, it will not be closed automatically'
+      this.transition(task.id, 'no_pr', reason)
       return
     }
     this.transition(task.id, 'committed')
@@ -377,20 +381,22 @@ export class Runner {
    * When the agent stopped because a question went unanswered, park and poll
    * the store until a human answers, then resume the recorded session with the
    * answer. Never answered within the window: escalate to needs_human.
-   * Returns null to stop the whole run. The server and the runner share one
-   * SQLite file but not one process, so this polls rather than subscribes.
+   * Returns null to stop the whole run. The summary is the resumed run's
+   * summary, or null when no agent ran (no question was parked). The server and
+   * the runner share one SQLite file but not one process, so this polls rather
+   * than subscribes.
    */
   private async parkAndResume(
     taskId: string,
     sessionId: string | null,
     cwd: string,
     lease: Lease,
-  ): Promise<string | null> {
+  ): Promise<{ sessionId: string | null; summary: string | null } | null> {
     const { store, config } = this.deps
-    if (store.task(taskId)?.state !== 'awaiting_answer') return sessionId
+    if (store.task(taskId)?.state !== 'awaiting_answer') return { sessionId, summary: null }
 
     const question = store.unansweredQuestions(taskId)[0]
-    if (question === undefined) return sessionId
+    if (question === undefined) return { sessionId, summary: null }
     store.append(taskId, { type: 'question.parked', questionId: question.id })
 
     const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
@@ -420,7 +426,7 @@ export class Runner {
           lease,
         )
         if (resumed.stopped) return null
-        return resumed.sessionId
+        return { sessionId: resumed.sessionId, summary: resumed.summary }
       }
       await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
     }
@@ -433,7 +439,12 @@ export class Runner {
     taskId: string,
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
-  ): Promise<{ sessionId: string | null; ok: boolean; detail: string | null }> {
+  ): Promise<{
+    sessionId: string | null
+    ok: boolean
+    detail: string | null
+    summary: string | null
+  }> {
     const { store, harness } = this.deps
     const spawn = {
       ...opts,
@@ -476,7 +487,7 @@ export class Runner {
         detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
         store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
       }
-      return { sessionId: outcome.sessionId, ok: outcome.ok, detail }
+      return { sessionId: outcome.sessionId, ok: outcome.ok, detail, summary: outcome.summary }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
     }
@@ -494,20 +505,22 @@ export class Runner {
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
     lease: Lease,
-  ): Promise<{ sessionId: string | null; stopped: boolean }> {
+  ): Promise<{ sessionId: string | null; stopped: boolean; summary: string | null }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
+    let summary: string | null = null
 
     for (let attempt = 1; ; attempt++) {
       const run = await this.runAgent(taskId, sessionId, opts)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
-      if (run.ok) return { sessionId, stopped: false }
+      summary = run.summary
+      if (run.ok) return { sessionId, stopped: false, summary }
       if (lease.isLost) throw new LeaseLostError(taskId)
 
       if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
         this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
-        return { sessionId, stopped: true }
+        return { sessionId, stopped: true, summary }
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
       store.append(taskId, {
