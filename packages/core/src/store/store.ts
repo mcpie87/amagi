@@ -291,6 +291,23 @@ export class Store {
     }))
   }
 
+  /**
+   * The most recent events for one task, oldest first, for windowed analysis
+   * (e.g. the doom-loop guard). Reads from the tail so a long-lived task's
+   * early history is never re-read.
+   */
+  recentEvents(taskId: string, limit: number): StoredEvent[] {
+    const rows = this.db
+      .query('select * from events where task_id = ? order by seq desc limit ?')
+      .all(taskId, limit) as { seq: number; ts: number; task_id: string | null; body: string }[]
+    return rows.reverse().map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
   question(id: string): QuestionRow | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null

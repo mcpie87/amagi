@@ -208,6 +208,11 @@ export class Runner {
   private transition(taskId: string, to: TaskState, reason?: string): void {
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
+    // An external actor (the doom guard) may have parked the task in a
+    // terminal state mid-run; once parked, further in-run transitions are
+    // no-ops so the runner unwinds cleanly instead of throwing an illegal
+    // transition.
+    if (from !== null && isTerminal(from)) return
     this.deps.store.append(taskId, {
       type: 'task.state',
       from,
@@ -296,6 +301,7 @@ export class Runner {
         systemPrompt: implementSystemPrompt(promptCtx),
         ...harnessStartOpts(config.harness.implement),
       },
+      'implement',
       lease,
     )
     if (first.stopped) return
@@ -344,6 +350,7 @@ export class Runner {
           permissions: config.harness.implement.permissions,
           extraArgs: config.harness.implement.extraArgs,
         },
+        'fix checks',
         lease,
       )
       if (fix.stopped) return
@@ -375,6 +382,7 @@ export class Runner {
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
+          'why no changes',
           lease,
         )
         if (why.stopped) return
@@ -502,6 +510,7 @@ export class Runner {
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
+          'implement',
           lease,
         )
         if (resumed.stopped) return null
@@ -523,6 +532,7 @@ export class Runner {
     taskId: string,
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
+    phase: string,
   ): Promise<{
     sessionId: string | null
     ok: boolean
@@ -539,6 +549,13 @@ export class Runner {
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
+
+    // The stream is persisted anyway, so a failure is mined from what the
+    // agent actually said or did instead of a bare exit code.
+    let lastText: string | null = null
+    let lastToolError: string | null = null
+    let resultSummary: string | null = null
+    let errorMessage: string | null = null
 
     try {
       // The resolved model only exists once the harness reports it (claude's
@@ -559,6 +576,20 @@ export class Runner {
             resumed: resumeFrom !== null,
           })
         }
+        switch (event.kind) {
+          case 'text':
+            lastText = event.text
+            break
+          case 'tool_result':
+            if (!event.ok) lastToolError = event.output
+            break
+          case 'result':
+            resultSummary = event.summary ?? resultSummary
+            break
+          case 'error':
+            errorMessage = event.message
+            break
+        }
         store.append(taskId, { type: 'agent.stream', role: 'implement', event })
       }
 
@@ -572,7 +603,13 @@ export class Runner {
 
       let detail: string | null = null
       if (!outcome.ok && !this.cancelled) {
-        detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
+        detail =
+          outcome.stderr.trim() ||
+          resultSummary ||
+          errorMessage ||
+          lastToolError ||
+          lastText ||
+          `${phase} phase failed (exit ${outcome.exitCode}); see the task log in the dashboard for the full trace`
         store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
       }
       return {
@@ -599,6 +636,7 @@ export class Runner {
     taskId: string,
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
+    phase: string,
     lease: Lease,
   ): Promise<{
     sessionId: string | null
@@ -614,7 +652,7 @@ export class Runner {
     let effort: string | null = null
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, opts)
+      const run = await this.runAgent(taskId, sessionId, opts, phase)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
       summary = run.summary
