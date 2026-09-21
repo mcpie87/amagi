@@ -5,7 +5,7 @@ import type { Config } from './config.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentProcess } from './drivers/types.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
-import { makeHarness } from './factory.ts'
+import { harnessStartOpts, makeHarness } from './factory.ts'
 import { cacheHome } from './paths.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
@@ -85,10 +85,7 @@ function startImplementHarness(
     cwd,
     prompt,
     systemPrompt,
-    ...(config.model === undefined ? {} : { model: config.model }),
-    ...(config.effort === undefined ? {} : { effort: config.effort }),
-    permissions: config.permissions,
-    extraArgs: config.extraArgs,
+    ...harnessStartOpts(config),
   })
 }
 

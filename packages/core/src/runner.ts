@@ -9,6 +9,7 @@ import {
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { harnessStartOpts } from './factory.ts'
 import { changesSinceBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
@@ -260,14 +261,7 @@ export class Runner {
         cwd,
         prompt: resume ? reclaimPrompt(promptCtx) : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
-        ...(config.harness.implement.model === undefined
-          ? {}
-          : { model: config.harness.implement.model }),
-        ...(config.harness.implement.effort === undefined
-          ? {}
-          : { effort: config.harness.implement.effort }),
-        permissions: config.harness.implement.permissions,
-        extraArgs: config.harness.implement.extraArgs,
+        ...harnessStartOpts(config.harness.implement),
       },
       lease,
     )
