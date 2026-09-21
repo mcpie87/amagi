@@ -42,17 +42,16 @@ const recorded: StoredEvent[] = [
     number: 1,
   }),
   ev(10, 'am-1', 1900, { type: 'task.state', from: 'committed', to: 'pr_open' }),
-  ev(11, 'am-1', 2000, { type: 'task.state', from: 'pr_open', to: 'reviewing' }),
-  ev(12, 'am-1', 2100, { type: 'task.state', from: 'reviewing', to: 'done' }),
-  ev(13, 'am-2', 2200, { type: 'task.claimed', title: 'Second task', tracker: 'bd' }),
-  ev(14, 'am-2', 2300, {
+  ev(11, 'am-1', 2000, { type: 'task.state', from: 'pr_open', to: 'done' }),
+  ev(12, 'am-2', 2200, { type: 'task.claimed', title: 'Second task', tracker: 'bd' }),
+  ev(13, 'am-2', 2300, {
     type: 'question.asked',
     questionId: 'q-1',
     question: 'Which port?',
     options: ['8080', '4321'],
     gateRef: null,
   }),
-  ev(15, 'am-2', 2400, {
+  ev(14, 'am-2', 2400, {
     type: 'question.answered',
     questionId: 'q-1',
     answer: '4321',
@@ -65,15 +64,14 @@ describe('dashboard state reducer', () => {
     const a = recorded.reduce(reduceState, initialDashboardState())
     const b = recorded.reduce(reduceState, initialDashboardState())
     expect(b).toEqual(a)
-    expect(b.latestSeq).toBe(15)
+    expect(b.latestSeq).toBe(14)
   })
 
-  test('folding projects tasks, review rounds, worktree, branch, PR and checks', () => {
+  test('folding projects tasks, worktree, branch, PR and checks', () => {
     const state = recorded.reduce(reduceState, initialDashboardState())
     const done = state.tasks['am-1']
     expect(done?.title).toBe('Fix the thing')
     expect(done?.state).toBe('done')
-    expect(done?.reviewRound).toBe(1)
     expect(done?.worktree).toBe('/tmp/amagi/am-1')
     expect(done?.branch).toBe('fix-the-thing')
     expect(done?.prUrl).toBe('https://github.com/x/amagi/pull/1')
@@ -82,19 +80,7 @@ describe('dashboard state reducer', () => {
     expect(done?.checksOk).toBe(false)
     expect(done?.lastCommit?.sha).toBe('abc123')
     expect(done?.createdAt).toBe(1000)
-    expect(done?.updatedAt).toBe(2100)
-  })
-
-  test('review round increments once per reviewing entry', () => {
-    // recorded ends am-1 at 'done'; replay without the terminal event so the
-    // second cycle starts from a legal reviewing state.
-    const withSecondReview = [
-      ...recorded.filter((e) => e.seq !== 12),
-      ev(16, 'am-1', 2500, { type: 'task.state', from: 'reviewing', to: 'fixing' }),
-      ev(17, 'am-1', 2600, { type: 'task.state', from: 'fixing', to: 'reviewing' }),
-    ]
-    const state = withSecondReview.reduce(reduceState, initialDashboardState())
-    expect(state.tasks['am-1']?.reviewRound).toBe(2)
+    expect(done?.updatedAt).toBe(2000)
   })
 
   test('the shared reducer rejects illegal transitions like the server does', () => {
@@ -130,8 +116,8 @@ describe('dashboard state reducer', () => {
 
   test('attention list includes only tasks stopped for a human', () => {
     const state = [
-      ...recorded.filter((e) => e.seq !== 12),
-      ev(16, 'am-1', 2500, { type: 'task.state', from: 'reviewing', to: 'needs_human' }),
+      ...recorded.filter((e) => e.seq !== 11),
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'pr_open', to: 'needs_human' }),
       ev(17, 'am-3', 2600, { type: 'task.claimed', title: 'Still running', tracker: 'bd' }),
     ].reduce(reduceState, initialDashboardState())
 
@@ -141,7 +127,7 @@ describe('dashboard state reducer', () => {
   test('questions resolve from events', () => {
     const state = recorded.reduce(reduceState, initialDashboardState())
     expect(openQuestionsFor(state, 'am-2')).toEqual([])
-    const before = recorded.filter((e) => e.seq !== 15).reduce(reduceState, initialDashboardState())
+    const before = recorded.filter((e) => e.seq !== 14).reduce(reduceState, initialDashboardState())
     expect(openQuestionsFor(before, 'am-2').map((q) => q.id)).toEqual(['q-1'])
     expect(before.questions['q-1']?.answer).toBeNull()
   })

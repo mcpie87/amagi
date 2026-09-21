@@ -26,7 +26,6 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
         session_id   text,
         pr_url       text,
         pr_number    integer,
-        review_round integer not null default 0,
         last_error   text,
         created_at   integer not null,
         updated_at   integer not null

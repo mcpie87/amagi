@@ -97,18 +97,14 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `awaiting_answer` | The agent called `amagi ask` and is parked on a human answer | `implementing` |
 | `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `committed` (checks passed) |
 | `committed` | Changes committed to the branch | `pr_open` |
-| `pr_open` | Pull request opened against `repo.baseBranch` | `reviewing` |
-| `reviewing` | Review harness runs against the PR | `fixing`, `done` |
-| `fixing` | Implement harness addresses review findings | `awaiting_answer`, `checks`, `reviewing` |
+| `pr_open` | Pull request opened against `repo.baseBranch` | — |
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
 
-**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
-
-A task also carries a `reviewRound` counter (visible in `amagi status`) for when that loop lands.
+**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. The review loop (a reviewer that inspects the PR and a fixing pass that addresses its findings) is not built yet; a task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 ## The runner service
 
@@ -174,14 +170,8 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
-| `harness.review.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"codex"` | Harness that reviews the PR. Reserved for the review loop (see [state machine](#the-task-state-machine)); not invoked by the runner yet. |
-| `harness.review.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
-| `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
-| `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
-| `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
 | `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
-| `loop.maxReviewRounds` | integer >= 0 | `3` | Review/fix rounds before escalating to `needs_human`. Reserved for the review loop. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |

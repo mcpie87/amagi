@@ -50,8 +50,6 @@ export const stateLabels: Record<TaskState, string> = {
   committed: 'Committed',
   retrying: 'Retrying',
   pr_open: 'PR open',
-  reviewing: 'Reviewing',
-  fixing: 'Fixing',
   done: 'Completed',
   no_pr: 'No PR needed',
   needs_human: 'Needs attention',
