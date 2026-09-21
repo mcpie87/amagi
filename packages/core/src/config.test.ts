@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadConfig } from './config.ts'
+import { loadConfig, writeConfig } from './config.ts'
 
 let home: string
 let repo: string
@@ -115,5 +115,25 @@ describe('loadConfig', () => {
   test('malformed toml is not swallowed', () => {
     writeRepo('[tracker\nkind = "beads"\n')
     expect(() => loadConfig(repo)).toThrow()
+  })
+
+  test('rejects maxParallel above the ceiling', () => {
+    writeRepo('[loop]\nmaxParallel = 100\n')
+    expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+  })
+})
+
+describe('writeConfig', () => {
+  test('merges a patch into the repo config and preserves other keys', () => {
+    writeRepo('[forge]\nkind = "forgejo"\n\n[loop]\nmaxParallel = 1\n')
+    writeConfig(repo, { loop: { maxParallel: 6 } })
+    const { config } = loadConfig(repo)
+    expect(config.loop.maxParallel).toBe(6)
+    expect(config.forge.kind).toBe('forgejo')
+  })
+
+  test('creates the repo config file when absent', () => {
+    writeConfig(repo, { loop: { maxParallel: 3 } })
+    expect(loadConfig(repo).config.loop.maxParallel).toBe(3)
   })
 })

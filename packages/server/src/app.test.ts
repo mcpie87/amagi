@@ -14,6 +14,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
+import { loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -510,6 +511,7 @@ describe('runner endpoints', () => {
     status: () => ({ available: true, capacity: 1, running: [] }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
+    setMaxParallel: () => {},
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -608,6 +610,68 @@ describe('runner endpoints', () => {
     expect(stopped).toEqual(['bd-1'])
 
     expect((await post('/api/runs/bd-9/stop')).status).toBe(404)
+  })
+})
+
+describe('repo settings endpoints', () => {
+  const patch = (repo: string, body: string) =>
+    app.request(`/api/repos/${repo}/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1', 'repo2'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('GET returns the current worker count', async () => {
+    const res = await app.request('/api/repos/repo1/settings')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ maxParallel: 1 })
+  })
+
+  test('PATCH persists, updates the workspace config, and is re-readable', async () => {
+    const res = await patch('repo1', '{"maxParallel":4}')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ maxParallel: 4 })
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
+      maxParallel: 4,
+    })
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
+  })
+
+  test('PATCH rejects worker counts outside the range', async () => {
+    for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
+      const res = await patch('repo1', JSON.stringify({ maxParallel }))
+      expect(res.status).toBe(400)
+    }
+  })
+
+  test('PATCH live-applies the runner only for the repo it serves', async () => {
+    const applied: number[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: () => ({ available: true, capacity: 1, running: [] }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: (n) => applied.push(n),
+      },
+      runnerRepo: 'repo1',
+    })
+    expect((await patch('repo1', '{"maxParallel":3}')).status).toBe(200)
+    expect(applied).toEqual([3])
+    expect((await patch('repo2', '{"maxParallel":2}')).status).toBe(200)
+    expect(applied).toEqual([3])
+  })
+
+  test('404s for an unknown repo', async () => {
+    expect((await app.request('/api/repos/nope/settings')).status).toBe(404)
   })
 })
 

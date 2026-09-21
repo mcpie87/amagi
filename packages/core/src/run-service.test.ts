@@ -244,6 +244,29 @@ describe('RunService', () => {
     expect(service.status()).toEqual({ available: true, capacity: 2, running: [] })
   })
 
+  test('setMaxParallel changes capacity live without touching running runs', async () => {
+    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1)
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    service.setMaxParallel(4)
+    expect(service.status()).toEqual({ available: true, capacity: 4, running: [TASK.id] })
+    // a buggy caller cannot zero the runner out
+    service.setMaxParallel(0)
+    expect(service.status().capacity).toBe(1)
+    await service.stop(TASK.id)
+  })
+
+  test('setMaxParallel raises the ceiling for new launches', async () => {
+    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 1)
+    expect((await service.start(TASK.id)).ok).toBe(true)
+    expect((await service.start(TASK2.id)).ok).toBe(false)
+    service.setMaxParallel(2)
+    expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+  })
+
   test('start launches the next ready task and it completes', async () => {
     const service = makeService(
       new FakeTracker([TASK]),

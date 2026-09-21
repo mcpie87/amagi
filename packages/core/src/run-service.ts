@@ -19,6 +19,8 @@ export interface RunServiceApi {
   status(): RunnerStatus
   start(taskId?: string): Promise<StartResult>
   stop(taskId: string): Promise<StopResult>
+  /** Live capacity change; only affects new launches, never in-flight runs. */
+  setMaxParallel(n: number): void
 }
 
 export type RunServiceOptions = {
@@ -41,13 +43,22 @@ export type RunServiceOptions = {
  * checked against the tracker before taking the task.
  */
 export class RunService implements RunServiceApi {
-  private readonly capacity: number
+  private capacity: number
   private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
 
   constructor(private readonly opts: RunServiceOptions) {
     this.capacity = opts.maxParallel ?? opts.config.loop.maxParallel
+  }
+
+  /**
+   * Live capacity change: `status()` and new launches read the new value, runs
+   * already in flight are untouched. The floor keeps a buggy caller from
+   * zeroing out the runner; the upper bound is enforced at the config/API layer.
+   */
+  setMaxParallel(n: number): void {
+    this.capacity = Math.max(1, n)
   }
 
   status(): RunnerStatus {
