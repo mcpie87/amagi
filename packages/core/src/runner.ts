@@ -524,6 +524,20 @@ export class Runner {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    if (changes.length === 0) {
+      // The worktree was dirty and a commit was made, yet the three-dot diff
+      // against the base is empty: the agent re-applied change already on the
+      // base. Nothing to push, so no PR. Distinct from the 'produced no
+      // changes' reason: that agent did nothing, this one duplicated existing
+      // work.
+      this.transition(
+        task.id,
+        'no_pr',
+        `the agent committed, but the diff against ${config.repo.baseBranch} is empty; ` +
+          `the work is probably already on ${config.repo.baseBranch}`,
+      )
+      return
+    }
     // The agent may have appended a how-to-use section to the task description
     // while implementing; re-read it so the PR body is not built from the stale
     // claim. Best effort: a failed re-read falls back to the claimed task.
