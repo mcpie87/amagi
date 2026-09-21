@@ -87,6 +87,12 @@ export const AnswerBody = z.object({
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
 
+/** A message from the operator to the worker behind a parked task. */
+export const ChatBody = z.object({
+  message: z.string().trim().min(1).max(4000),
+})
+export type ChatBody = z.infer<typeof ChatBody>
+
 export const SettingsBody = z.object({
   maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
 })

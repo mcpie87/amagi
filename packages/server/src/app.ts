@@ -1,5 +1,6 @@
 import {
   CAPABILITY_WORDS,
+  ChatService,
   classifyDifficulty,
   isTerminal,
   makeHarness,
@@ -20,6 +21,7 @@ import {
   type Workspaces,
   writeConfig,
 } from '@amagi/core'
+import type { Harness } from '@amagi/core/drivers/types'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -29,6 +31,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  ChatBody,
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
@@ -56,6 +59,8 @@ export type ServerDeps = {
   runnerRepo?: string
   /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
   workers?: () => WorkerActivity[]
+  /** Overridable so tests stub the harness a workspace's chat uses. */
+  chatHarnessFor?: (ws: Workspace) => Harness
 }
 
 /**
@@ -159,7 +164,25 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [], runner, runnerRepo, workers }: ServerDeps) {
+export function createApp({
+  workspaces,
+  notify = [],
+  runner,
+  runnerRepo,
+  workers,
+  chatHarnessFor,
+}: ServerDeps) {
+  // One ChatService per workspace, so the in-flight guard survives requests.
+  const chats = new Map<string, ChatService>()
+  const chatFor = (ws: Workspace): ChatService => {
+    let chat = chats.get(ws.key)
+    if (chat === undefined) {
+      const harness = chatHarnessFor?.(ws) ?? makeHarness(ws.config.harness.implement)
+      chat = new ChatService({ store: ws.store, harness, config: ws.config })
+      chats.set(ws.key, chat)
+    }
+    return chat
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -446,6 +469,22 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo, workers
           console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
         }
         return c.json({ task: ws.store.task(id) })
+      },
+    )
+
+    .post(
+      '/api/repos/:repo/tasks/:id/chat',
+      valid('param', RepoTaskIdParam),
+      valid('json', ChatBody),
+      (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { message } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const result = chatFor(ws).send(id, message)
+        if (!result.ok) return c.json({ error: result.error }, result.status)
+        // The answer streams back through the repo event stream like any agent
+        // run, so the request returns before the run finishes.
+        return c.json({ taskId: id }, 202)
       },
     )
 

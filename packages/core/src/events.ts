@@ -75,7 +75,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'review'])
+export const AgentRole = z.enum(['implement', 'review', 'chat'])
 export type AgentRole = z.infer<typeof AgentRole>
 
 /** One harness dialect normalized into a single shape. */
@@ -145,9 +145,14 @@ export const EventBody = z.discriminatedUnion('type', [
     to: TaskState,
     reason: z.string().optional(),
   }),
-  z.object({ type: z.literal('task.reclaimed') }),
+  z.object({ type: z.literal('task.reclaimed'), reason: z.string().optional() }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
+  z.object({
+    type: z.literal('chat.message'),
+    /** The operator's message to the worker; a chat run's answer streams as agent.stream. */
+    text: z.string(),
+  }),
   z.object({
     type: z.literal('agent.started'),
     role: AgentRole,

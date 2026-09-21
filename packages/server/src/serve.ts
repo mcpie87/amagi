@@ -4,6 +4,7 @@ import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
+import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
 
 export type ServeOptions = {
   workspaces: Workspaces
@@ -13,6 +14,7 @@ export type ServeOptions = {
   gatePollIntervalMs?: number
   prPollIntervalMs?: number
   mentionWatchIntervalMs?: number
+  stallWatchIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
@@ -42,8 +44,9 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
 
 /**
  * Gate and PR pollers are per repo, plus an agent-mention watcher wherever a
- * forge driver exists. A supervisor checks the registry every few seconds so
- * a repo added (or removed) after startup gets (or loses) its pollers without
+ * forge driver exists and a stall watcher (recovers tasks whose worker stopped
+ * heartbeating). A supervisor checks the registry every few seconds so a repo
+ * added (or removed) after startup gets (or loses) its pollers without
  * restarting the server.
  */
 function startRepoPollers(
@@ -52,15 +55,22 @@ function startRepoPollers(
     gateIntervalMs,
     prIntervalMs,
     mentionIntervalMs,
+    stallIntervalMs,
   }: {
     gateIntervalMs?: number
     prIntervalMs?: number
     mentionIntervalMs?: number
+    stallIntervalMs?: number
   },
 ) {
   const pollers = new Map<
     string,
-    { gate: GatePoller; pr: PrPoller | null; mention: MentionWatcher | null }
+    {
+      gate: GatePoller
+      pr: PrPoller | null
+      mention: MentionWatcher | null
+      stall: StallWatcher
+    }
   >()
 
   function ensure(): void {
@@ -71,6 +81,7 @@ function startRepoPollers(
       p?.gate.stop()
       p?.pr?.stop()
       p?.mention?.stop()
+      p?.stall.stop()
       pollers.delete(key)
     }
     for (const key of keys) {
@@ -86,39 +97,40 @@ function startRepoPollers(
       }
       if (!ws) continue
       const forge = ws.forge
-      if (forge === null) {
-        pollers.set(key, {
-          gate: startGatePoller({
-            store: ws.store,
-            tracker: ws.tracker,
-            ...(gateIntervalMs === undefined ? {} : { intervalMs: gateIntervalMs }),
-          }),
-          pr: null,
-          mention: null,
-        })
-        continue
-      }
       pollers.set(key, {
         gate: startGatePoller({
           store: ws.store,
           tracker: ws.tracker,
           ...(gateIntervalMs === undefined ? {} : { intervalMs: gateIntervalMs }),
         }),
-        pr: startPrPoller({
-          store: ws.store,
-          forge,
-          tracker: ws.tracker,
-          cwd: ws.root,
-          ...(prIntervalMs === undefined ? {} : { intervalMs: prIntervalMs }),
-        }),
-        mention: startMentionWatcher({
+        pr:
+          forge === null
+            ? null
+            : startPrPoller({
+                store: ws.store,
+                forge,
+                tracker: ws.tracker,
+                cwd: ws.root,
+                ...(prIntervalMs === undefined ? {} : { intervalMs: prIntervalMs }),
+              }),
+        mention:
+          forge === null
+            ? null
+            : startMentionWatcher({
+                repo: ws.key,
+                root: ws.root,
+                repoName: ws.name,
+                config: ws.config,
+                driver: forge,
+                tracker: ws.tracker,
+                intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
+              }),
+        stall: startStallWatcher({
           repo: ws.key,
-          root: ws.root,
-          repoName: ws.name,
-          config: ws.config,
-          driver: forge,
+          store: ws.store,
           tracker: ws.tracker,
-          intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
+          timeoutMs: ws.config.loop.stallTimeoutSec * 1000,
+          intervalMs: stallIntervalMs ?? ws.config.loop.stallWatchIntervalSec * 1000,
         }),
       })
     }
@@ -127,7 +139,10 @@ function startRepoPollers(
   ensure()
   const supervisor = setInterval(ensure, 10_000)
   const workers = (): WorkerActivity[] =>
-    [...pollers.values()].flatMap((p) => (p.mention ? [p.mention.activity()] : []))
+    [...pollers.values()].flatMap((p) => [
+      ...(p.mention ? [p.mention.activity()] : []),
+      p.stall.activity(),
+    ])
   return {
     workers,
     stop() {
@@ -136,6 +151,7 @@ function startRepoPollers(
         p.gate.stop()
         p.pr?.stop()
         p.mention?.stop()
+        p.stall.stop()
       }
       pollers.clear()
     },
@@ -150,6 +166,7 @@ export function serve({
   gatePollIntervalMs,
   prPollIntervalMs,
   mentionWatchIntervalMs,
+  stallWatchIntervalMs,
   staticDir,
   runner,
   runnerRepo,
@@ -158,6 +175,7 @@ export function serve({
     ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),
     ...(prPollIntervalMs === undefined ? {} : { prIntervalMs: prPollIntervalMs }),
     ...(mentionWatchIntervalMs === undefined ? {} : { mentionIntervalMs: mentionWatchIntervalMs }),
+    ...(stallWatchIntervalMs === undefined ? {} : { stallIntervalMs: stallWatchIntervalMs }),
   })
   const app = createApp({
     workspaces,

@@ -29,17 +29,15 @@ to the API at `http://127.0.0.1:7777`.
 
 ### Dashboard
 
-The dashboard is the shared control room for the connected server:
+The dashboard is the shared control room for the connected server. The header holds the repo selector, a runner status indicator (how many capacity slots are busy), and a button to register another repository. Four pages, plus a per-task detail:
 
-- **Overview** brings active runs, open pull requests, questions, and recent activity together.
-- **Runs** searches and filters running, completed, and attention-needed work. Each run has live agent output with follow/pause, check results, a timeline, and workspace context.
-- **Task board** browses tracker tasks with search, status filters, and a saved board/list preference.
-- **Inbox** collects agent questions and stopped runs. Answer questions directly to resume waiting agents.
-- **Activity** shows a searchable timeline of run milestones and decisions.
+- **Queue** shows active runs with state badges, a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and a Workers panel: runner capacity, per-slot resource usage (RSS, CPU, process count), and any running background workers (`respond-to-mentions`, `check-prs`). A **Run next** button launches the next ready task.
+- **Tasks** browses the tracker's issues in Kanban or List view (the choice is remembered), with a status filter, pagination, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
+- **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
+- **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
+- **Task detail** (linked from Queue and Tasks) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place. Its actions cover reclaim, retry, stop, and instant close.
 
-Use Ctrl+K or Cmd+K to find a page or run. Connection status shows when the event stream is reconnecting and displayed data may be stale. On small screens, navigation opens from the menu button.
-
-Starting and stopping runs, editing tracker tasks, and registering multiple repositories still require backend support. The dashboard currently operates on the repository connected to its server.
+Starting and stopping runs, editing tracker tasks, and registering repositories are all live from the dashboard; the event stream is scoped to the selected repo.
 
 ## Usage
 
@@ -141,6 +139,18 @@ Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
 run`) relies on the tracker's atomic claim to avoid double-claiming.
 
+A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
+runs inside `amagi serve`. Every worker process records a liveness heartbeat
+in the store while it drives a task; a worker that dies or hangs leaves its
+task in an in-progress state with no fresh heartbeat. Once a task has been
+silent for `loop.stallTimeoutSec` (default 1h) the watcher recovers it: it
+releases the tracker claim (the issue reads ready again, and any surviving
+runner of that task detects the lost lease and stops itself) and parks the
+task back to `claimed` with its recorded worktree kept, so the next worker
+resumes where the dead one left off. Only in-progress states are watched;
+`pr_open` is excluded, since there the PR is out for human review and no
+worker runs the task.
+
 ## Configuration
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
@@ -171,6 +181,8 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxReviewRounds` | integer >= 0 | `3` | Review/fix rounds before escalating to `needs_human`. Reserved for the review loop. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
+| `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
+| `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
