@@ -2,14 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
+import { MAX_PARALLEL } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
-
-/** Upper bound on concurrent task runs; shared by config, API and dashboard. */
-export const MAX_PARALLEL = 16
 
 export const HarnessConfig = z.object({
   kind: HarnessKind,
