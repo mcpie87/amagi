@@ -93,9 +93,9 @@ export class Runner {
     this.exec = deps.exec ?? defaultExec
   }
 
-  /** Claims one ready task and drives it as far as the current milestone goes. */
-  async runOnce(): Promise<RunOnceResult> {
-    const task = await this.deps.tracker.claim()
+  /** Claims one ready task (or the given id) and drives it as far as the current milestone goes. */
+  async runOnce(taskId?: string): Promise<RunOnceResult> {
+    const task = await this.deps.tracker.claim(taskId)
     if (task === null) return null
 
     const { store } = this.deps
