@@ -440,6 +440,21 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
+  test('a task with no description still gets a summary section from the agent run summary', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([{ ...TASK, description: '' }]),
+      new FakeHarness([
+        { ...writesAFile, outcome: { summary: 'Dedup by exact comment id, not by watermark' } },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(pr.calls[0]?.body).toContain('### 📝 Summary')
+    expect(pr.calls[0]?.body).toContain('Dedup by exact comment id, not by watermark')
+  })
+
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')
