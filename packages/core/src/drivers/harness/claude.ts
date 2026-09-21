@@ -1,17 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { AsyncQueue } from '../../async-queue.ts'
 import type { AgentEvent } from '../../events.ts'
-import { jsonLines } from '../../jsonl.ts'
-import { killTree } from '../../process.ts'
-import type {
-  AgentOutcome,
-  AgentProcess,
-  AgentStartOptions,
-  AgentUsage,
-  Harness,
-} from '../types.ts'
-import { harnessEnv } from './env.ts'
+import { HARDCODED_MODELS } from '../../models.ts'
+import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 /**
  * Enough to implement a task and call `amagi ask`, without handing over the
@@ -48,21 +40,7 @@ type ClaudeMessage = {
   total_cost_usd?: number
   model?: string
   message?: { model?: string; content?: ContentBlock[] }
-  usage?: { input_tokens?: number; output_tokens?: number }
-}
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number }
 }
 
 /**
@@ -136,12 +114,14 @@ export class ClaudeTranslator {
       this.usage = {
         inputTokens: msg.usage.input_tokens ?? 0,
         outputTokens: msg.usage.output_tokens ?? 0,
+        cachedTokens: msg.usage.cache_read_input_tokens ?? 0,
         costUsd: msg.total_cost_usd ?? null,
       }
       events.push({
         kind: 'usage',
         inputTokens: this.usage.inputTokens,
         outputTokens: this.usage.outputTokens,
+        ...(this.usage.cachedTokens === 0 ? {} : { cachedTokens: this.usage.cachedTokens }),
         ...(this.usage.costUsd === null ? {} : { costUsd: this.usage.costUsd }),
       })
     }
@@ -184,6 +164,14 @@ export class ClaudeHarness implements Harness {
     return this.spawn(this.argv(opts, null), opts)
   }
 
+  async listModels(): Promise<string[]> {
+    return [...HARDCODED_MODELS.claude]
+  }
+
+  async listEfforts(): Promise<string[]> {
+    return ['low', 'medium', 'high', 'xhigh']
+  }
+
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.spawn(this.argv(opts, sessionId), opts)
   }
@@ -208,54 +196,12 @@ export class ClaudeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    let env = { ...harnessEnv(), ...opts.env }
-    if (opts.effort) env = { ...env, CLAUDE_EFFORT: opts.effort }
-
-    const proc = Bun.spawn(argv, {
-      cwd: opts.cwd,
-      env,
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-
-    const queue = new AsyncQueue<AgentEvent>()
     const translator = new ClaudeTranslator()
-    const stderr = new Response(proc.stderr).text()
-
-    const done: Promise<AgentOutcome> = (async () => {
-      try {
-        for await (const raw of jsonLines(proc.stdout)) {
-          for (const event of translator.push(raw)) queue.push(event)
-        }
-      } catch (err) {
-        queue.push({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
-      } finally {
-        queue.close()
-      }
-
-      const exitCode = await proc.exited
-      return {
-        exitCode,
-        ok: translator.ok && exitCode === 0,
-        sessionId: translator.sessionId,
-        summary: translator.summary,
-        usage: translator.usage,
-        stderr: await stderr,
-      }
-    })()
-
-    return {
-      pid: proc.pid,
-      events: () => queue,
-      done,
-      kill: async () => {
-        await killTree(proc.pid)
-      },
-      get model() {
-        return translator.model
-      },
+    return spawnAgent(argv, opts, translator, {
+      // claude reads its effort from the CLAUDE_EFFORT env var, not a flag.
+      env: opts.effort ? { CLAUDE_EFFORT: opts.effort } : {},
+      model: () => translator.model,
       effort: opts.effort ?? this.defaultEffort,
-    }
+    })
   }
 }

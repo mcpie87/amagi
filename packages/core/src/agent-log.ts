@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentRole } from '@amagi/core/events'
+import type { AgentEvent, AgentRole } from './events.ts'
 
 export type AgentLogLine = {
   id: number
@@ -65,8 +65,9 @@ function splitLines(text: string): string[] {
 }
 
 function formatUsage(event: Extract<AgentEvent, { kind: 'usage' }>): string {
+  const cached = event.cachedTokens !== undefined ? ` cached=${event.cachedTokens}` : ''
   const cost = event.costUsd !== undefined ? ` cost=$${event.costUsd.toFixed(4)}` : ''
-  return `tokens in=${event.inputTokens} out=${event.outputTokens}${cost}`
+  return `tokens in=${event.inputTokens} out=${event.outputTokens}${cached}${cost}`
 }
 
 /** Splits one AgentEvent into the individual rows it renders as in the log. */

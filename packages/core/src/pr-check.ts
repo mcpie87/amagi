@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { gitTokenConfig } from './drivers/pr.ts'
+import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
-import { branchExists } from './worktree.ts'
+import { applyPersona, branchExists } from './worktree.ts'
 
 export type PrInfo = {
   number: number
@@ -12,6 +12,8 @@ export type PrInfo = {
   baseRefName: string
   mergeable: string
   mergeStateStatus: string
+  /** Last activity timestamp, so pollers can skip PRs that have not changed. */
+  updatedAt: string
 }
 
 export type PrCheckOptions = {
@@ -19,7 +21,7 @@ export type PrCheckOptions = {
   exec?: Exec
 }
 
-const GH_FIELDS = 'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus'
+const GH_FIELDS = 'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,updatedAt'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -33,6 +35,7 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
   const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
     cwd: opts.cwd,
+    env: ghEnv(),
   })
   return JSON.parse(out) as PrInfo[]
 }
@@ -43,6 +46,8 @@ export type PrepareConflictWorktreeOptions = {
   worktreeRoot: string
   baseBranch: string
   pr: PrInfo
+  /** Git persona name; the matching ~/.config/git/personas/<name>.gitconfig is included. */
+  persona?: string | null
   exec?: Exec
 }
 
@@ -62,7 +67,7 @@ export async function prepareConflictWorktree(
   opts: PrepareConflictWorktreeOptions,
 ): Promise<ConflictWorktree> {
   const run = opts.exec ?? defaultExec
-  const tokenCfg = gitTokenConfig()
+  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
 
   await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', opts.baseBranch], {
     cwd: opts.repoRoot,
@@ -82,6 +87,10 @@ export async function prepareConflictWorktree(
     await execOk(run, args, { cwd: opts.repoRoot })
   }
 
+  if (opts.persona) {
+    await applyPersona(run, path, opts.persona)
+  }
+
   const merge = await run(['git', 'merge', `origin/${opts.baseBranch}`], { cwd: path })
   return { path, branch, conflicted: merge.exitCode !== 0 }
 }
@@ -97,9 +106,10 @@ export type PushConflictFixOptions = {
 /** Pushes the resolved local branch back to the PR head ref, updating the PR. */
 export async function pushConflictFix(opts: PushConflictFixOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
+  const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github'))
   await execOk(
     run,
-    ['git', ...gitTokenConfig(), 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],
+    ['git', ...tokenCfg, 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],
     { cwd: opts.cwd },
   )
 }
@@ -119,7 +129,7 @@ export async function prMergeStatus(
   const out = await execOk(
     run,
     ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-    { cwd },
+    { cwd, env: ghEnv() },
   )
   return JSON.parse(out) as PrMergeStatus
 }

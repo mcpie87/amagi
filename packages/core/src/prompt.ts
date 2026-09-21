@@ -20,6 +20,14 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
+    '- Never pipe check or lint output through head/tail: it aborts the tool',
+    '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
+    '- If your changes add a user-facing feature (new CLI command or flag, new config',
+    "  option, new API endpoint), append a short `### How to use` section to the task's",
+    '  description in the issue tracker: how to trigger it and what it does. The PR',
+    '  description is built from that description.',
+    '- End your final message with a short summary of what was done; it is used as',
+    '  the reason when no pull request is opened.',
   ]
 
   if (ctx.askCommand) {
@@ -38,6 +46,20 @@ export function implementPrompt(ctx: PromptContext): string {
   const parts = [`Task ${ctx.task.id}: ${ctx.task.title}`]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
   parts.push('', 'Implement this task completely, then stop.')
+  return parts.join('\n')
+}
+
+/** A previously interrupted run was reclaimed and its worktree resumed. */
+export function reclaimPrompt(ctx: PromptContext): string {
+  const parts = [
+    `Task ${ctx.task.id}: ${ctx.task.title}`,
+    '',
+    'This task was interrupted mid-run and is being resumed. Existing work is',
+    'already in the worktree and branch; inspect the current state, continue',
+    'where it left off, and finish what is missing.',
+  ]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push('', 'Continue this task completely, then stop.')
   return parts.join('\n')
 }
 
@@ -115,5 +137,154 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
     )
   }
   parts.push('', 'Then finish the merge with `git add -A` and `git commit`, and stop.')
+  return parts.join('\n')
+}
+
+export type MentionPromptContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+  worktree: string
+  branch: string
+  baseBranch: string
+  checks: readonly string[]
+}
+
+export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string {
+  const lines = [
+    'You are working inside a dedicated git worktree on a pull request, responding to review feedback from a human.',
+    `Worktree: ${ctx.worktree}`,
+    `Branch: ${ctx.branch}`,
+    `Pull request: #${ctx.pr.number} ${ctx.pr.title} (${ctx.pr.url})`,
+    `Base branch: ${ctx.baseBranch}`,
+    '',
+    'Rules:',
+    '- Stay inside this worktree. Do not touch other checkouts of this repository.',
+    '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
+    '- Commit your changes. Do not push; the dispatcher pushes.',
+  ]
+  return lines.join('\n')
+}
+
+export function respondToMentionPrompt(ctx: MentionPromptContext): string {
+  const parts = [
+    `A human (@${ctx.mention.user}) left feedback on PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+  ]
+  if (ctx.checks.length > 0) {
+    parts.push(
+      '',
+      'Run the project checks and make sure they pass before committing:',
+      ...ctx.checks.map((c) => `- ${c}`),
+    )
+  }
+  parts.push(
+    '',
+    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+  )
+  return parts.join('\n')
+}
+
+export type ExplainMentionContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+  diff: string
+  outPath: string
+}
+
+export function explainMentionSystemPrompt(): string {
+  return [
+    'You are explaining changes made in a pull request to a human reviewer.',
+    'Read the review comment and the diff, then write a clear explanation.',
+    'Do not modify any files in the repository.',
+  ].join('\n')
+}
+
+export type MentionClassifyContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+}
+
+export function classifyMentionSystemPrompt(): string {
+  return [
+    'You are a classifier for comments on a pull request.',
+    'Do not use any tools. Do not modify any files.',
+    'Reply with exactly one token, nothing else.',
+  ].join('\n')
+}
+
+export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
+  return [
+    `A human (@${ctx.mention.user}) commented on PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+    '',
+    'Classify the comment into exactly one of:',
+    '- fix-pr — the human wants code in this PR changed',
+    '- explain — the human is asking why or how something was done',
+    '- add-a-task — the human wants a new task tracked in the issue tracker, not done in this PR',
+    '- ambiguous — the intent is unclear or none of the above',
+    '',
+    'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
+  ].join('\n')
+}
+
+export function explainMentionPrompt(ctx: ExplainMentionContext): string {
+  return [
+    `A human (@${ctx.mention.user}) asked about PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+    '',
+    `Write your explanation to this file: ${ctx.outPath}`,
+    'It will be posted as a comment on the PR. Be concrete: what the changes do, why they were made, and how they fit together.',
+    '',
+    'Pull request diff:',
+    '',
+    ctx.diff,
+    '',
+    'Write the explanation to the file and stop.',
+  ].join('\n')
+}
+
+export type DifficultyClassifyContext = {
+  title: string
+  description: string
+  levels: readonly string[]
+}
+
+export function classifyDifficultySystemPrompt(): string {
+  return [
+    'You are a classifier for issue tracker tasks.',
+    'Do not use any tools. Do not modify any files.',
+    'Reply with exactly one token, nothing else.',
+  ].join('\n')
+}
+
+export function classifyDifficultyPrompt(ctx: DifficultyClassifyContext): string {
+  const parts = [`Task: ${ctx.title}`]
+  if (ctx.description.trim() !== '') parts.push('', ctx.description.trim())
+  parts.push(
+    '',
+    `Classify how difficult this task is for an AI coding agent to implement, into exactly one of: ${ctx.levels.join(', ')}.`,
+    'Consider scope, ambiguity, risk, and how many files or systems it likely touches.',
+    '',
+    `Reply with exactly one token: ${ctx.levels.join(', ')}.`,
+  )
+  return parts.join('\n')
+}
+
+/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
+export function whyNoChangesPrompt(task: TrackerTask): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    'The run ended with no changes in the worktree, so no pull request was opened.',
+    'Explain in a few sentences why no changes were made: was the task already done,',
+    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
+    'the reason no PR was opened, so be concrete.',
+    '',
+    'Do not modify any files; reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
   return parts.join('\n')
 }

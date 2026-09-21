@@ -9,6 +9,8 @@
   "dependencies": {
     "@amagi/core": "workspace:*",
     "@amagi/server": "workspace:*",
+    "@amagi/tui": "workspace:*",
+    "@clack/prompts": "1.8.1",
     "citty": "^0.1.6"
   }
 }
