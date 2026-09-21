@@ -19,11 +19,19 @@ import {
   explainMentionSystemPrompt,
   respondToMentionPrompt,
   respondToMentionSystemPrompt,
+  takeDownPrompt,
+  takeDownSystemPrompt,
 } from './prompt.ts'
 
-export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'ambiguous'
+export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'take-down' | 'ambiguous'
 
-const MENTION_KINDS: readonly MentionKind[] = ['fix-pr', 'explain', 'add-a-task', 'ambiguous']
+const MENTION_KINDS: readonly MentionKind[] = [
+  'fix-pr',
+  'explain',
+  'add-a-task',
+  'take-down',
+  'ambiguous',
+]
 
 /** Best-effort parse of the classifier's reply; anything unrecognised is ambiguous. */
 export function parseMentionKind(reply: string): MentionKind {
@@ -117,7 +125,7 @@ export type RespondToMentionOptions = {
   mention: PrComment
   config: Config
   driver: PrDriver
-  /** Tracker used by the add-a-task response; optional so callers without one still work. */
+  /** Tracker used to post take-down reasons and log add-a-task responses; optional so callers without one still reply on the PR. */
   tracker?: Tracker
   exec?: Exec
   /** Test seam: the harness factory, defaulting to the configured one. */
@@ -179,6 +187,11 @@ class Progress {
       tool: this.tool,
     })
   }
+}
+
+/** Task id (e.g. "am-544") embedded in an amagi-authored PR title like "am-544: Short name". */
+export function taskIdFromPrTitle(title: string): string | null {
+  return title.match(/\bam-[a-z0-9.]+\b/i)?.[0] ?? null
 }
 
 function startImplementHarness(
@@ -362,6 +375,7 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     priority: null,
     labels: [],
     dependencies: [],
+    parent: null,
     ...(difficulty === null ? {} : { difficulty }),
   })
   const where = task.url ?? `task ${task.id}`
@@ -370,6 +384,63 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     opts.pr.number,
     `@${opts.mention.user} Logged this as ${where}.${configuredFooter(opts.config)}`,
   )
+}
+
+/**
+ * Lets the LLM judge whether a PR deserves to be taken down. When it rules
+ * `TAKE DOWN`, the reason is posted as a comment on the task issue in the
+ * tracker; a `KEEP` verdict only replies on the PR. The agent never touches
+ * the forge itself, so nothing is closed or reverted automatically.
+ */
+async function respondToTakeDown(
+  opts: RespondToMentionOptions,
+  run: Exec,
+  p: Progress,
+): Promise<void> {
+  const mk = opts.makeHarnessFn ?? makeHarness
+  p.phase('preparing worktree')
+  const wt = await prWorktree(opts, run)
+  const outPath = join(tmpdir(), `amagi-takedown-${opts.pr.number}-${opts.mention.id}.md`)
+  let verdict: string
+  let reason: string
+  try {
+    p.phase('judging')
+    const proc = startImplementHarness(
+      mk,
+      opts.config.harness.implement,
+      wt.path,
+      takeDownPrompt({
+        pr: opts.pr,
+        mention: opts.mention,
+        outPath,
+      }),
+      takeDownSystemPrompt(),
+    )
+    const outcome = await p.agent(proc, 'judging')
+    if (!outcome.ok) {
+      throw new Error(
+        `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
+      )
+    }
+    const raw = readFileSync(outPath, 'utf8').trim()
+    if (raw === '') throw new Error('agent produced no take-down verdict')
+    verdict = raw.split('\n', 1)[0]?.trim().toUpperCase() ?? ''
+    reason = raw.split('\n').slice(1).join('\n').trim()
+    if (reason === '') reason = raw
+  } finally {
+    rmSync(outPath, { force: true })
+  }
+
+  p.phase('posting comment')
+  await opts.driver.postComment(opts.root, opts.pr.number, reason)
+  if (verdict !== 'TAKE DOWN') return
+  if (opts.tracker === undefined) return
+
+  const taskId = taskIdFromPrTitle(opts.pr.title)
+  if (taskId === null) return
+  const task = await opts.tracker.get(taskId)
+  if (task === null) return
+  await opts.tracker.comment(taskId, reason)
 }
 
 /** Responds to a single mention. Throws when the response fails so the caller can retry. */
@@ -384,6 +455,9 @@ export async function respondToMention(opts: RespondToMentionOptions): Promise<M
     case 'explain':
       await respondToExplain(opts, run, p)
       return 'explain'
+    case 'take-down':
+      await respondToTakeDown(opts, run, p)
+      return 'take-down'
     case 'add-a-task':
       await respondToAddTask(opts, p)
       return 'add-a-task'

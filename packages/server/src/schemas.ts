@@ -117,6 +117,8 @@ export const IssueCreateBody = z.object({
   labels: z.array(z.string()).default([]),
   /** Issue ids the new task is blocked by. */
   dependencies: z.array(z.string()).default([]),
+  /** Parent issue id when the task is a child of a container (epic/milestone). */
+  parent: z.string().nullable().default(null),
 })
 export type IssueCreateBody = z.infer<typeof IssueCreateBody>
 
