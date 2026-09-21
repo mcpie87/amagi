@@ -66,8 +66,8 @@ export type RunServiceOptions = {
   config: Config
   repoRoot: string
   repoName: string
-  exec?: Exec
-  forge?: PrDriver
+  exec?: Exec | undefined
+  forge?: PrDriver | undefined
   /** Overrides config.loop.maxParallel, mainly for tests. */
   maxParallel?: number
   /**
@@ -226,8 +226,8 @@ export class RunService implements RunServiceApi {
       config,
       repoRoot,
       repoName,
-      ...(exec === undefined ? {} : { exec }),
-      ...(forge === undefined ? {} : { forge }),
+      exec,
+      forge,
     })
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
     this.runs.set(task.id, { runner, done })

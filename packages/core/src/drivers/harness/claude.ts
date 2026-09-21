@@ -135,7 +135,7 @@ export class ClaudeTranslator {
 }
 
 export type ClaudeHarnessOptions = {
-  bin?: string
+  bin?: string | undefined
 }
 
 export class ClaudeHarness implements Harness {

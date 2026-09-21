@@ -29,13 +29,13 @@ export type Workspace = {
   tracker: Tracker
   /** Null when the configured forge driver could not be built (e.g. no forge binary). */
   forge: PrDriver | null
-  listIssues?: () => Promise<BeadsIssue[]>
+  listIssues?: (() => Promise<BeadsIssue[]>) | undefined
   /** Rich issue detail, including dependency blockers, when the tracker has it. */
-  getIssue?: (id: string) => Promise<BeadsIssue | null>
+  getIssue?: ((id: string) => Promise<BeadsIssue | null>) | undefined
   /** Epics whose children are all complete, when the tracker can compute it. */
-  eligibleEpics?: () => Promise<EpicCloseEligible[]>
+  eligibleEpics?: (() => Promise<EpicCloseEligible[]>) | undefined
   /** Close the eligible epics with the operator's reason. */
-  closeEligibleEpics?: (reason: string) => Promise<EpicCloseResult>
+  closeEligibleEpics?: ((reason: string) => Promise<EpicCloseResult>) | undefined
 }
 
 export type WorkspacesOptions = {
@@ -43,7 +43,7 @@ export type WorkspacesOptions = {
   /** Overridable so tests use in-memory databases. */
   storeFor?: (key: string) => Store
   /** Overridable so tests can inject a fake tracker. */
-  trackerFor?: (config: Config, path: string) => Tracker
+  trackerFor?: ((config: Config, path: string) => Tracker) | undefined
 }
 
 /**
@@ -122,10 +122,10 @@ export class Workspaces {
       store,
       tracker,
       forge,
-      ...(listIssues === undefined ? {} : { listIssues }),
-      ...(getIssue === undefined ? {} : { getIssue }),
-      ...(eligibleEpics === undefined ? {} : { eligibleEpics }),
-      ...(closeEligibleEpics === undefined ? {} : { closeEligibleEpics }),
+      listIssues,
+      getIssue,
+      eligibleEpics,
+      closeEligibleEpics,
     }
   }
 

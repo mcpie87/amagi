@@ -137,7 +137,7 @@ export class OpencodeTranslator {
 }
 
 export type OpencodeHarnessOptions = {
-  bin?: string
+  bin?: string | undefined
 }
 
 export class OpencodeHarness implements Harness {

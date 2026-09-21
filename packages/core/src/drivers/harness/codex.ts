@@ -222,7 +222,7 @@ export class CodexTranslator {
 }
 
 export type CodexHarnessOptions = {
-  bin?: string
+  bin?: string | undefined
 }
 
 export class CodexHarness implements Harness {

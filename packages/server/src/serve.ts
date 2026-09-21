@@ -11,7 +11,7 @@ export type ServeOptions = {
   workspaces: Workspaces
   host: string
   port: number
-  notify?: Notifier[]
+  notify?: Notifier[] | undefined
   gatePollIntervalMs?: number
   prPollIntervalMs?: number
   mentionWatchIntervalMs?: number
@@ -20,9 +20,9 @@ export type ServeOptions = {
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
-  runner?: RunServiceApi
+  runner?: RunServiceApi | undefined
   /** The repo key the runner is bound to; its settings apply live to it. */
-  runnerRepo?: string
+  runnerRepo?: string | undefined
 }
 
 /**
@@ -60,11 +60,11 @@ function startRepoPollers(
     prConflictIntervalMs,
     stallIntervalMs,
   }: {
-    gateIntervalMs?: number
-    prIntervalMs?: number
-    mentionIntervalMs?: number
-    prConflictIntervalMs?: number
-    stallIntervalMs?: number
+    gateIntervalMs?: number | undefined
+    prIntervalMs?: number | undefined
+    mentionIntervalMs?: number | undefined
+    prConflictIntervalMs?: number | undefined
+    stallIntervalMs?: number | undefined
   },
 ) {
   const pollers = new Map<
@@ -107,7 +107,7 @@ function startRepoPollers(
         gate: startGatePoller({
           store: ws.store,
           tracker: ws.tracker,
-          ...(gateIntervalMs === undefined ? {} : { intervalMs: gateIntervalMs }),
+          intervalMs: gateIntervalMs,
         }),
         pr:
           forge === null
@@ -117,7 +117,7 @@ function startRepoPollers(
                 forge,
                 tracker: ws.tracker,
                 cwd: ws.root,
-                ...(prIntervalMs === undefined ? {} : { intervalMs: prIntervalMs }),
+                intervalMs: prIntervalMs,
               }),
         mention:
           forge === null
@@ -201,19 +201,17 @@ export function serve({
   runnerRepo,
 }: ServeOptions) {
   const repoPollers = startRepoPollers(workspaces, {
-    ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),
-    ...(prPollIntervalMs === undefined ? {} : { prIntervalMs: prPollIntervalMs }),
-    ...(mentionWatchIntervalMs === undefined ? {} : { mentionIntervalMs: mentionWatchIntervalMs }),
-    ...(prConflictWatchIntervalMs === undefined
-      ? {}
-      : { prConflictIntervalMs: prConflictWatchIntervalMs }),
-    ...(stallWatchIntervalMs === undefined ? {} : { stallIntervalMs: stallWatchIntervalMs }),
+    gateIntervalMs: gatePollIntervalMs,
+    prIntervalMs: prPollIntervalMs,
+    mentionIntervalMs: mentionWatchIntervalMs,
+    prConflictIntervalMs: prConflictWatchIntervalMs,
+    stallIntervalMs: stallWatchIntervalMs,
   })
   const app = createApp({
     workspaces,
-    ...(notify === undefined ? {} : { notify }),
-    ...(runner === undefined ? {} : { runner }),
-    ...(runnerRepo === undefined ? {} : { runnerRepo }),
+    notify,
+    runner,
+    runnerRepo,
     workers: repoPollers.workers,
   })
   const server = Bun.serve({

@@ -19,7 +19,7 @@ export type TestWorkspaces = {
 
 export type TestWorkspacesOptions = {
   /** Injects a fake tracker into every workspace. */
-  trackerFor?: (config: Config, path: string) => Tracker
+  trackerFor?: ((config: Config, path: string) => Tracker) | undefined
 }
 
 /**
@@ -42,7 +42,7 @@ export function testWorkspaces(keys: string[], opts: TestWorkspacesOptions = {})
       stores[key] ??= new Store(openDatabase(':memory:'))
       return stores[key]
     },
-    ...(opts.trackerFor === undefined ? {} : { trackerFor: opts.trackerFor }),
+    trackerFor: opts.trackerFor,
   })
   for (const key of keys) workspaces.get(key)
   return {

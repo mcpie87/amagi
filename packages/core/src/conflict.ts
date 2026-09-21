@@ -14,9 +14,9 @@ export type ResolveConflictOptions = {
   repoName: string
   pr: PrInfo
   config: Config
-  exec?: Exec
+  exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
-  makeHarnessFn?: typeof makeHarness
+  makeHarnessFn?: typeof makeHarness | undefined
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
 }

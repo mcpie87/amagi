@@ -3,7 +3,7 @@ import type { Store, Tracker } from '@amagi/core'
 export type GatePollerOptions = {
   store: Store
   tracker: Tracker
-  intervalMs?: number
+  intervalMs?: number | undefined
 }
 
 export type GatePoller = {

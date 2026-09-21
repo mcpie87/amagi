@@ -118,9 +118,9 @@ export type RespondToMentionOptions = {
   driver: PrDriver
   /** Tracker used by the add-a-task response; optional so callers without one still work. */
   tracker?: Tracker
-  exec?: Exec
+  exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
-  makeHarnessFn?: typeof makeHarness
+  makeHarnessFn?: typeof makeHarness | undefined
   /** Called with live progress while a response is produced, for a status line. */
   onProgress?: (progress: MentionProgress) => void
 }

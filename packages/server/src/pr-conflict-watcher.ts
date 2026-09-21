@@ -73,7 +73,7 @@ export function startPrConflictWatcher({
   async function tick(): Promise<void> {
     const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
     try {
-      const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
+      const prs = await listOpenPrs({ cwd: root, exec })
       scanned = prs.length
       const statePath = conflictWatchPath(repoName)
       const state = readConflictWatch(statePath)
@@ -93,8 +93,8 @@ export function startPrConflictWatcher({
           repoName,
           pr,
           config,
-          ...(exec === undefined ? {} : { exec }),
-          ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+          exec,
+          makeHarnessFn,
         })
         nextState[key] = { headOid }
         if (result.ok) {

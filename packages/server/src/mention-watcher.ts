@@ -84,7 +84,7 @@ export function startMentionWatcher({
       const handledPath = mentionsPath(repoName)
       const watchPath = mentionWatchPath(repoName)
       const handled = readHandledMentions(handledPath)
-      const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
+      const prs = await listOpenPrs({ cwd: root, exec })
       const state = readMentionWatch(watchPath)
       const nextState: MentionWatchState = {}
       for (const pr of prs) {
@@ -121,8 +121,8 @@ export function startMentionWatcher({
               config,
               driver,
               tracker,
-              ...(exec === undefined ? {} : { exec }),
-              ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+              exec,
+              makeHarnessFn,
             })
             handled.add(mention.id)
             saveHandledMentions(handledPath, handled)

@@ -29,11 +29,11 @@ export function makeTracker(config: Config, repoRoot: string, actor = 'amagi'): 
 export function makeHarness(config: Config['harness']['implement']): Harness {
   switch (config.kind) {
     case 'claude':
-      return new ClaudeHarness(config.bin === undefined ? {} : { bin: config.bin })
+      return new ClaudeHarness({ bin: config.bin })
     case 'opencode':
-      return new OpencodeHarness(config.bin === undefined ? {} : { bin: config.bin })
+      return new OpencodeHarness({ bin: config.bin })
     case 'codex':
-      return new CodexHarness(config.bin === undefined ? {} : { bin: config.bin })
+      return new CodexHarness({ bin: config.bin })
     default:
       throw new NotImplementedDriverError('harness', config.kind)
   }
@@ -48,8 +48,8 @@ export function harnessStartOpts(
   cfg: Pick<Config['harness']['implement'], 'model' | 'effort' | 'permissions' | 'extraArgs'>,
 ): Pick<AgentStartOptions, 'model' | 'effort' | 'permissions' | 'extraArgs'> {
   return {
-    ...(cfg.model === undefined ? {} : { model: cfg.model }),
-    ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+    model: cfg.model,
+    effort: cfg.effort,
     permissions: cfg.permissions,
     extraArgs: cfg.extraArgs,
   }

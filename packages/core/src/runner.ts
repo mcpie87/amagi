@@ -28,9 +28,9 @@ export type RunnerDeps = {
   config: Config
   repoRoot: string
   repoName: string
-  exec?: Exec
+  exec?: Exec | undefined
   /** Overridable so tests do not need gh installed. Defaults to the configured forge driver. */
-  forge?: PrDriver
+  forge?: PrDriver | undefined
 }
 
 export type RunOnceResult = {
@@ -217,7 +217,7 @@ export class Runner {
       type: 'task.state',
       from,
       to,
-      ...(reason === undefined ? {} : { reason }),
+      reason,
     })
   }
 
