@@ -83,7 +83,7 @@ picks the tracker, forge, harness and checks. The CLI (`run`, `status`, `clean`,
 `git rev-parse --show-toplevel`, reads and writes that repo's own store, and addresses the
 server's repo-scoped routes by that key.
 
-The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default) and, for the `github` tracker/forge, a `GH_TOKEN` or `GITHUB_TOKEN` in the environment so `gh` and the unattended `git push`/`fetch` never block on interactive auth.
+The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default). Forge access is token-only: export the bot's token into the Amagi process environment (`GH_TOKEN`/`GITHUB_TOKEN` for `github`, `FORGEJO_TOKEN` for `forgejo`) and Amagi uses it for `gh`, `tea` and the unattended `git push`/`fetch` with no `gh auth login` or `tea login` step. Harness agents never inherit forge credentials: token env vars are stripped and their `gh`/`tea` are pointed at empty Amagi-owned config dirs, so an agent that reaches for the forge fails closed instead of using the operator's stored login.
 
 ## The task state machine
 
@@ -162,7 +162,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
 | `repo.persona` | string \| null | `null` | Git persona for commits/PRs: the name of a gitconfig fragment under `~/.config/git/personas/<name>.gitconfig` (e.g. `"agent-chise"`), included in each fresh worktree's own config so its `user.name`/`user.email` apply there without touching the main repo. |
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
-| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. Only `github` (via `gh`) is implemented today; `forgejo` throws `NotImplementedDriverError` if selected. |
+| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. `github` goes through `gh`, `forgejo` through a direct token-authenticated Forgejo API client; both are token-only and never require an interactive login. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
@@ -210,10 +210,13 @@ commands = ["just check"]
 
 | Variable | Effect |
 | --- | --- |
-| `GH_TOKEN` / `GITHUB_TOKEN` | Used for the `github` tracker/forge: rewrites the remote to push/fetch over HTTPS with the token so an unattended run never prompts for an SSH passphrase. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | The bot's GitHub token, exported into the Amagi process environment. Used for the `github` tracker/forge: `gh` runs against an Amagi-owned `GH_CONFIG_DIR` with this token (no `gh auth` state) and the remote is rewritten to push/fetch over HTTPS so an unattended run never prompts for an SSH passphrase. |
+| `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step) and uses it for the direct Forgejo PR API client. `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
 | `AMAGI_DB` | Overrides the SQLite store path (default `$XDG_STATE_HOME/amagi/amagi.db`). Mainly for tests and running multiple isolated instances. |
 | `AMAGI_TASK_TOKEN` | Set by the runner in the harness's environment; `amagi ask` uses it to authenticate its request to the server. Not meant to be set by hand. |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Standard XDG overrides that relocate the global config, the SQLite store, and the default worktree root, respectively. |
+
+Forge credentials never reach harness agents: token env vars are stripped from the agent's environment and `gh`/`tea` are pointed at empty Amagi-owned config dirs (`$XDG_STATE_HOME/amagi/forge/agents/`), so an agent that tries the forge fails closed instead of inheriting the operator's or the bot's stored login.
 
 For OpenCode with a local provider, select the provider/model name OpenCode already knows and, when NixOS wraps the default executable, set `bin` to the unconfined wrapper:
 
