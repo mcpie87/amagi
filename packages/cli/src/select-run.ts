@@ -1,4 +1,5 @@
 import { type Config, HarnessConfig } from '@amagi/core'
+import { byUsage, type Usage } from './picker-usage.ts'
 
 const KINDS = ['claude', 'codex', 'opencode'] as const
 
@@ -15,12 +16,16 @@ export type RunSelection = {
 }
 
 /** Harness choices for the picker: named definitions, or the three known kinds. */
-export function harnessChoices(config: Config): SelectOption<Config['harness']['implement']>[] {
+export function harnessChoices(
+  config: Config,
+  usage: Usage = {},
+): SelectOption<Config['harness']['implement']>[] {
   const defs = Object.entries(config.harness.definitions)
-  if (defs.length > 0) {
-    return defs.map(([name, cfg]) => ({ label: name, value: cfg }))
-  }
-  return KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
+  const base =
+    defs.length > 0
+      ? defs.map(([name, cfg]) => ({ label: name, value: cfg }))
+      : KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
+  return [...base].sort((a, b) => (usage[b.value.kind] ?? 0) - (usage[a.value.kind] ?? 0))
 }
 
 const withModel = (
@@ -32,13 +37,15 @@ const withModel = (
  * Resolves the harness and model for a run. `--harness`/`--model` win and
  * never prompt; without flags a null picker (no TTY) falls back to the config
  * defaults; with a picker the operator chooses harness then model from a
- * cached model list.
+ * cached model list. `usage` ranks the options by how often each was used in
+ * past runs (harness kinds and models), so the most common ones sit on top.
  */
 export async function pickRunSelection(
   config: Config,
   flags: { harness?: string; model?: string },
   picker: Picker | null,
   listModels: (cfg: Config['harness']['implement']) => Promise<string[]>,
+  usage: Usage = {},
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
     const named = config.harness.definitions[flags.harness]
@@ -50,7 +57,7 @@ export async function pickRunSelection(
     return { harness: withModel(config.harness.implement, flags.model), interactive: false }
   }
 
-  const chosen = await picker.select('Which harness?', harnessChoices(config))
+  const chosen = await picker.select('Which harness?', harnessChoices(config, usage))
   if (chosen === null) {
     return { harness: withModel(config.harness.implement, flags.model), interactive: true }
   }
@@ -68,7 +75,7 @@ export async function pickRunSelection(
   }
   options.push({ label: '(custom model)', value: '' })
 
-  const picked = await picker.select('Which model?', options)
+  const picked = await picker.select('Which model?', byUsage(usage, options))
   let model: string | undefined
   if (picked === null) model = defaultModel
   else if (picked === '') model = (await picker.input('Model: ')) ?? defaultModel

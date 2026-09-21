@@ -11,6 +11,7 @@ import {
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
+import { usageFromEvents } from '../picker-usage.ts'
 import { currentRepo } from '../repo.ts'
 import { pickRunSelection } from '../select-run.ts'
 
@@ -41,6 +42,7 @@ export const runCommand = defineCommand({
       flags,
       interactive() ? picker : null,
       listModelsFor,
+      usageFromEvents(store.events()),
     )
 
     const implement = selection.harness
