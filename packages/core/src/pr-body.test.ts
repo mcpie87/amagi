@@ -120,6 +120,23 @@ describe('formatPrBody', () => {
     expect(body).not.toContain('How to use')
   })
 
+  test('always renders a summary section, using the agent summary when the description is empty', () => {
+    const body = formatPrBody(
+      { ...TASK, description: '' },
+      [],
+      undefined,
+      'Dedup by exact comment id, not by a numeric watermark.',
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Dedup by exact comment id, not by a numeric watermark.')
+  })
+
+  test('renders the summary heading even with no description and no agent summary', () => {
+    const body = formatPrBody({ ...TASK, description: '' }, [])
+    expect(body).toContain('### 📝 Summary')
+  })
+
   test('appends a model/effort footer when metadata is supplied', () => {
     const body = formatPrBody(TASK, [], {
       harness: 'opencode',

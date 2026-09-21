@@ -74,10 +74,12 @@ export function formatPrBody(
   task: TrackerTask,
   changes: readonly PrChange[],
   meta?: PrBodyMeta,
+  agentSummary?: string | null,
 ): string {
   const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
   const { summary, howToUse } = splitDescription(task.description)
-  if (summary !== '') lines.push('', '### 📝 Summary', '', backtickFileRefs(summary))
+  const body = summary !== '' ? summary : (agentSummary?.trim() ?? '')
+  lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
