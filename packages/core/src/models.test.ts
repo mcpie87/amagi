@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { listModelsCached, parseModelLines } from './models.ts'
+import { listModelsCached, parseClaudeModelHint, parseModelLines } from './models.ts'
 
 describe('parseModelLines', () => {
   test('parses opencode provider/model lines', () => {
@@ -23,6 +23,32 @@ describe('parseModelLines', () => {
 
   test('de-duplicates repeated model names', () => {
     expect(parseModelLines('gpt-5\ngpt-5\n')).toEqual(['gpt-5'])
+  })
+})
+
+describe('parseClaudeModelHint', () => {
+  test('parses the alias list out of the /model reply', () => {
+    const out = parseClaudeModelHint(
+      'Current model: `Sonnet 5` (effort: high)\n' +
+        'Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, ' +
+        'sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.',
+    )
+    expect(out).toEqual([
+      'sonnet',
+      'opus',
+      'haiku',
+      'fable',
+      'best',
+      'sonnet[1m]',
+      'opus[1m]',
+      'fable[1m]',
+      'opusplan',
+      'default',
+    ])
+  })
+
+  test('returns an empty list when the reply has no Available: section', () => {
+    expect(parseClaudeModelHint('some unrelated error output')).toEqual([])
   })
 })
 

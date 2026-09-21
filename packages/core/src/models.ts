@@ -52,6 +52,22 @@ export function parseModelLines(output: string): string[] {
   return models
 }
 
+/**
+ * claude has no `model list` subcommand; its `/model` slash command works
+ * non-interactively under `-p` and replies with e.g. "Usage: /model <name>.
+ * Available: sonnet, opus, ..., or a full model ID." This pulls the names
+ * out of that reply. The trailing "or a full model ID" is prose, not a
+ * choice, so any comma-split entry containing whitespace is dropped.
+ */
+export function parseClaudeModelHint(output: string): string[] {
+  const match = output.match(/Available:\s*(.+)/)
+  if (!match?.[1]) return []
+  return match[1]
+    .split(',')
+    .map((s) => s.trim().replace(/\.$/, ''))
+    .filter((s) => s !== '' && !/\s/.test(s))
+}
+
 const TTL_MS = 24 * 60 * 60 * 1000
 
 type CacheEntry = { cachedAt: number; models: string[] }

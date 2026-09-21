@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
@@ -149,5 +151,29 @@ describe('ClaudeHarness process', () => {
     expect(seen).toEqual([])
     expect(outcome.ok).toBe(false)
     expect(outcome.exitCode).not.toBe(0)
+  })
+})
+
+describe('ClaudeHarness listModels', () => {
+  // claude has no `model list` subcommand; this stands in for `claude -p
+  // "/model"`, whose reply listModels() parses for the available names.
+  const fakeClaude = (reply: string): { bin: string; dir: string } => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-claude-bin-'))
+    const bin = join(dir, 'claude')
+    writeFileSync(bin, `#!/bin/sh\ncat <<'EOF'\n${reply}\nEOF\n`)
+    chmodSync(bin, 0o755)
+    return { bin, dir }
+  }
+
+  test('parses the model names out of the /model reply', async () => {
+    const { bin, dir } = fakeClaude(
+      'Current model: `Sonnet 5` (effort: high)\n' +
+        'Usage: /model <name>. Available: sonnet, opus, haiku, or a full model ID.',
+    )
+    try {
+      expect(await new ClaudeHarness({ bin }).listModels()).toEqual(['sonnet', 'opus', 'haiku'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
