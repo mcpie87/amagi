@@ -327,6 +327,7 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     priority: null,
     labels: [],
     dependencies: [],
+    parent: null,
   })
   const where = task.url ?? `task ${task.id}`
   await opts.driver.postComment(

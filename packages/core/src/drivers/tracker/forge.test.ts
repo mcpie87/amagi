@@ -137,6 +137,7 @@ describe('GithubTracker', () => {
         priority: null,
         labels: [],
         dependencies: [],
+        parent: null,
       }),
     ).rejects.toThrow(/does not support creating issues/)
     await expect(tracker.updateTask('3', { title: 'x' })).rejects.toThrow(

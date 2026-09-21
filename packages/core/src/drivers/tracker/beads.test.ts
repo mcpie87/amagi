@@ -248,6 +248,7 @@ describe('BeadsTracker', () => {
       priority: 1,
       labels: ['ui', 'board'],
       dependencies: ['tst-abc'],
+      parent: 'tst-epic',
     })
 
     expect(task?.id).toBe('tst-new')
@@ -263,6 +264,8 @@ describe('BeadsTracker', () => {
     expect(call).toContain('ui,board')
     expect(call).toContain('--deps')
     expect(call).toContain('tst-abc')
+    expect(call).toContain('--parent')
+    expect(call).toContain('tst-epic')
   })
 
   test('create omits unset fields instead of passing empties', async () => {
@@ -274,6 +277,7 @@ describe('BeadsTracker', () => {
       priority: null,
       labels: [],
       dependencies: [],
+      parent: null,
     })
     const call = calls[0]?.join(' ')
     expect(call).toContain('--title')
@@ -282,6 +286,7 @@ describe('BeadsTracker', () => {
     expect(call).not.toContain('--priority')
     expect(call).not.toContain('--labels')
     expect(call).not.toContain('--deps')
+    expect(call).not.toContain('--parent')
   })
 
   test('update writes fields and adds and removes dependencies', async () => {
@@ -309,6 +314,17 @@ describe('BeadsTracker', () => {
     expect(remove).toContain('tst-old')
     const returned = calls.filter((c) => c.includes('show'))
     expect(returned).toHaveLength(1)
+  })
+
+  test('children surfaces the child issues of a container', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('children') ? ok(SHOW_WITH_DEPS_JSON) : undefined,
+    )
+    const children = await new BeadsTracker({ cwd: '/repo', exec }).children('tst-epic')
+
+    expect(children).toHaveLength(1)
+    expect(children[0]?.id).toBe('tst-1')
+    expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'children', 'tst-epic', '--json'])
   })
 
   test('getIssue surfaces dependency blockers with their state', async () => {

@@ -11,6 +11,7 @@ import { respondToMentionsCommand } from './commands/respond-to-mentions.ts'
 import { runCommand } from './commands/run.ts'
 import { serveCommand } from './commands/serve.ts'
 import { statusCommand } from './commands/status.ts'
+import { triageCommand } from './commands/triage.ts'
 import { tuiCommand } from './commands/tui.ts'
 
 const main = defineCommand({
@@ -21,6 +22,7 @@ const main = defineCommand({
   subCommands: {
     run: runCommand,
     status: statusCommand,
+    triage: triageCommand,
     config: configCommand,
     clean: cleanCommand,
     ask: askCommand,
