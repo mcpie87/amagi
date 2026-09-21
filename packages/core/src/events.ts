@@ -71,7 +71,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'chat'])
 export type AgentRole = z.infer<typeof AgentRole>
 
 /** One harness dialect normalized into a single shape. */
@@ -129,6 +129,12 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string().optional(),
   }),
   z.object({ type: z.literal('task.reclaimed'), reason: z.string().optional() }),
+  z.object({
+    type: z.literal('doom.detected'),
+    /** Which heuristic tripped: repeated tool calls, identical check failures, static diff. */
+    kind: z.enum(['tool_repeat', 'check_repeat', 'diff_static']),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
   z.object({

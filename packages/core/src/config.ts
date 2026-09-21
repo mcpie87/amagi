@@ -88,6 +88,14 @@ export const Config = z.object({
        */
       mentionWatchIntervalSec: z.number().int().min(1).default(300),
       /**
+       * How often the PR conflict watcher scans open PRs and dispatches an
+       * agent per conflicting one. Defaults to 5 minutes: ticks are
+       * sequential (a long resolution delays the next check) and each PR is
+       * only attempted once per head SHA, so the default stays inside GitHub
+       * REST rate limits.
+       */
+      prCheckIntervalSec: z.number().int().min(1).default(300),
+      /**
        * How often the stall watcher scans in-progress tasks for a worker that
        * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
        * reads the local store and checks one timestamp per task.
@@ -99,6 +107,20 @@ export const Config = z.object({
        * claim and park it back to claimed, keeping the worktree). Default 1h.
        */
       stallTimeoutSec: z.number().int().min(60).default(3600),
+      /**
+       * Doom-loop guard: the stall watcher also scans busy workers for a
+       * busy-but-not-progressing agent and stops the run. Set false to disable
+       * while tuning the thresholds below for a repo.
+       */
+      doomEnabled: z.boolean().default(true),
+      /** Repeated near-identical tool calls (same command or file) within this many seconds trip the guard. */
+      doomToolWindowSec: z.number().int().min(1).default(600),
+      /** How many near-identical tool calls within the window trip the guard. */
+      doomToolRepeat: z.number().int().min(2).default(20),
+      /** Consecutive check rounds sharing one failure signature that trip the guard. */
+      doomCheckRounds: z.number().int().min(2).default(3),
+      /** A live worker whose worktree diff has not changed for this many seconds trips the guard. */
+      doomDiffWindowSec: z.number().int().min(60).default(1800),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */

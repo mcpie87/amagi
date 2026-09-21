@@ -1,11 +1,192 @@
 @import "tailwindcss";
 
+/* Every color in the dashboard resolves through these tokens: the Tailwind
+   utilities in the tsx (bg-surface, text-fg-muted, ring-red-edge) and the
+   plain CSS below read the same variables, so a theme swap cannot leave one
+   of them behind. Dark is the baseline; the light block further down only
+   restates what differs. */
+@theme {
+  --color-app: #0e0e11;
+  --color-sidebar: #09090b;
+  --color-sunken: #09090b;
+  --color-surface: #18181b;
+  --color-raised: #27272a;
+  --color-raised-strong: #3f3f46;
+  --color-line: #27272a;
+  --color-line-strong: #3f3f46;
+
+  --color-fg-strong: #fafafa;
+  --color-fg: #e4e4e7;
+  --color-fg-muted: #a1a1aa;
+  --color-fg-faint: #71717a;
+  --color-fg-dim: #52525b;
+  /* label on a filled accent button, dark in both themes */
+  --color-on-solid: #09090b;
+  --color-accent: #0ea5e9;
+
+  --color-neutral-soft: rgb(113 113 122 / 0.15);
+  --color-neutral-edge: rgb(113 113 122 / 0.3);
+  --color-neutral-ink: #d4d4d8;
+
+  --color-sky-soft: rgb(14 165 233 / 0.15);
+  --color-sky-edge: rgb(14 165 233 / 0.3);
+  --color-sky-ink: #7dd3fc;
+
+  --color-blue-soft: rgb(59 130 246 / 0.15);
+  --color-blue-edge: rgb(59 130 246 / 0.3);
+  --color-blue-ink: #93c5fd;
+
+  --color-amber-soft: rgb(245 158 11 / 0.15);
+  --color-amber-soft-hover: rgb(245 158 11 / 0.28);
+  --color-amber-edge: rgb(245 158 11 / 0.3);
+  --color-amber-ink: #fcd34d;
+
+  --color-violet-soft: rgb(139 92 246 / 0.15);
+  --color-violet-edge: rgb(139 92 246 / 0.3);
+  --color-violet-ink: #c4b5fd;
+
+  --color-cyan-soft: rgb(6 182 212 / 0.15);
+  --color-cyan-edge: rgb(6 182 212 / 0.3);
+  --color-cyan-ink: #67e8f9;
+
+  --color-orange-soft: rgb(249 115 22 / 0.15);
+  --color-orange-edge: rgb(249 115 22 / 0.3);
+  --color-orange-ink: #fdba74;
+
+  --color-emerald-soft: rgb(16 185 129 / 0.15);
+  --color-emerald-soft-hover: rgb(16 185 129 / 0.28);
+  --color-emerald-edge: rgb(16 185 129 / 0.3);
+  --color-emerald-ink: #6ee7b7;
+
+  --color-red-soft: rgb(239 68 68 / 0.15);
+  --color-red-soft-hover: rgb(239 68 68 / 0.28);
+  --color-red-edge: rgb(239 68 68 / 0.3);
+  --color-red-ink: #fca5a5;
+
+  --color-teal-soft: rgb(20 184 166 / 0.15);
+  --color-teal-edge: rgb(20 184 166 / 0.3);
+  --color-teal-ink: #5eead4;
+}
+
+:root {
+  color-scheme: dark;
+  --selection-bg: #075985;
+  --selection-fg: #f0f9ff;
+  --code-bg: rgb(0 0 0 / 0.35);
+  --shadow-color: rgb(0 0 0 / 0.5);
+}
+
+/* Light theme. Tailwind emits the tokens above inside its theme layer, so an
+   unlayered override here wins regardless of the theme layer's order. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-app: #f7f7f8;
+  --color-sidebar: #ffffff;
+  --color-sunken: #f4f4f5;
+  --color-surface: #ffffff;
+  --color-raised: #e4e4e7;
+  --color-raised-strong: #d4d4d8;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d4d4d8;
+
+  --color-fg-strong: #09090b;
+  --color-fg: #27272a;
+  --color-fg-muted: #52525b;
+  --color-fg-faint: #71717a;
+  --color-fg-dim: #a1a1aa;
+  --color-accent: #0284c7;
+
+  --color-neutral-soft: rgb(113 113 122 / 0.12);
+  --color-neutral-ink: #3f3f46;
+  --color-sky-ink: #0369a1;
+  --color-blue-ink: #1d4ed8;
+  --color-amber-soft: rgb(245 158 11 / 0.18);
+  --color-amber-soft-hover: rgb(245 158 11 / 0.3);
+  --color-amber-ink: #b45309;
+  --color-violet-ink: #6d28d9;
+  --color-cyan-ink: #0e7490;
+  --color-orange-ink: #c2410c;
+  --color-emerald-soft-hover: rgb(16 185 129 / 0.25);
+  --color-emerald-ink: #047857;
+  --color-red-soft-hover: rgb(239 68 68 / 0.25);
+  --color-red-ink: #b91c1c;
+  --color-teal-ink: #0f766e;
+
+  --selection-bg: #bae6fd;
+  --selection-fg: #082f49;
+  --code-bg: rgb(24 24 27 / 0.06);
+  --shadow-color: rgb(24 24 27 / 0.16);
+}
+
+body {
+  background: var(--color-app);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: var(--color-line-strong);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fg-dim);
+  background-clip: content-box;
+}
+
+/* One focus treatment for every control, instead of the per-input mix of
+   none, a border tint, and the browser default. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+button:not(:disabled) {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-fg-faint);
+}
+
 .connection-status {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: #5f7157;
-  font-size: 10px;
+  color: var(--color-fg-muted);
+  font-size: 11px;
   white-space: nowrap;
 }
 .connection-dot {
@@ -30,14 +211,22 @@
 }
 
 .runner-status {
-  color: #a1a1aa;
-  font-size: 10px;
+  color: var(--color-fg-muted);
+  font-size: 11px;
   white-space: nowrap;
 }
 
 .app-shell {
   display: flex;
   min-height: 100vh;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--color-app) 85%, transparent);
+  backdrop-filter: blur(8px);
 }
 
 .sidebar {
@@ -48,8 +237,8 @@
   width: 232px;
   flex-shrink: 0;
   height: 100vh;
-  border-right: 1px solid #27272a;
-  background: #09090b;
+  border-right: 1px solid var(--color-line);
+  background: var(--color-sidebar);
 }
 
 .nav-link {
@@ -59,16 +248,16 @@
   padding: 8px 12px;
   margin: 2px 0;
   border-radius: 8px;
-  color: #a1a1aa;
+  color: var(--color-fg-muted);
   font-size: 14px;
 }
 .nav-link:hover {
-  color: #e4e4e7;
-  background: #18181b;
+  color: var(--color-fg);
+  background: var(--color-surface);
 }
 .nav-link.is-active {
-  color: #e4e4e7;
-  background: #27272a;
+  color: var(--color-fg-strong);
+  background: var(--color-raised);
   font-weight: 500;
 }
 
@@ -86,9 +275,12 @@
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  border: 1px solid #3f3f46;
-  background: #18181b;
-  color: #d4d4d8;
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-surface);
+  color: var(--color-fg);
+}
+.mobile-menu-button:hover {
+  background: var(--color-raised);
 }
 
 @media (max-width: 767px) {
@@ -106,7 +298,7 @@
     transition:
       transform 0.2s ease,
       visibility 0s linear 0.2s;
-    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.5);
+    box-shadow: 12px 0 32px var(--shadow-color);
   }
   .sidebar.is-open {
     transform: translateX(0);
@@ -119,24 +311,25 @@
 
 .command-palette {
   width: min(560px, calc(100vw - 32px));
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--color-line-strong);
   border-radius: 12px;
-  background: #18181b;
-  color: #e4e4e7;
+  background: var(--color-surface);
+  color: var(--color-fg);
   padding: 0;
   overflow: hidden;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 20px 50px var(--shadow-color);
 }
 .command-palette::backdrop {
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
 }
 .command-input-row {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 12px 14px;
-  border-bottom: 1px solid #27272a;
-  color: #a1a1aa;
+  border-bottom: 1px solid var(--color-line);
+  color: var(--color-fg-muted);
 }
 .command-input {
   flex: 1;
@@ -144,12 +337,12 @@
   background: transparent;
   border: none;
   outline: none;
-  color: #e4e4e7;
+  color: var(--color-fg);
   font-size: 15px;
 }
 .command-empty {
   padding: 22px 16px;
-  color: #a1a1aa;
+  color: var(--color-fg-muted);
   font-size: 13px;
 }
 .command-results {
@@ -165,33 +358,34 @@
   width: 100%;
   padding: 8px 10px;
   border-radius: 8px;
-  color: #e4e4e7;
+  color: var(--color-fg);
   font-size: 14px;
   text-align: left;
 }
 .command-result.is-active {
-  background: #27272a;
+  background: var(--color-raised);
 }
 .command-hint {
   display: block;
   margin-top: 1px;
-  color: #a1a1aa;
+  color: var(--color-fg-muted);
   font-size: 11px;
 }
 .command-arrow {
-  color: #a1a1aa;
+  color: var(--color-fg-muted);
   font-size: 13px;
 }
 .command-footer {
   padding: 8px 14px;
-  border-top: 1px solid #27272a;
-  color: #71717a;
+  border-top: 1px solid var(--color-line);
+  color: var(--color-fg-faint);
   font-size: 11px;
 }
 
 @media (max-width: 500px) {
-  .connection-status {
-    font-size: 9px;
+  .connection-status,
+  .runner-status {
+    font-size: 10px;
   }
 }
 
@@ -200,76 +394,119 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 43px 25px;
+  padding: 44px 24px;
+  border: 1px dashed var(--color-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-surface) 50%, transparent);
 }
 .empty-icon {
   display: grid;
   place-items: center;
-  width: 47px;
-  height: 47px;
-  border: 1px solid #e2e8d9;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--color-line);
   border-radius: 13px;
-  background: #f5f7f0;
-  color: #8c9a7c;
+  background: var(--color-surface);
+  color: var(--color-fg-faint);
   margin-bottom: 14px;
 }
 .empty-state h3 {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  color: #4e5943;
+  color: var(--color-fg);
 }
 .empty-state p {
-  font-size: 11px;
-  line-height: 1.8;
-  color: #8a917e;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-fg-muted);
   max-width: 340px;
-  margin-top: 7px;
+  margin-top: 6px;
 }
 
+/* Matches the sibling Reclaim/Retry/Requeue buttons; without the explicit
+   border-width the Tailwind reset would collapse this to a borderless box. */
 .stop-button {
-  border-color: #e0c3b4;
-  color: #a0522f;
-  background: #fdf3ee;
+  padding: 4px 12px;
+  border: 1px solid var(--color-red-edge);
+  border-radius: 4px;
+  background: var(--color-red-soft);
+  color: var(--color-red-ink);
+  font-size: 14px;
+}
+.stop-button:hover:not(:disabled) {
+  background: var(--color-red-soft-hover);
+}
+.stop-button:disabled {
+  opacity: 0.5;
 }
 .run-button-error {
-  margin: 6px 0 0;
-  color: #b26447;
-  font-size: 10px;
+  margin: 4px 0 0;
+  color: var(--color-red-ink);
+  font-size: 12px;
 }
 
 .agent-log-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 17px;
-  font-size: 10px;
-  background: #263027;
-  color: #a8b99a;
+  gap: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--color-line);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  font-size: 11px;
+  background: var(--color-surface);
+  color: var(--color-fg-muted);
 }
 .agent-log-last {
   margin-left: 12px;
-  color: #d5e2c8;
+  color: var(--color-fg);
 }
 .agent-log-header button {
-  background: #394837;
-  color: #d5e2c8;
-  border: 1px solid #52644b;
-  padding: 4px 7px;
-  border-radius: 3px;
-  font-size: 9px;
+  background: var(--color-raised);
+  color: var(--color-fg);
+  border: 1px solid var(--color-line-strong);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.agent-log-header button:hover {
+  background: var(--color-raised-strong);
+  color: var(--color-fg-strong);
 }
 .agent-log-scroll {
   height: 460px;
   overflow: auto;
-  background: #202821;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
+  border: 1px solid var(--color-line);
+  border-radius: 0 0 8px 8px;
+  background: var(--color-sunken);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
   line-height: 18px;
+}
+
+/* Hover affordance for the rows and cards that are whole click targets. */
+.metric,
+.issue-card,
+.check-result {
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+.issue-card:hover {
+  border-color: var(--color-line-strong);
+}
+.run-row:hover,
+.attention-row:hover,
+.activity-item:hover,
+.issue-list-row:hover {
+  background: color-mix(in srgb, var(--color-raised) 45%, transparent);
 }
 
 .summary-markdown {
   font-size: 13px;
-  color: #e4e4e7;
+  color: var(--color-fg);
   line-height: 1.6;
 }
 .summary-markdown > :first-child {
@@ -295,14 +532,14 @@
   padding: 8px 10px;
   overflow-x: auto;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--code-bg);
   font-family: ui-monospace, monospace;
   font-size: 12px;
 }
 .summary-markdown code {
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--code-bg);
   font-family: ui-monospace, monospace;
   font-size: 0.92em;
 }
@@ -311,7 +548,7 @@
   background: none;
 }
 .summary-markdown a {
-  color: #7dd3fc;
+  color: var(--color-sky-ink);
   text-decoration: underline;
 }
 .summary-markdown h1,
@@ -340,10 +577,10 @@
 .summary-markdown blockquote {
   margin: 8px 0;
   padding-left: 10px;
-  border-left: 2px solid #b45309;
-  color: #a1a1aa;
+  border-left: 2px solid var(--color-amber-ink);
+  color: var(--color-fg-muted);
 }
 .summary-markdown hr {
   margin: 10px 0;
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: var(--color-line);
 }

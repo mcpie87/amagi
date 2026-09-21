@@ -1,6 +1,19 @@
 import { describe, expect, test } from 'bun:test'
 import { Config } from '@amagi/core'
-import { harnessChoices, type Picker, pickRunSelection } from './select-run.ts'
+import { harnessChoices, type Picker, pickRunSelection, usageCounts } from './select-run.ts'
+
+const started = (seq: number, harness: string, model: string | null = null) => ({
+  seq,
+  ts: seq,
+  taskId: `am-${seq}`,
+  type: 'agent.started' as const,
+  role: 'implement' as const,
+  harness,
+  model,
+  effort: null,
+  cwd: '.',
+  resumed: false,
+})
 
 const config = (over: Record<string, unknown> = {}) =>
   Config.parse({
@@ -38,6 +51,37 @@ describe('harnessChoices', () => {
   test('falls back to the three known kinds', () => {
     const labels = harnessChoices(config({ definitions: {} })).map((o) => o.label)
     expect(labels).toEqual(['claude', 'codex', 'opencode'])
+  })
+
+  test('sorts definitions by how often their kind was used', () => {
+    const counts = usageCounts([
+      started(1, 'claude', 'sonnet'),
+      started(2, 'claude', 'sonnet'),
+      started(3, 'opencode', 'local/x'),
+    ])
+    const labels = harnessChoices(config(), counts).map((o) => o.label)
+    expect(labels).toEqual(['careful', 'fast'])
+  })
+
+  test('sorts the fallback kinds by usage, ties keep insertion order', () => {
+    const counts = usageCounts([started(1, 'codex'), started(2, 'codex'), started(3, 'claude')])
+    const labels = harnessChoices(config({ definitions: {} }), counts).map((o) => o.label)
+    expect(labels).toEqual(['codex', 'claude', 'opencode'])
+  })
+})
+
+describe('usageCounts', () => {
+  test('counts started runs per harness kind and model', () => {
+    const counts = usageCounts([
+      started(1, 'claude', 'sonnet'),
+      started(2, 'claude', 'sonnet'),
+      started(3, 'codex', 'gpt-5.1-codex'),
+      started(4, 'opencode'),
+    ])
+    expect(counts).toEqual({
+      harness: { claude: 2, codex: 1, opencode: 1 },
+      model: { sonnet: 2, 'gpt-5.1-codex': 1 },
+    })
   })
 })
 
@@ -92,6 +136,31 @@ describe('pickRunSelection', () => {
     const picker = scripted(['fast', null])
     const { harness } = await pickRunSelection(config(), {}, picker, listModels)
     expect(harness.model).toBe('local/deepseek-ai/DeepSeek-V4-Flash-0731')
+  })
+
+  test('interactive: model options are sorted by how often each was used', async () => {
+    let modelLabels: string[] = []
+    const picker: Picker = {
+      select: async (title, options) => {
+        if (title === 'Which harness?') {
+          return options.find((o) => o.label === 'careful')?.value ?? null
+        }
+        if (title === 'Which model?') {
+          modelLabels = options.map((o) => o.label)
+          return null
+        }
+        return null
+      },
+      input: async () => null,
+    }
+    const counts = usageCounts([
+      started(1, 'claude', 'sonnet'),
+      started(2, 'claude', 'sonnet'),
+      started(3, 'claude', 'sonnet'),
+      started(4, 'claude', 'opus'),
+    ])
+    await pickRunSelection(config(), {}, picker, async () => ['opus', 'haiku', 'sonnet'], counts)
+    expect(modelLabels).toEqual(['sonnet', 'opus', 'haiku', '(custom model)'])
   })
 
   test('interactive: cancelling the harness pick falls back to the configured default', async () => {
