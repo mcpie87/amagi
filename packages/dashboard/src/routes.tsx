@@ -1113,6 +1113,7 @@ function AnswerBox({
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [submitted, setSubmitted] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -1143,6 +1144,7 @@ function AnswerBox({
         },
       )
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setSubmitted(true)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -1157,6 +1159,10 @@ function AnswerBox({
 
   if (token === null) {
     return <p className="mt-2 text-sm text-zinc-500">answer box unavailable</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-400">answered</p>
   }
 
   return (
