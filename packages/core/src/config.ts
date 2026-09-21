@@ -1,12 +1,29 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
+import { MAX_PARALLEL } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
+
+export const DifficultyConfig = z.object({
+  /**
+   * Master switch: when off, no LLM pass runs at task creation and no claim is
+   * gated. Defaults off so the feature is opt-in.
+   */
+  enabled: z.boolean().default(false),
+  /** Difficulty levels a task can be classified into, easiest first. */
+  levels: z.array(z.string().min(1)).default(['low', 'medium', 'high']),
+  /** Model tiers, weakest first; a model's tier is its index in this list. */
+  tierOrder: z.array(z.string().min(1)).default(['fast', 'smart']),
+  /** The minimum tier a task of a given difficulty needs; unlisted levels require the weakest tier. */
+  requiredTier: z.record(z.string(), z.string()).default({ high: 'smart' }),
+  /** Explicit model id -> tier mapping; an unlisted model counts as the weakest tier. */
+  modelTiers: z.record(z.string(), z.string()).default({}),
+})
 
 export const HarnessConfig = z.object({
   kind: HarnessKind,
@@ -56,15 +73,32 @@ export const Config = z.object({
        */
       definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
-      review: HarnessConfig.prefault({ kind: 'codex' }),
     })
     .prefault({}),
   loop: z
     .object({
-      maxParallel: z.number().int().min(1).default(1),
-      maxReviewRounds: z.number().int().min(0).default(3),
+      maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
+      /**
+       * How often the agent-mention watcher polls open PRs for comments and
+       * reviews mentioning the agent handle. Defaults to 5 minutes: paired
+       * with last-seen-per-PR tracking, unchanged PRs are not re-scanned, so
+       * the default stays inside GitHub REST rate limits.
+       */
+      mentionWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How often the stall watcher scans in-progress tasks for a worker that
+       * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
+       * reads the local store and checks one timestamp per task.
+       */
+      stallWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How long a task may sit in an in-progress state with no worker
+       * heartbeat before the stall watcher reclaims it (release the tracker
+       * claim and park it back to claimed, keeping the worktree). Default 1h.
+       */
+      stallTimeoutSec: z.number().int().min(60).default(3600),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */
@@ -81,6 +115,7 @@ export const Config = z.object({
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
+  difficulty: DifficultyConfig.prefault({}),
   notify: z
     .object({
       desktop: z.boolean().default(true),
@@ -154,4 +189,15 @@ export function loadGlobalConfig(): Config {
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return config
+}
+
+/**
+ * Merges a patch into the repo's own `.amagi/config.toml` and writes it back,
+ * preserving every other key. Creates the file (and directory) when absent.
+ * `loadConfig` re-reads it on next use, so persisted settings survive restarts.
+ */
+export function writeConfig(repoRoot: string, patch: Json): void {
+  const path = repoConfigPath(repoRoot)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, stringifyToml(deepMerge(readToml(path), patch)))
 }

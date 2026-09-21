@@ -157,7 +157,10 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
           agentLogStore.append(`${repo}/${parsed.taskId}`, parsed.role, parsed.ts, parsed.event)
           // usage is sparse (one per step/turn, not per line): the only
           // agent.stream event the reducer needs, for the sessions view.
-          if (parsed.event.kind === 'usage') dispatch(parsed)
+          // Chat runs are also routed to the reducer so the chat panel can
+          // fold their text into a conversation; the reducer itself ignores
+          // agent.stream, only the event log accumulates it.
+          if (parsed.event.kind === 'usage' || parsed.role === 'chat') dispatch(parsed)
         } else {
           dispatch(parsed)
         }
@@ -188,11 +191,13 @@ export function useReadyQueue(): TrackerTask[] {
 
 export type RunnerApi = {
   status: RunnerStatus | null
+  start: (taskId?: string) => Promise<{ ok: true; taskId: string } | { ok: false; error?: string }>
   stop: (taskId: string) => Promise<{ ok: boolean; error?: string }>
 }
 
 const RunnerContext = createContext<RunnerApi>({
   status: null,
+  start: async () => ({ ok: false }),
   stop: async () => ({ ok: false }),
 })
 
@@ -214,6 +219,27 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(timer)
   }, [base])
 
+  const start = async (
+    taskId?: string,
+  ): Promise<{ ok: true; taskId: string } | { ok: false; error?: string }> => {
+    try {
+      const res = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(taskId === undefined ? {} : { taskId }),
+      })
+      refresh()
+      if (res.ok) {
+        const body = (await res.json()) as { taskId?: string }
+        return { ok: true, taskId: body.taskId ?? '' }
+      }
+      const parsed = (await res.json().catch(() => null)) as { error?: string } | null
+      return { ok: false, error: parsed?.error ?? `HTTP ${res.status}` }
+    } catch {
+      return { ok: false, error: 'could not reach the amagi server' }
+    }
+  }
+
   const stop = async (taskId: string): Promise<{ ok: boolean; error?: string }> => {
     try {
       const res = await fetch(`${base}/api/runs/${taskId}/stop`, { method: 'POST' })
@@ -226,7 +252,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  return <RunnerContext.Provider value={{ status, stop }}>{children}</RunnerContext.Provider>
+  return <RunnerContext.Provider value={{ status, start, stop }}>{children}</RunnerContext.Provider>
 }
 
 export function useRunner(): RunnerApi {

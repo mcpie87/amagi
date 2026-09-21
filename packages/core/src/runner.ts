@@ -1,11 +1,7 @@
 import type { Config } from './config.ts'
-import {
-  amagiLabels,
-  type CreatePrOptions,
-  gitTokenConfig,
-  makePrDriver,
-  type PrDriver,
-} from './drivers/pr.ts'
+import { claimEligible, implementModel } from './difficulty.ts'
+import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -19,8 +15,9 @@ import {
   implementSystemPrompt,
   prTitle,
   reclaimPrompt,
+  whyNoChangesPrompt,
 } from './prompt.ts'
-import { backoffDelayMs, isTransientFailure } from './retry.ts'
+import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
@@ -44,6 +41,14 @@ export type RunOnceResult = {
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
 
+/**
+ * Worker heartbeat cadence into the store, well under the default 1h stall
+ * threshold so a live runner never looks stalled. Kept separate from the
+ * tracker lease cadence: forge/github grant a 6h lease, which would make the
+ * lease tick far too slow to serve as the stall watcher's activity signal.
+ */
+const WORKER_HEARTBEAT_MS = 60_000
+
 class LeaseLostError extends Error {
   constructor(taskId: string) {
     super(`task ${taskId}: claim lease was reclaimed, stopping before another worker collides`)
@@ -66,10 +71,12 @@ export class RunCancelledError extends Error {
  */
 class Lease {
   private timer: ReturnType<typeof setInterval> | null = null
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private lost = false
 
   constructor(
     private readonly tracker: Tracker,
+    private readonly store: Store,
     private readonly taskId: string,
   ) {}
 
@@ -80,11 +87,16 @@ class Lease {
         if (!alive) this.lost = true
       })
     }, period)
+    this.heartbeatTimer = setInterval(() => {
+      this.store.heartbeat(this.taskId)
+    }, WORKER_HEARTBEAT_MS)
   }
 
   stop(): void {
     if (this.timer !== null) clearInterval(this.timer)
     this.timer = null
+    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = null
   }
 
   get isLost(): boolean {
@@ -110,13 +122,26 @@ export class Runner {
     if (this.currentProcess !== null) void this.currentProcess.kill()
   }
 
+  /** The pid of the live agent process, or null between agent phases. */
+  currentPid(): number | null {
+    return this.currentProcess?.pid ?? null
+  }
+
   private throwIfCancelled(taskId: string): void {
     if (this.cancelled) throw new RunCancelledError(taskId)
   }
 
   /** Claims one ready task and drives it as far as the current milestone goes. */
   async runOnce(): Promise<RunOnceResult> {
-    const task = await this.deps.tracker.claim()
+    const { store, tracker, config } = this.deps
+    const task = await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+      store.append(null, {
+        type: 'claim.rejected',
+        title: skipped.title,
+        difficulty: skipped.difficulty ?? null,
+        reason,
+      })
+    })
     if (task === null) return null
     return this.runClaimed(task)
   }
@@ -135,6 +160,9 @@ export class Runner {
       priority: task.priority,
       taskType: task.type,
       url: task.url,
+      ...(task.difficulty === undefined || task.difficulty === null
+        ? {}
+        : { difficulty: task.difficulty }),
     })
 
     try {
@@ -198,12 +226,20 @@ export class Runner {
 
     let worktree: WorktreeSpec
     if (resume) {
-      worktree = { path: recorded.worktree!, branch: recorded.branch! }
+      worktree = {
+        path: recorded.worktree as string,
+        branch: recorded.branch as string,
+      }
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
-      // https; without one, fall back to the local base branch so the ssh key
-      // never prompts during an unattended run.
-      const tokenCfg = config.forge.kind === 'github' ? gitTokenConfig() : []
+      // https; without one, fall back to the local base branch so git never
+      // prompts during an unattended run.
+      const tokenCfg = await gitTokenConfig(
+        this.exec,
+        this.deps.repoRoot,
+        config.forge.remote,
+        forgeToken(config.forge.kind),
+      )
       if (tokenCfg.length > 0) {
         await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
           cwd: this.deps.repoRoot,
@@ -230,7 +266,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, task.id)
+    const lease = new Lease(this.deps.tracker, this.deps.store, task.id)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, resume)
@@ -264,12 +300,18 @@ export class Runner {
     )
     if (first.stopped) return
     let sessionId = first.sessionId
+    let summary = first.summary
+    let model = first.model
+    let effort = first.effort
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
     const parked = await this.parkAndResume(task.id, sessionId, cwd, lease)
     if (parked === null) return
-    sessionId = parked
+    sessionId = parked.sessionId
+    summary = parked.summary ?? summary
+    model = parked.model ?? model
+    effort = parked.effort ?? effort
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
@@ -306,25 +348,49 @@ export class Runner {
       )
       if (fix.stopped) return
       sessionId = fix.sessionId
+      summary = fix.summary
+      model = fix.model
+      effort = fix.effort
       if (lease.isLost) throw new LeaseLostError(task.id)
 
       const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease)
       if (resumed === null) return
-      sessionId = resumed
+      sessionId = resumed.sessionId
+      summary = resumed.summary ?? summary
+      model = resumed.model ?? model
+      effort = resumed.effort ?? effort
     }
 
     const committed = await this.commit(task, cwd)
     if (!committed) {
+      let reason = summary?.trim() !== '' ? summary : null
+      if (reason === null && sessionId !== null) {
+        this.transition(task.id, 'implementing')
+        const why = await this.runAgentWithRetry(
+          task.id,
+          sessionId,
+          {
+            cwd,
+            prompt: whyNoChangesPrompt(task),
+            permissions: config.harness.implement.permissions,
+            extraArgs: config.harness.implement.extraArgs,
+          },
+          lease,
+        )
+        if (why.stopped) return
+        reason = why.summary?.trim() !== '' ? why.summary : null
+      }
       this.transition(
         task.id,
         'no_pr',
-        'the agent produced no changes; the task may already be done or need no PR — ' +
-          'verify and close it explicitly, it will not be closed automatically',
+        reason ??
+          'the agent produced no changes; the task may already be done or need no PR — ' +
+            'verify and close it explicitly, it will not be closed automatically',
       )
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch)
+    await this.openPullRequest(task, cwd, branch, model, effort)
     this.throwIfCancelled(task.id)
   }
 
@@ -333,7 +399,13 @@ export class Runner {
    * authenticated, remote gone) leaves the commit in place and escalates, so
    * the operator can push and open it by hand.
    */
-  private async openPullRequest(task: TrackerTask, cwd: string, branch: string): Promise<void> {
+  private async openPullRequest(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    model: string | null,
+    effort: string | null,
+  ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
@@ -352,7 +424,11 @@ export class Runner {
       base: config.repo.baseBranch,
       remote: config.forge.remote,
       title: prTitle(current),
-      body: formatPrBody(current, changes),
+      body: formatPrBody(current, changes, {
+        harness: this.deps.harness.kind,
+        model,
+        effort,
+      }),
       labels: amagiLabels(current.type),
     }
     try {
@@ -362,7 +438,7 @@ export class Runner {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const hint = /auth|login|token|not logged/i.test(message)
-        ? ' (gh needs auth: set GH_TOKEN in .env or run gh auth login)'
+        ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
         type: 'error',
@@ -377,20 +453,29 @@ export class Runner {
    * When the agent stopped because a question went unanswered, park and poll
    * the store until a human answers, then resume the recorded session with the
    * answer. Never answered within the window: escalate to needs_human.
-   * Returns null to stop the whole run. The server and the runner share one
-   * SQLite file but not one process, so this polls rather than subscribes.
+   * Returns null to stop the whole run. The summary is the resumed run's
+   * summary, or null when no agent ran (no question was parked). The server and
+   * the runner share one SQLite file but not one process, so this polls rather
+   * than subscribes.
    */
   private async parkAndResume(
     taskId: string,
     sessionId: string | null,
     cwd: string,
     lease: Lease,
-  ): Promise<string | null> {
+  ): Promise<{
+    sessionId: string | null
+    summary: string | null
+    model: string | null
+    effort: string | null
+  } | null> {
     const { store, config } = this.deps
-    if (store.task(taskId)?.state !== 'awaiting_answer') return sessionId
+    if (store.task(taskId)?.state !== 'awaiting_answer') {
+      return { sessionId, summary: null, model: null, effort: null }
+    }
 
     const question = store.unansweredQuestions(taskId)[0]
-    if (question === undefined) return sessionId
+    if (question === undefined) return { sessionId, summary: null, model: null, effort: null }
     store.append(taskId, { type: 'question.parked', questionId: question.id })
 
     const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
@@ -420,7 +505,12 @@ export class Runner {
           lease,
         )
         if (resumed.stopped) return null
-        return resumed.sessionId
+        return {
+          sessionId: resumed.sessionId,
+          summary: resumed.summary,
+          model: resumed.model,
+          effort: resumed.effort,
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
     }
@@ -433,7 +523,14 @@ export class Runner {
     taskId: string,
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
-  ): Promise<{ sessionId: string | null; ok: boolean; detail: string | null }> {
+  ): Promise<{
+    sessionId: string | null
+    ok: boolean
+    detail: string | null
+    summary: string | null
+    model: string | null
+    effort: string | null
+  }> {
     const { store, harness } = this.deps
     const spawn = {
       ...opts,
@@ -446,6 +543,8 @@ export class Runner {
     try {
       // The resolved model only exists once the harness reports it (claude's
       // init line), so the started event lands on the first stream event.
+      const model = proc.model ?? opts.model ?? null
+      const effort = proc.effort ?? null
       let started = false
       for await (const event of proc.events()) {
         if (!started) {
@@ -454,8 +553,8 @@ export class Runner {
             type: 'agent.started',
             role: 'implement',
             harness: harness.kind,
-            model: proc.model ?? opts.model ?? null,
-            effort: proc.effort ?? null,
+            model,
+            effort,
             cwd: opts.cwd,
             resumed: resumeFrom !== null,
           })
@@ -476,7 +575,14 @@ export class Runner {
         detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
         store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
       }
-      return { sessionId: outcome.sessionId, ok: outcome.ok, detail }
+      return {
+        sessionId: outcome.sessionId,
+        ok: outcome.ok,
+        detail,
+        summary: outcome.summary,
+        model,
+        effort,
+      }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
     }
@@ -494,20 +600,32 @@ export class Runner {
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
     lease: Lease,
-  ): Promise<{ sessionId: string | null; stopped: boolean }> {
+  ): Promise<{
+    sessionId: string | null
+    stopped: boolean
+    summary: string | null
+    model: string | null
+    effort: string | null
+  }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
+    let summary: string | null = null
+    let model: string | null = null
+    let effort: string | null = null
 
     for (let attempt = 1; ; attempt++) {
       const run = await this.runAgent(taskId, sessionId, opts)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
-      if (run.ok) return { sessionId, stopped: false }
+      summary = run.summary
+      model = run.model
+      effort = run.effort
+      if (run.ok) return { sessionId, stopped: false, summary, model, effort }
       if (lease.isLost) throw new LeaseLostError(taskId)
 
       if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
         this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
-        return { sessionId, stopped: true }
+        return { sessionId, stopped: true, summary, model, effort }
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
       store.append(taskId, {
@@ -517,6 +635,9 @@ export class Runner {
         reason: 'transient harness failure',
         detail: run.detail ?? '',
       })
+      // A session that hit its own limit (turn/context window) is spent and
+      // cannot be resumed; the retry starts a fresh session in the same worktree.
+      if (isSessionLimit(run.detail ?? '')) sessionId = null
       this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out.
       const deadline = Date.now() + delayMs

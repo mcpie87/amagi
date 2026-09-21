@@ -26,7 +26,6 @@ type RawTask = {
   session_id: string | null
   pr_url: string | null
   pr_number: number | null
-  review_round: number
   status_reason: string | null
   last_error: string | null
   retry_count: number
@@ -36,6 +35,7 @@ type RawTask = {
   checks_ok: number | null
   created_at: number
   updated_at: number
+  last_heartbeat_at: number | null
 }
 
 type RawQuestion = {
@@ -60,7 +60,6 @@ const toTask = (r: RawTask): ProjectedTask => ({
   sessionId: r.session_id,
   prUrl: r.pr_url,
   prNumber: r.pr_number,
-  reviewRound: r.review_round,
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
@@ -86,66 +85,57 @@ const toQuestion = (r: RawQuestion): ProjectedQuestion => ({
   resolvedAt: r.resolved_at,
 })
 
-type Column<T> = { col: string; from: (value: T) => SQLQueryBindings }
+type Row = Record<string, SQLQueryBindings>
 
-/** Every projected field maps to exactly one column, so SQL mirrors the reducer. */
-const TASK_COLUMNS: Column<ProjectedTask>[] = [
-  { col: 'id', from: (t) => t.id },
-  { col: 'title', from: (t) => t.title },
-  { col: 'tracker', from: (t) => t.tracker },
-  { col: 'state', from: (t) => t.state },
-  { col: 'branch', from: (t) => t.branch },
-  { col: 'worktree', from: (t) => t.worktree },
-  { col: 'session_id', from: (t) => t.sessionId },
-  { col: 'pr_url', from: (t) => t.prUrl },
-  { col: 'pr_number', from: (t) => t.prNumber },
-  { col: 'review_round', from: (t) => t.reviewRound },
-  { col: 'status_reason', from: (t) => t.statusReason },
-  { col: 'last_error', from: (t) => t.lastError },
-  { col: 'retry_count', from: (t) => t.retryCount },
-  { col: 'created_at', from: (t) => t.createdAt },
-  { col: 'updated_at', from: (t) => t.updatedAt },
-  { col: 'last_commit_sha', from: (t) => t.lastCommit?.sha ?? null },
-  { col: 'last_commit_subject', from: (t) => t.lastCommit?.subject ?? null },
-  { col: 'checks', from: (t) => (t.checks === null ? null : JSON.stringify(t.checks)) },
-  { col: 'checks_ok', from: (t) => (t.checksOk === null ? null : t.checksOk ? 1 : 0) },
-]
+/** The projected row as SQL values keyed by column name: one map between the
+ *  reducer shape and the schema, in place of a hand-kept column diff. Columns
+ *  the projection doesn't carry (task_token, last_heartbeat_at) are omitted so
+ *  an upsert leaves them untouched. */
+const taskRow = (t: ProjectedTask): Row => ({
+  id: t.id,
+  title: t.title,
+  tracker: t.tracker,
+  state: t.state,
+  branch: t.branch,
+  worktree: t.worktree,
+  session_id: t.sessionId,
+  pr_url: t.prUrl,
+  pr_number: t.prNumber,
+  status_reason: t.statusReason,
+  last_error: t.lastError,
+  retry_count: t.retryCount,
+  created_at: t.createdAt,
+  updated_at: t.updatedAt,
+  last_commit_sha: t.lastCommit?.sha ?? null,
+  last_commit_subject: t.lastCommit?.subject ?? null,
+  checks: t.checks === null ? null : JSON.stringify(t.checks),
+  checks_ok: t.checksOk === null ? null : t.checksOk ? 1 : 0,
+})
 
-const QUESTION_COLUMNS: Column<ProjectedQuestion>[] = [
-  { col: 'id', from: (q) => q.id },
-  { col: 'task_id', from: (q) => q.taskId },
-  { col: 'question', from: (q) => q.question },
-  { col: 'options', from: (q) => JSON.stringify(q.options) },
-  { col: 'gate_ref', from: (q) => q.gateRef },
-  { col: 'answer', from: (q) => q.answer },
-  { col: 'answered_via', from: (q) => q.answeredVia },
-  { col: 'asked_at', from: (q) => q.askedAt },
-  { col: 'resolved_at', from: (q) => q.resolvedAt },
-]
+const questionRow = (q: ProjectedQuestion): Row => ({
+  id: q.id,
+  task_id: q.taskId,
+  question: q.question,
+  options: JSON.stringify(q.options),
+  gate_ref: q.gateRef,
+  answer: q.answer,
+  answered_via: q.answeredVia,
+  asked_at: q.askedAt,
+  resolved_at: q.resolvedAt,
+})
 
-/** Inserts on first sight, else updates only the columns the reducer changed. */
-function writeDiff<T>(
-  db: Database,
-  table: string,
-  columns: Column<T>[],
-  before: T | undefined,
-  after: T | undefined,
-  key: string,
-  keyValue: string,
-): void {
-  if (before === undefined && after !== undefined) {
-    const cols = columns.map((c) => c.col)
-    db.query(
-      `insert into ${table} (${cols.join(', ')}) values (${cols.map(() => '?').join(', ')})`,
-    ).run(...columns.map((c) => c.from(after)))
-    return
-  }
-  if (before === undefined || after === undefined) return
-  const changes = columns.filter((c) => c.col !== key && !Object.is(c.from(before), c.from(after)))
-  if (changes.length === 0) return
+/** Inserts on first sight, else rewrites the projected columns. The store is a
+ *  local single-writer SQLite file, so an upsert beats a column diff. */
+function upsert(db: Database, table: string, key: string, row: Row): void {
+  const cols = Object.keys(row)
+  const set = cols
+    .filter((c) => c !== key)
+    .map((c) => `${c} = excluded.${c}`)
+    .join(', ')
   db.query(
-    `update ${table} set ${changes.map((c) => `${c.col} = ?`).join(', ')} where ${key} = ?`,
-  ).run(...changes.map((c) => c.from(after)), keyValue)
+    `insert into ${table} (${cols.join(', ')}) values (${cols.map(() => '?').join(', ')})
+     on conflict(${key}) do update set ${set}`,
+  ).run(...Object.values(row))
 }
 
 export type Listener = (event: StoredEvent) => void
@@ -179,37 +169,23 @@ export class Store {
 
   private apply(taskId: string | null, ts: number, body: EventBody): void {
     if (taskId === null) return
-    // The same pure reducer the clients fold events through; only the
-    // persistence differs: the server diffs the projection to SQL.
+    // The same pure reducer the clients fold events through; the server just
+    // persists its output wholesale.
     const event = { seq: 0, ts, taskId, ...body } as StoredEvent
     const before = this.projectionFor(event)
     const after = project(before, event)
 
     if (event.taskId !== null) {
-      writeDiff(
-        this.db,
-        'tasks',
-        TASK_COLUMNS,
-        before.tasks[event.taskId],
-        after.tasks[event.taskId],
-        'id',
-        event.taskId,
-      )
+      const task = after.tasks[event.taskId]
+      if (task) upsert(this.db, 'tasks', 'id', taskRow(task))
     }
     if (
       event.type === 'question.asked' ||
       event.type === 'question.answered' ||
       event.type === 'question.timedout'
     ) {
-      writeDiff(
-        this.db,
-        'questions',
-        QUESTION_COLUMNS,
-        before.questions[event.questionId],
-        after.questions[event.questionId],
-        'id',
-        event.questionId,
-      )
+      const question = after.questions[event.questionId]
+      if (question) upsert(this.db, 'questions', 'id', questionRow(question))
     }
   }
 
@@ -256,6 +232,44 @@ export class Store {
     }
     const rows = this.db.query(`select * from tasks ${order}`).all(limit) as RawTask[]
     return rows.map(toTask)
+  }
+
+  /**
+   * A column rather than an event: heartbeats land on every lease tick, so
+   * folding them into the event log would drown the streams in noise. The
+   * stall watcher reads this timestamp to tell a live worker from a dead one.
+   */
+  heartbeat(taskId: string): void {
+    this.db.query('update tasks set last_heartbeat_at = ? where id = ?').run(Date.now(), taskId)
+  }
+
+  /**
+   * Tasks in the given states whose last activity (worker heartbeat, falling
+   * back to the last event) predates `beforeMs`. The stall watcher's scan set.
+   */
+  stalledTasks(
+    states: readonly TaskState[],
+    beforeMs: number,
+  ): { id: string; state: TaskState; updatedAt: number; lastHeartbeatAt: number | null }[] {
+    if (states.length === 0) return []
+    const holes = states.map(() => '?').join(', ')
+    const rows = this.db
+      .query(
+        `select id, state, updated_at, last_heartbeat_at from tasks
+         where state in (${holes}) and coalesce(last_heartbeat_at, updated_at) < ?`,
+      )
+      .all(...states, beforeMs) as {
+      id: string
+      state: string
+      updated_at: number
+      last_heartbeat_at: number | null
+    }[]
+    return rows.map((r) => ({
+      id: r.id,
+      state: r.state as TaskState,
+      updatedAt: r.updated_at,
+      lastHeartbeatAt: r.last_heartbeat_at,
+    }))
   }
 
   events(opts: { taskId?: string; sinceSeq?: number; limit?: number } = {}): StoredEvent[] {

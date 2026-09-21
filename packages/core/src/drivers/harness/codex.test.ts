@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
+import { HARDCODED_MODELS } from '../../models.ts'
 import { CodexHarness, CodexTranslator } from './codex.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'codex-stream.jsonl')
@@ -160,9 +161,32 @@ describe('CodexHarness argv', () => {
     expect(argv[argv.indexOf('-c') + 1]).toBe('developer_instructions=be terse')
   })
 
+  test('effort is wired through as model_reasoning_effort', () => {
+    const argv = new CodexHarness().argv({ ...base, effort: 'high' }, null)
+    expect(argv[argv.indexOf('-c') + 1]).toBe('model_reasoning_effort=high')
+  })
+
+  test('effort and system prompt each get their own -c', () => {
+    const argv = new CodexHarness().argv(
+      { ...base, systemPrompt: 'be terse', effort: 'xhigh' },
+      null,
+    )
+    expect(argv.filter((a) => a === '-c')).toHaveLength(2)
+    expect(argv).toContain('developer_instructions=be terse')
+    expect(argv).toContain('model_reasoning_effort=xhigh')
+  })
+
   test('extraArgs land before the trailing prompt', () => {
     const argv = new CodexHarness().argv({ ...base, extraArgs: ['--add-dir', '/other'] }, null)
     expect(argv.slice(-3)).toEqual(['--add-dir', '/other', 'do the thing'])
+  })
+})
+
+describe('CodexHarness listModels', () => {
+  test('returns the hardcoded curated list instead of shelling out', async () => {
+    expect(await new CodexHarness({ bin: 'false' }).listModels()).toEqual([
+      ...HARDCODED_MODELS.codex,
+    ])
   })
 })
 

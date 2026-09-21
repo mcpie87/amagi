@@ -2,10 +2,13 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
+import { classifyDifficulty } from './difficulty.ts'
+import { ghEnv } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { modelFooter } from './footer.ts'
 import { cacheHome } from './paths.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
@@ -47,6 +50,18 @@ export function saveHandledMentions(path: string, ids: Set<string>): void {
   writeFileSync(path, JSON.stringify([...ids]))
 }
 
+/**
+ * True when a comment mentions the agent handle and was written by a human.
+ * Shared by the one-shot responder and the continuous watcher so both agree on
+ * what counts as a mention.
+ */
+export function isAgentMention(comment: PrComment, handle: string): boolean {
+  if (comment.body === '' || comment.user === handle) return false
+  const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`@${escaped}\\b`, 'i')
+  return re.test(comment.body)
+}
+
 export type ListPrMentionsOptions = {
   driver: PrDriver
   cwd: string
@@ -57,9 +72,27 @@ export type ListPrMentionsOptions = {
 /** Comments on a PR that mention the agent handle, from humans (never the agent itself). */
 export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrComment[]> {
   const comments = await opts.driver.listComments(opts.cwd, opts.pr.number)
-  const escaped = opts.handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`@${escaped}\\b`, 'i')
-  return comments.filter((c) => c.body !== '' && c.user !== opts.handle && re.test(c.body))
+  return comments.filter((c) => isAgentMention(c, opts.handle))
+}
+
+/** Last-seen comment per open PR, so the watcher skips PRs that have not changed. */
+export type MentionWatchState = Record<string, { updatedAt: string; lastCommentId: number }>
+
+export function mentionWatchPath(repoName: string): string {
+  return join(cacheHome(), 'amagi', 'mentions', `${repoName}.watch.json`)
+}
+
+export function readMentionWatch(path: string): MentionWatchState {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as MentionWatchState
+  } catch {
+    return {}
+  }
+}
+
+export function saveMentionWatch(path: string, state: MentionWatchState): void {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify(state))
 }
 
 /** Live progress of one mention response, for a status line while it works. */
@@ -163,6 +196,12 @@ function startImplementHarness(
   })
 }
 
+/** Provenance footer for a canned reply, from the configured implement harness. */
+function configuredFooter(config: Config): string {
+  const { kind, model, effort } = config.harness.implement
+  return modelFooter(kind, model ?? null, effort ?? null)
+}
+
 /** Worktree on the PR head with base merged in, shared with conflict resolution. */
 async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
   return prepareConflictWorktree({
@@ -226,7 +265,10 @@ async function respondToExplain(
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], { cwd: opts.root })
+  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], {
+    cwd: opts.root,
+    env: ghEnv(),
+  })
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')
@@ -251,7 +293,9 @@ async function respondToExplain(
     const explanation = readFileSync(outPath, 'utf8').trim()
     if (explanation === '') throw new Error('agent produced no explanation')
     p.phase('posting comment')
-    await opts.driver.postComment(opts.root, opts.pr.number, explanation)
+    const { kind, model, effort } = opts.config.harness.implement
+    const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
+    await opts.driver.postComment(opts.root, opts.pr.number, `${explanation}${footer}`)
   } finally {
     rmSync(outPath, { force: true })
   }
@@ -263,7 +307,11 @@ async function askClarification(opts: RespondToMentionOptions, p: Progress): Pro
     `@${opts.mention.user} I'm not sure what you'd like me to do with your comment.`,
     'Do you want me to change the code (fix something), are you asking me to explain the changes, or should I log it as a new task? Please clarify.',
   ].join('\n\n')
-  await opts.driver.postComment(opts.root, opts.pr.number, question)
+  await opts.driver.postComment(
+    opts.root,
+    opts.pr.number,
+    `${question}${configuredFooter(opts.config)}`,
+  )
 }
 
 /** Lets the LLM decide the response path, rather than assuming a fixed one. */
@@ -299,27 +347,33 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     await opts.driver.postComment(
       opts.root,
       opts.pr.number,
-      `@${opts.mention.user} I'd log this as a task, but the configured tracker (${tracker?.kind ?? 'none'}) can't create issues.`,
+      `@${opts.mention.user} I'd log this as a task, but the configured tracker (${tracker?.kind ?? 'none'}) can't create issues.${configuredFooter(opts.config)}`,
     )
     return
   }
+  const description = [
+    `From @${opts.mention.user} on PR #${opts.pr.number} "${opts.pr.title}" (${opts.pr.url}):`,
+    '',
+    opts.mention.body.trim(),
+  ].join('\n')
+  const title = addTaskTitle(opts)
+  const difficulty = opts.config.difficulty.enabled
+    ? await classifyDifficulty(title, description, opts.config)
+    : null
   const task = await tracker.createTask({
-    title: addTaskTitle(opts),
-    description: [
-      `From @${opts.mention.user} on PR #${opts.pr.number} "${opts.pr.title}" (${opts.pr.url}):`,
-      '',
-      opts.mention.body.trim(),
-    ].join('\n'),
+    title,
+    description,
     acceptanceCriteria: null,
     priority: null,
     labels: [],
     dependencies: [],
+    ...(difficulty === null ? {} : { difficulty }),
   })
   const where = task.url ?? `task ${task.id}`
   await opts.driver.postComment(
     opts.root,
     opts.pr.number,
-    `@${opts.mention.user} Logged this as ${where}.`,
+    `@${opts.mention.user} Logged this as ${where}.${configuredFooter(opts.config)}`,
   )
 }
 

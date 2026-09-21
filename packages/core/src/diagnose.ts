@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { loadConfig } from './config.ts'
+import { forgeToken } from './drivers/forge-cred.ts'
 import { makePrDriver } from './drivers/pr.ts'
 import { expandTilde } from './paths.ts'
 import { isRepoRoot, type RegistryEntry } from './registry.ts'
@@ -7,7 +8,12 @@ import { isRepoRoot, type RegistryEntry } from './registry.ts'
 export type Diagnostic = { name: string; ok: boolean; detail?: string }
 
 const TRACKER_BIN: Record<string, string> = { beads: 'bd', github: 'gh', forgejo: 'tea' }
-const FORGE_BIN: Record<string, string> = { github: 'gh' }
+const FORGE_BIN: Record<string, string> = { github: 'gh', forgejo: 'tea' }
+/** Env var a forge token comes from, per kind, so the diagnostic names the fix. */
+const FORGE_TOKEN_VAR: Record<string, string> = {
+  github: 'GH_TOKEN or GITHUB_TOKEN',
+  forgejo: 'FORGEJO_TOKEN',
+}
 
 function binaryExists(bin: string): boolean {
   const r = Bun.spawnSync(['which', bin], { stdout: 'pipe', stderr: 'pipe' })
@@ -68,6 +74,13 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
         : binaryExists(forgeBin)
           ? {}
           : { detail: `${forgeBin} not on PATH` }),
+    })
+    checks.push({
+      name: `forge ${config.forge.kind} token`,
+      ok: forgeToken(config.forge.kind) !== null,
+      ...(forgeToken(config.forge.kind) === null
+        ? { detail: `${FORGE_TOKEN_VAR[config.forge.kind] ?? 'a token'} not set` }
+        : {}),
     })
   } catch (err) {
     checks.push({

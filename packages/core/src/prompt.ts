@@ -20,10 +20,14 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
+    '- Never pipe check or lint output through head/tail: it aborts the tool',
+    '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
     '- If your changes add a user-facing feature (new CLI command or flag, new config',
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    '- End your final message with a short summary of what was done; it is used as',
+    '  the reason when no pull request is opened.',
   ]
 
   if (ctx.askCommand) {
@@ -240,4 +244,47 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     '',
     'Write the explanation to the file and stop.',
   ].join('\n')
+}
+
+export type DifficultyClassifyContext = {
+  title: string
+  description: string
+  levels: readonly string[]
+}
+
+export function classifyDifficultySystemPrompt(): string {
+  return [
+    'You are a classifier for issue tracker tasks.',
+    'Do not use any tools. Do not modify any files.',
+    'Reply with exactly one token, nothing else.',
+  ].join('\n')
+}
+
+export function classifyDifficultyPrompt(ctx: DifficultyClassifyContext): string {
+  const parts = [`Task: ${ctx.title}`]
+  if (ctx.description.trim() !== '') parts.push('', ctx.description.trim())
+  parts.push(
+    '',
+    `Classify how difficult this task is for an AI coding agent to implement, into exactly one of: ${ctx.levels.join(', ')}.`,
+    'Consider scope, ambiguity, risk, and how many files or systems it likely touches.',
+    '',
+    `Reply with exactly one token: ${ctx.levels.join(', ')}.`,
+  )
+  return parts.join('\n')
+}
+
+/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
+export function whyNoChangesPrompt(task: TrackerTask): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    'The run ended with no changes in the worktree, so no pull request was opened.',
+    'Explain in a few sentences why no changes were made: was the task already done,',
+    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
+    'the reason no PR was opened, so be concrete.',
+    '',
+    'Do not modify any files; reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  return parts.join('\n')
 }
