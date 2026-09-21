@@ -112,6 +112,34 @@ export const Config = z.object({
       maxRetries: z.number().int().min(0).default(3),
       retryBaseMs: z.number().int().min(0).default(10_000),
       retryMaxMs: z.number().int().min(0).default(300_000),
+      /**
+       * Input context at which a run is flagged: the runner appends a
+       * `context.warn` event once the run's peak context (input + cached
+       * tokens) reaches it. Kept under `contextMaxTokens` so there is a
+       * breathing room between warning and acting.
+       */
+      contextWarnTokens: z.number().int().min(0).default(160_000),
+      /**
+       * Input context at which a run is stopped: crossing it kills the current
+       * agent process and routes the task to needs_human instead of letting the
+       * harness degrade. Defaults to the claude 200k window; harnesses with a
+       * different window override it via `contextOverrides`.
+       */
+      contextMaxTokens: z.number().int().min(0).default(200_000),
+      /**
+       * Per-harness context budget overrides, keyed by harness kind
+       * (claude/codex/opencode), since context windows differ between them.
+       * Unset fields fall back to contextWarnTokens/contextMaxTokens.
+       */
+      contextOverrides: z
+        .record(
+          z.string(),
+          z.object({
+            warnTokens: z.number().int().min(0).optional(),
+            maxTokens: z.number().int().min(0).optional(),
+          }),
+        )
+        .default({}),
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),

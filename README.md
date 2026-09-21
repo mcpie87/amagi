@@ -177,6 +177,10 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
+| `loop.contextWarnTokens` | integer >= 0 | `160000` | Input context (input + cached tokens) at which a run is flagged: the runner appends a `context.warn` event once the run's peak context reaches it. Kept under `loop.contextMaxTokens`. |
+| `loop.contextMaxTokens` | integer >= 0 | `200000` | Input context at which a run is stopped: crossing it kills the current agent process and routes the task to `needs_human` instead of letting the harness degrade. |
+| `loop.contextOverrides.<harness>.warnTokens` | integer >= 0 | *(falls back to `loop.contextWarnTokens`)* | Per-harness soft limit, keyed by harness kind (`claude`/`codex`/`opencode`), for harnesses whose context window differs. |
+| `loop.contextOverrides.<harness>.maxTokens` | integer >= 0 | *(falls back to `loop.contextMaxTokens`)* | Per-harness hard limit, keyed by harness kind, for harnesses whose context window differs. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |

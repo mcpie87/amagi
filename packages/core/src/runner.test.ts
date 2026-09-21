@@ -87,10 +87,16 @@ type Turn = {
 }
 
 class FakeHarness implements Harness {
-  readonly kind = 'fake'
+  readonly kind: string
   readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+  kills = 0
 
-  constructor(private readonly turns: Turn[]) {}
+  constructor(
+    private readonly turns: Turn[],
+    kind = 'fake',
+  ) {
+    this.kind = kind
+  }
 
   start(opts: AgentStartOptions): AgentProcess {
     return this.run(null, opts)
@@ -127,7 +133,9 @@ class FakeHarness implements Harness {
       pid: -1,
       events: () => queue,
       done: Promise.resolve(outcome),
-      kill: async () => {},
+      kill: async () => {
+        this.kills++
+      },
       model: turn.model ?? null,
       effort: turn.effort ?? null,
     }
@@ -637,6 +645,121 @@ describe('Runner.runOnce', () => {
       .filter((e) => e.type === 'task.state')
       .at(-1)
     expect(lastState?.type === 'task.state' && lastState.to).toBe('needs_human')
+  })
+})
+
+describe('Runner context budget', () => {
+  const usage = (inputTokens: number, cachedTokens = 0, outputTokens = 10): AgentEvent => ({
+    kind: 'usage',
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+  })
+
+  test('crossing the soft limit warns but the run completes', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        events: [{ kind: 'text', text: 'wrote hello.txt' }, usage(180_000, 10_000)],
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 300_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.kills).toBe(0)
+    const warns = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'context.warn' }> => e.type === 'context.warn')
+    expect(warns).toHaveLength(1)
+    expect(warns[0]?.contextTokens).toBe(190_000)
+    expect(warns[0]?.limit).toBe(150_000)
+    expect(types(TASK.id)).not.toContain('context.exceeded')
+  })
+
+  test('the warning fires once on the peak, not on every usage event', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        events: [usage(80_000, 20_000), usage(100_000, 50_000), usage(120_000, 60_000)],
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 300_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    const warns = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'context.warn' }> => e.type === 'context.warn')
+    expect(warns).toHaveLength(1)
+    const peaks = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'run.context' }> => e.type === 'run.context')
+      .map((e) => e.contextTokens)
+    // Peak grows 100k -> 150k -> 180k; only new peaks are recorded.
+    expect(peaks).toEqual([100_000, 150_000, 180_000])
+  })
+
+  test('crossing the hard limit kills the agent and routes the task to needs_human', async () => {
+    const harness = new FakeHarness([{ ...writesAFile, events: [usage(190_000, 15_000)] }])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 200_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(store.task(TASK.id)?.state).toBe('needs_human')
+    expect(harness.kills).toBe(1)
+    expect(harness.calls).toHaveLength(1)
+    const exceeded = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'context.exceeded' }> =>
+          e.type === 'context.exceeded',
+      )
+    expect(exceeded).toHaveLength(1)
+    expect(exceeded[0]?.contextTokens).toBe(205_000)
+    expect(exceeded[0]?.limit).toBe(200_000)
+    expect(types(TASK.id)).toContain('context.warn')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    // A guard kill is a deliberate stop, not an agent failure: no error event.
+    const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
+    expect(errors.some((e) => e.type === 'error' && e.message.includes('agent failed'))).toBe(false)
+  })
+
+  test('per-harness overrides win over the loop defaults', async () => {
+    const harness = new FakeHarness([{ ...writesAFile, events: [usage(180_000)] }], 'codex')
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        loop: {
+          // Loop defaults are far above the emitted usage, so only the
+          // codex override can trip the guard here.
+          contextWarnTokens: 1_000_000,
+          contextMaxTokens: 1_000_000,
+          contextOverrides: { codex: { warnTokens: 150_000, maxTokens: 170_000 } },
+        },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.kills).toBe(1)
+    const exceeded = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'context.exceeded' }> =>
+          e.type === 'context.exceeded',
+      )
+    expect(exceeded).toHaveLength(1)
+    expect(exceeded[0]?.limit).toBe(170_000)
   })
 })
 
