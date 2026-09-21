@@ -208,6 +208,11 @@ export class Runner {
   private transition(taskId: string, to: TaskState, reason?: string): void {
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
+    // An external actor (the doom guard) may have parked the task in a
+    // terminal state mid-run; once parked, further in-run transitions are
+    // no-ops so the runner unwinds cleanly instead of throwing an illegal
+    // transition.
+    if (from !== null && isTerminal(from)) return
     this.deps.store.append(taskId, {
       type: 'task.state',
       from,

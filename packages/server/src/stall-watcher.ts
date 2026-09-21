@@ -1,4 +1,20 @@
-import type { Store, TaskState, Tracker, WorkerActivity } from '@amagi/core'
+import {
+  type DoomOptions,
+  type DoomSignal,
+  exec as defaultExec,
+  detectDoom,
+  type Exec,
+  type Store,
+  type TaskRow,
+  type TaskState,
+  type Tracker,
+  type WorkerActivity,
+} from '@amagi/core'
+
+export type DoomGuardOptions = DoomOptions & {
+  /** A live worker whose worktree diff has not changed for this long is a doom loop. */
+  diffWindowMs: number
+}
 
 export type StallWatcherOptions = {
   /** Repo key, so activity can be attributed across registered repos. */
@@ -8,6 +24,9 @@ export type StallWatcherOptions = {
   /** Inactivity threshold: a task idle for this long gets recovered. */
   timeoutMs: number
   intervalMs?: number
+  /** Doom-loop guard thresholds; omitted to disable the guard. */
+  doom?: DoomGuardOptions
+  exec?: Exec
 }
 
 export type StallWatcher = {
@@ -32,10 +51,25 @@ export const STALLED_STATES: readonly TaskState[] = [
   'committed',
 ]
 
+/**
+ * States where an agent is actively working, so a busy-but-not-progressing
+ * worker can be spotted. `awaiting_answer` is excluded: the worker is parked
+ * waiting on a human, so static tool/diff streams are expected there.
+ */
+export const DOOM_STATES: readonly TaskState[] = ['implementing', 'checks', 'retrying']
+
+/** Event tail the doom guard analyzes per task each tick; covers the tool window. */
+const RECENT_EVENTS_LIMIT = 2000
+/** Cap on the per-tick doom scan; runs are bounded by loop.maxParallel in practice. */
+const DOOM_SCAN_LIMIT = 50
+const GIT_TIMEOUT_MS = 10_000
+
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 function humanMs(ms: number): string {
-  const minutes = Math.round(ms / 60_000)
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.round(seconds / 60)
   return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`
 }
 
@@ -47,6 +81,13 @@ function humanMs(ms: number): string {
  * task back to `claimed`, keeping the recorded worktree for the next worker
  * to resume. Releasing the claim also makes any surviving (hung) runner
  * detect the lost lease and stop itself.
+ *
+ * The same tick also runs the doom-loop guard (`doom` option): a worker that
+ * keeps heartbeating but never progresses (repeated identical tool calls,
+ * identical check failures, or a worktree diff that never changes) gets its
+ * claim released and its task parked in `needs_human` instead of being left to
+ * burn budget. Unlike a stall, a doom loop is not resumed automatically, the
+ * agent is stuck and a human should look.
  */
 export function startStallWatcher({
   repo,
@@ -54,11 +95,16 @@ export function startStallWatcher({
   tracker,
   timeoutMs,
   intervalMs = DEFAULT_INTERVAL_MS,
+  doom,
+  exec = defaultExec,
 }: StallWatcherOptions): StallWatcher {
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
   /** Cumulative across ticks, like the mention watcher's counters. */
   let recovered = 0
+  let stoppedDoom = 0
+  /** Per-task diff snapshots, keyed by worktree state; pruned when a task leaves the scan. */
+  const diffSince = new Map<string, { snapshot: string; since: number }>()
   let activity: WorkerActivity = {
     repo,
     name: 'stall-watcher',
@@ -70,10 +116,100 @@ export function startStallWatcher({
     detail: 'no stalled tasks',
   }
 
+  const detail = (): string => {
+    const bits: string[] = []
+    if (recovered > 0) bits.push(`recovered ${recovered} stalled task${recovered === 1 ? '' : 's'}`)
+    if (stoppedDoom > 0)
+      bits.push(`stopped ${stoppedDoom} doom loop${stoppedDoom === 1 ? '' : 's'}`)
+    return bits.length > 0 ? bits.join(', ') : 'no stalled tasks'
+  }
+
+  async function recoverDoom(task: TaskRow, signal: DoomSignal): Promise<void> {
+    diffSince.delete(task.id)
+    try {
+      await tracker.release(task.id)
+    } catch (err) {
+      console.warn(`doom recover ${task.id}: ${errMsg(err)}`)
+    }
+    store.append(task.id, {
+      type: 'doom.detected',
+      kind: signal.kind,
+      detail: signal.detail,
+    })
+    store.append(task.id, {
+      type: 'task.state',
+      from: task.state,
+      to: 'needs_human',
+      reason: `recovered by doom guard: ${signal.detail}`,
+    })
+    console.warn(`doom loop ${task.id}: ${signal.detail}`)
+  }
+
+  /** Heuristic 3: a live worker whose worktree diff has not changed for the window. */
+  async function diffStaleSignal(task: TaskRow, nowMs: number): Promise<DoomSignal | null> {
+    if (doom === undefined || task.worktree === null) return null
+    let snapshot: string
+    try {
+      const result = await exec(['git', 'status', '--porcelain'], {
+        cwd: task.worktree,
+        timeoutMs: GIT_TIMEOUT_MS,
+      })
+      if (result.exitCode !== 0) return null
+      snapshot = result.stdout
+    } catch {
+      return null
+    }
+    const prev = diffSince.get(task.id)
+    if (prev !== undefined && snapshot === prev.snapshot) {
+      const staleMs = nowMs - prev.since
+      if (staleMs >= doom.diffWindowMs) {
+        return { kind: 'diff_static', detail: `worktree unchanged for ${humanMs(staleMs)}` }
+      }
+      return null
+    }
+    diffSince.set(task.id, { snapshot, since: nowMs })
+    return null
+  }
+
+  async function doomSignalFor(task: TaskRow, nowMs: number): Promise<DoomSignal | null> {
+    if (doom === undefined) return null
+    const recent = store.recentEvents(task.id, RECENT_EVENTS_LIMIT)
+    const signal = detectDoom(recent, nowMs, {
+      toolWindowMs: doom.toolWindowMs,
+      toolRepeat: doom.toolRepeat,
+      checkRounds: doom.checkRounds,
+    })
+    if (signal !== null) return signal
+    return diffStaleSignal(task, nowMs)
+  }
+
+  async function scanDoomLoops(nowMs: number): Promise<number> {
+    if (doom === undefined) return 0
+    const active = store.tasks({ states: DOOM_STATES, limit: DOOM_SCAN_LIMIT })
+    const seen = new Set<string>()
+    let count = 0
+    for (const task of active) {
+      seen.add(task.id)
+      try {
+        const signal = await doomSignalFor(task, nowMs)
+        if (signal === null) continue
+        await recoverDoom(task, signal)
+        count++
+      } catch (err) {
+        console.warn(`doom watch ${task.id}: ${errMsg(err)}`)
+      }
+    }
+    for (const id of [...diffSince.keys()]) {
+      if (!seen.has(id)) diffSince.delete(id)
+    }
+    return count
+  }
+
   async function tick(): Promise<void> {
     const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
     try {
-      const found = store.stalledTasks(STALLED_STATES, Date.now() - timeoutMs)
+      const nowMs = Date.now()
+      const found = store.stalledTasks(STALLED_STATES, nowMs - timeoutMs)
       for (const task of found) {
         try {
           await tracker.release(task.id)
@@ -86,10 +222,18 @@ export function startStallWatcher({
         })
       }
       recovered += found.length
-      next.detail =
-        recovered > 0
-          ? `recovered ${recovered} stalled task${recovered === 1 ? '' : 's'}`
-          : 'no stalled tasks'
+
+      let doomCount = 0
+      if (doom !== undefined) {
+        try {
+          doomCount = await scanDoomLoops(nowMs)
+        } catch (err) {
+          console.warn(`doom watch: ${errMsg(err)}`)
+        }
+      }
+      stoppedDoom += doomCount
+
+      next.detail = detail()
     } catch (err) {
       next.ok = false
       next.error = errMsg(err)

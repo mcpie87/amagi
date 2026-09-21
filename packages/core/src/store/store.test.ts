@@ -294,4 +294,20 @@ describe('Store', () => {
       'recovered by stall watcher: no worker activity for 1h',
     )
   })
+
+  test('recentEvents returns the newest events in order', () => {
+    claim()
+    for (const [from, to] of [
+      ['claimed', 'worktree_ready'],
+      ['worktree_ready', 'implementing'],
+    ] as const) {
+      store.append('bd-1', { type: 'task.state', from, to })
+    }
+    const recent = store.recentEvents('bd-1', 2)
+    expect(recent.map((e) => (e.type === 'task.state' ? e.to : e.type))).toEqual([
+      'worktree_ready',
+      'implementing',
+    ])
+    expect(store.recentEvents('bd-1', 0)).toEqual([])
+  })
 })
