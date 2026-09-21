@@ -1,4 +1,5 @@
 import { agentLogStore } from '@amagi/core/agent-log'
+import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
@@ -48,6 +49,10 @@ function RunnerIndicator() {
 type Dependency = {
   id: string
   title: string
+  /** Tracker status of the blocker: open/in_progress/blocked/closed. */
+  status: string
+  /** Human-only blockers carry the `human` label and need an operator, not an agent. */
+  labels: string[]
 }
 
 type Issue = {
@@ -622,6 +627,7 @@ function IssuesView() {
           <DetailRow label="assignee" value={selectedIssue.assignee} />
           <DetailRow label="labels" value={selectedIssue.labels.join(', ') || null} />
         </dl>
+        <Blockers issue={selectedIssue} />
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
             Description
@@ -1081,6 +1087,60 @@ function DetailRow({ label, value }: { label: string; value: string | ReactNode 
   )
 }
 
+/** Why a task cannot run: its dependency and human-only blockers, from issue detail. */
+function Blockers({ issue }: { issue: Issue }) {
+  const blocking = issue.dependencies.filter((d) => d.status !== 'closed')
+  if (blocking.length === 0) return null
+  const humanOnly = blocking.filter((d) => d.labels.includes(HUMAN_ONLY_LABEL))
+  const dependencies = blocking.filter((d) => !d.labels.includes(HUMAN_ONLY_LABEL))
+
+  const group = (title: string, items: Dependency[], tone: 'red' | 'amber') => (
+    <div>
+      <h3
+        className={`mb-1 text-xs font-semibold uppercase tracking-wide ${
+          tone === 'red' ? 'text-red-300' : 'text-amber-300'
+        }`}
+      >
+        {title} ({items.length})
+      </h3>
+      <ul
+        className={`rounded-lg border px-3 py-1 ${
+          tone === 'red' ? 'border-red-900/60 bg-red-950/20' : 'border-amber-800 bg-amber-950/20'
+        }`}
+      >
+        {items.map((d) => (
+          <li key={d.id} className="flex items-center gap-2 py-1 text-sm">
+            <span
+              className={`rounded px-1.5 py-0.5 text-xs ${
+                tone === 'red' ? 'bg-red-900/60 text-red-200' : 'bg-amber-900/60 text-amber-200'
+              }`}
+            >
+              {d.status}
+            </span>
+            <span className="shrink-0 text-zinc-500">{d.id}</span>
+            <span className="min-w-0 truncate text-zinc-200">{d.title}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-red-400">
+        Blocked by
+      </h2>
+      <p className="mb-2 text-sm text-zinc-500">
+        This task cannot run until every blocker is resolved.
+      </p>
+      <div className="space-y-3">
+        {dependencies.length > 0 && group('Dependency blockers', dependencies, 'red')}
+        {humanOnly.length > 0 && group('Human-only blockers', humanOnly, 'amber')}
+      </div>
+    </div>
+  )
+}
+
 function GithubIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
@@ -1382,6 +1442,90 @@ function RetryButton({
   )
 }
 
+/**
+ * Put a parked needs_human/no_pr task back in the tracker queue so the runner
+ * can pick it up again, and tell the operator whether the runner is available
+ * to do so. Unlike Retry this does not launch immediately: a requeued task
+ * waits for a free slot (Run next on the queue), which is exactly why the
+ * runner's availability is surfaced next to the action.
+ */
+function RequeueButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const { status } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
+
+  const requeue = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setResult({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
+        return
+      }
+      const availability =
+        status === null
+          ? 'the runner is offline, so the task waits for a runner'
+          : status.available
+            ? 'the runner has a free slot'
+            : `the runner is busy (${status.running.length}/${status.capacity})`
+      setResult({
+        kind: 'ok',
+        text: `requeued; ${availability}. Launch it from the queue with Run next when ready.`,
+      })
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const availability =
+    status === null
+      ? 'offline'
+      : status.available
+        ? `${status.running.length}/${status.capacity} free`
+        : `busy (${status.running.length}/${status.capacity})`
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void requeue()}
+        className="rounded border border-amber-700 bg-amber-950/40 px-3 py-1 text-sm text-amber-300 hover:bg-amber-900 disabled:opacity-50"
+      >
+        Requeue
+      </button>
+      <p
+        className="mt-1 text-right text-xs text-zinc-500"
+        title="whether the runner can pick up a requeued task"
+      >
+        runner: {availability}
+      </p>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
+          {result.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -1512,15 +1656,8 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
               <DetailRow label="assignee" value={issue.assignee} />
               <DetailRow label="labels" value={issue.labels.join(', ') || null} />
               <DetailRow label="parent" value={issue.parent} />
-              <DetailRow
-                label="blocked by"
-                value={
-                  issue.dependencies.length === 0
-                    ? null
-                    : issue.dependencies.map((d) => d.title).join(', ')
-                }
-              />
             </dl>
+            <Blockers issue={issue} />
             <div className="mt-6">
               <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
                 Description
@@ -1703,6 +1840,14 @@ function TaskDetailView() {
         )}
         {selected !== null && (
           <RetryButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
+        {selected !== null && (
+          <RequeueButton
             repo={selected}
             taskId={task.id}
             state={task.state}

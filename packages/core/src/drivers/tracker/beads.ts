@@ -24,13 +24,19 @@ type BdIssue = {
   dependencies?: BdIssue[]
 }
 
+/** A blocker behind a BeadsIssue, with the labels the dashboard needs to tell
+ * dependency blockers from human-only ones (`human` label). */
+export type BeadsBlocker = TrackerTask & {
+  labels: string[]
+}
+
 export type BeadsIssue = TrackerTask & {
   acceptanceCriteria: string | null
   assignee: string | null
   labels: string[]
   parent: string | null
   /** Issues this one is blocked by, when the tracker reports them (bd show does). */
-  dependencies: TrackerTask[]
+  dependencies: BeadsBlocker[]
 }
 
 export type BeadsOptions = {
@@ -93,7 +99,10 @@ function toIssue(issue: BdIssue): BeadsIssue {
     assignee: issue.assignee ?? null,
     labels: issue.labels ?? [],
     parent: issue.parent ?? null,
-    dependencies: (issue.dependencies ?? []).map(toTask),
+    dependencies: (issue.dependencies ?? []).map((d) => ({
+      ...toTask(d),
+      labels: d.labels ?? [],
+    })),
   }
 }
 
