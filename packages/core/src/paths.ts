@@ -25,21 +25,3 @@ export function dbPath(): string {
   if (override) return resolve(expandTilde(override))
   return join(stateHome(), 'amagi', 'amagi.db')
 }
-
-/**
- * One database per registered repository, so identical issue ids in different
- * repos never collide and every repo's store, tokens, logs and streams stay
- * scoped to it. `AMAGI_DB` overrides to a single file for tests that want one.
- */
-export function dbPathForRepo(key: string): string {
-  const override = process.env.AMAGI_DB
-  if (override) return resolve(expandTilde(override))
-  return join(stateHome(), 'amagi', 'repos', `${key}.db`)
-}
-
-/** The repository registry lives here; overridable for tests. */
-export function registryPath(): string {
-  const override = process.env.AMAGI_REGISTRY
-  if (override) return resolve(expandTilde(override))
-  return join(stateHome(), 'amagi', 'registry.json')
-}

@@ -25,18 +25,16 @@ const kindClass: Record<AgentLogLine['kind'], string> = {
  * costs one re-render, not one per line. Rows outside the viewport are never
  * mounted, via @tanstack/react-virtual.
  */
-export function AgentLogView({ repo, taskId }: { repo: string; taskId: string }) {
+export function AgentLogView({ taskId }: { taskId: string }) {
   const parentRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
-  // namespaced by repo so identical issue ids across repos never share a buffer
-  const logKey = `${repo}/${taskId}`
   const [following, setFollowing] = useState(true)
 
   useSyncExternalStore(
-    (listener) => agentLogStore.subscribe(logKey, listener),
-    () => agentLogStore.get(logKey).version,
+    (listener) => agentLogStore.subscribe(taskId, listener),
+    () => agentLogStore.get(taskId).version,
   )
-  const buffer = agentLogStore.get(logKey)
+  const buffer = agentLogStore.get(taskId)
 
   const rowVirtualizer = useVirtualizer({
     count: buffer.length,
@@ -45,7 +43,6 @@ export function AgentLogView({ repo, taskId }: { repo: string; taskId: string })
     overscan: 30,
   })
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: A full ring buffer changes version without changing length.
   useEffect(() => {
     if (!stickToBottom.current || buffer.length === 0) return
     rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })

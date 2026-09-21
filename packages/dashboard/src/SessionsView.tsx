@@ -65,7 +65,7 @@ function StatCard({ label, value }: { label: string; value: string }) {
 }
 
 export function SessionsView() {
-  const { state } = useDashboard()
+  const state = useDashboard()
   const sessions = useMemo(() => sessionsFromEvents(state.events), [state.events])
   const running = sessions.filter((s) => s.endedAt === null).length
   const completed = sessions.filter((s) => s.durationMs !== null)

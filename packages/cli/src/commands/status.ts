@@ -1,7 +1,6 @@
-import { isTerminal, loadConfig, repoRoot, type TaskState } from '@amagi/core'
+import { isTerminal, loadConfig, repoRoot, Store, type TaskState } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, magenta, red, relTime, table, yellow } from '../format.ts'
-import { currentRepo } from '../repo.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, (s: string) => string>> = {
   awaiting_answer: yellow,
@@ -22,7 +21,7 @@ export const statusCommand = defineCommand({
   run({ args }) {
     const root = repoRoot()
     const { config, sources } = loadConfig(root)
-    const { key, store } = currentRepo()
+    const store = new Store()
 
     const tasks = store.tasks().filter((t) => args.all || !isTerminal(t.state))
     const questions = store.openQuestions()
@@ -53,7 +52,6 @@ export const statusCommand = defineCommand({
         }),
       )
     }
-    console.log(dim(`repo: ${key}`))
 
     if (questions.length > 0) {
       console.log(`\n${bold(yellow(`${questions.length} question(s) waiting on you`))}`)

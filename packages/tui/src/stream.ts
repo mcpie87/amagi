@@ -46,7 +46,6 @@ const RETRY_DELAY_MS = 1000
  */
 export function subscribeToStream(
   baseUrl: string,
-  repo: string,
   scope: { taskId?: string },
   onEvent: (event: StoredEvent) => void,
 ): StreamHandle {
@@ -57,9 +56,7 @@ export function subscribeToStream(
   async function connectOnce(): Promise<void> {
     const qs = new URLSearchParams({ sinceSeq: String(sinceSeq) })
     if (scope.taskId !== undefined) qs.set('taskId', scope.taskId)
-    const res = await fetch(`${baseUrl}/api/repos/${repo}/stream?${qs}`, {
-      signal: controller.signal,
-    })
+    const res = await fetch(`${baseUrl}/api/stream?${qs}`, { signal: controller.signal })
     if (!res.ok || res.body === null) throw new Error(`stream request failed: HTTP ${res.status}`)
 
     const reader = res.body.getReader()

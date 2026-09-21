@@ -10,30 +10,25 @@ import { subscribeToStream } from './stream.ts'
  * the same reason the browser does: it is the hot path and must never cost a
  * render per line. Components that show the log read agentLogStore directly.
  */
-export function useDashboardStream(baseUrl: string, repo: string, taskId?: string): DashboardState {
+export function useDashboardStream(baseUrl: string, taskId?: string): DashboardState {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
   const mounted = useRef(true)
 
   useEffect(() => {
     mounted.current = true
-    const handle = subscribeToStream(
-      baseUrl,
-      repo,
-      taskId !== undefined ? { taskId } : {},
-      (event) => {
-        if (!mounted.current) return
-        if (event.type === 'agent.stream' && event.taskId !== null) {
-          agentLogStore.append(`${repo}/${event.taskId}`, event.role, event.ts, event.event)
-        } else {
-          dispatch(event)
-        }
-      },
-    )
+    const handle = subscribeToStream(baseUrl, taskId !== undefined ? { taskId } : {}, (event) => {
+      if (!mounted.current) return
+      if (event.type === 'agent.stream' && event.taskId !== null) {
+        agentLogStore.append(event.taskId, event.role, event.ts, event.event)
+      } else {
+        dispatch(event)
+      }
+    })
     return () => {
       mounted.current = false
       handle.close()
     }
-  }, [baseUrl, repo, taskId])
+  }, [baseUrl, taskId])
 
   return state
 }

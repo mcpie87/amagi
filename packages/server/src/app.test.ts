@@ -1,24 +1,23 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import type {
-  BeadsIssue,
-  CreateTrackerTask,
-  GateRef,
-  Question,
-  QuestionRow,
-  RunServiceApi,
+import { beforeEach, describe, expect, test } from 'bun:test'
+import {
+  type BeadsIssue,
+  type CreateTrackerTask,
+  type GateRef,
+  openDatabase,
+  type Question,
+  type QuestionRow,
+  type RunServiceApi,
   Store,
-  TaskRow,
-  Tracker,
-  TrackerCapabilities,
-  TrackerStatus,
-  TrackerTask,
-  UpdateTrackerTask,
+  type TaskRow,
+  type Tracker,
+  type TrackerCapabilities,
+  type TrackerStatus,
+  type TrackerTask,
+  type UpdateTrackerTask,
 } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
-import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
-let ws: TestWorkspaces
 let store: Store
 let app: AppType
 
@@ -71,21 +70,15 @@ class FakeGateTracker implements Tracker {
   }
 }
 
-afterEach(() => {
-  ws.cleanup()
+beforeEach(() => {
+  store = new Store(openDatabase(':memory:'))
+  app = createApp({ store })
 })
-
-describe('GET /api/repos/:repo/tasks', () => {
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1'])
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
+describe('GET /api/tasks', () => {
   test('returns the store projection newest first', async () => {
     claim('bd-1')
     claim('bd-2')
-    const res = await app.request('/api/repos/repo1/tasks')
+    const res = await app.request('/api/tasks')
     expect(res.status).toBe(200)
     const body = (await res.json()) as TaskRow[]
     expect(body.map((t) => t.id)).toEqual(['bd-2', 'bd-1'])
@@ -97,75 +90,55 @@ describe('GET /api/repos/:repo/tasks', () => {
     claim('bd-2')
     store.append('bd-2', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
 
-    const repeated = await app.request('/api/repos/repo1/tasks?state=claimed&state=worktree_ready')
+    const repeated = await app.request('/api/tasks?state=claimed&state=worktree_ready')
     expect(((await repeated.json()) as TaskRow[]).map((t) => t.id).sort()).toEqual(['bd-1', 'bd-2'])
 
-    const csv = await app.request('/api/repos/repo1/tasks?state=worktree_ready')
+    const csv = await app.request('/api/tasks?state=worktree_ready')
     expect(((await csv.json()) as TaskRow[]).map((t) => t.id)).toEqual(['bd-2'])
   })
 
   test('rejects an unknown state with a 400 and a readable error', async () => {
-    const res = await app.request('/api/repos/repo1/tasks?state=nonsense')
+    const res = await app.request('/api/tasks?state=nonsense')
     expect(res.status).toBe(400)
     expect((await res.json()) as { error: string }).toHaveProperty('error')
   })
 
   test('rejects a limit outside the allowed range', async () => {
-    expect((await app.request('/api/repos/repo1/tasks?limit=0')).status).toBe(400)
-    expect((await app.request('/api/repos/repo1/tasks?limit=abc')).status).toBe(400)
-  })
-
-  test('404s for an unknown repo', async () => {
-    expect((await app.request('/api/repos/nope/tasks')).status).toBe(404)
+    expect((await app.request('/api/tasks?limit=0')).status).toBe(400)
+    expect((await app.request('/api/tasks?limit=abc')).status).toBe(400)
   })
 })
 
-describe('identical issue ids across repos do not collide', () => {
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1', 'repo2'])
-    app = createApp({ workspaces: ws.workspaces })
+describe('GET /api/issues', () => {
+  test('returns tracker issues when the tracker supports browsing', async () => {
+    const issueApp = createApp({
+      store,
+      listIssues: async () => [
+        {
+          id: 'bd-1',
+          title: 'Browse issues',
+          description: 'Show tracker issues in the dashboard.',
+          status: 'open',
+          priority: 2,
+          type: 'feature',
+          url: null,
+          acceptanceCriteria: null,
+          assignee: null,
+          labels: [],
+          parent: null,
+          dependencies: [],
+        },
+      ],
+    })
+    const res = await issueApp.request('/api/issues')
+    expect(res.status).toBe(200)
+    expect((await res.json()) as { id: string }[]).toEqual([
+      expect.objectContaining({ id: 'bd-1' }),
+    ])
   })
 
-  test('each repo sees only its own task under the same id', async () => {
-    const one = ws.store('repo1')
-    const two = ws.store('repo2')
-    one.append('42', { type: 'task.claimed', title: 'repo one issue', tracker: 'beads' })
-    two.append('42', { type: 'task.claimed', title: 'repo two issue', tracker: 'beads' })
-
-    const body = (await (await app.request('/api/repos/repo1/tasks/42')).json()) as {
-      task: TaskRow
-    }
-    expect(body.task.title).toBe('repo one issue')
-    expect(one.token('42')).not.toBe(two.token('42'))
-
-    const list1 = (await (await app.request('/api/repos/repo1/tasks')).json()) as TaskRow[]
-    expect(list1).toHaveLength(1)
-    const list2 = (await (await app.request('/api/repos/repo2/tasks')).json()) as TaskRow[]
-    expect(list2).toHaveLength(1)
-  })
-
-  test('an event stream is scoped to one repo', async () => {
-    const one = ws.store('repo1')
-    one.append('1', { type: 'task.claimed', title: 'a', tracker: 'beads' })
-    ws.store('repo2').append('1', { type: 'task.claimed', title: 'b', tracker: 'beads' })
-    const body = (await (await app.request('/api/repos/repo1/events')).json()) as {
-      taskId: string | null
-    }[]
-    expect(body.every((e) => e.taskId === '1')).toBe(true)
-    expect(body).toHaveLength(1)
-  })
-})
-
-describe('GET /api/repos/:repo/issues', () => {
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
-  test('reports when issue browsing is unavailable (non-beads tracker)', async () => {
-    const res = await app.request('/api/repos/repo1/issues')
-    expect(res.status).toBe(501)
+  test('reports when issue browsing is unavailable', async () => {
+    expect((await app.request('/api/issues')).status).toBe(501)
   })
 })
 
@@ -196,10 +169,6 @@ class FakeIssueTracker implements Tracker {
     }
     this.issues.set(issue.id, issue)
     return issue
-  }
-
-  list(): BeadsIssue[] {
-    return [...this.issues.values()]
   }
 
   getIssue(id: string): BeadsIssue | null {
@@ -280,16 +249,22 @@ class FakeIssueTracker implements Tracker {
 }
 
 function issueApp(tracker: Tracker) {
-  ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-  store = ws.store('repo1')
-  return createApp({ workspaces: ws.workspaces })
+  return createApp({
+    store,
+    tracker,
+    listIssues: async () => [],
+    getIssue: async (id) => {
+      if (tracker instanceof FakeIssueTracker) return tracker.getIssue(id)
+      return null
+    },
+  })
 }
 
 describe('issue mutations', () => {
-  test('POST /api/repos/:repo/issues creates through the tracker and returns the issue', async () => {
+  test('POST /api/issues creates through the tracker and returns the issue', async () => {
     const tracker = new FakeIssueTracker()
     app = issueApp(tracker)
-    const res = await app.request('/api/repos/repo1/issues', {
+    const res = await app.request('/api/issues', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -310,9 +285,9 @@ describe('issue mutations', () => {
     expect(tracker.created[0]).toMatchObject({ title: 'Plan the board' })
   })
 
-  test('POST /api/repos/:repo/issues surfaces an unsupported tracker explicitly', async () => {
-    app = issueApp(new FakeGateTracker())
-    const res = await app.request('/api/repos/repo1/issues', {
+  test('POST /api/issues surfaces an unsupported tracker explicitly', async () => {
+    app = createApp({ store, tracker: new FakeGateTracker() })
+    const res = await app.request('/api/issues', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'x' }),
@@ -321,10 +296,10 @@ describe('issue mutations', () => {
     expect(((await res.json()) as { error: string }).error).toContain('does not support')
   })
 
-  test('POST /api/repos/:repo/issues rejects an empty title', async () => {
+  test('POST /api/issues rejects an empty title', async () => {
     const tracker = new FakeIssueTracker()
     app = issueApp(tracker)
-    const res = await app.request('/api/repos/repo1/issues', {
+    const res = await app.request('/api/issues', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: '   ' }),
@@ -333,7 +308,7 @@ describe('issue mutations', () => {
     expect(tracker.created).toHaveLength(0)
   })
 
-  test('PATCH /api/repos/:repo/issues/:id updates fields and diffs dependencies', async () => {
+  test('PATCH /api/issues/:id updates fields and diffs dependencies', async () => {
     const tracker = new FakeIssueTracker()
     tracker.seed({
       id: 'bd-1',
@@ -352,7 +327,7 @@ describe('issue mutations', () => {
     })
     app = issueApp(tracker)
 
-    const res = await app.request('/api/repos/repo1/issues/bd-1', {
+    const res = await app.request('/api/issues/bd-1', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -372,9 +347,10 @@ describe('issue mutations', () => {
     })
   })
 
-  test('PATCH /api/repos/:repo/issues/:id rejects dependency edits on a tracker without them', async () => {
-    app = issueApp(new FakeGateTracker())
-    const res = await app.request('/api/repos/repo1/issues/bd-1', {
+  test('PATCH /api/issues/:id rejects dependency edits on a tracker without them', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
+    const res = await app.request('/api/issues/bd-1', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ dependencies: ['bd-9'] }),
@@ -383,9 +359,9 @@ describe('issue mutations', () => {
     expect(((await res.json()) as { error: string }).error).toContain('managing dependencies')
   })
 
-  test('PATCH /api/repos/:repo/issues/:id surfaces an unsupported tracker explicitly', async () => {
-    app = issueApp(new FakeGateTracker())
-    const res = await app.request('/api/repos/repo1/issues/bd-1', {
+  test('PATCH /api/issues/:id surfaces an unsupported tracker explicitly', async () => {
+    app = createApp({ store, tracker: new FakeGateTracker() })
+    const res = await app.request('/api/issues/bd-1', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'x' }),
@@ -394,35 +370,26 @@ describe('issue mutations', () => {
     expect(((await res.json()) as { error: string }).error).toContain('does not support')
   })
 
-  test('GET /api/repos/:repo/issues/:id returns the issue detail', async () => {
+  test('GET /api/issues/:id returns the issue detail', async () => {
     const tracker = new FakeIssueTracker()
     tracker.seed({ id: 'bd-1', labels: ['x'] })
     app = issueApp(tracker)
-    const res = await app.request('/api/repos/repo1/issues/bd-1')
+    const res = await app.request('/api/issues/bd-1')
     expect(res.status).toBe(200)
     const body = (await res.json()) as BeadsIssue
     expect(body.id).toBe('bd-1')
     expect(body.labels).toEqual(['x'])
   })
 
-  test('GET /api/repos/:repo/issues/:id 404s on an unknown issue', async () => {
+  test('GET /api/issues/:id 404s on an unknown issue', async () => {
     const tracker = new FakeIssueTracker()
     app = issueApp(tracker)
-    const res = await app.request('/api/repos/repo1/issues/nope')
+    const res = await app.request('/api/issues/nope')
     expect(res.status).toBe(404)
   })
 })
 
-describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
-  let tracker: FakeGateTracker
-
-  beforeEach(() => {
-    tracker = new FakeGateTracker()
-    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
+describe('POST /api/tasks/:id/reclaim', () => {
   const stuckTask = (id: string) => {
     claim(id)
     store.append(id, {
@@ -435,8 +402,10 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   }
 
   test('returns a stuck task with a recorded worktree to the queue and releases it', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
     stuckTask('bd-1')
-    const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { task: TaskRow }
     expect(body.task.state).toBe('claimed')
@@ -446,39 +415,39 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   })
 
   test('reclaims even when releasing the tracker claim fails', async () => {
+    const tracker = new FakeGateTracker()
     tracker.releaseError = new Error('bd down')
+    app = createApp({ store, tracker })
     stuckTask('bd-1')
-    const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     expect((await res.json()) as { task: TaskRow }).toMatchObject({ task: { state: 'claimed' } })
   })
 
   test('404s on an unknown task', async () => {
-    const res = await app.request('/api/repos/repo1/tasks/nope/reclaim', { method: 'POST' })
+    const res = await app.request('/api/tasks/nope/reclaim', { method: 'POST' })
     expect(res.status).toBe(404)
   })
 
   test('409s when the task has no worktree to resume', async () => {
     claim('bd-1')
-    const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(409)
   })
 
   test('409s when the task already reached a terminal state', async () => {
     stuckTask('bd-1')
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'needs_human' })
-    const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(409)
   })
 
   test('reclaims a cancelled task so its preserved worktree can be resumed', async () => {
     const tracker = new FakeGateTracker()
-    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = createApp({ store, tracker })
     stuckTask('bd-1')
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
-    const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { task: TaskRow }
     expect(body.task.state).toBe('claimed')
@@ -501,15 +470,9 @@ describe('runner endpoints', () => {
       ...(body === undefined ? {} : { body }),
     })
 
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1'])
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
   test('GET /api/runner reports availability and capacity', async () => {
     app = createApp({
-      workspaces: ws.workspaces,
+      store,
       runner: stubRunner({
         status: () => ({ available: false, capacity: 1, running: ['bd-1'] }),
       }),
@@ -528,7 +491,7 @@ describe('runner endpoints', () => {
   test('POST /api/runs launches the next ready task', async () => {
     const started: (string | undefined)[] = []
     app = createApp({
-      workspaces: ws.workspaces,
+      store,
       runner: stubRunner({
         start: async (taskId) => {
           started.push(taskId)
@@ -545,7 +508,7 @@ describe('runner endpoints', () => {
   test('POST /api/runs forwards a task id and rejects an invalid body', async () => {
     const started: (string | undefined)[] = []
     app = createApp({
-      workspaces: ws.workspaces,
+      store,
       runner: stubRunner({
         start: async (taskId) => {
           started.push(taskId)
@@ -561,7 +524,7 @@ describe('runner endpoints', () => {
 
   test('POST /api/runs propagates a launch failure', async () => {
     app = createApp({
-      workspaces: ws.workspaces,
+      store,
       runner: stubRunner({
         start: async () => ({ ok: false, status: 409, error: 'runner at capacity (1/1)' }),
       }),
@@ -574,7 +537,7 @@ describe('runner endpoints', () => {
   test('POST /api/runs/:id/stop forwards to the runner and propagates failures', async () => {
     const stopped: string[] = []
     app = createApp({
-      workspaces: ws.workspaces,
+      store,
       runner: stubRunner({
         stop: async (id) => {
           stopped.push(id)
@@ -593,13 +556,7 @@ describe('runner endpoints', () => {
   })
 })
 
-describe('GET /api/repos/:repo/tasks/:id', () => {
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1'])
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
+describe('GET /api/tasks/:id', () => {
   test('returns the task with its open questions', async () => {
     claim('bd-1')
     store.append('bd-1', {
@@ -609,7 +566,7 @@ describe('GET /api/repos/:repo/tasks/:id', () => {
       options: ['npm', 'nexus'],
       gateRef: null,
     })
-    const res = await app.request('/api/repos/repo1/tasks/bd-1')
+    const res = await app.request('/api/tasks/bd-1')
     const body = (await res.json()) as { task: TaskRow; token: string; questions: QuestionRow[] }
     expect(body.task.id).toBe('bd-1')
     expect(body.token).toBe(store.token('bd-1'))
@@ -618,23 +575,17 @@ describe('GET /api/repos/:repo/tasks/:id', () => {
   })
 
   test('404s on an unknown id', async () => {
-    const res = await app.request('/api/repos/repo1/tasks/nope')
+    const res = await app.request('/api/tasks/nope')
     expect(res.status).toBe(404)
     expect(((await res.json()) as { error: string }).error).toContain('nope')
   })
 })
 
-describe('GET /api/repos/:repo/events', () => {
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1'])
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
+describe('GET /api/events', () => {
   test('replays from a sequence number without repeating it', async () => {
     const first = claim('bd-1')
     store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
-    const res = await app.request(`/api/repos/repo1/events?sinceSeq=${first.seq}`)
+    const res = await app.request(`/api/events?sinceSeq=${first.seq}`)
     const body = (await res.json()) as { seq: number; type: string }[]
     expect(body).toHaveLength(1)
     expect(body[0]?.type).toBe('task.state')
@@ -643,19 +594,13 @@ describe('GET /api/repos/:repo/events', () => {
   test('scopes to one task', async () => {
     claim('bd-1')
     claim('bd-2')
-    const res = await app.request('/api/repos/repo1/events?taskId=bd-2')
+    const res = await app.request('/api/events?taskId=bd-2')
     const body = (await res.json()) as { taskId: string | null }[]
     expect(body.every((e) => e.taskId === 'bd-2')).toBe(true)
   })
 })
 
-describe('GET /api/repos/:repo/questions', () => {
-  beforeEach(() => {
-    ws = testWorkspaces(['repo1'])
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
+describe('GET /api/questions', () => {
   test('lists only unresolved questions', async () => {
     claim('bd-1')
     for (const id of ['q1', 'q2']) {
@@ -668,22 +613,13 @@ describe('GET /api/repos/:repo/questions', () => {
       })
     }
     store.append('bd-1', { type: 'question.answered', questionId: 'q1', answer: 'yes', via: 'web' })
-    const res = await app.request('/api/repos/repo1/questions')
+    const res = await app.request('/api/questions')
     const body = (await res.json()) as QuestionRow[]
     expect(body.map((q) => q.id)).toEqual(['q2'])
   })
 })
 
 describe('question channel', () => {
-  let tracker: FakeGateTracker
-
-  beforeEach(() => {
-    tracker = new FakeGateTracker()
-    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-  })
-
   const token = (id: string) => store.token(id)
   const implementing = (id: string) => {
     for (const to of ['worktree_ready', 'implementing'] as const) {
@@ -691,13 +627,13 @@ describe('question channel', () => {
     }
   }
   const ask = (id: string, question: string, options: string[] = []) =>
-    app.request(`/api/repos/repo1/tasks/${id}/questions`, {
+    app.request(`/api/tasks/${id}/questions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ question, options }),
     })
   const answer = (id: string, questionId: string, text: string, token?: string) =>
-    app.request(`/api/repos/repo1/tasks/${id}/questions/${questionId}/answer`, {
+    app.request(`/api/tasks/${id}/questions/${questionId}/answer`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -707,7 +643,7 @@ describe('question channel', () => {
     })
   const awaitQ = (id: string, questionId: string, t: string, deadlineMs?: number) =>
     app.request(
-      `/api/repos/repo1/tasks/${id}/questions/${questionId}/await${deadlineMs ? `?deadlineMs=${deadlineMs}` : ''}`,
+      `/api/tasks/${id}/questions/${questionId}/await${deadlineMs ? `?deadlineMs=${deadlineMs}` : ''}`,
       { headers: { 'X-Amagi-Token': t } },
     )
 
@@ -815,7 +751,7 @@ describe('question channel', () => {
       },
     }
     app = createApp({
-      workspaces: ws.workspaces,
+      store,
       notify: [
         {
           kind: 'spy',
@@ -841,6 +777,8 @@ describe('question channel', () => {
   })
 
   test('asking opens a gate on the issue and records its ref', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
     claim('bd-1')
     implementing('bd-1')
     const res = await ask('bd-1', 'which registry?', ['npm', 'nexus'])
@@ -854,6 +792,8 @@ describe('question channel', () => {
   })
 
   test('answering resolves the gate', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
     claim('bd-1')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
@@ -865,75 +805,7 @@ describe('question channel', () => {
   })
 })
 
-describe('GET /api/repos', () => {
-  test('lists registered repositories with readiness', async () => {
-    ws = testWorkspaces(['repo1', 'repo2'])
-    app = createApp({ workspaces: ws.workspaces })
-    const res = await app.request('/api/repos')
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as {
-      key: string
-      name: string
-      path: string
-      ready: { name: string; ok: boolean }[]
-    }[]
-    expect(body.map((r) => r.key).sort()).toEqual(['repo1', 'repo2'])
-    // a missing git root is reported, not thrown
-    expect(body[0]?.ready.some((d) => d.ok === false)).toBe(true)
-  })
-})
-
-describe('POST /api/repos (onboarding)', () => {
-  test('registers a new repo without a restart and reports readiness', async () => {
-    ws = testWorkspaces([])
-    app = createApp({ workspaces: ws.workspaces })
-    const res = await app.request('/api/repos', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: process.cwd() }),
-    })
-    expect(res.status).toBe(201)
-    const body = (await res.json()) as { key: string; name: string; ready: unknown[] }
-    expect(body.key).toBeTruthy()
-    expect(Array.isArray(body.ready)).toBe(true)
-    expect(ws.workspaces.list().some((e) => e.key === body.key)).toBe(true)
-  })
-
-  test('rejects a path that is not a git repository', async () => {
-    ws = testWorkspaces([])
-    app = createApp({ workspaces: ws.workspaces })
-    const res = await app.request('/api/repos', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: '/nonexistent-path-xyz' }),
-    })
-    expect(res.status).toBe(400)
-  })
-})
-
-describe('POST /api/repos/:repo/run', () => {
-  test('starts a run in the background for the repo', async () => {
-    const tracker = new FakeGateTracker()
-    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-    const res = await app.request('/api/repos/repo1/run', { method: 'POST' })
-    expect(res.status).toBe(202)
-    await Bun.sleep(20)
-    // the fake tracker has nothing ready, so the run ends without events
-    expect(tracker.released).toEqual([])
-  })
-
-  test('404s for an unknown repo', async () => {
-    ws = testWorkspaces(['repo1'])
-    app = createApp({ workspaces: ws.workspaces })
-    expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
-  })
-})
-
 test('unknown routes answer with the shared error shape', async () => {
-  ws = testWorkspaces(['repo1'])
-  app = createApp({ workspaces: ws.workspaces })
   const res = await app.request('/api/nope')
   expect(res.status).toBe(404)
   expect((await res.json()) as { error: string }).toHaveProperty('error')
@@ -945,20 +817,15 @@ test('unknown routes answer with the shared error shape', async () => {
  * fails at typecheck, not at runtime, if the route chain stops inferring.
  */
 test('hono/client infers the store projections', async () => {
-  ws = testWorkspaces(['repo1'])
-  store = ws.store('repo1')
-  app = createApp({ workspaces: ws.workspaces })
   claim('bd-1')
   const client = hc<AppType>('http://localhost', { fetch: app.request })
 
-  const tasks = await client.api.repos[':repo'].tasks.$get({ param: { repo: 'repo1' }, query: {} })
+  const tasks = await client.api.tasks.$get({ query: {} })
   if (tasks.status !== 200) throw new Error('expected 200')
   const rows: TaskRow[] = await tasks.json()
   expect(rows[0]?.id).toBe('bd-1')
 
-  const detail = await client.api.repos[':repo'].tasks[':id'].$get({
-    param: { repo: 'repo1', id: 'bd-1' },
-  })
+  const detail = await client.api.tasks[':id'].$get({ param: { id: 'bd-1' } })
   if (detail.status !== 200) throw new Error('expected 200')
   const body: { task: TaskRow; questions: QuestionRow[] } = await detail.json()
   expect(body.task.title).toBe('work on bd-1')

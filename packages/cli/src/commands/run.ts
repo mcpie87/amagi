@@ -7,11 +7,11 @@ import {
   Runner,
   repoName,
   repoRoot,
+  Store,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
-import { currentRepo } from '../repo.ts'
 import { pickRunSelection } from '../select-run.ts'
 
 const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
@@ -32,8 +32,6 @@ export const runCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const { key, store } = currentRepo()
-
     const flags = { harness: args.harness, model: args.model }
 
     const selection = await pickRunSelection(
@@ -43,6 +41,7 @@ export const runCommand = defineCommand({
       listModelsFor,
     )
 
+    const store = new Store()
     const implement = selection.harness
     if (selection.interactive) {
       console.log(
@@ -113,7 +112,7 @@ export const runCommand = defineCommand({
     })
 
     try {
-      console.log(dim(`claiming next ready task in ${key}...`))
+      console.log(dim('claiming next ready task...'))
       const result = await runner.runOnce()
       if (result === null) {
         console.log(dim('nothing ready to work on'))
