@@ -2,7 +2,7 @@ import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
 import { parseModelLines } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type FileChange = { path: string; kind: string }
 
@@ -41,20 +41,6 @@ type CodexMessage = {
 }
 
 type ItemPhase = 'started' | 'updated' | 'completed'
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
-}
 
 /**
  * Turns codex's `exec --json` dialect (the `ThreadEvent`/`ThreadItem` shapes

@@ -2,7 +2,7 @@ import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
 import { parseModelLines } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type ToolState = {
   status?: string
@@ -24,11 +24,6 @@ type OpencodeMessage = {
   type?: string
   sessionID?: string
   part?: Part
-}
-
-function renderToolResult(output: unknown): string {
-  if (typeof output === 'string') return output
-  return JSON.stringify(output ?? '')
 }
 
 /**
