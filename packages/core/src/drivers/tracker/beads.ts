@@ -40,6 +40,21 @@ export type BeadsOptions = {
   actor?: string
 }
 
+/** One epic from `bd epic close-eligible --dry-run`, the preview surface. */
+export type EpicCloseEligible = {
+  id: string
+  title: string
+  status: string
+  totalChildren: number
+  closedChildren: number
+}
+
+/** What `bd epic close-eligible` actually closed. */
+export type EpicCloseResult = {
+  closed: string[]
+  reason: string
+}
+
 /** bd grants a five minute lease on claim and expects heartbeats under that. */
 const LEASE_TTL_MS = 5 * 60_000
 
@@ -153,7 +168,15 @@ export class BeadsTracker implements Tracker {
       HUMAN_ONLY_LABEL,
     ])
     const issues = parseIssues(out)
-    return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
+    const claimed = issues[0]
+    if (claimed !== undefined) return toTask(claimed)
+    // bd 1.3.0's ready --claim skips open issues already assigned to the
+    // claiming actor, even though `bd ready` lists them, so a queue of such
+    // issues would report nothing ready forever. Claim the first by id.
+    const ready = await this.ready(1)
+    const first = ready[0]
+    if (first === undefined) return null
+    return this.claim(first.id)
   }
 
   async get(id: string): Promise<TrackerTask | null> {
@@ -261,6 +284,36 @@ export class BeadsTracker implements Tracker {
 
   async resolveGate(ref: GateRef): Promise<void> {
     await this.bd(['gate', 'resolve', ref.id])
+  }
+
+  /** Preview: epics whose children are all complete (bd epic close-eligible --dry-run). */
+  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+    const out = await this.bd(['epic', 'close-eligible', '--dry-run', '--json'])
+    const parsed: unknown = JSON.parse(out)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((e): e is Record<string, unknown> => e !== null && typeof e === 'object')
+      .filter((e) => e.eligible_for_close === true)
+      .map((e) => {
+        const epic = (e.epic ?? {}) as Record<string, unknown>
+        return {
+          id: String(epic.id ?? ''),
+          title: String(epic.title ?? ''),
+          status: String(epic.status ?? ''),
+          totalChildren: Number(e.total_children ?? 0),
+          closedChildren: Number(e.closed_children ?? 0),
+        }
+      })
+  }
+
+  /** Close the eligible epics, recording the operator's reason (bd epic close-eligible --reason). */
+  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+    const out = await this.bd(['epic', 'close-eligible', '--reason', reason, '--json'])
+    const parsed = (JSON.parse(out) ?? {}) as { closed?: unknown; reason?: unknown }
+    return {
+      closed: Array.isArray(parsed.closed) ? parsed.closed.map(String) : [],
+      reason: String(parsed.reason ?? ''),
+    }
   }
 }
 

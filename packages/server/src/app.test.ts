@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync } from 'node:fs'
 import type {
+  AgentEvent,
+  AgentOutcome,
+  AgentProcess,
+  AgentStartOptions,
   BeadsIssue,
   CreateTrackerTask,
+  EpicCloseEligible,
+  EpicCloseResult,
   GateRef,
+  Harness,
   Question,
   QuestionRow,
   RunServiceApi,
@@ -15,7 +22,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { loadConfig } from '@amagi/core'
+import { AsyncQueue, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -418,6 +425,91 @@ describe('issue mutations', () => {
   })
 })
 
+class FakeEpicTracker extends FakeGateTracker {
+  readonly eligible = new Map<string, EpicCloseEligible>()
+  readonly closedReasons: { id: string; reason: string }[] = []
+  private epicSeq = 0
+
+  seedEligible(partial: Partial<EpicCloseEligible>): EpicCloseEligible {
+    const epic: EpicCloseEligible = {
+      id: `bd-${this.epicSeq++}`,
+      title: 'Eligible epic',
+      status: 'open',
+      totalChildren: 7,
+      closedChildren: 7,
+      ...partial,
+    }
+    this.eligible.set(epic.id, epic)
+    return epic
+  }
+
+  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+    return [...this.eligible.values()]
+  }
+
+  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+    const closed = [...this.eligible.keys()]
+    this.eligible.clear()
+    this.closedReasons.push({ id: closed.join(','), reason })
+    return { closed, reason }
+  }
+}
+
+describe('epic close-eligible endpoints', () => {
+  const post = (reason: string) =>
+    app.request('/api/repos/repo1/epics/close-eligible', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+
+  test('GET reports when epic closure is unavailable (non-beads tracker)', async () => {
+    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/epics/close-eligible')
+    expect(res.status).toBe(501)
+  })
+
+  test('GET previews the eligible epics', async () => {
+    const tracker = new FakeEpicTracker()
+    tracker.seedEligible({ id: 'bd-1', title: 'M4', totalChildren: 7, closedChildren: 7 })
+    tracker.seedEligible({ id: 'bd-2', title: 'M6', totalChildren: 5, closedChildren: 2 })
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/epics/close-eligible')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as EpicCloseEligible[]
+    expect(body.map((e) => e.id)).toEqual(['bd-1', 'bd-2'])
+    expect(body[0]).toMatchObject({ title: 'M4', totalChildren: 7, closedChildren: 7 })
+  })
+
+  test('POST closes with the reason and reports the closed epics', async () => {
+    const tracker = new FakeEpicTracker()
+    tracker.seedEligible({ id: 'bd-1' })
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await post('All children completed')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as EpicCloseResult
+    expect(body).toEqual({ closed: ['bd-1'], reason: 'All children completed' })
+    expect(tracker.closedReasons).toEqual([{ id: 'bd-1', reason: 'All children completed' }])
+  })
+
+  test('POST rejects a blank reason', async () => {
+    const tracker = new FakeEpicTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await post('   ')).status).toBe(400)
+    expect(tracker.closedReasons).toHaveLength(0)
+  })
+
+  test('POST is 501 on a tracker without epic closure', async () => {
+    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await post('x')).status).toBe(501)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   let tracker: FakeGateTracker
 
@@ -682,6 +774,129 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
   })
 })
 
+describe('POST /api/repos/:repo/tasks/:id/chat', () => {
+  class FakeChatHarness implements Harness {
+    readonly kind = 'fake'
+    readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+    start(opts: AgentStartOptions): AgentProcess {
+      return this.run(null, opts)
+    }
+    resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
+      return this.run(sessionId, opts)
+    }
+    async listModels(): Promise<string[]> {
+      return []
+    }
+    async listEfforts(): Promise<string[]> {
+      return []
+    }
+    private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
+      this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
+      const queue = new AsyncQueue<AgentEvent>()
+      queue.push({ kind: 'text', text: 'the answer' })
+      queue.close()
+      const outcome: AgentOutcome = {
+        exitCode: 0,
+        ok: true,
+        sessionId: 'sess-1',
+        summary: 'the answer',
+        usage: null,
+        stderr: '',
+      }
+      return {
+        pid: -1,
+        events: () => queue,
+        done: Promise.resolve(outcome),
+        kill: async () => {},
+        model: null,
+        effort: null,
+      }
+    }
+  }
+
+  let harness: FakeChatHarness
+
+  beforeEach(() => {
+    harness = new FakeChatHarness()
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces, chatHarnessFor: () => harness })
+  })
+
+  const parked = (id: string) => {
+    store.append(id, { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'agent.exited', role: 'implement', exitCode: 0, sessionId: 'sess-1' })
+    store.append(id, {
+      type: 'task.state',
+      from: 'implementing',
+      to: 'no_pr',
+      reason: 'no changes',
+    })
+  }
+  const chat = (id: string, message: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message }),
+    })
+
+  test('accepts a message and resumes the recorded session on the worktree', async () => {
+    parked('bd-1')
+    const res = await chat('bd-1', 'why no pr?')
+    expect(res.status).toBe(202)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(harness.calls).toEqual([{ resumeFrom: 'sess-1', prompt: 'why no pr?', cwd: '/tmp/wt' }])
+    const events = store.events({ taskId: 'bd-1' })
+    expect(events.some((e) => e.type === 'chat.message' && e.text === 'why no pr?')).toBe(true)
+  })
+
+  test('rejects a missing or blank message', async () => {
+    parked('bd-1')
+    expect((await chat('bd-1', '')).status).toBe(400)
+    expect((await chat('bd-1', '   ')).status).toBe(400)
+    const empty = await app.request('/api/repos/repo1/tasks/bd-1/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(empty.status).toBe(400)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await chat('nope', 'hi')
+    expect(res.status).toBe(404)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task is not a parked no_pr task', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task has no summary to chat about', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', {
+      type: 'agent.exited',
+      role: 'implement',
+      exitCode: 0,
+      sessionId: 'sess-1',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'no_pr' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+})
+
 describe('runner endpoints', () => {
   const stubRunner = (over: Partial<RunServiceApi> = {}): RunServiceApi => ({
     status: async () => ({
@@ -731,6 +946,42 @@ describe('runner endpoints', () => {
       running: ['bd-1'],
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
     })
+  })
+
+  test('GET /api/runner merges background worker activity when present', async () => {
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner(),
+      workers: () => [
+        {
+          repo: 'repo1',
+          name: 'mention-watcher',
+          lastRunAt: 1720000000000,
+          ok: true,
+          error: null,
+          counters: [
+            { label: 'scanned', value: 2 },
+            { label: 'responded', value: 1 },
+          ],
+        },
+      ],
+    })
+    const res = await app.request('/api/runner')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { workers?: unknown }
+    expect(body.workers).toEqual([
+      {
+        repo: 'repo1',
+        name: 'mention-watcher',
+        lastRunAt: 1720000000000,
+        ok: true,
+        error: null,
+        counters: [
+          { label: 'scanned', value: 2 },
+          { label: 'responded', value: 1 },
+        ],
+      },
+    ])
   })
 
   test('runner endpoints are 501 without a runner service', async () => {

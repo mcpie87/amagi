@@ -66,6 +66,33 @@ export const Config = z.object({
       maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
+      /**
+       * How often the agent-mention watcher polls open PRs for comments and
+       * reviews mentioning the agent handle. Defaults to 5 minutes: paired
+       * with last-seen-per-PR tracking, unchanged PRs are not re-scanned, so
+       * the default stays inside GitHub REST rate limits.
+       */
+      mentionWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How often the PR conflict watcher scans open PRs and dispatches an
+       * agent per conflicting one. Defaults to 5 minutes: ticks are
+       * sequential (a long resolution delays the next check) and each PR is
+       * only attempted once per head SHA, so the default stays inside GitHub
+       * REST rate limits.
+       */
+      prCheckIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How often the stall watcher scans in-progress tasks for a worker that
+       * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
+       * reads the local store and checks one timestamp per task.
+       */
+      stallWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How long a task may sit in an in-progress state with no worker
+       * heartbeat before the stall watcher reclaims it (release the tracker
+       * claim and park it back to claimed, keeping the worktree). Default 1h.
+       */
+      stallTimeoutSec: z.number().int().min(60).default(3600),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */

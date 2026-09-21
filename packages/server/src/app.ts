@@ -1,5 +1,6 @@
 import {
   CAPABILITY_WORDS,
+  ChatService,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -14,10 +15,12 @@ import {
   type TrackerTask,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
+  type WorkerActivity,
   type Workspace,
   type Workspaces,
   writeConfig,
 } from '@amagi/core'
+import type { Harness } from '@amagi/core/drivers/types'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -27,7 +30,9 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  ChatBody,
   CloseTaskBody,
+  EpicCloseBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -51,6 +56,10 @@ export type ServerDeps = {
   runner?: RunServiceApi
   /** The repo key the runner is bound to, so settings apply live only to it. */
   runnerRepo?: string
+  /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
+  workers?: () => WorkerActivity[]
+  /** Overridable so tests stub the harness a workspace's chat uses. */
+  chatHarnessFor?: (ws: Workspace) => Harness
 }
 
 /**
@@ -154,7 +163,25 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [], runner, runnerRepo }: ServerDeps) {
+export function createApp({
+  workspaces,
+  notify = [],
+  runner,
+  runnerRepo,
+  workers,
+  chatHarnessFor,
+}: ServerDeps) {
+  // One ChatService per workspace, so the in-flight guard survives requests.
+  const chats = new Map<string, ChatService>()
+  const chatFor = (ws: Workspace): ChatService => {
+    let chat = chats.get(ws.key)
+    if (chat === undefined) {
+      const harness = chatHarnessFor?.(ws) ?? makeHarness(ws.config.harness.implement)
+      chat = new ChatService({ store: ws.store, harness, config: ws.config })
+      chats.set(ws.key, chat)
+    }
+    return chat
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -298,6 +325,30 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       return c.json(await ws.listIssues())
     })
 
+    .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.eligibleEpics === undefined) {
+        return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
+      }
+      return c.json(await ws.eligibleEpics())
+    })
+
+    .post(
+      '/api/repos/:repo/epics/close-eligible',
+      valid('param', RepoParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (ws.closeEligibleEpics === undefined) {
+          return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
+        }
+        return c.json(await ws.closeEligibleEpics(reason))
+      },
+    )
+
     .get(
       '/api/repos/:repo/tasks',
       valid('param', RepoParam),
@@ -413,9 +464,27 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       },
     )
 
+    .post(
+      '/api/repos/:repo/tasks/:id/chat',
+      valid('param', RepoTaskIdParam),
+      valid('json', ChatBody),
+      (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { message } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const result = chatFor(ws).send(id, message)
+        if (!result.ok) return c.json({ error: result.error }, result.status)
+        // The answer streams back through the repo event stream like any agent
+        // run, so the request returns before the run finishes.
+        return c.json({ taskId: id }, 202)
+      },
+    )
+
     .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      return c.json(await runner.status())
+      const status = await runner.status()
+      if (workers === undefined) return c.json(status)
+      return c.json({ ...status, workers: workers() })
     })
 
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {

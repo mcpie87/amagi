@@ -4,6 +4,8 @@ import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
   activeTasks,
+  chatInFlight,
+  chatTurns,
   currentAgentFor,
   type DashboardState,
   openQuestionsFor,
@@ -21,7 +23,7 @@ import {
 } from '@tanstack/react-router'
 import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
@@ -60,6 +62,15 @@ type Issue = {
   labels: string[]
   parent: string | null
   dependencies: Dependency[]
+}
+
+/** One epic from /api/repos/:repo/epics/close-eligible (bd epic close-eligible --dry-run). */
+type EligibleEpic = {
+  id: string
+  title: string
+  status: string
+  totalChildren: number
+  closedChildren: number
 }
 
 const PAGE_SIZE = 10
@@ -453,9 +464,58 @@ function IssueFormModal({
   )
 }
 
+/** The operator's call to close a finished epic; the worker never decides this. */
+function CloseEpicButton({
+  repo,
+  epic,
+  onClosed,
+}: {
+  repo: string
+  epic: EligibleEpic
+  onClosed: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const close = async () => {
+    const reason = window.prompt(`Reason for closing ${epic.title}`)
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/epics/close-eligible`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else onClosed()
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-emerald-500 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function IssuesView() {
   const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
+  const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
@@ -501,6 +561,19 @@ function IssuesView() {
         )
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+  }, [selected, refresh])
+
+  useEffect(() => {
+    if (selected === null) return
+    fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+        return res.json() as Promise<EligibleEpic[]>
+      })
+      .then(setEligibleEpics)
+      // An unavailable or unreachable tracker means no epic surface, not a
+      // broken tasks view: the issue fetch above reports connectivity.
+      .catch(() => setEligibleEpics([]))
   }, [selected, refresh])
 
   const saved = () => {
@@ -633,6 +706,26 @@ function IssuesView() {
           )}
         </div>
       </div>
+      {selected !== null && eligibleEpics.length > 0 && (
+        <section className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-emerald-400">
+            Eligible epics ({eligibleEpics.length})
+          </h2>
+          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+            {eligibleEpics.map((epic) => (
+              <li key={epic.id} className="flex items-center gap-3 px-4 py-3">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{epic.title}</span>
+                  <span className="block truncate text-xs text-zinc-500">
+                    {epic.id} · {epic.closedChildren}/{epic.totalChildren} children done
+                  </span>
+                </span>
+                <CloseEpicButton repo={selected} epic={epic} onClosed={saved} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {error !== null ? (
         <p className="text-red-400">{error}</p>
       ) : view === 'kanban' ? (
@@ -808,8 +901,14 @@ function WorkerSlot({
         <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
           busy
         </span>
-        <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
-        <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        <Link
+          to="/tasks/$id"
+          params={{ id: taskId }}
+          className="flex min-w-0 items-baseline gap-x-3 hover:underline"
+        >
+          <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+          <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
@@ -875,6 +974,31 @@ function WorkersPanel() {
           />
         ))}
       </div>
+      {status.workers !== undefined && status.workers.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {status.workers.map((w) => (
+            <div
+              key={`${w.repo}/${w.name}`}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2 text-xs text-zinc-400"
+            >
+              <span className="shrink-0 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white">
+                {w.name}
+              </span>
+              <span className="font-medium text-zinc-200">{w.repo}</span>
+              <span>last run: {fmtLastRun(w.lastRunAt)}</span>
+              {w.error === null ? (
+                w.detail !== null && w.detail !== undefined ? (
+                  <span>{w.detail}</span>
+                ) : (
+                  <span>{w.counters.map((c) => `${c.label} ${c.value}`).join(' · ')}</span>
+                )
+              ) : (
+                <span className="text-red-400">error: {w.error}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -999,6 +1123,7 @@ function AnswerBox({
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [submitted, setSubmitted] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -1029,6 +1154,7 @@ function AnswerBox({
         },
       )
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setSubmitted(true)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -1043,6 +1169,10 @@ function AnswerBox({
 
   if (token === null) {
     return <p className="mt-2 text-sm text-zinc-500">answer box unavailable</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-400">answered</p>
   }
 
   return (
@@ -1297,6 +1427,17 @@ function fmtCpu(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
+/** Compact "x ago" for a worker's last-run stamp; empty before the first tick. */
+function fmtLastRun(epochMs: number): string {
+  if (epochMs <= 0) return 'never'
+  const s = Math.floor((Date.now() - epochMs) / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}min ago`
+  const h = Math.floor(m / 60)
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
+}
+
 function lineFor(event: AgentStreamEvent): string {
   const ev = event.event
   switch (ev.kind) {
@@ -1357,13 +1498,194 @@ function Markdown({ text }: { text: string }) {
   )
 }
 
+/**
+ * The tracker's full issue metadata behind a task - description, acceptance
+ * criteria, priority, type, assignee, labels, parent, dependencies - fetched
+ * on first expand and kept for the session.
+ */
+function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
+  const [open, setOpen] = useState(false)
+  const [issue, setIssue] = useState<Issue | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = () => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    setOpen(true)
+    if (issue === null && error === null) {
+      fetch(`${apiBase}/api/repos/${repo}/issues/${issueId}`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+          return res.json() as Promise<Issue>
+        })
+        .then(setIssue)
+        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+    }
+  }
+
+  return (
+    <div className="mt-6">
+      <button
+        type="button"
+        onClick={toggle}
+        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+      >
+        {open ? 'hide issue details' : 'show issue details'}
+      </button>
+      {open &&
+        (error !== null ? (
+          <p className="mt-3 text-sm text-red-400">{error}</p>
+        ) : issue === null ? (
+          <p className="mt-3 text-sm text-zinc-500">loading issue...</p>
+        ) : (
+          <div className="mt-3">
+            <dl className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+              <DetailRow
+                label="priority"
+                value={issue.priority === null ? null : `P${issue.priority}`}
+              />
+              <DetailRow label="type" value={issue.type} />
+              <DetailRow label="assignee" value={issue.assignee} />
+              <DetailRow label="labels" value={issue.labels.join(', ') || null} />
+              <DetailRow label="parent" value={issue.parent} />
+              <DetailRow
+                label="blocked by"
+                value={
+                  issue.dependencies.length === 0
+                    ? null
+                    : issue.dependencies.map((d) => d.title).join(', ')
+                }
+              />
+            </dl>
+            <div className="mt-6">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                Description
+              </h2>
+              <p className="whitespace-pre-wrap text-zinc-300">
+                {issue.description || 'No description.'}
+              </p>
+            </div>
+            {issue.acceptanceCriteria !== null && (
+              <div className="mt-6">
+                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                  Acceptance criteria
+                </h2>
+                <p className="whitespace-pre-wrap text-zinc-300">{issue.acceptanceCriteria}</p>
+              </div>
+            )}
+          </div>
+        ))}
+    </div>
+  )
+}
+
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
-  if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
+  const needsHuman = task.state === 'needs_human'
+  if (!needsHuman && (task.statusReason === null || !ATTENTION_STATES.includes(task.state))) {
+    return null
+  }
   return (
-    <div className="mt-6 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-300">Summary</h2>
-      <Markdown text={task.statusReason} />
+    <div
+      className={`mt-6 rounded-lg border px-4 py-3 ${
+        needsHuman ? 'border-red-700 bg-red-950/40' : 'border-amber-700 bg-amber-950/40'
+      }`}
+    >
+      <h2
+        className={`text-sm font-semibold uppercase tracking-wide ${
+          needsHuman ? 'text-red-300' : 'text-amber-300'
+        }`}
+      >
+        {needsHuman ? 'Needs human attention' : 'Summary'}
+      </h2>
+      {task.statusReason !== null && <Markdown text={task.statusReason} />}
+    </div>
+  )
+}
+
+/**
+ * Operator/worker chat on a parked no_pr task. Each message resumes the task's
+ * recorded session in its worktree; the answer streams in through the repo
+ * event stream, so this component only renders what chatTurns folds from it.
+ */
+function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
+  const { state } = useDashboard()
+  const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
+  const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Tail the conversation after every render, like the agent log.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  })
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault()
+    const message = text.trim()
+    if (message === '' || responding) return
+    setError(null)
+    setText('')
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        Chat with worker
+      </h2>
+      <div
+        ref={scrollRef}
+        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3"
+      >
+        {messages.length === 0 && (
+          <p className="text-sm text-zinc-500">Ask the worker about why there is no PR.</p>
+        )}
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
+              m.role === 'user'
+                ? 'ml-auto bg-sky-600 text-zinc-950'
+                : 'mr-auto border border-zinc-700 bg-zinc-800 text-zinc-200'
+            }`}
+          >
+            {m.role === 'user'
+              ? m.text
+              : m.pending
+                ? `${m.text === '' ? 'worker is responding' : m.text}...`
+                : m.text}
+          </div>
+        ))}
+      </div>
+      <form onSubmit={send} className="flex gap-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          disabled={responding}
+          placeholder={responding ? 'worker is responding...' : 'ask the worker'}
+          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={responding || text.trim() === ''}
+          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+        >
+          Send
+        </button>
+      </form>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
     </div>
   )
 }
@@ -1435,6 +1757,12 @@ function TaskDetailView() {
 
       <SummaryPanel task={task} />
 
+      {selected !== null &&
+        task.state === 'no_pr' &&
+        task.statusReason !== null &&
+        task.sessionId !== null &&
+        task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
+
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow
@@ -1456,6 +1784,8 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
       {selected !== null && <AgentLogView repo={selected} taskId={id} />}
 

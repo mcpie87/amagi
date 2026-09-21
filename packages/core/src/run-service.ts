@@ -21,7 +21,27 @@ export type RunnerStatus = {
   running: string[]
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
+  /** Activity of background workers (e.g. the mention watcher), when any. */
+  workers?: WorkerActivity[]
 }
+
+/** One background worker's latest tick, surfaced in the dashboard Workers section. */
+export type WorkerActivity = {
+  /** Repo key the worker is bound to. */
+  repo: string
+  name: string
+  /** Epoch ms of the last completed tick; 0 before the first tick. */
+  lastRunAt: number
+  ok: boolean
+  error: string | null
+  /** Counters reported by the worker, rendered as label/value pairs in the dashboard. */
+  counters: WorkerCounter[]
+  /** Human summary of the last tick for workers without counters. */
+  detail?: string | null
+}
+
+/** One named counter a worker reports (e.g. scanned, responded, resolved). */
+export type WorkerCounter = { label: string; value: number }
 
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }

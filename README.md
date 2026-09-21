@@ -141,6 +141,27 @@ Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
 run`) relies on the tracker's atomic claim to avoid double-claiming.
 
+A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
+runs inside `amagi serve`. Every worker process records a liveness heartbeat
+in the store while it drives a task; a worker that dies or hangs leaves its
+task in an in-progress state with no fresh heartbeat. Once a task has been
+silent for `loop.stallTimeoutSec` (default 1h) the watcher recovers it: it
+releases the tracker claim (the issue reads ready again, and any surviving
+runner of that task detects the lost lease and stops itself) and parks the
+task back to `claimed` with its recorded worktree kept, so the next worker
+resumes where the dead one left off. Only in-progress states are watched;
+`pr_open` is excluded, since there the PR is out for human review and no
+worker runs the task.
+
+A per-repo **PR conflict watcher** (`loop.prCheckIntervalSec`, default 5
+minutes) is the same idea as the mention watcher but for the `check-prs` flow:
+each interval it lists open PRs, and any that conflict with `repo.baseBranch`
+get a resolution agent dispatched on the same code path the `check-prs` CLI
+uses. Ticks are sequential, and a PR is only attempted once per head SHA (the
+attempted head is kept on disk), so an unresolvable conflict is not retried
+until its head changes. Both watchers appear in the dashboard Workers section
+with their own last-run stamp and counters.
+
 ## Configuration
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
@@ -171,6 +192,9 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxReviewRounds` | integer >= 0 | `3` | Review/fix rounds before escalating to `needs_human`. Reserved for the review loop. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
+| `loop.prCheckIntervalSec` | integer >= 1 | `300` | How often the PR conflict watcher scans open PRs and dispatches a resolution agent per one conflicting with `repo.baseBranch`. Each PR is only attempted once per head SHA, so the default 5 minutes stays inside GitHub REST rate limits. |
+| `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
+| `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
