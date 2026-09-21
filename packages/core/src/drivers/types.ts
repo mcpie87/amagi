@@ -123,6 +123,7 @@ export type AgentStartOptions = {
 export type AgentUsage = {
   inputTokens: number
   outputTokens: number
+  cachedTokens: number
   costUsd: number | null
 }
 

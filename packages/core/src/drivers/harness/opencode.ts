@@ -16,7 +16,7 @@ type Part = {
   callID?: string
   state?: ToolState
   text?: string
-  tokens?: { input?: number; output?: number }
+  tokens?: { input?: number; output?: number; cache?: { read?: number; write?: number } }
   cost?: number
 }
 
@@ -47,6 +47,7 @@ export class OpencodeTranslator {
   private readonly startedTools = new Set<string>()
   private totalInputTokens = 0
   private totalOutputTokens = 0
+  private totalCachedTokens = 0
   private totalCostUsd = 0
   /** Whether any message was ever seen, so finalize() stays silent on a run that produced no JSON at all. */
   private sawAnyMessage = false
@@ -110,17 +111,28 @@ export class OpencodeTranslator {
   private fromStepFinish(part: Part): AgentEvent[] {
     const inputTokens = part.tokens?.input ?? 0
     const outputTokens = part.tokens?.output ?? 0
+    const cachedTokens = part.tokens?.cache?.read ?? 0
     const costUsd = part.cost ?? 0
 
     this.totalInputTokens += inputTokens
     this.totalOutputTokens += outputTokens
+    this.totalCachedTokens += cachedTokens
     this.totalCostUsd += costUsd
     this.usage = {
       inputTokens: this.totalInputTokens,
       outputTokens: this.totalOutputTokens,
+      cachedTokens: this.totalCachedTokens,
       costUsd: this.totalCostUsd,
     }
-    return [{ kind: 'usage', inputTokens, outputTokens, costUsd }]
+    return [
+      {
+        kind: 'usage',
+        inputTokens,
+        outputTokens,
+        ...(cachedTokens === 0 ? {} : { cachedTokens }),
+        costUsd,
+      },
+    ]
   }
 }
 
