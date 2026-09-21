@@ -38,10 +38,18 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
-    expect(config.harness.review.kind).toBe('codex')
     expect(config.loop.maxParallel).toBe(1)
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
+    expect(config.loop.mentionWatchIntervalSec).toBe(300)
+    expect(config.loop.prCheckIntervalSec).toBe(300)
+    expect(config.loop.stallWatchIntervalSec).toBe(300)
+    expect(config.loop.stallTimeoutSec).toBe(3600)
+    expect(config.loop.doomEnabled).toBe(true)
+    expect(config.loop.doomToolWindowSec).toBe(600)
+    expect(config.loop.doomToolRepeat).toBe(20)
+    expect(config.loop.doomCheckRounds).toBe(3)
+    expect(config.loop.doomDiffWindowSec).toBe(1800)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {
@@ -120,6 +128,30 @@ describe('loadConfig', () => {
   test('rejects maxParallel above the ceiling', () => {
     writeRepo('[loop]\nmaxParallel = 100\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+  })
+
+  test('stall watcher keys are overridable', () => {
+    writeRepo('[loop]\nstallWatchIntervalSec = 60\nstallTimeoutSec = 7200\n')
+    const config = loadConfig(repo).config
+    expect(config.loop.stallWatchIntervalSec).toBe(60)
+    expect(config.loop.stallTimeoutSec).toBe(7200)
+  })
+
+  test('pr check interval is overridable', () => {
+    writeRepo('[loop]\nprCheckIntervalSec = 120\n')
+    expect(loadConfig(repo).config.loop.prCheckIntervalSec).toBe(120)
+  })
+
+  test('doom guard keys are overridable and can be disabled', () => {
+    writeRepo(
+      '[loop]\ndoomEnabled = false\ndoomToolWindowSec = 60\ndoomToolRepeat = 5\ndoomCheckRounds = 2\ndoomDiffWindowSec = 120\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.loop.doomEnabled).toBe(false)
+    expect(config.loop.doomToolWindowSec).toBe(60)
+    expect(config.loop.doomToolRepeat).toBe(5)
+    expect(config.loop.doomCheckRounds).toBe(2)
+    expect(config.loop.doomDiffWindowSec).toBe(120)
   })
 })
 

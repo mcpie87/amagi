@@ -14,6 +14,8 @@ export type TrackerTask = {
   notes?: string
   /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
   comments?: string[]
+  /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
+  difficulty?: string | null
 }
 
 /** Opaque handle to whatever the tracker uses to block an issue on a human. */
@@ -51,6 +53,8 @@ export type CreateTrackerTask = {
   labels: string[]
   /** Issue ids this task depends on (blocked by). */
   dependencies: string[]
+  /** Difficulty level stamped at creation; trackers that cannot store it ignore it. */
+  difficulty?: string | null
 }
 
 export type UpdateTrackerTask = Partial<{

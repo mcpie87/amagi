@@ -24,6 +24,13 @@ type BdIssue = {
   dependencies?: BdIssue[]
   notes?: string
   comments?: Array<{ text: string }>
+  metadata?: Record<string, string>
+}
+
+/** A blocker behind a BeadsIssue, with the labels the dashboard needs to tell
+ * dependency blockers from human-only ones (`human` label). */
+export type BeadsBlocker = TrackerTask & {
+  labels: string[]
 }
 
 export type BeadsIssue = TrackerTask & {
@@ -32,7 +39,7 @@ export type BeadsIssue = TrackerTask & {
   labels: string[]
   parent: string | null
   /** Issues this one is blocked by, when the tracker reports them (bd show does). */
-  dependencies: TrackerTask[]
+  dependencies: BeadsBlocker[]
 }
 
 export type BeadsOptions = {
@@ -40,6 +47,21 @@ export type BeadsOptions = {
   exec?: Exec
   /** Recorded in bd's provenance log so agent activity is distinguishable. */
   actor?: string
+}
+
+/** One epic from `bd epic close-eligible --dry-run`, the preview surface. */
+export type EpicCloseEligible = {
+  id: string
+  title: string
+  status: string
+  totalChildren: number
+  closedChildren: number
+}
+
+/** What `bd epic close-eligible` actually closed. */
+export type EpicCloseResult = {
+  closed: string[]
+  reason: string
 }
 
 /** bd grants a five minute lease on claim and expects heartbeats under that. */
@@ -62,6 +84,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 }
 
 function toTask(issue: BdIssue): TrackerTask {
+  const difficulty = issue.metadata?.difficulty
   const task: TrackerTask = {
     id: issue.id,
     title: issue.title,
@@ -70,6 +93,7 @@ function toTask(issue: BdIssue): TrackerTask {
     priority: issue.priority ?? null,
     type: issue.issue_type ?? null,
     url: null,
+    ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
   }
   const notes = issue.notes?.trim()
   if (notes) task.notes = notes
@@ -85,7 +109,10 @@ function toIssue(issue: BdIssue): BeadsIssue {
     assignee: issue.assignee ?? null,
     labels: issue.labels ?? [],
     parent: issue.parent ?? null,
-    dependencies: (issue.dependencies ?? []).map(toTask),
+    dependencies: (issue.dependencies ?? []).map((d) => ({
+      ...toTask(d),
+      labels: d.labels ?? [],
+    })),
   }
 }
 
@@ -126,6 +153,9 @@ export class BeadsTracker implements Tracker {
       '--json',
       '--limit',
       String(limit),
+      // FCFS: bd defaults to priority ordering; oldest is first-created first.
+      '--sort',
+      'oldest',
       '--exclude-type',
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
@@ -159,13 +189,24 @@ export class BeadsTracker implements Tracker {
       'ready',
       '--claim',
       '--json',
+      // FCFS: claim the oldest ready task, same ordering as ready().
+      '--sort',
+      'oldest',
       '--exclude-type',
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
       HUMAN_ONLY_LABEL,
     ])
     const issues = parseIssues(out)
-    return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
+    const claimed = issues[0]
+    if (claimed !== undefined) return toTask(claimed)
+    // bd 1.3.0's ready --claim skips open issues already assigned to the
+    // claiming actor, even though `bd ready` lists them, so a queue of such
+    // issues would report nothing ready forever. Claim the first by id.
+    const ready = await this.ready(1)
+    const first = ready[0]
+    if (first === undefined) return null
+    return this.claim(first.id)
   }
 
   async get(id: string): Promise<TrackerTask | null> {
@@ -184,6 +225,9 @@ export class BeadsTracker implements Tracker {
       ...(input.priority === null ? [] : ['--priority', `P${input.priority}`]),
       ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
       ...(input.dependencies.length === 0 ? [] : ['--deps', input.dependencies.join(',')]),
+      ...(input.difficulty === undefined || input.difficulty === null
+        ? []
+        : ['--metadata', JSON.stringify({ difficulty: input.difficulty })]),
     ]
     const issues = parseIssues(await this.bd(args))
     const created = issues[0]
@@ -272,6 +316,36 @@ export class BeadsTracker implements Tracker {
 
   async resolveGate(ref: GateRef): Promise<void> {
     await this.bd(['gate', 'resolve', ref.id])
+  }
+
+  /** Preview: epics whose children are all complete (bd epic close-eligible --dry-run). */
+  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+    const out = await this.bd(['epic', 'close-eligible', '--dry-run', '--json'])
+    const parsed: unknown = JSON.parse(out)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((e): e is Record<string, unknown> => e !== null && typeof e === 'object')
+      .filter((e) => e.eligible_for_close === true)
+      .map((e) => {
+        const epic = (e.epic ?? {}) as Record<string, unknown>
+        return {
+          id: String(epic.id ?? ''),
+          title: String(epic.title ?? ''),
+          status: String(epic.status ?? ''),
+          totalChildren: Number(e.total_children ?? 0),
+          closedChildren: Number(e.closed_children ?? 0),
+        }
+      })
+  }
+
+  /** Close the eligible epics, recording the operator's reason (bd epic close-eligible --reason). */
+  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+    const out = await this.bd(['epic', 'close-eligible', '--reason', reason, '--json'])
+    const parsed = (JSON.parse(out) ?? {}) as { closed?: unknown; reason?: unknown }
+    return {
+      closed: Array.isArray(parsed.closed) ? parsed.closed.map(String) : [],
+      reason: String(parsed.reason ?? ''),
+    }
   }
 }
 

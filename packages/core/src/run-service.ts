@@ -1,4 +1,5 @@
 import type { Config } from './config.ts'
+import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { Exec } from './exec.ts'
@@ -21,10 +22,33 @@ export type RunnerStatus = {
   running: string[]
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
+  /** Activity of background workers (e.g. the mention watcher), when any. */
+  workers?: WorkerActivity[]
 }
+
+/** One background worker's latest tick, surfaced in the dashboard Workers section. */
+export type WorkerActivity = {
+  /** Repo key the worker is bound to. */
+  repo: string
+  name: string
+  /** Epoch ms of the last completed tick; 0 before the first tick. */
+  lastRunAt: number
+  ok: boolean
+  error: string | null
+  /** Counters reported by the worker, rendered as label/value pairs in the dashboard. */
+  counters: WorkerCounter[]
+  /** Human summary of the last tick for workers without counters. */
+  detail?: string | null
+}
+
+/** One named counter a worker reports (e.g. scanned, responded, resolved). */
+export type WorkerCounter = { label: string; value: number }
 
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }
+
+/** How often the auto-pick loop re-checks for ready work. */
+const AUTO_PICK_POLL_MS = 3000
 
 /** The slice of RunService the HTTP layer depends on, so tests can stub it. */
 export interface RunServiceApi {
@@ -46,6 +70,11 @@ export type RunServiceOptions = {
   forge?: PrDriver
   /** Overrides config.loop.maxParallel, mainly for tests. */
   maxParallel?: number
+  /**
+   * When true (default), the service fills every free runner slot with the
+   * next ready task on its own, so nothing waits for a manual run click.
+   */
+  autoPick?: boolean
 }
 
 /**
@@ -59,9 +88,12 @@ export class RunService implements RunServiceApi {
   private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
+  private stopped = false
+  private pollTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private readonly opts: RunServiceOptions) {
     this.capacity = opts.maxParallel ?? opts.config.loop.maxParallel
+    if (opts.autoPick ?? true) void this.pickLoop()
   }
 
   /**
@@ -92,6 +124,39 @@ export class RunService implements RunServiceApi {
     }
   }
 
+  /** Stops the server-driven pick loop; in-flight runs keep going. */
+  close(): void {
+    this.stopped = true
+    if (this.pollTimer !== null) clearTimeout(this.pollTimer)
+    this.pollTimer = null
+  }
+
+  /**
+   * Server-driven picking: keeps every free runner slot filled with the next
+   * ready task (FCFS via the tracker) so a run never waits for a click. Polls
+   * so freshly created tasks and freed slots are both picked up; launches go
+   * through the same launchQueue as manual starts, so no double-claim.
+   */
+  private async pickLoop(): Promise<void> {
+    while (!this.stopped) {
+      try {
+        await this.fillSlots()
+      } catch (err) {
+        console.warn(`auto-pick: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      await new Promise((resolve) => {
+        this.pollTimer = setTimeout(resolve, AUTO_PICK_POLL_MS)
+      })
+    }
+  }
+
+  private async fillSlots(): Promise<void> {
+    while (this.runs.size < this.capacity) {
+      const result = await this.start()
+      if (!result.ok) return
+    }
+  }
+
   start(taskId?: string): Promise<StartResult> {
     const result = this.launchQueue.then(() => this.tryStart(taskId))
     this.launchQueue = result.then(
@@ -114,12 +179,30 @@ export class RunService implements RunServiceApi {
     }
     if (taskId !== undefined) {
       const ready = await this.opts.tracker.ready()
-      if (!ready.some((t) => t.id === taskId)) {
+      const target = ready.find((t) => t.id === taskId)
+      if (target === undefined) {
         return { ok: false, status: 409, error: `task ${taskId} is not ready to run` }
       }
+      const gate = claimGate(this.opts.config, target, implementModel(this.opts.config))
+      if (!gate.allowed) {
+        return { ok: false, status: 409, error: `task ${taskId}: ${gate.reason}` }
+      }
+      const task = await this.opts.tracker.claim(taskId)
+      if (task === null) return { ok: false, status: 409, error: 'no ready task to claim' }
+      this.launch(task)
+      return { ok: true, taskId: task.id }
     }
-    const task = await this.opts.tracker.claim(taskId)
-    if (task === null) return { ok: false, status: 409, error: 'no ready task to claim' }
+    const skipped: string[] = []
+    const task = await claimEligible(
+      this.opts.tracker,
+      this.opts.config,
+      implementModel(this.opts.config),
+      (t, reason) => skipped.push(`${t.id}: ${reason}`),
+    )
+    if (task === null) {
+      const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''
+      return { ok: false, status: 409, error: `no ready task to claim${detail}` }
+    }
     this.launch(task)
     return { ok: true, taskId: task.id }
   }

@@ -1,4 +1,5 @@
 import { agentLogStore } from '@amagi/core/agent-log'
+import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { StoredEvent } from '@amagi/core/events'
 import type { RunnerStatus } from '@amagi/core/run-service'
 import { type DashboardState, initialDashboardState, reduceState } from '@amagi/core/view'
@@ -38,6 +39,9 @@ const ReposContext = createContext<DashboardValue>({
 })
 
 const StreamContext = createContext<DashboardState>(initialDashboardState())
+
+/** The repo's unclaimed ready queue, FCFS from the tracker. */
+const ReadyQueueContext = createContext<TrackerTask[]>([])
 
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'
 const ConnectionContext = createContext<ConnectionStatus>('connecting')
@@ -115,7 +119,28 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
 function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
+  const [readyQueue, setReadyQueue] = useState<TrackerTask[]>([])
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
+
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      fetch(`${apiBase}/api/repos/${repo}/ready-queue`)
+        .then((res) => (res.ok ? (res.json() as Promise<TrackerTask[]>) : []))
+        .then((tasks) => {
+          if (alive) setReadyQueue(tasks)
+        })
+        .catch(() => {
+          if (alive) setReadyQueue([])
+        })
+    }
+    load()
+    const timer = setInterval(load, 4000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [repo])
 
   useEffect(() => {
     const source = new EventSource(`${apiBase}/api/repos/${repo}/stream?sinceSeq=0`)
@@ -132,7 +157,10 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
           agentLogStore.append(`${repo}/${parsed.taskId}`, parsed.role, parsed.ts, parsed.event)
           // usage is sparse (one per step/turn, not per line): the only
           // agent.stream event the reducer needs, for the sessions view.
-          if (parsed.event.kind === 'usage') dispatch(parsed)
+          // Chat runs are also routed to the reducer so the chat panel can
+          // fold their text into a conversation; the reducer itself ignores
+          // agent.stream, only the event log accumulates it.
+          if (parsed.event.kind === 'usage' || parsed.role === 'chat') dispatch(parsed)
         } else {
           dispatch(parsed)
         }
@@ -145,13 +173,20 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
 
   return (
     <ConnectionContext.Provider value={connection}>
-      <StreamContext.Provider value={state}>{children}</StreamContext.Provider>
+      <StreamContext.Provider value={state}>
+        <ReadyQueueContext.Provider value={readyQueue}>{children}</ReadyQueueContext.Provider>
+      </StreamContext.Provider>
     </ConnectionContext.Provider>
   )
 }
 
 export function useDashboard(): DashboardValue & { state: DashboardState } {
   return { ...useContext(ReposContext), state: useContext(StreamContext) }
+}
+
+/** The repo's unclaimed ready queue, first-created first. */
+export function useReadyQueue(): TrackerTask[] {
+  return useContext(ReadyQueueContext)
 }
 
 export type RunnerApi = {
