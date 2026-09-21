@@ -59,6 +59,10 @@ describe('state machine', () => {
     expect(canTransition('no_pr', 'abandoned')).toBe(true)
   })
 
+  test('a stopped run can be retired by instant close', () => {
+    expect(canTransition('cancelled', 'abandoned')).toBe(true)
+  })
+
   test('skipping stages is rejected', () => {
     expect(canTransition('claimed', 'implementing')).toBe(false)
     expect(canTransition('implementing', 'pr_open')).toBe(false)
