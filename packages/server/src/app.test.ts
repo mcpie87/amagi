@@ -204,6 +204,7 @@ class FakeIssueTracker implements Tracker {
       labels: [],
       parent: null,
       dependencies: [],
+      childCount: 0,
       ...partial,
     }
     this.issues.set(issue.id, issue)
@@ -626,6 +627,41 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/tasks/:id/stop', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const running = (id: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+  }
+
+  test('parks a running task in cancelled', async () => {
+    running('bd-1')
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('cancelled')
+    expect(store.task('bd-1')?.state).toBe('cancelled')
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/tasks/nope/stop', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('409s on an already terminal task', async () => {
+    running('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/close', () => {
   let tracker: FakeGateTracker
 
@@ -710,6 +746,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           available: true,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -928,6 +965,7 @@ describe('runner endpoints', () => {
       available: true,
       capacity: 1,
       running: [],
+      startedAt: {},
       resources: {},
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -957,6 +995,7 @@ describe('runner endpoints', () => {
           available: false,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
         }),
       }),
@@ -968,6 +1007,7 @@ describe('runner endpoints', () => {
       available: false,
       capacity: 1,
       running: ['bd-1'],
+      startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
     })
   })
@@ -1131,6 +1171,7 @@ describe('repo settings endpoints', () => {
           available: true,
           capacity: 1,
           running: [],
+          startedAt: {},
           resources: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1465,6 +1506,46 @@ describe('POST /api/repos (onboarding)', () => {
       body: JSON.stringify({ path: '/nonexistent-path-xyz' }),
     })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /api/repos/:repo/run', () => {
+  test('starts a run in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/run', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker has nothing ready, so the run ends without events
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
+  })
+})
+
+describe('POST /api/repos/:repo/triage', () => {
+  test('starts a triage pass in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/triage', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker is not triage-capable, so the pass ends without a claim
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/triage', { method: 'POST' })).status).toBe(404)
   })
 })
 

@@ -1,3 +1,4 @@
+import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
 import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
@@ -33,6 +34,8 @@ export type PrDriver = {
   createPr(opts: CreatePrOptions): Promise<PullRequest>
   /** Resolve the remote state of a PR, run from `cwd` so the forge CLI finds the repo. */
   getPr(cwd: string, number: number): Promise<PrState>
+  /** Whether an open PR can merge, normalized to mergeable/conflicted/unknown. */
+  getMergeStatus(cwd: string, number: number): Promise<MergeStatus>
   /** Every conversation comment, review summary, and inline review comment on a PR. */
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
@@ -107,6 +110,26 @@ function githubPr(exec: Exec): PrDriver {
         default:
           return 'open'
       }
+    },
+    async getMergeStatus(cwd, number) {
+      // GitHub computes mergeability asynchronously, so a fresh PR may report
+      // UNKNOWN until a single-PR query has forced the check.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const out = await execOk(
+          exec,
+          ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
+          { cwd, env: ghEnv() },
+        )
+        const status = JSON.parse(out) as { mergeable: string; mergeStateStatus: string }
+        if (status.mergeable === 'CONFLICTING' || status.mergeStateStatus === 'DIRTY') {
+          return 'conflicted'
+        }
+        if (status.mergeable === 'MERGEABLE' || status.mergeStateStatus === 'CLEAN') {
+          return 'mergeable'
+        }
+        if (attempt < 4) await Bun.sleep(1000)
+      }
+      return 'unknown'
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -231,6 +254,12 @@ function forgejoPr(exec: Exec): PrDriver {
       if (pr.merged === true || pr.state === 'merged') return 'merged'
       if (pr.state === 'closed') return 'closed'
       return 'open'
+    },
+    async getMergeStatus(cwd, number) {
+      const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
+      if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
+      if (pr.mergeable === true) return 'mergeable'
+      return 'unknown'
     },
     async listComments(cwd, number) {
       const r = await forge(cwd)

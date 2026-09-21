@@ -45,11 +45,15 @@ export function makeHarness(config: Config['harness']['implement']): Harness {
  * harness.start() call site so the spread stays in one place.
  */
 export function harnessStartOpts(
-  cfg: Pick<Config['harness']['implement'], 'model' | 'effort' | 'permissions' | 'extraArgs'>,
-): Pick<AgentStartOptions, 'model' | 'effort' | 'permissions' | 'extraArgs'> {
+  cfg: Pick<
+    Config['harness']['implement'],
+    'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs'
+  >,
+): Pick<AgentStartOptions, 'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs'> {
   return {
     model: cfg.model,
     effort: cfg.effort,
+    ...(cfg.allowedTools === undefined ? {} : { allowedTools: cfg.allowedTools }),
     permissions: cfg.permissions,
     extraArgs: cfg.extraArgs,
   }
