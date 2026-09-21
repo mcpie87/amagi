@@ -3,14 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec, execOk } from './exec.ts'
-import {
-  branchName,
-  createWorktree,
-  listWorktrees,
-  removeWorktree,
-  slugify,
-  worktreeDirName,
-} from './worktree.ts'
+import { listWorktrees, removeWorktree } from './test-util.ts'
+import { branchName, createWorktree, slugify, worktreeDirName } from './worktree.ts'
 
 describe('slugify', () => {
   test('kebabs and truncates to five words', () => {

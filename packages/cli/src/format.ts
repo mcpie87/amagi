@@ -10,6 +10,11 @@ export const yellow = wrap('33')
 export const blue = wrap('34')
 export const magenta = wrap('35')
 
+/** Prints text indented two spaces, collapsed of leading/trailing blank lines. */
+export function printBlock(text: string): void {
+  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
+}
+
 export function relTime(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
   if (s < 60) return `${s}s ago`

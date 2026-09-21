@@ -1,7 +1,13 @@
+import { agentLogStore } from '@amagi/core/agent-log'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import { MAX_PARALLEL } from '@amagi/core/limits'
+import type { RunnerResource } from '@amagi/core/run-service'
 import {
   activeTasks,
+  chatInFlight,
+  chatTurns,
   currentAgentFor,
+  type DashboardState,
   openQuestionsFor,
   type QuestionView,
   type TaskView,
@@ -15,9 +21,11 @@ import {
   Outlet,
   useParams,
 } from '@tanstack/react-router'
+import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
+import { SessionsView } from './SessionsView.tsx'
 import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
@@ -54,6 +62,15 @@ type Issue = {
   labels: string[]
   parent: string | null
   dependencies: Dependency[]
+}
+
+/** One epic from /api/repos/:repo/epics/close-eligible (bd epic close-eligible --dry-run). */
+type EligibleEpic = {
+  id: string
+  title: string
+  status: string
+  totalChildren: number
+  closedChildren: number
 }
 
 const PAGE_SIZE = 10
@@ -184,6 +201,12 @@ function RootLayout() {
                   </Link>
                   <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
                     Tasks
+                  </Link>
+                  <Link to="/sessions" activeProps={{ className: 'text-zinc-100' }}>
+                    Sessions
+                  </Link>
+                  <Link to="/settings" activeProps={{ className: 'text-zinc-100' }}>
+                    Settings
                   </Link>
                 </nav>
                 <div className="ml-auto flex items-center gap-2">
@@ -441,9 +464,58 @@ function IssueFormModal({
   )
 }
 
+/** The operator's call to close a finished epic; the worker never decides this. */
+function CloseEpicButton({
+  repo,
+  epic,
+  onClosed,
+}: {
+  repo: string
+  epic: EligibleEpic
+  onClosed: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const close = async () => {
+    const reason = window.prompt(`Reason for closing ${epic.title}`)
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/epics/close-eligible`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else onClosed()
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-emerald-500 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function IssuesView() {
   const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
+  const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
@@ -489,6 +561,19 @@ function IssuesView() {
         )
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+  }, [selected, refresh])
+
+  useEffect(() => {
+    if (selected === null) return
+    fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+        return res.json() as Promise<EligibleEpic[]>
+      })
+      .then(setEligibleEpics)
+      // An unavailable or unreachable tracker means no epic surface, not a
+      // broken tasks view: the issue fetch above reports connectivity.
+      .catch(() => setEligibleEpics([]))
   }, [selected, refresh])
 
   const saved = () => {
@@ -621,6 +706,26 @@ function IssuesView() {
           )}
         </div>
       </div>
+      {selected !== null && eligibleEpics.length > 0 && (
+        <section className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-emerald-400">
+            Eligible epics ({eligibleEpics.length})
+          </h2>
+          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+            {eligibleEpics.map((epic) => (
+              <li key={epic.id} className="flex items-center gap-3 px-4 py-3">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{epic.title}</span>
+                  <span className="block truncate text-xs text-zinc-500">
+                    {epic.id} · {epic.closedChildren}/{epic.totalChildren} children done
+                  </span>
+                </span>
+                <CloseEpicButton repo={selected} epic={epic} onClosed={saved} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {error !== null ? (
         <p className="text-red-400">{error}</p>
       ) : view === 'kanban' ? (
@@ -758,19 +863,165 @@ function RunButton() {
   )
 }
 
+/** The tail of one task's ring buffer, live from the rAF-batched log store. */
+function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
+  const key = `${repo}/${taskId}`
+  useSyncExternalStore(
+    (listener) => agentLogStore.subscribe(key, listener),
+    () => agentLogStore.get(key).version,
+  )
+  const line = agentLogStore.get(key).at(-1)
+  if (line === undefined || line.text === '') return null
+  return <p className="mt-2 truncate font-mono text-xs text-zinc-400">{line.text}</p>
+}
+
+function WorkerSlot({
+  taskId,
+  resource,
+  state,
+  selected,
+}: {
+  taskId: string | null
+  resource?: RunnerResource | undefined
+  state: DashboardState
+  selected: string | null
+}) {
+  if (taskId === null) {
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/40 px-4 py-2 text-sm text-zinc-600">
+        free slot
+      </div>
+    )
+  }
+  const task = state.tasks[taskId]
+  const agent = currentAgentFor(state, taskId)
+  return (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
+          busy
+        </span>
+        <Link
+          to="/tasks/$id"
+          params={{ id: taskId }}
+          className="flex min-w-0 items-baseline gap-x-3 hover:underline"
+        >
+          <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+          <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        </Link>
+        {task !== undefined && <Badge state={task.state} />}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+        <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
+        <span>model: {agent?.model ?? 'unknown'}</span>
+        {resource !== undefined && (
+          <>
+            <span>rss: {fmtBytes(resource.rssBytes)}</span>
+            <span>cpu: {fmtCpu(resource.cpuMs)}</span>
+            <span>procs: {resource.processes}</span>
+          </>
+        )}
+      </div>
+      {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
+    </div>
+  )
+}
+
+/**
+ * One row per runner slot from /api/runner, so busy agents and free capacity
+ * are both visible at a glance. Busy slots draw their identity and activity
+ * from the SSE projection plus the live agent log ring buffer. The summary
+ * strip sums RSS/CPU/process count over the live agent trees so the operator
+ * can see which runner is eating the machine.
+ */
+function WorkersPanel() {
+  const { status } = useRunner()
+  const { state, selected } = useDashboard()
+  if (status === null) return null
+  const running = status.running
+  const total = running.reduce(
+    (acc, id) => {
+      const r = status.resources[id]
+      return r === undefined
+        ? acc
+        : {
+            processes: acc.processes + r.processes,
+            rssBytes: acc.rssBytes + r.rssBytes,
+            cpuMs: acc.cpuMs + r.cpuMs,
+          }
+    },
+    { processes: 0, rssBytes: 0, cpuMs: 0 },
+  )
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        Workers ({running.length}/{status.capacity})
+      </h2>
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs text-zinc-400">
+        <span className="font-medium text-zinc-200">{status.name}</span>
+        <span>rss: {fmtBytes(total.rssBytes)}</span>
+        <span>cpu: {fmtCpu(total.cpuMs)}</span>
+        <span>procs: {total.processes}</span>
+      </div>
+      <div className="space-y-2">
+        {Array.from({ length: status.capacity }, (_, i) => (
+          <WorkerSlot
+            key={i}
+            taskId={running[i] ?? null}
+            resource={running[i] === undefined ? undefined : status.resources[running[i]]}
+            state={state}
+            selected={selected}
+          />
+        ))}
+      </div>
+      {status.workers !== undefined && status.workers.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {status.workers.map((w) => (
+            <div
+              key={`${w.repo}/${w.name}`}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2 text-xs text-zinc-400"
+            >
+              <span className="shrink-0 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white">
+                {w.name}
+              </span>
+              <span className="font-medium text-zinc-200">{w.repo}</span>
+              <span>last run: {fmtLastRun(w.lastRunAt)}</span>
+              {w.error === null ? (
+                w.detail !== null && w.detail !== undefined ? (
+                  <span>{w.detail}</span>
+                ) : (
+                  <span>
+                    scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
+                  </span>
+                )
+              ) : (
+                <span className="text-red-400">error: {w.error}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function QueueView() {
   const { state, selected } = useDashboard()
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[]) => (
+  const taskList = (
+    tasks: TaskView[],
+    showReason: boolean,
+    action?: (task: TaskView) => ReactNode,
+  ) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
-        <li key={task.id}>
+        <li key={task.id} className="flex items-center">
           <Link
             to="/tasks/$id"
             params={{ id: task.id }}
-            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-zinc-800"
           >
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
@@ -779,8 +1030,12 @@ function QueueView() {
                 {task.id}
                 {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
               </span>
+              {showReason && task.statusReason !== null && (
+                <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
+              )}
             </span>
           </Link>
+          {action?.(task)}
         </li>
       ))}
     </ul>
@@ -792,15 +1047,26 @@ function QueueView() {
         <h1 className="text-xl font-semibold">Queue</h1>
         {selected !== null && <RunButton />}
       </div>
+      <WorkersPanel />
       {attention.length > 0 && (
         <div className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention)}
+          {taskList(
+            attention,
+            true,
+            selected === null
+              ? undefined
+              : (task) => <CloseButtons repo={selected} taskId={task.id} state={task.state} />,
+          )}
         </div>
       )}
-      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
+      {queue.length === 0 ? (
+        <p className="text-zinc-500">No active tasks.</p>
+      ) : (
+        taskList(queue, false)
+      )}
     </section>
   )
 }
@@ -859,6 +1125,7 @@ function AnswerBox({
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [submitted, setSubmitted] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -889,6 +1156,7 @@ function AnswerBox({
         },
       )
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setSubmitted(true)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -903,6 +1171,10 @@ function AnswerBox({
 
   if (token === null) {
     return <p className="mt-2 text-sm text-zinc-500">answer box unavailable</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-400">answered</p>
   }
 
   return (
@@ -987,6 +1259,129 @@ function ReclaimButton({
   )
 }
 
+/** A task the operator can still retire: in flight, parked, or stopped. */
+function closable(state: TaskState): boolean {
+  return !isTerminal(state) || state === 'needs_human' || state === 'no_pr' || state === 'cancelled'
+}
+
+function CloseButton({
+  repo,
+  taskId,
+  state,
+  target,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  target: 'abandoned' | 'done'
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
+
+  const close = async () => {
+    const reason = window.prompt(
+      target === 'done' ? 'Reason for marking this task done' : 'Reason for closing this task',
+    )
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim(), to: target }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className={
+          target === 'done'
+            ? 'rounded border border-green-800 bg-green-950/40 px-3 py-1 text-sm text-green-300 hover:bg-green-900 disabled:opacity-50'
+            : 'rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50'
+        }
+      >
+        {target === 'done' ? 'Mark done' : 'Close'}
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+/** The two operator retire actions: close as abandoned, or mark done when the work already existed. */
+function CloseButtons({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  if (!closable(state)) return null
+  return (
+    <div className="ml-auto flex gap-2">
+      <CloseButton repo={repo} taskId={taskId} state={state} target="done" />
+      <CloseButton repo={repo} taskId={taskId} state={state} target="abandoned" />
+    </div>
+  )
+}
+
+function RetryButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const { start } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
+
+  const retry = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Reclaim only releases the tracker claim; actually restart the run.
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void retry()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Retry
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -1017,42 +1412,242 @@ function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
 }
 
-function lineFor(event: AgentStreamEvent): string {
-  const ev = event.event
-  switch (ev.kind) {
-    case 'text':
-    case 'reasoning':
-      return ev.text
-    case 'tool_use':
-      return `[tool] ${ev.name}`
-    case 'tool_result':
-      return `[${ev.ok ? 'ok' : 'FAIL'}] ${ev.name}`
-    case 'usage':
-      return `[usage] in=${ev.inputTokens} out=${ev.outputTokens}`
-    case 'result':
-      return `[result] ${ev.summary ?? (ev.ok ? 'ok' : 'failed')}`
-    case 'error':
-      return `[error] ${ev.message}`
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = n
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
   }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`
 }
 
-/** Plain recent log. The virtualization task (am-b2z.4) replaces this. */
-function AgentLog({ events }: { events: AgentStreamEvent[] }) {
-  const ref = useRef<HTMLDivElement>(null)
-  // no deps on purpose: tail the log after every render, not just on mount
-  useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight
-  })
+function fmtCpu(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s'
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Compact "x ago" for a worker's last-run stamp; empty before the first tick. */
+function fmtLastRun(epochMs: number): string {
+  if (epochMs <= 0) return 'never'
+  const s = Math.floor((Date.now() - epochMs) / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}min ago`
+  const h = Math.floor(m / 60)
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
+}
+
+const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+// Raw HTML from the agent is escaped, not rendered, so a prompt-injected tag cannot run.
+const markdown = new Marked({
+  renderer: {
+    html({ text }) {
+      return escapeHtml(text)
+    },
+  },
+})
+
+function Markdown({ text }: { text: string }) {
+  return (
+    <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
+  )
+}
+
+/**
+ * The tracker's full issue metadata behind a task - description, acceptance
+ * criteria, priority, type, assignee, labels, parent, dependencies - fetched
+ * on first expand and kept for the session.
+ */
+function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
+  const [open, setOpen] = useState(false)
+  const [issue, setIssue] = useState<Issue | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = () => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    setOpen(true)
+    if (issue === null && error === null) {
+      fetch(`${apiBase}/api/repos/${repo}/issues/${issueId}`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+          return res.json() as Promise<Issue>
+        })
+        .then(setIssue)
+        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+    }
+  }
+
+  return (
+    <div className="mt-6">
+      <button
+        type="button"
+        onClick={toggle}
+        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+      >
+        {open ? 'hide issue details' : 'show issue details'}
+      </button>
+      {open &&
+        (error !== null ? (
+          <p className="mt-3 text-sm text-red-400">{error}</p>
+        ) : issue === null ? (
+          <p className="mt-3 text-sm text-zinc-500">loading issue...</p>
+        ) : (
+          <div className="mt-3">
+            <dl className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+              <DetailRow
+                label="priority"
+                value={issue.priority === null ? null : `P${issue.priority}`}
+              />
+              <DetailRow label="type" value={issue.type} />
+              <DetailRow label="assignee" value={issue.assignee} />
+              <DetailRow label="labels" value={issue.labels.join(', ') || null} />
+              <DetailRow label="parent" value={issue.parent} />
+              <DetailRow
+                label="blocked by"
+                value={
+                  issue.dependencies.length === 0
+                    ? null
+                    : issue.dependencies.map((d) => d.title).join(', ')
+                }
+              />
+            </dl>
+            <div className="mt-6">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                Description
+              </h2>
+              <p className="whitespace-pre-wrap text-zinc-300">
+                {issue.description || 'No description.'}
+              </p>
+            </div>
+            {issue.acceptanceCriteria !== null && (
+              <div className="mt-6">
+                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                  Acceptance criteria
+                </h2>
+                <p className="whitespace-pre-wrap text-zinc-300">{issue.acceptanceCriteria}</p>
+              </div>
+            )}
+          </div>
+        ))}
+    </div>
+  )
+}
+
+/** Why a task stopped, in plain language, when the operator actually needs it. */
+function SummaryPanel({ task }: { task: TaskView }) {
+  const needsHuman = task.state === 'needs_human'
+  if (!needsHuman && (task.statusReason === null || !ATTENTION_STATES.includes(task.state))) {
+    return null
+  }
   return (
     <div
-      ref={ref}
-      className="max-h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs text-zinc-300"
+      className={`mt-6 rounded-lg border px-4 py-3 ${
+        needsHuman ? 'border-red-700 bg-red-950/40' : 'border-amber-700 bg-amber-950/40'
+      }`}
     >
-      {events.map((e) => (
-        <div key={e.seq} className="whitespace-pre-wrap break-words">
-          {lineFor(e)}
-        </div>
-      ))}
+      <h2
+        className={`text-sm font-semibold uppercase tracking-wide ${
+          needsHuman ? 'text-red-300' : 'text-amber-300'
+        }`}
+      >
+        {needsHuman ? 'Needs human attention' : 'Summary'}
+      </h2>
+      {task.statusReason !== null && <Markdown text={task.statusReason} />}
+    </div>
+  )
+}
+
+/**
+ * Operator/worker chat on a parked no_pr task. Each message resumes the task's
+ * recorded session in its worktree; the answer streams in through the repo
+ * event stream, so this component only renders what chatTurns folds from it.
+ */
+function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
+  const { state } = useDashboard()
+  const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
+  const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Tail the conversation after every render, like the agent log.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  })
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault()
+    const message = text.trim()
+    if (message === '' || responding) return
+    setError(null)
+    setText('')
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        Chat with worker
+      </h2>
+      <div
+        ref={scrollRef}
+        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3"
+      >
+        {messages.length === 0 && (
+          <p className="text-sm text-zinc-500">Ask the worker about why there is no PR.</p>
+        )}
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
+              m.role === 'user'
+                ? 'ml-auto bg-sky-600 text-zinc-950'
+                : 'mr-auto border border-zinc-700 bg-zinc-800 text-zinc-200'
+            }`}
+          >
+            {m.role === 'user'
+              ? m.text
+              : m.pending
+                ? `${m.text === '' ? 'worker is responding' : m.text}...`
+                : m.text}
+          </div>
+        ))}
+      </div>
+      <form onSubmit={send} className="flex gap-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          disabled={responding}
+          placeholder={responding ? 'worker is responding...' : 'ask the worker'}
+          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={responding || text.trim() === ''}
+          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+        >
+          Send
+        </button>
+      </form>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
     </div>
   )
 }
@@ -1062,12 +1657,9 @@ function TaskDetailView() {
   const { state, selected } = useDashboard()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
-  // ponytail: last 500 rendered, the virtualization task (am-b2z.4) removes the cap
-  const agentEvents = state.events
-    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
-    .slice(-500)
   const currentAgent = currentAgentFor(state, id)
-  const usageEvents = agentEvents
+  const usageEvents = state.events
+    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
   const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
@@ -1109,9 +1701,26 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && (
+          <RetryButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
+        {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
+
+      <SummaryPanel task={task} />
+
+      {selected !== null &&
+        task.state === 'no_pr' &&
+        task.statusReason !== null &&
+        task.sessionId !== null &&
+        task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
@@ -1135,6 +1744,8 @@ function TaskDetailView() {
         <DetailRow label="error" value={task.lastError} />
       </dl>
 
+      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
+
       {selected !== null && <AgentLogView repo={selected} taskId={id} />}
 
       {questions.length > 0 && selected !== null && (
@@ -1153,15 +1764,6 @@ function TaskDetailView() {
               </li>
             ))}
           </ul>
-        </div>
-      )}
-
-      {agentEvents.length > 0 && (
-        <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Agent output
-          </h2>
-          <AgentLog events={agentEvents} />
         </div>
       )}
 
@@ -1196,6 +1798,104 @@ function TaskDetailView() {
   )
 }
 
+function SettingsView() {
+  const { selected } = useDashboard()
+  const [value, setValue] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (selected === null) return
+    setLoaded(false)
+    setMessage(null)
+    fetch(`${apiBase}/api/repos/${selected}/settings`)
+      .then((res) => (res.ok ? (res.json() as Promise<{ maxParallel: number }>) : null))
+      .then((body) => {
+        setLoaded(true)
+        setValue(body === null ? '' : String(body.maxParallel))
+      })
+      .catch(() => setLoaded(true))
+  }, [selected])
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    if (selected === null || busy) return
+    const n = Number(value)
+    if (!Number.isInteger(n) || n < 1 || n > MAX_PARALLEL) {
+      setMessage({
+        kind: 'error',
+        text: `workers must be an integer between 1 and ${MAX_PARALLEL}`,
+      })
+      return
+    }
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${selected}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ maxParallel: n }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setMessage({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
+        return
+      }
+      setMessage({ kind: 'ok', text: `saved: up to ${n} concurrent workers` })
+    } catch {
+      setMessage({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="max-w-xl">
+      <h1 className="text-xl font-semibold">Settings</h1>
+      {selected === null ? (
+        <p className="mt-2 text-zinc-500">no repository selected</p>
+      ) : (
+        <form onSubmit={save} className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+          <label htmlFor="max-workers" className="mb-1 block text-sm text-zinc-400">
+            Concurrent workers
+          </label>
+          <p className="mb-3 text-sm text-zinc-500">
+            How many tasks run at once for {selected}. Applied live; in-flight runs are unaffected.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              id="max-workers"
+              type="number"
+              min={1}
+              max={MAX_PARALLEL}
+              step={1}
+              value={value}
+              disabled={!loaded}
+              onChange={(e) => setValue(e.target.value)}
+              className="w-28 rounded border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm"
+            />
+            <button
+              type="submit"
+              disabled={busy || !loaded}
+              className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+            >
+              Save
+            </button>
+          </div>
+          {message !== null && (
+            <p
+              className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}
+            >
+              {message.text}
+            </p>
+          )}
+        </form>
+      )}
+    </section>
+  )
+}
+
 const rootRoute = createRootRoute({ component: RootLayout })
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: QueueView })
 const issuesRoute = createRoute({
@@ -1203,11 +1903,27 @@ const issuesRoute = createRoute({
   path: '/issues',
   component: IssuesView,
 })
+const sessionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/sessions',
+  component: SessionsView,
+})
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  component: SettingsView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, taskRoute])
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  issuesRoute,
+  sessionsRoute,
+  settingsRoute,
+  taskRoute,
+])
 export const router = createRouter({ routeTree })

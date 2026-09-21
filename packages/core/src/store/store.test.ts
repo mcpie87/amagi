@@ -114,6 +114,22 @@ describe('Store', () => {
     expect(store.task('bd-1')?.reviewRound).toBe(2)
   })
 
+  test('task.state reason surfaces as statusReason and clears on the next transition', () => {
+    claim()
+    expect(store.task('bd-1')?.statusReason).toBeNull()
+    store.append('bd-1', {
+      type: 'task.state',
+      from: null,
+      to: 'needs_human',
+      reason: 'project checks still failing',
+    })
+    expect(store.task('bd-1')?.statusReason).toBe('project checks still failing')
+    store.append('bd-1', { type: 'task.reclaimed' })
+    expect(store.task('bd-1')?.statusReason).toBeNull()
+    store.append('bd-1', { type: 'task.state', from: null, to: 'worktree_ready' })
+    expect(store.task('bd-1')?.statusReason).toBeNull()
+  })
+
   test('questions open then close', () => {
     claim()
     store.append('bd-1', {
@@ -247,5 +263,54 @@ describe('Store', () => {
     claim('bd-2')
     store.append('bd-2', { type: 'task.state', from: 'claimed', to: 'abandoned' })
     expect(store.tasks({ states: ['claimed'] }).map((t) => t.id)).toEqual(['bd-1'])
+  })
+
+  test('heartbeat records activity without appending an event', () => {
+    claim()
+    store.db.query('update tasks set updated_at = ? where id = ?').run(Date.now() - 120_000, 'bd-1')
+    store.heartbeat('bd-1')
+    expect(store.events({ taskId: 'bd-1' })).toHaveLength(1)
+    expect(store.stalledTasks(['claimed'], Date.now() - 60_000)).toHaveLength(0)
+  })
+
+  test('stalledTasks finds only stale in-progress tasks, using updated_at when unheartbeated', () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.heartbeat('bd-1')
+    store.db.query('update tasks set updated_at = ? where id = ?').run(Date.now() - 120_000, 'bd-1')
+
+    claim('bd-2')
+    store.append('bd-2', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-2', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.db.query('update tasks set updated_at = ? where id = ?').run(Date.now() - 120_000, 'bd-2')
+
+    claim('bd-3')
+    store.append('bd-3', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-3', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+
+    claim('bd-4')
+    store.append('bd-4', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-4', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-4', { type: 'task.state', from: 'implementing', to: 'checks' })
+    store.append('bd-4', { type: 'task.state', from: 'checks', to: 'committed' })
+    store.append('bd-4', { type: 'task.state', from: 'committed', to: 'pr_open' })
+    store.append('bd-4', { type: 'task.state', from: 'pr_open', to: 'done' })
+
+    const past = Date.now() - 60_000
+    const stalled = store.stalledTasks(['implementing'], past)
+    expect(stalled.map((t) => t.id)).toEqual(['bd-2'])
+  })
+
+  test('task.reclaimed carries the reason into statusReason', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'task.reclaimed',
+      reason: 'recovered by stall watcher: no worker activity for 1h',
+    })
+    expect(store.task('bd-1')?.state).toBe('claimed')
+    expect(store.task('bd-1')?.statusReason).toBe(
+      'recovered by stall watcher: no worker activity for 1h',
+    )
   })
 })

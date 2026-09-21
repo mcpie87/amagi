@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
+import { MAX_PARALLEL } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
@@ -61,10 +62,29 @@ export const Config = z.object({
     .prefault({}),
   loop: z
     .object({
-      maxParallel: z.number().int().min(1).default(1),
+      maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
       maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
+      /**
+       * How often the agent-mention watcher polls open PRs for comments and
+       * reviews mentioning the agent handle. Defaults to 5 minutes: paired
+       * with last-seen-per-PR tracking, unchanged PRs are not re-scanned, so
+       * the default stays inside GitHub REST rate limits.
+       */
+      mentionWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How often the stall watcher scans in-progress tasks for a worker that
+       * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
+       * reads the local store and checks one timestamp per task.
+       */
+      stallWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How long a task may sit in an in-progress state with no worker
+       * heartbeat before the stall watcher reclaims it (release the tracker
+       * claim and park it back to claimed, keeping the worktree). Default 1h.
+       */
+      stallTimeoutSec: z.number().int().min(60).default(3600),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */
@@ -154,4 +174,15 @@ export function loadGlobalConfig(): Config {
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return config
+}
+
+/**
+ * Merges a patch into the repo's own `.amagi/config.toml` and writes it back,
+ * preserving every other key. Creates the file (and directory) when absent.
+ * `loadConfig` re-reads it on next use, so persisted settings survive restarts.
+ */
+export function writeConfig(repoRoot: string, patch: Json): void {
+  const path = repoConfigPath(repoRoot)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, stringifyToml(deepMerge(readToml(path), patch)))
 }

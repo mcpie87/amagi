@@ -2,7 +2,7 @@ import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
 import { parseModelLines } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type ToolState = {
   status?: string
@@ -16,7 +16,7 @@ type Part = {
   callID?: string
   state?: ToolState
   text?: string
-  tokens?: { input?: number; output?: number }
+  tokens?: { input?: number; output?: number; cache?: { read?: number; write?: number } }
   cost?: number
 }
 
@@ -24,11 +24,6 @@ type OpencodeMessage = {
   type?: string
   sessionID?: string
   part?: Part
-}
-
-function renderToolResult(output: unknown): string {
-  if (typeof output === 'string') return output
-  return JSON.stringify(output ?? '')
 }
 
 /**
@@ -52,6 +47,7 @@ export class OpencodeTranslator {
   private readonly startedTools = new Set<string>()
   private totalInputTokens = 0
   private totalOutputTokens = 0
+  private totalCachedTokens = 0
   private totalCostUsd = 0
   /** Whether any message was ever seen, so finalize() stays silent on a run that produced no JSON at all. */
   private sawAnyMessage = false
@@ -115,17 +111,28 @@ export class OpencodeTranslator {
   private fromStepFinish(part: Part): AgentEvent[] {
     const inputTokens = part.tokens?.input ?? 0
     const outputTokens = part.tokens?.output ?? 0
+    const cachedTokens = part.tokens?.cache?.read ?? 0
     const costUsd = part.cost ?? 0
 
     this.totalInputTokens += inputTokens
     this.totalOutputTokens += outputTokens
+    this.totalCachedTokens += cachedTokens
     this.totalCostUsd += costUsd
     this.usage = {
       inputTokens: this.totalInputTokens,
       outputTokens: this.totalOutputTokens,
+      cachedTokens: this.totalCachedTokens,
       costUsd: this.totalCostUsd,
     }
-    return [{ kind: 'usage', inputTokens, outputTokens, costUsd }]
+    return [
+      {
+        kind: 'usage',
+        inputTokens,
+        outputTokens,
+        ...(cachedTokens === 0 ? {} : { cachedTokens }),
+        costUsd,
+      },
+    ]
   }
 }
 
@@ -150,6 +157,11 @@ export class OpencodeHarness implements Harness {
     const result = await exec(cmd)
     if (result.exitCode !== 0) throw new CommandError(cmd, result)
     return parseModelLines(result.stdout)
+  }
+
+  // opencode's `--variant` is provider-specific, so there is no universal list.
+  async listEfforts(): Promise<string[]> {
+    return []
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {

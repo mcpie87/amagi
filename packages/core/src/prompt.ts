@@ -20,10 +20,14 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
+    '- Never pipe check or lint output through head/tail: it aborts the tool',
+    '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
     '- If your changes add a user-facing feature (new CLI command or flag, new config',
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    '- End your final message with a short summary of what was done; it is used as',
+    '  the reason when no pull request is opened.',
   ]
 
   if (ctx.askCommand) {
@@ -196,6 +200,35 @@ export function explainMentionSystemPrompt(): string {
   ].join('\n')
 }
 
+export type MentionClassifyContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+}
+
+export function classifyMentionSystemPrompt(): string {
+  return [
+    'You are a classifier for comments on a pull request.',
+    'Do not use any tools. Do not modify any files.',
+    'Reply with exactly one token, nothing else.',
+  ].join('\n')
+}
+
+export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
+  return [
+    `A human (@${ctx.mention.user}) commented on PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+    '',
+    'Classify the comment into exactly one of:',
+    '- fix-pr — the human wants code in this PR changed',
+    '- explain — the human is asking why or how something was done',
+    '- add-a-task — the human wants a new task tracked in the issue tracker, not done in this PR',
+    '- ambiguous — the intent is unclear or none of the above',
+    '',
+    'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
+  ].join('\n')
+}
+
 export function explainMentionPrompt(ctx: ExplainMentionContext): string {
   return [
     `A human (@${ctx.mention.user}) asked about PR #${ctx.pr.number} "${ctx.pr.title}":`,
@@ -211,4 +244,20 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     '',
     'Write the explanation to the file and stop.',
   ].join('\n')
+}
+
+/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
+export function whyNoChangesPrompt(task: TrackerTask): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    'The run ended with no changes in the worktree, so no pull request was opened.',
+    'Explain in a few sentences why no changes were made: was the task already done,',
+    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
+    'the reason no PR was opened, so be concrete.',
+    '',
+    'Do not modify any files; reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  return parts.join('\n')
 }

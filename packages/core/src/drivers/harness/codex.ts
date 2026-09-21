@@ -1,8 +1,7 @@
 import type { AgentEvent } from '../../events.ts'
-import { CommandError, exec } from '../../exec.ts'
-import { parseModelLines } from '../../models.ts'
+import { HARDCODED_EFFORTS, HARDCODED_MODELS } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type FileChange = { path: string; kind: string }
 
@@ -35,26 +34,13 @@ type CodexMessage = {
   usage?: {
     input_tokens?: number
     output_tokens?: number
+    cached_input_tokens?: number
   }
   error?: { message: string }
   message?: string
 }
 
 type ItemPhase = 'started' | 'updated' | 'completed'
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
-}
 
 /**
  * Turns codex's `exec --json` dialect (the `ThreadEvent`/`ThreadItem` shapes
@@ -207,6 +193,7 @@ export class CodexTranslator {
       this.usage = {
         inputTokens: msg.usage.input_tokens ?? 0,
         outputTokens: msg.usage.output_tokens ?? 0,
+        cachedTokens: msg.usage.cached_input_tokens ?? 0,
         // Codex's usage payload carries no dollar figure, unlike claude's.
         costUsd: null,
       }
@@ -214,6 +201,7 @@ export class CodexTranslator {
         kind: 'usage',
         inputTokens: this.usage.inputTokens,
         outputTokens: this.usage.outputTokens,
+        ...(this.usage.cachedTokens === 0 ? {} : { cachedTokens: this.usage.cachedTokens }),
       })
     }
     events.push({
@@ -250,10 +238,11 @@ export class CodexHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    const cmd = [this.bin, 'models']
-    const result = await exec(cmd)
-    if (result.exitCode !== 0) throw new CommandError(cmd, result)
-    return parseModelLines(result.stdout)
+    return [...HARDCODED_MODELS.codex]
+  }
+
+  async listEfforts(): Promise<string[]> {
+    return [...HARDCODED_EFFORTS.codex]
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
@@ -276,6 +265,7 @@ export class CodexHarness implements Harness {
     // codex has no `--append-system-prompt`; `developer_instructions` is the
     // config key that injects extra instructions as a separate message.
     if (opts.systemPrompt) argv.push('-c', `developer_instructions=${opts.systemPrompt}`)
+    if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')
