@@ -58,52 +58,14 @@ function splitDescription(description: string): { summary: string; howToUse: str
   return { summary, howToUse: howToUse === '' ? null : howToUse }
 }
 
-/** Existing inline code spans and fenced blocks, left untouched. */
-const PROTECTED = /(```[\s\S]*?```|`[^`\n]+`)/g
+/** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
+const FILE_REF = /[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}/g
 
-/** A line that starts a shell command after a prompt marker. */
-const PROMPT_LINE = /^(\s*[$>%]\s+)(.+?)\s*$/m
-
-const FILE_EXTENSIONS =
-  'ts|tsx|js|jsx|mjs|cjs|py|json|jsonl|md|toml|nix|lock|txt|png|jpe?g|gif|svg|webp|ico|css|scss|html|sh|zsh|bash|fish|yml|yaml|sql|go|rs|c|h|cpp|hpp|rb|php|mod|sum|db|env|cfg|conf|ini|log|dolt|dotx|pptx|docx'
-
-const CODE_REF = new RegExp(
-  [
-    // file paths
-    String.raw`[\w.-]+(?:/[\w.-]+)+`,
-    // file names with a known extension
-    String.raw`[\w.-]+\.(?:${FILE_EXTENSIONS})`,
-    // dotted identifiers, e.g. Runner.drive
-    String.raw`[A-Za-z]{2}\w*(\.[A-Za-z]{2}\w*)+`,
-    // snake_case
-    '[a-zA-Z]+(?:_[a-zA-Z0-9]+)+',
-    // camelCase
-    '[a-z]+[A-Z][a-zA-Z0-9]*',
-    // kebab-case containing a digit (task/branch ids, versions)
-    String.raw`(?=\S*\d)[a-z]+(?:-[a-z0-9]+)+`,
-    // #issue / #PR references
-    String.raw`#\d+`,
-    // version numbers
-    String.raw`\d+\.\d+(?:\.\d+)*`,
-    // long-form CLI flags
-    '--[a-z][a-z0-9-]*',
-  ].join('|'),
-  'g',
-)
-
-/**
- * Wraps code references (identifiers, file paths, commands) in backticks.
- * Existing inline code and fenced blocks are left untouched.
- */
-export function backtickCodeRefs(text: string): string {
-  const parts = text.split(PROTECTED)
-  return parts
-    .map((part, i) => {
-      if (i % 2 === 1) return part
-      return part
-        .replace(PROMPT_LINE, (_, pre: string, cmd: string) => `${pre}\`${cmd.trim()}\``)
-        .replace(CODE_REF, '`$&`')
-    })
+/** Wraps file names and paths in backticks, leaving existing code spans alone. */
+export function backtickFileRefs(text: string): string {
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]+`)/g)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
     .join('')
 }
 
@@ -118,10 +80,12 @@ export function formatPrBody(
   task: TrackerTask,
   changes: readonly PrChange[],
   meta?: PrBodyMeta,
+  agentSummary?: string | null,
 ): string {
   const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
   const { summary, howToUse } = splitDescription(task.description)
-  if (summary !== '') lines.push('', '### 📝 Summary', '', backtickCodeRefs(summary))
+  const body = summary !== '' ? summary : (agentSummary?.trim() ?? '')
+  lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
