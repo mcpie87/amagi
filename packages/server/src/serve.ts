@@ -15,6 +15,8 @@ export type ServeOptions = {
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
   runner?: RunServiceApi
+  /** The repo key the runner is bound to; its settings apply live to it. */
+  runnerRepo?: string
 }
 
 /**
@@ -111,11 +113,13 @@ export function serve({
   prPollIntervalMs,
   staticDir,
   runner,
+  runnerRepo,
 }: ServeOptions) {
   const app = createApp({
     workspaces,
     ...(notify === undefined ? {} : { notify }),
     ...(runner === undefined ? {} : { runner }),
+    ...(runnerRepo === undefined ? {} : { runnerRepo }),
   })
   const repoPollers = startRepoPollers(workspaces, {
     ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),

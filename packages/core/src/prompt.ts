@@ -26,6 +26,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    '- End your final message with a short summary of what was done; it is used as',
+    '  the reason when no pull request is opened.',
   ]
 
   if (ctx.askCommand) {
@@ -242,4 +244,20 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     '',
     'Write the explanation to the file and stop.',
   ].join('\n')
+}
+
+/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
+export function whyNoChangesPrompt(task: TrackerTask): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    'The run ended with no changes in the worktree, so no pull request was opened.',
+    'Explain in a few sentences why no changes were made: was the task already done,',
+    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
+    'the reason no PR was opened, so be concrete.',
+    '',
+    'Do not modify any files; reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  return parts.join('\n')
 }

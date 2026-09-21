@@ -1,4 +1,4 @@
-import { TaskState } from '@amagi/core'
+import { MAX_PARALLEL, TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -67,17 +67,22 @@ export type RunBody = z.infer<typeof RunBody>
 
 export const TaskIdParam = z.object({ id: z.string().min(1) })
 
+/** Operator-supplied reason for closing a needs_human/no_pr task. */
+export const CloseTaskBody = z.object({
+  reason: z.string().trim().min(1).max(1000),
+})
+export type CloseTaskBody = z.infer<typeof CloseTaskBody>
+
 export const AnswerBody = z.object({
   answer: z.string().min(1),
   via: z.enum(['web', 'cli', 'gate']).default('web'),
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
 
-/** Operator-supplied reason for abandoning a task that needs attention. */
-export const CloseBody = z.object({
-  reason: z.string().trim().min(1),
+export const SettingsBody = z.object({
+  maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
 })
-export type CloseBody = z.infer<typeof CloseBody>
+export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

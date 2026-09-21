@@ -1,5 +1,6 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec } from './exec.ts'
+import { modelFooter } from './footer.ts'
 
 export type PrChange = {
   path: string
@@ -100,7 +101,18 @@ export function backtickCodeRefs(text: string): string {
     .join('')
 }
 
-export function formatPrBody(task: TrackerTask, changes: readonly PrChange[]): string {
+/** Provenance of the model run that produced the PR, for the body footer. */
+export type PrBodyMeta = {
+  harness: string
+  model: string | null
+  effort: string | null
+}
+
+export function formatPrBody(
+  task: TrackerTask,
+  changes: readonly PrChange[],
+  meta?: PrBodyMeta,
+): string {
   const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
   const { summary, howToUse } = splitDescription(task.description)
   if (summary !== '') lines.push('', '### 📝 Summary', '', backtickCodeRefs(summary))
@@ -114,5 +126,6 @@ export function formatPrBody(task: TrackerTask, changes: readonly PrChange[]): s
       lines.push(`- \`${change.path}\` ${stat}`)
     }
   }
-  return lines.join('\n')
+  const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
+  return lines.join('\n') + footer
 }

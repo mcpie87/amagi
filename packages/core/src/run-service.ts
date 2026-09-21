@@ -2,13 +2,25 @@ import type { Config } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { Exec } from './exec.ts'
+import { processTreeStats } from './process.ts'
 import { Runner, type RunOnceResult } from './runner.ts'
 import type { Store } from './store/store.ts'
 
+/** Summed over the agent's whole process tree (see process.ts). */
+export type RunnerResource = {
+  processes: number
+  rssBytes: number
+  cpuMs: number
+}
+
 export type RunnerStatus = {
+  /** Repo name the runner is bound to, so several runners can be told apart. */
+  name: string
   available: boolean
   capacity: number
   running: string[]
+  /** Resource usage per running task, keyed by task id; absent when no agent is live. */
+  resources: Record<string, RunnerResource>
 }
 
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
@@ -16,9 +28,11 @@ export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404
 
 /** The slice of RunService the HTTP layer depends on, so tests can stub it. */
 export interface RunServiceApi {
-  status(): RunnerStatus
+  status(): Promise<RunnerStatus>
   start(taskId?: string): Promise<StartResult>
   stop(taskId: string): Promise<StopResult>
+  /** Live capacity change; only affects new launches, never in-flight runs. */
+  setMaxParallel(n: number): void
 }
 
 export type RunServiceOptions = {
@@ -41,7 +55,7 @@ export type RunServiceOptions = {
  * checked against the tracker before taking the task.
  */
 export class RunService implements RunServiceApi {
-  private readonly capacity: number
+  private capacity: number
   private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
@@ -50,12 +64,31 @@ export class RunService implements RunServiceApi {
     this.capacity = opts.maxParallel ?? opts.config.loop.maxParallel
   }
 
-  status(): RunnerStatus {
+  /**
+   * Live capacity change: `status()` and new launches read the new value, runs
+   * already in flight are untouched. The floor keeps a buggy caller from
+   * zeroing out the runner; the upper bound is enforced at the config/API layer.
+   */
+  setMaxParallel(n: number): void {
+    this.capacity = Math.max(1, n)
+  }
+
+  async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
+    const resources: Record<string, RunnerResource> = {}
+    await Promise.all(
+      running.map(async (id) => {
+        const pid = this.runs.get(id)?.runner.currentPid()
+        if (pid === null || pid === undefined || pid <= 0) return
+        resources[id] = await processTreeStats(pid)
+      }),
+    )
     return {
+      name: this.opts.repoName,
       available: running.length < this.capacity,
       capacity: this.capacity,
       running,
+      resources,
     }
   }
 

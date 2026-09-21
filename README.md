@@ -101,9 +101,9 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `reviewing` | Review harness runs against the PR | `fixing`, `done` |
 | `fixing` | Implement harness addresses review findings | `awaiting_answer`, `checks`, `reviewing` |
 | `done` | Terminal: task complete | — |
-| `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
+| `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
-| `abandoned` | Terminal: task withdrawn | — |
+| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
@@ -122,6 +122,20 @@ existing Reclaim action (or a fresh launch) resumes it where it left off. The
 server runs up to `loop.maxParallel` tasks at once and refuses launch requests
 that would exceed that or claim a task that is already running. The dashboard
 surfaces all of this from the task board and task detail pages.
+
+`GET /api/runner` also carries per-task resource usage for the runner, summed
+over each running task's whole agent process tree from `/proc` on Linux: resident
+memory (`rssBytes`), CPU time (`cpuMs`), and process count (`processes`), keyed
+by task id under `resources` plus the repo `name` the runner is bound to. The
+dashboard's Workers section shows these numbers as a per-runner summary strip
+and per busy slot, so the operator can see which runner is eating the machine.
+
+Beyond stopping, the task detail page offers **instant close** (`POST
+/api/repos/:repo/tasks/:id/close`): it retires any in-flight or parked task by
+killing the worker if the runner owns it, deleting the task's worktree and
+branch, closing the tracker ticket, and parking the task in the terminal
+`abandoned` state. It is the operator's way to kill an in-flight task outright —
+unlike stop, which preserves the worktree for the reclaim path.
 
 Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
@@ -144,7 +158,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
-| `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"opus"`. |
+| `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"claude-opus-5"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
@@ -211,7 +225,7 @@ permissions = "bypass"
 
 ### Harness and model selection
 
-`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort — each from what the harness says is available. Model lists are fetched the way each harness lists them (`claude model list`, `codex debug models`, `opencode models`) and cached under `$XDG_CACHE_HOME/amagi/models/` for 24h, so the prompt is fast and still offers the last known models offline. Codex's catalog also carries each model's supported reasoning levels, so its effort prompt offers exactly those. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
+`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
 
 ```bash
 amagi run                      # interactive picker
@@ -229,7 +243,7 @@ permissions = "bypass"
 
 [harness.definitions.careful]
 kind = "claude"
-model = "opus"
+model = "claude-opus-5"
 ```
 
 ## Packages
