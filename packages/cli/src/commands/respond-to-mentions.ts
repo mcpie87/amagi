@@ -1,5 +1,4 @@
 import {
-  listOpenPrs,
   listPrMentions,
   loadConfig,
   type MentionProgress,
@@ -41,11 +40,11 @@ export const respondToMentionsCommand = defineCommand({
 
     let prs: PrInfo[]
     try {
-      prs = await listOpenPrs({ cwd: root })
+      prs = await driver.listOpenPrs(root)
     } catch (err) {
       console.log(
         red(
-          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is gh installed and authenticated?)`,
+          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is the forge CLI installed and authenticated?)`,
         ),
       )
       return

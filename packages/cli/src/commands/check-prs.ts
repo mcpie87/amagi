@@ -2,12 +2,12 @@ import {
   type Config,
   harnessStartOpts,
   isConflicting,
-  listOpenPrs,
   loadConfig,
   makeHarness,
+  makePrDriver,
+  type PrDriver,
   type PrInfo,
   prepareConflictWorktree,
-  prMergeStatus,
   pushConflictFix,
   repoName,
   repoRoot,
@@ -23,17 +23,26 @@ function mergeLabel(p: PrInfo, baseBranch: string): string {
   return 'CLEAN'
 }
 
-/** gh pr list reports UNKNOWN until GitHub computes mergeability; resolve per-PR. */
-async function resolveMergeStatuses(root: string, prs: PrInfo[]): Promise<PrInfo[]> {
+/** A bulk PR list reports UNKNOWN until the forge computes mergeability; resolve per-PR. */
+async function resolveMergeStatuses(
+  root: string,
+  prs: PrInfo[],
+  driver: PrDriver,
+): Promise<PrInfo[]> {
   return Promise.all(
     prs.map(async (p) => {
       if (p.mergeable !== 'UNKNOWN' && p.mergeStateStatus !== 'UNKNOWN') return p
-      return { ...p, ...(await prMergeStatus(root, p.number)) }
+      return { ...p, ...(await driver.getMergeStatus(root, p.number)) }
     }),
   )
 }
 
-async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<void> {
+async function resolveOne(
+  pr: PrInfo,
+  root: string,
+  config: Config,
+  driver: PrDriver,
+): Promise<void> {
   console.log(`\n${bold(`#${pr.number}`)}  ${pr.title}`)
   console.log(dim(`  ${pr.url}`))
   try {
@@ -95,7 +104,7 @@ async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<voi
       headRef: pr.headRefName,
       remote: config.forge.remote,
     })
-    const status = await prMergeStatus(root, pr.number)
+    const status = await driver.getMergeStatus(root, pr.number)
     const ok = status.mergeable === 'MERGEABLE' || status.mergeStateStatus === 'CLEAN'
     console.log(
       ok
@@ -123,14 +132,15 @@ export const checkPrsCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
+    const driver = makePrDriver(config.forge.kind)
 
     let prs: PrInfo[]
     try {
-      prs = await listOpenPrs({ cwd: root })
+      prs = await driver.listOpenPrs(root)
     } catch (err) {
       console.log(
         red(
-          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is gh installed and authenticated?)`,
+          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is the forge CLI installed and authenticated?)`,
         ),
       )
       return
@@ -141,7 +151,7 @@ export const checkPrsCommand = defineCommand({
     }
 
     const base = config.repo.baseBranch
-    const resolved = await resolveMergeStatuses(root, prs)
+    const resolved = await resolveMergeStatuses(root, prs, driver)
     const header = ['PR', 'MERGE', 'BASE', 'HEAD', 'TITLE']
     const rows = resolved.map((p) => [
       `#${p.number}`,
@@ -174,7 +184,7 @@ export const checkPrsCommand = defineCommand({
       `\n${yellow(`${conflicts.length} conflicting PR(s), dispatching resolution agents:`)}`,
     )
     for (const pr of conflicts) {
-      await resolveOne(pr, root, config)
+      await resolveOne(pr, root, config, driver)
     }
   },
 })

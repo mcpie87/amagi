@@ -21,6 +21,7 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
+import type { PrInfo } from './pr-check.ts'
 import { RunService } from './run-service.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -184,6 +185,15 @@ class FakePr implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return []
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+  }
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []

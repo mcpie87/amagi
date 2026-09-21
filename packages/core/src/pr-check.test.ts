@@ -3,14 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
-import {
-  isConflicting,
-  listOpenPrs,
-  type PrInfo,
-  prepareConflictWorktree,
-  prMergeStatus,
-  pushConflictFix,
-} from './pr-check.ts'
+import { isConflicting, type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 
 type Call = readonly string[]
 
@@ -60,52 +53,6 @@ describe('isConflicting', () => {
       false,
     )
     expect(isConflicting(pr(), 'develop')).toBe(false)
-  })
-})
-
-describe('listOpenPrs', () => {
-  test('parses open PRs from gh pr list', async () => {
-    const { exec, calls } = fake((c) =>
-      c.includes('list') && c.includes('pr')
-        ? ok(
-            JSON.stringify([
-              pr(),
-              pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-            ]),
-          )
-        : undefined,
-    )
-    const prs = await listOpenPrs({ cwd: '/repo', exec })
-
-    expect(calls[0]).toEqual([
-      'gh',
-      'pr',
-      'list',
-      '--state',
-      'open',
-      '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,updatedAt',
-    ])
-    expect(prs).toHaveLength(2)
-    expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
-  })
-})
-
-describe('prMergeStatus', () => {
-  test('retries while GitHub reports UNKNOWN, then returns the resolved state', async () => {
-    const calls: Call[] = []
-    let n = 0
-    const exec: Exec = async (cmd) => {
-      calls.push(cmd)
-      n++
-      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
-      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
-    }
-
-    const status = await prMergeStatus('/repo', 7, exec)
-
-    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
-    expect(calls).toHaveLength(2)
   })
 })
 

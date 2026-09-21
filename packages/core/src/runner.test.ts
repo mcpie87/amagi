@@ -21,6 +21,7 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
+import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -193,6 +194,18 @@ class FakePr implements PrDriver {
 
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return []
+  }
+
+  async getMergeStatus(_cwd: string, _number: number) {
+    return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+  }
+
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
 
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
@@ -588,15 +601,22 @@ describe('Runner.runOnce', () => {
         events: [
           { kind: 'text', text: 'working on it' },
           { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
-          { kind: 'result', ok: false, summary: 'hit the turn limit' },
+          { kind: 'result', ok: false, summary: 'registry unreachable' },
         ],
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
     ])
-    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      // "hit the turn limit" matches the transient/session-limit patterns and
+      // would retry into a fresh (empty) turn; this test is about which detail
+      // wins over the tool noise, so force immediate escalation.
+      config({ loop: { maxRetries: 0 } }),
+    ).runOnce()
 
     expect(result?.state).toBe('needs_human')
-    expect(stateReason(TASK.id)).toContain('hit the turn limit')
+    expect(stateReason(TASK.id)).toContain('registry unreachable')
   })
 
   test('a failed agent falls back to the failing tool output when there is no result or text', async () => {

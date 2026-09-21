@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { Exec, ExecResult } from '../exec.ts'
+import type { PrInfo } from '../pr-check.ts'
 import { gitTokenConfig } from './forge-cred.ts'
 import { amagiLabels, makePrDriver } from './pr.ts'
 
@@ -18,6 +19,18 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
 }
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
+
+const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
+  number: 7,
+  title: 'Do the thing',
+  url: 'https://github.com/owner/repo/pull/7',
+  headRefName: 'amagi/am-1-do-the-thing',
+  baseRefName: 'main',
+  mergeable: 'MERGEABLE',
+  mergeStateStatus: 'CLEAN',
+  updatedAt: '2026-09-21T10:00:00Z',
+  ...over,
+})
 
 beforeEach(() => {
   delete process.env.GH_TOKEN
@@ -188,6 +201,50 @@ describe('githubPr', () => {
     expect(calls).toContainEqual(['gh', 'pr', 'comment', '7', '--body-file', '-'])
     expect(calls).toContainEqual(['<stdin>', 'explanation'])
   })
+
+  test('lists open PRs from gh', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('list') && c.includes('pr')
+        ? ok(JSON.stringify([prInfo(), prInfo({ number: 8, headRefName: 'amagi/am-2' })]))
+        : undefined,
+    )
+    const prs = await makePrDriver('github', exec).listOpenPrs('/repo')
+
+    expect(calls[0]).toEqual([
+      'gh',
+      'pr',
+      'list',
+      '--state',
+      'open',
+      '--json',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,updatedAt',
+    ])
+    expect(prs).toHaveLength(2)
+    expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+  })
+
+  test('resolves a merge status by retrying while gh reports UNKNOWN', async () => {
+    let n = 0
+    const { exec, calls } = fake(() => {
+      n++
+      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
+      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
+    })
+    const status = await makePrDriver('github', exec).getMergeStatus('/repo', 7)
+
+    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
+    expect(calls).toHaveLength(2)
+  })
+
+  test('fetches the pr diff from gh', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('diff') ? ok('diff --git a/x b/x\n') : undefined,
+    )
+    const diff = await makePrDriver('github', exec).getPrDiff('/repo', 7)
+
+    expect(calls[0]).toEqual(['gh', 'pr', 'diff', '7'])
+    expect(diff).toBe('diff --git a/x b/x\n')
+  })
 })
 
 describe('forgejoPr', () => {
@@ -261,6 +318,86 @@ describe('forgejoPr', () => {
       () => makePrDriver('forgejo', exec).getPr('/wt', 3),
     )
     expect(state).toBe('merged')
+  })
+
+  test('lists open PRs through the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const prs = await withFetch(
+      (path) => {
+        if (path === 'repos/owner/repo/pulls?state=open') {
+          return new Response(
+            JSON.stringify([
+              {
+                number: 3,
+                title: 'Do the thing',
+                html_url: 'https://git.example.com/owner/repo/pulls/3',
+                head: { ref: 'amagi/am-1' },
+                base: { ref: 'main' },
+                mergeable: true,
+                mergeable_state: 'clean',
+                updated_at: '2026-09-21T10:00:00Z',
+              },
+            ]),
+            { status: 200 },
+          )
+        }
+        return new Response('[]', { status: 200 })
+      },
+      () => makePrDriver('forgejo', exec).listOpenPrs('/wt'),
+    )
+
+    expect(prs).toEqual([
+      {
+        number: 3,
+        title: 'Do the thing',
+        url: 'https://git.example.com/owner/repo/pulls/3',
+        headRefName: 'amagi/am-1',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        updatedAt: '2026-09-21T10:00:00Z',
+      },
+    ])
+  })
+
+  test('maps forgejo mergeability onto the shared merge status', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const status = await withFetch(
+      () =>
+        new Response(JSON.stringify({ mergeable: true, mergeable_state: 'clean' }), {
+          status: 200,
+        }),
+      () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
+    )
+    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
+  })
+
+  test('maps a dirty forgejo PR as conflicting', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const status = await withFetch(
+      () =>
+        new Response(JSON.stringify({ mergeable: false, mergeable_state: 'dirty' }), {
+          status: 200,
+        }),
+      () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
+    )
+    expect(status).toEqual({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' })
+  })
+
+  test('fetches the pr diff through the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const diff = await withFetch(
+      (path) =>
+        path === 'repos/owner/repo/pulls/3.diff'
+          ? new Response('diff --git a/x b/x\n', { status: 200 })
+          : new Response('[]', { status: 200 }),
+      () => makePrDriver('forgejo', exec).getPrDiff('/wt', 3),
+    )
+    expect(diff).toBe('diff --git a/x b/x\n')
   })
 
   test('throws a clear error without a token', async () => {
