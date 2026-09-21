@@ -1089,6 +1089,45 @@ function ReclaimButton({
   )
 }
 
+function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'needs_human' && state !== 'no_pr') return null
+
+  const close = async () => {
+    const reason = window.prompt('Reason for closing this task')
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function RetryButton({
   repo,
   taskId,
@@ -1135,47 +1174,6 @@ function RetryButton({
         className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
       >
         Retry
-      </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
-    </div>
-  )
-}
-
-function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  if (state !== 'needs_human' && state !== 'no_pr') return null
-
-  const close = async () => {
-    const reason = window.prompt(`Why is ${taskId} done? (closes the tracker issue)`)
-    if (reason === null) return
-    const trimmed = reason.trim()
-    if (trimmed === '') return
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: trimmed }),
-      })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-    } catch {
-      setError('could not reach the amagi server')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="ml-auto">
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void close()}
-        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
-      >
-        Close
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
     </div>
