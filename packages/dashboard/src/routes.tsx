@@ -1,7 +1,13 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
-import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import {
+  type AgentEvent,
+  isTerminal,
+  type MergeStatus,
+  type StoredEvent,
+  type TaskState,
+} from '@amagi/core/events'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -9,6 +15,7 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  currentUsageFor,
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
@@ -266,6 +273,25 @@ type EligibleEpic = {
   closedChildren: number
 }
 
+/** Preset close reasons offered for an epic; '__other' falls back to free text. */
+const EPIC_CLOSE_REASONS = [
+  'completed',
+  'superseded / duplicate',
+  'abandoned',
+  'merged into another epic',
+  'out of scope',
+  '__other',
+]
+
+/** Preset reasons offered when marking a task done; '__other' falls back to free text. */
+const TASK_DONE_REASONS = [
+  'completed',
+  'already done elsewhere',
+  'duplicate / superseded',
+  'out of scope',
+  '__other',
+]
+
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
 const columnHeader: Record<Issue['status'], string> = {
@@ -303,6 +329,22 @@ const stateBadge: Record<TaskState, string> = {
 
 function Badge({ state }: { state: TaskState }) {
   return <span className={`${PILL} ${stateBadge[state]}`}>{state}</span>
+}
+
+const mergeTone: Record<MergeStatus, string> = {
+  mergeable: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
+  conflicted: 'bg-red-soft text-red-ink ring-red-edge',
+  unknown: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
+}
+
+const mergeLabel: Record<MergeStatus, string> = {
+  mergeable: 'mergeable',
+  conflicted: 'merge conflict',
+  unknown: 'merge status unknown',
+}
+
+function PrStatusChip({ status }: { status: MergeStatus }) {
+  return <span className={`${PILL} ${mergeTone[status]}`}>{mergeLabel[status]}</span>
 }
 
 function readyOk(repo: RepoInfo): boolean {
@@ -742,20 +784,24 @@ function CloseEpicButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(EPIC_CLOSE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
 
-  const close = async () => {
-    const reason = window.prompt(`Reason for closing ${epic.title}`)
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/epics/close-eligible`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim() }),
+        body: JSON.stringify({ reason: finalReason }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-      else onClosed()
+      else {
+        onClosed()
+        setOpen(false)
+      }
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -763,17 +809,89 @@ function CloseEpicButton({
     }
   }
 
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div className="ml-auto">
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => setOpen(true)}
         className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
       >
         Close
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Close {epic.id}</h2>
+            <div className="space-y-3">
+              <p className="text-sm text-fg-muted">{epic.title}</p>
+              <div>
+                <label className={label} htmlFor="epic-close-reason">
+                  Reason for closing
+                </label>
+                <select
+                  id="epic-close-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {EPIC_CLOSE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="epic-close-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="epic-close-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Close
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -1137,11 +1255,16 @@ function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
 
 function WorkerSlot({
   taskId,
+  startedAt,
+  now,
   resource,
   state,
   selected,
 }: {
   taskId: string | null
+  startedAt: number | undefined
+  /** Wall-clock snapshot, advanced by one shared 1s interval in WorkersPanel. */
+  now: number
   resource?: RunnerResource | undefined
   state: DashboardState
   selected: string | null
@@ -1155,9 +1278,15 @@ function WorkerSlot({
   }
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
+  const usage = currentUsageFor(state, taskId)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {startedAt !== undefined && (
+          <span className="shrink-0 font-mono tabular-nums text-sm text-fg">
+            {fmtElapsed(now - startedAt)}
+          </span>
+        )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
         <Link
           to="/tasks/$id"
@@ -1172,6 +1301,9 @@ function WorkerSlot({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
         <span>model: {agent?.model ?? 'unknown'}</span>
+        <span>
+          ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
+        </span>
         {resource !== undefined && (
           <>
             <span>rss: {fmtBytes(resource.rssBytes)}</span>
@@ -1192,9 +1324,74 @@ function WorkerSlot({
  * strip sums RSS/CPU/process count over the live agent trees so the operator
  * can see which runner is eating the machine.
  */
+function AutoQueueToggle() {
+  const { status } = useRunner()
+  const { repos, selected } = useDashboard()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fromStatus = status?.autoQueue ?? false
+  const [on, setOn] = useState(fromStatus)
+  useEffect(() => setOn(fromStatus), [fromStatus])
+  // The toggle config lives with the repo the runner serves; address that repo
+  // so it live-applies even when another repo is selected in the dashboard.
+  const runnerRepo = repos?.find((r) => r.name === status?.name)?.key ?? selected
+
+  const toggle = async () => {
+    if (runnerRepo === null || busy) return
+    const next = !on
+    setBusy(true)
+    setError(null)
+    setOn(next)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${runnerRepo}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ autoQueue: next }),
+      })
+      if (!res.ok) {
+        setOn(!next)
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setOn(!next)
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {error !== null && <span className="text-sm text-red-400">{error}</span>}
+      <button
+        type="button"
+        disabled={busy || runnerRepo === null}
+        onClick={() => void toggle()}
+        title={
+          on
+            ? 'free runner slots get filled automatically as tasks become claimable'
+            : 'dispatch is manual: click Run next (or retry) to start a task'
+        }
+        className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
+          on
+            ? 'bg-emerald-600 text-zinc-950 hover:bg-emerald-500'
+            : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+        }`}
+      >
+        Auto queue: {on ? 'on' : 'off'}
+      </button>
+    </div>
+  )
+}
+
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
   if (status === null) return null
   const running = status.running
   const total = running.reduce(
@@ -1212,9 +1409,12 @@ function WorkersPanel() {
   )
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        Workers ({running.length}/{status.capacity})
-      </h2>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Workers ({running.length}/{status.capacity})
+        </h2>
+        <AutoQueueToggle />
+      </div>
       <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-4 py-2 text-xs text-fg-muted">
         <span className="font-medium text-fg">{status.name}</span>
         <span>rss: {fmtBytes(total.rssBytes)}</span>
@@ -1226,6 +1426,8 @@ function WorkersPanel() {
           <WorkerSlot
             key={i}
             taskId={running[i] ?? null}
+            startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
+            now={now}
             resource={running[i] === undefined ? undefined : status.resources[running[i]]}
             state={state}
             selected={selected}
@@ -1367,6 +1569,17 @@ function QueueView() {
                                 {task.statusReason}
                               </span>
                             )}
+                          {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
+                            <span
+                              className={`mt-1 block truncate text-xs ${
+                                task.prMergeStatus === 'conflicted'
+                                  ? 'text-red-400'
+                                  : 'text-emerald-400'
+                              }`}
+                            >
+                              PR {mergeLabel[task.prMergeStatus]}
+                            </span>
+                          )}
                         </Link>
                       </li>
                     ))}
@@ -1799,22 +2012,22 @@ function CloseButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(TASK_DONE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
   if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
-  const close = async () => {
-    const reason = window.prompt(
-      target === 'done' ? 'Reason for marking this task done' : 'Reason for closing this task',
-    )
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim(), to: target }),
+        body: JSON.stringify({ reason: finalReason, to: target }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setOpen(false)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -1822,12 +2035,33 @@ function CloseButton({
     }
   }
 
+  const onMarkDone = () => {
+    setOpen(true)
+  }
+
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div>
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => {
+          if (target === 'done') onMarkDone()
+          else {
+            const reason = window.prompt(`Reason for closing ${taskId}`)
+            if (reason === null || reason.trim() === '') return
+            void close(reason.trim())
+          }
+        }}
         title={
           target === 'done'
             ? 'marks the task done when the work already existed elsewhere'
@@ -1842,6 +2076,67 @@ function CloseButton({
         {target === 'done' ? 'Mark done' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {target === 'done' && open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Mark done {taskId}</h2>
+            <div className="space-y-3">
+              <div>
+                <label className={label} htmlFor="task-done-reason">
+                  Reason for marking this task done
+                </label>
+                <select
+                  id="task-done-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {TASK_DONE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="task-done-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="task-done-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Mark done
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -2040,6 +2335,16 @@ function fmtBytes(n: number): string {
 function fmtCpu(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0s'
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Compact fixed-width elapsed time, e.g. 0:42, 12:07, 2:41:33. */
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const two = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${two(m)}:${two(sec)}` : `${m}:${two(sec)}`
 }
 
 /** Compact "x ago" for a worker's last-run stamp; empty before the first tick. */
@@ -2365,7 +2670,17 @@ function TaskDetailView() {
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
-        <DetailRow label="PR" value={task.prUrl === null ? null : <PrLink url={task.prUrl} />} />
+        <DetailRow
+          label="PR"
+          value={
+            task.prUrl === null ? null : (
+              <span className="flex items-center gap-2">
+                <PrLink url={task.prUrl} />
+                {task.prMergeStatus !== null && <PrStatusChip status={task.prMergeStatus} />}
+              </span>
+            )
+          }
+        />
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"

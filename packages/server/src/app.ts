@@ -1,4 +1,5 @@
 import {
+  BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
   classifyDifficulty,
@@ -7,12 +8,14 @@ import {
   type Notifier,
   type Question,
   type RegistryEntry,
+  Runner,
   type RunServiceApi,
   removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
+  Triage,
   type UpdateTrackerTask,
   type WorkerActivity,
   type Workspace,
@@ -78,6 +81,11 @@ function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities
   return tracker.capabilities[capability]
     ? null
     : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
+}
+
+/** The beads tracker's issue browser and epic closer, or null for any other tracker. */
+function beadsTracker(ws: Workspace): BeadsTracker | null {
+  return ws.tracker instanceof BeadsTracker ? ws.tracker : null
 }
 
 /**
@@ -181,6 +189,12 @@ export function createApp({
     }
     return chat
   }
+  // The legacy non-scoped stop route predates the repo registry; it targets the
+  // first registered workspace, which is the default repo for single-repo use.
+  const defaultStore = (): Store | null => {
+    const entry = workspaces.list()[0]
+    return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -224,10 +238,11 @@ export function createApp({
     .get('/api/repos/:repo/issues/:id', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      if (ws.getIssue === undefined) {
+      const beads = beadsTracker(ws)
+      if (beads === null) {
         return c.json({ error: `issue detail is unavailable for ${repo}` }, 501)
       }
-      const issue = await ws.getIssue(id)
+      const issue = await beads.getIssue(id)
       if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
       return c.json(issue)
     })
@@ -249,7 +264,8 @@ export function createApp({
             }
           : body
         const created: TrackerTask = await ws.tracker.createTask(input)
-        const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
+        const beads = beadsTracker(ws)
+        const issue = beads === null ? null : await beads.getIssue(created.id)
         return c.json(issue ?? created, 201)
       },
     )
@@ -281,17 +297,19 @@ export function createApp({
         if (body.dependencies !== undefined) {
           const depCap = capabilityError(ws.tracker, 'dependencies')
           if (depCap !== null) return c.json({ error: depCap }, 501)
-          if (ws.getIssue === undefined) {
+          const beads = beadsTracker(ws)
+          if (beads === null) {
             return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
           }
-          const current = (await ws.getIssue(id))?.dependencies.map((d) => d.id) ?? []
+          const current = (await beads.getIssue(id))?.dependencies.map((d) => d.id) ?? []
           input.dependencies = {
             add: body.dependencies.filter((d) => !current.includes(d)),
             remove: current.filter((d) => !body.dependencies?.includes(d)),
           }
         }
         const updated = await ws.tracker.updateTask(id, input)
-        const issue = ws.getIssue === undefined ? null : await ws.getIssue(updated.id)
+        const beads = beadsTracker(ws)
+        const issue = beads === null ? null : await beads.getIssue(updated.id)
         return c.json(issue ?? updated)
       },
     )
@@ -320,19 +338,42 @@ export function createApp({
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      if (ws.listIssues === undefined) {
+      const beads = beadsTracker(ws)
+      if (beads === null) {
         return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
       }
-      return c.json(await ws.listIssues())
+      return c.json(await beads.list())
     })
 
     .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      if (ws.eligibleEpics === undefined) {
+      const beads = beadsTracker(ws)
+      if (beads === null) {
         return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
       }
-      return c.json(await ws.eligibleEpics())
+      return c.json(await beads.eligibleEpics())
+    })
+
+    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
+      const store = defaultStore()
+      if (store === null) return c.json({ error: 'no repository registered' }, 409)
+      const { id } = c.req.valid('param')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (isTerminal(task.state)) {
+        return c.json({ error: `task ${id} is already in terminal state ${task.state}` }, 409)
+      }
+      // Park the run in `cancelled`; a live runner watches the store, kills
+      // the agent process and unwinds. A crashed runner leaves the task parked
+      // for the operator to reclaim via the restart flow.
+      store.append(id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'cancelled',
+        reason: 'operator interrupt',
+      })
+      return c.json({ task: store.task(id) })
     })
 
     .post(
@@ -343,10 +384,11 @@ export function createApp({
         const { repo } = c.req.valid('param')
         const { reason } = c.req.valid('json')
         const ws = resolveWorkspace(workspaces, repo)
-        if (ws.closeEligibleEpics === undefined) {
+        const beads = beadsTracker(ws)
+        if (beads === null) {
           return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
         }
-        return c.json(await ws.closeEligibleEpics(reason))
+        return c.json(await beads.closeEligibleEpics(reason))
       },
     )
 
@@ -491,7 +533,10 @@ export function createApp({
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      return c.json({ maxParallel: ws.config.loop.maxParallel })
+      return c.json({
+        maxParallel: ws.config.loop.maxParallel,
+        autoQueue: ws.config.loop.autoQueue,
+      })
     })
 
     .patch(
@@ -501,14 +546,27 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { maxParallel } = c.req.valid('json')
+        const { maxParallel, autoQueue } = c.req.valid('json')
         // Persist first so a restart keeps the value, then live-apply: the
         // cached workspace config and, when this repo owns the runner, its
-        // capacity. In-flight runs are untouched — capacity gates new launches.
-        writeConfig(ws.root, { loop: { maxParallel } })
-        ws.config.loop.maxParallel = maxParallel
-        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
-        return c.json({ maxParallel })
+        // capacity and automatic dispatch. In-flight runs are untouched, both
+        // gate and poll only affect new launches.
+        const patch: Record<string, unknown> = {}
+        if (maxParallel !== undefined) patch.maxParallel = maxParallel
+        if (autoQueue !== undefined) patch.autoQueue = autoQueue
+        writeConfig(ws.root, { loop: patch })
+        if (maxParallel !== undefined) {
+          ws.config.loop.maxParallel = maxParallel
+          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        }
+        if (autoQueue !== undefined) {
+          ws.config.loop.autoQueue = autoQueue
+          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+        }
+        return c.json({
+          maxParallel: ws.config.loop.maxParallel,
+          autoQueue: ws.config.loop.autoQueue,
+        })
       },
     )
 
@@ -667,6 +725,48 @@ export function createApp({
         return c.json(ws.store.openQuestions(taskId))
       },
     )
+
+    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const runner = new Runner({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.implement),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // A full agent run takes minutes, so the request returns immediately and
+      // the run reports through the repo's own event stream.
+      void runner.runOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
+
+    .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const triage = new Triage({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.triage),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // Triage may hand off to a long implementation run; the request returns
+      // immediately and every decision reports through the repo's event stream.
+      void triage.triageOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 
