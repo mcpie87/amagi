@@ -3,11 +3,13 @@ import {
   isConflicting,
   listOpenPrs,
   loadConfig,
+  makeTracker,
   type PrInfo,
   prMergeStatus,
   repoName,
   repoRoot,
   resolveConflict,
+  stampIterationLabel,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
@@ -113,7 +115,19 @@ export const checkPrsCommand = defineCommand({
     console.log(
       `\n${yellow(`${conflicts.length} conflicting PR(s), dispatching resolution agents:`)}`,
     )
+    const tracker = makeTracker(config, root)
     for (const pr of conflicts) {
+      try {
+        const stamped = await stampIterationLabel({ cwd: root, pr })
+        if (stamped !== null) {
+          await tracker.setMetadata?.(stamped.taskId, { iterations: String(stamped.iteration) })
+          console.log(dim(`  iteration ${stamped.iteration} for #${pr.number} (${stamped.taskId})`))
+        }
+      } catch (err) {
+        console.log(
+          red(`  iteration bump failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+      }
       await resolveOne(pr, root, config)
     }
   },

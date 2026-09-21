@@ -5,11 +5,15 @@ import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
 import {
   isConflicting,
+  iterationLabel,
+  iterationsFromLabels,
   listOpenPrs,
   type PrInfo,
   prepareConflictWorktree,
   prMergeStatus,
   pushConflictFix,
+  stampIterationLabel,
+  taskIdFromBranch,
 } from './pr-check.ts'
 
 type Call = readonly string[]
@@ -85,10 +89,90 @@ describe('listOpenPrs', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+  })
+
+  test('flattens gh label objects into label names', async () => {
+    const { exec } = fake((c) =>
+      c.includes('list') && c.includes('pr')
+        ? ok(
+            JSON.stringify([
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/iterations:2' }] },
+            ]),
+          )
+        : undefined,
+    )
+    const prs = await listOpenPrs({ cwd: '/repo', exec })
+    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/iterations:2'])
+  })
+})
+
+describe('iterations', () => {
+  test('parses the amagi/iterations:N label, defaulting to 0', () => {
+    expect(iterationsFromLabels([])).toBe(0)
+    expect(iterationsFromLabels(undefined)).toBe(0)
+    expect(iterationsFromLabels(['amagi', 'amagi/iterations:3'])).toBe(3)
+    expect(iterationsFromLabels(['amagi/iterations:0'])).toBe(0)
+    expect(iterationsFromLabels(['amagi/iterations:oops'])).toBe(0)
+  })
+
+  test('formats the iteration label', () => {
+    expect(iterationLabel(4)).toBe('amagi/iterations:4')
+  })
+
+  test('taskIdFromBranch reads the task id from an amagi head branch', () => {
+    expect(taskIdFromBranch('amagi/am-19b.2-ask-cli-fallback')).toBe('am-19b.2')
+    expect(taskIdFromBranch('feature/foo')).toBeNull()
+  })
+
+  test('stamps the first iteration on an amagi PR with no prior label', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const stamped = await stampIterationLabel({
+      cwd: '/repo',
+      pr: pr({ labels: ['amagi'] }),
+      exec,
+    })
+
+    expect(stamped).toEqual({ taskId: 'am-1', iteration: 1 })
+    expect(calls).toContainEqual(['gh', 'label', 'create', 'amagi/iterations:1', '--force'])
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/iterations:1'])
+  })
+
+  test('stamps the next iteration and drops the stale label', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const stamped = await stampIterationLabel({
+      cwd: '/repo',
+      pr: pr({ labels: ['amagi/iterations:2'] }),
+      exec,
+    })
+
+    expect(stamped).toEqual({ taskId: 'am-1', iteration: 3 })
+    expect(calls).toContainEqual(['gh', 'label', 'create', 'amagi/iterations:3', '--force'])
+    expect(calls).toContainEqual([
+      'gh',
+      'pr',
+      'edit',
+      '7',
+      '--add-label',
+      'amagi/iterations:3',
+      '--remove-label',
+      'amagi/iterations:2',
+    ])
+  })
+
+  test('leaves non-amagi PRs untouched', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const stamped = await stampIterationLabel({
+      cwd: '/repo',
+      pr: pr({ headRefName: 'feature/foo' }),
+      exec,
+    })
+
+    expect(stamped).toBeNull()
+    expect(calls).toEqual([])
   })
 })
 

@@ -90,6 +90,8 @@ export interface Tracker {
   createTask(input: CreateTrackerTask): Promise<TrackerTask>
   /** Update an issue, throwing UnsupportedCapabilityError when the tracker cannot. */
   updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask>
+  /** Set or replace metadata keys on an issue; trackers without metadata leave it undefined. */
+  setMetadata?(id: string, metadata: Record<string, string>): Promise<void>
 
   /**
    * Refresh the claim lease. Returns false once the lease is gone, which is

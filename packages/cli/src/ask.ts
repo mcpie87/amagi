@@ -10,10 +10,7 @@ export type AskOptions = {
   deadlineMs: number
 }
 
-/** `amagi/<id>-<slug>` from the worktree branch is the agent's own task id. */
-export function taskIdFromBranch(branch: string): string | null {
-  return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
-}
+export { taskIdFromBranch } from '@amagi/core'
 
 async function errorOf(res: Response): Promise<string> {
   try {

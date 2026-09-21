@@ -224,6 +224,15 @@ export class BeadsTracker implements Tracker {
     return toTask(created)
   }
 
+  /** Set or replace metadata keys (e.g. difficulty, iterations), keeping the rest. */
+  async setMetadata(id: string, metadata: Record<string, string>): Promise<void> {
+    const pairs = Object.entries(metadata).flatMap(([key, value]) => [
+      '--set-metadata',
+      `${key}=${value}`,
+    ])
+    await this.bd(['update', id, ...pairs])
+  }
+
   async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
     const update: string[] = []
     if (input.title !== undefined) update.push('--title', input.title)

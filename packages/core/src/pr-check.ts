@@ -16,6 +16,8 @@ export type PrInfo = {
   headRefOid: string | null
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
+  /** Label names; filled by listOpenPrs, absent in hand-built fixtures. */
+  labels?: string[]
 }
 
 export type PrCheckOptions = {
@@ -24,7 +26,7 @@ export type PrCheckOptions = {
 }
 
 const GH_FIELDS =
-  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt'
+  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -40,7 +42,69 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
     cwd: opts.cwd,
     env: ghEnv(),
   })
-  return JSON.parse(out) as PrInfo[]
+  const raw = JSON.parse(out) as Array<
+    Omit<PrInfo, 'labels'> & { labels?: Array<{ name: string }> }
+  >
+  return raw.map((p) => ({ ...p, labels: (p.labels ?? []).map((l) => l.name) }))
+}
+
+/** Label counting how many times a conflicting PR has been re-resolved. */
+export const ITERATION_LABEL_PREFIX = 'amagi/iterations:'
+
+export function iterationLabel(n: number): string {
+  return `${ITERATION_LABEL_PREFIX}${n}`
+}
+
+/** The amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
+export function iterationsFromLabels(labels: readonly string[] | undefined): number {
+  if (labels === undefined) return 0
+  const hit = labels.find((l) => l.startsWith(ITERATION_LABEL_PREFIX))
+  if (hit === undefined) return 0
+  const n = Number(hit.slice(ITERATION_LABEL_PREFIX.length))
+  return Number.isInteger(n) && n > 0 ? n : 0
+}
+
+/** The task id an amagi PR's head branch encodes (`amagi/<id>-...`), null for non-amagi PRs. */
+export function taskIdFromBranch(branch: string): string | null {
+  return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
+}
+
+export type StampedIteration = {
+  taskId: string
+  iteration: number
+}
+
+/**
+ * Bumps a conflicting amagi PR's resolution counter: reads the current
+ * amagi/iterations:N label (0 when absent), stamps amagi/iterations:N+1 on the
+ * PR, and reports the new count so the caller can mirror it onto the linked
+ * bead. Returns null for non-amagi PRs, which carry no iteration label.
+ */
+export async function stampIterationLabel(opts: {
+  cwd: string
+  pr: PrInfo
+  exec?: Exec
+}): Promise<StampedIteration | null> {
+  const run = opts.exec ?? defaultExec
+  const taskId = taskIdFromBranch(opts.pr.headRefName)
+  if (taskId === null) return null
+  const current = iterationsFromLabels(opts.pr.labels)
+  const iteration = current + 1
+  await execOk(run, ['gh', 'label', 'create', iterationLabel(iteration), '--force'], {
+    cwd: opts.cwd,
+    env: ghEnv(),
+  })
+  const edit = [
+    'gh',
+    'pr',
+    'edit',
+    String(opts.pr.number),
+    '--add-label',
+    iterationLabel(iteration),
+  ]
+  if (current > 0) edit.push('--remove-label', iterationLabel(current))
+  await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
+  return { taskId, iteration }
 }
 
 export type PrepareConflictWorktreeOptions = {
