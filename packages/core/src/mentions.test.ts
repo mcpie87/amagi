@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from './config.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
-import type { AgentOutcome, Harness } from './drivers/types.ts'
+import type {
+  AgentOutcome,
+  GateRef,
+  Harness,
+  Question,
+  Tracker,
+  TrackerStatus,
+} from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import {
   classifyMention,
@@ -13,6 +20,7 @@ import {
   readHandledMentions,
   respondToMention,
   saveHandledMentions,
+  taskIdFromPrTitle,
 } from './mentions.ts'
 import type { PrInfo } from './pr-check.ts'
 
@@ -58,6 +66,46 @@ class FakeDriver implements PrDriver {
   async postComment(_cwd: string, _number: number, body: string): Promise<void> {
     this.posted.push(body)
   }
+}
+
+class FakeTracker implements Tracker {
+  readonly kind = 'fake'
+  readonly leaseTtlMs = 60_000
+  readonly comments: Array<[string, string]> = []
+
+  async ready(_limit?: number): Promise<never[]> {
+    return []
+  }
+  async claim(_id?: string): Promise<null> {
+    return null
+  }
+  async get(id: string) {
+    return {
+      id,
+      title: id,
+      description: '',
+      status: 'open' as TrackerStatus,
+      priority: null,
+      type: null,
+      url: null,
+    }
+  }
+  async heartbeat(_id: string): Promise<boolean> {
+    return true
+  }
+  async comment(id: string, body: string): Promise<void> {
+    this.comments.push([id, body])
+  }
+  async setStatus(_id: string, _status: TrackerStatus): Promise<void> {}
+  async release(_id: string): Promise<void> {}
+  async close(_id: string, _reason?: string): Promise<void> {}
+  async openGate(_taskId: string, _question: Question): Promise<GateRef> {
+    return { id: 'gate', advisory: false }
+  }
+  async gateResolved(_ref: GateRef): Promise<boolean> {
+    return true
+  }
+  async resolveGate(_ref: GateRef): Promise<void> {}
 }
 
 beforeEach(() => {
@@ -116,6 +164,18 @@ describe('classifyMention', () => {
     expect(classifyMention('why did you make these changes')).toBe('explain')
     expect(classifyMention('why did you add X')).toBe('explain')
     expect(classifyMention('please explain the rationale')).toBe('explain')
+  })
+
+  test('take-down requests', () => {
+    expect(classifyMention('take this PR down')).toBe('take-down')
+    expect(classifyMention('this PR should be taken down')).toBe('take-down')
+    expect(classifyMention('close this pull request')).toBe('take-down')
+    expect(classifyMention('revert this PR')).toBe('take-down')
+    expect(classifyMention('withdraw this PR')).toBe('take-down')
+  })
+
+  test('explain beats take-down when both match', () => {
+    expect(classifyMention('explain why this PR was taken down')).toBe('explain')
   })
 
   test('ambiguous when neither', () => {
@@ -251,5 +311,99 @@ describe('respondToMention', () => {
           }),
       }),
     ).rejects.toThrow('boom')
+  })
+
+  test('a TAKE DOWN verdict posts the reason on the tracker issue and replies on the PR', async () => {
+    const outPath = join(tmpdir(), 'amagi-takedown-7-1.md')
+    writeFileSync(
+      outPath,
+      'TAKE DOWN\nThis PR reverses the base behavior and breaks existing callers.\n',
+    )
+    const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
+    const driver = new FakeDriver()
+    const tracker = new FakeTracker()
+    try {
+      const kind = await respondToMention({
+        root: '/repo',
+        repoName: 'amagi',
+        pr: pr({ title: 'am-123: Do the thing' }),
+        mention: { id: '1', user: 'bob', body: 'take this PR down' },
+        config: config(),
+        driver,
+        tracker,
+        exec,
+        makeHarnessFn: () => fakeHarness(),
+      })
+
+      expect(kind).toBe('take-down')
+      expect(driver.posted).toEqual([
+        'This PR reverses the base behavior and breaks existing callers.',
+      ])
+      expect(tracker.comments).toEqual([
+        ['am-123', 'This PR reverses the base behavior and breaks existing callers.'],
+      ])
+    } finally {
+      rmSync(outPath, { force: true })
+    }
+    expect(existsSync(outPath)).toBe(false)
+  })
+
+  test('a KEEP verdict replies on the PR but does not comment on the tracker', async () => {
+    const outPath = join(tmpdir(), 'amagi-takedown-7-2.md')
+    writeFileSync(outPath, 'KEEP\nThe conflicts are trivial and the PR is fine.\n')
+    const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
+    const driver = new FakeDriver()
+    const tracker = new FakeTracker()
+    try {
+      const kind = await respondToMention({
+        root: '/repo',
+        repoName: 'amagi',
+        pr: pr({ title: 'am-123: Do the thing' }),
+        mention: { id: '2', user: 'bob', body: 'take this PR down' },
+        config: config(),
+        driver,
+        tracker,
+        exec,
+        makeHarnessFn: () => fakeHarness(),
+      })
+
+      expect(kind).toBe('take-down')
+      expect(driver.posted).toEqual(['The conflicts are trivial and the PR is fine.'])
+      expect(tracker.comments).toEqual([])
+    } finally {
+      rmSync(outPath, { force: true })
+    }
+  })
+
+  test('take-down without a tracker or task id still replies on the PR', async () => {
+    const outPath = join(tmpdir(), 'amagi-takedown-7-3.md')
+    writeFileSync(outPath, 'TAKE DOWN\nThe PR duplicates existing functionality.\n')
+    const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
+    const driver = new FakeDriver()
+    try {
+      const kind = await respondToMention({
+        root: '/repo',
+        repoName: 'amagi',
+        pr: pr({ title: 'Not an amagi PR' }),
+        mention: { id: '3', user: 'bob', body: 'take this PR down' },
+        config: config(),
+        driver,
+        exec,
+        makeHarnessFn: () => fakeHarness(),
+      })
+
+      expect(kind).toBe('take-down')
+      expect(driver.posted).toEqual(['The PR duplicates existing functionality.'])
+    } finally {
+      rmSync(outPath, { force: true })
+    }
+  })
+})
+
+describe('taskIdFromPrTitle', () => {
+  test('extracts the amagi task id from a PR title', () => {
+    expect(taskIdFromPrTitle('am-544: PR titles should use task code')).toBe('am-544')
+    expect(taskIdFromPrTitle('am-3b8.2: Schema-constrained review')).toBe('am-3b8.2')
+    expect(taskIdFromPrTitle('Do the thing')).toBeNull()
   })
 })

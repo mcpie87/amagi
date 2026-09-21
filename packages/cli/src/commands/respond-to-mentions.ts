@@ -3,6 +3,7 @@ import {
   listPrMentions,
   loadConfig,
   makePrDriver,
+  makeTracker,
   mentionsPath,
   type PrComment,
   type PrInfo,
@@ -32,6 +33,7 @@ export const respondToMentionsCommand = defineCommand({
     const { config } = loadConfig(root)
     const name = repoName(root)
     const driver = makePrDriver(config.forge.kind)
+    const tracker = makeTracker(config, root)
     const handle = config.forge.agentHandle
 
     let prs: PrInfo[]
@@ -75,7 +77,15 @@ export const respondToMentionsCommand = defineCommand({
         console.log(`  @${mention.user}: ${mention.body.trim().replace(/\s+/g, ' ').slice(0, 120)}`)
         if (args['dry-run']) continue
         try {
-          const kind = await respondToMention({ root, repoName: name, pr, mention, config, driver })
+          const kind = await respondToMention({
+            root,
+            repoName: name,
+            pr,
+            mention,
+            config,
+            driver,
+            tracker,
+          })
           handled.add(mention.id)
           saveHandledMentions(path, handled)
           console.log(green(`  responded (${kind})`))
