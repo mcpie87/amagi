@@ -1,37 +1,138 @@
 @import "tailwindcss";
 
-/* The zinc scale the Tailwind utilities across the app already assume; the
-   shell mirrors it here so plain CSS blocks cannot drift from them. */
+/* Every color in the dashboard resolves through these tokens: the Tailwind
+   utilities in the tsx (bg-surface, text-fg-muted, ring-red-edge) and the
+   plain CSS below read the same variables, so a theme swap cannot leave one
+   of them behind. Dark is the baseline; the light block further down only
+   restates what differs. */
+@theme {
+  --color-app: #0e0e11;
+  --color-sidebar: #09090b;
+  --color-sunken: #09090b;
+  --color-surface: #18181b;
+  --color-raised: #27272a;
+  --color-raised-strong: #3f3f46;
+  --color-line: #27272a;
+  --color-line-strong: #3f3f46;
+
+  --color-fg-strong: #fafafa;
+  --color-fg: #e4e4e7;
+  --color-fg-muted: #a1a1aa;
+  --color-fg-faint: #71717a;
+  --color-fg-dim: #52525b;
+  /* label on a filled accent button, dark in both themes */
+  --color-on-solid: #09090b;
+  --color-accent: #0ea5e9;
+
+  --color-neutral-soft: rgb(113 113 122 / 0.15);
+  --color-neutral-edge: rgb(113 113 122 / 0.3);
+  --color-neutral-ink: #d4d4d8;
+
+  --color-sky-soft: rgb(14 165 233 / 0.15);
+  --color-sky-edge: rgb(14 165 233 / 0.3);
+  --color-sky-ink: #7dd3fc;
+
+  --color-blue-soft: rgb(59 130 246 / 0.15);
+  --color-blue-edge: rgb(59 130 246 / 0.3);
+  --color-blue-ink: #93c5fd;
+
+  --color-amber-soft: rgb(245 158 11 / 0.15);
+  --color-amber-soft-hover: rgb(245 158 11 / 0.28);
+  --color-amber-edge: rgb(245 158 11 / 0.3);
+  --color-amber-ink: #fcd34d;
+
+  --color-violet-soft: rgb(139 92 246 / 0.15);
+  --color-violet-edge: rgb(139 92 246 / 0.3);
+  --color-violet-ink: #c4b5fd;
+
+  --color-cyan-soft: rgb(6 182 212 / 0.15);
+  --color-cyan-edge: rgb(6 182 212 / 0.3);
+  --color-cyan-ink: #67e8f9;
+
+  --color-orange-soft: rgb(249 115 22 / 0.15);
+  --color-orange-edge: rgb(249 115 22 / 0.3);
+  --color-orange-ink: #fdba74;
+
+  --color-emerald-soft: rgb(16 185 129 / 0.15);
+  --color-emerald-soft-hover: rgb(16 185 129 / 0.28);
+  --color-emerald-edge: rgb(16 185 129 / 0.3);
+  --color-emerald-ink: #6ee7b7;
+
+  --color-red-soft: rgb(239 68 68 / 0.15);
+  --color-red-soft-hover: rgb(239 68 68 / 0.28);
+  --color-red-edge: rgb(239 68 68 / 0.3);
+  --color-red-ink: #fca5a5;
+
+  --color-teal-soft: rgb(20 184 166 / 0.15);
+  --color-teal-edge: rgb(20 184 166 / 0.3);
+  --color-teal-ink: #5eead4;
+}
+
 :root {
   color-scheme: dark;
-  --app-bg: #0e0e11;
-  --sidebar-bg: #09090b;
-  --sunken: #09090b;
-  --surface: #18181b;
-  --surface-hover: #27272a;
-  --line: #27272a;
-  --line-strong: #3f3f46;
-  --fg: #e4e4e7;
-  --fg-muted: #a1a1aa;
-  --fg-faint: #71717a;
-  --accent: #0ea5e9;
+  --selection-bg: #075985;
+  --selection-fg: #f0f9ff;
+  --code-bg: rgb(0 0 0 / 0.35);
+  --shadow-color: rgb(0 0 0 / 0.5);
+}
+
+/* Light theme. Tailwind emits the tokens above inside its theme layer, so an
+   unlayered override here wins regardless of the theme layer's order. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-app: #f7f7f8;
+  --color-sidebar: #ffffff;
+  --color-sunken: #f4f4f5;
+  --color-surface: #ffffff;
+  --color-raised: #e4e4e7;
+  --color-raised-strong: #d4d4d8;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d4d4d8;
+
+  --color-fg-strong: #09090b;
+  --color-fg: #27272a;
+  --color-fg-muted: #52525b;
+  --color-fg-faint: #71717a;
+  --color-fg-dim: #a1a1aa;
+  --color-accent: #0284c7;
+
+  --color-neutral-soft: rgb(113 113 122 / 0.12);
+  --color-neutral-ink: #3f3f46;
+  --color-sky-ink: #0369a1;
+  --color-blue-ink: #1d4ed8;
+  --color-amber-soft: rgb(245 158 11 / 0.18);
+  --color-amber-soft-hover: rgb(245 158 11 / 0.3);
+  --color-amber-ink: #b45309;
+  --color-violet-ink: #6d28d9;
+  --color-cyan-ink: #0e7490;
+  --color-orange-ink: #c2410c;
+  --color-emerald-soft-hover: rgb(16 185 129 / 0.25);
+  --color-emerald-ink: #047857;
+  --color-red-soft-hover: rgb(239 68 68 / 0.25);
+  --color-red-ink: #b91c1c;
+  --color-teal-ink: #0f766e;
+
+  --selection-bg: #bae6fd;
+  --selection-fg: #082f49;
+  --code-bg: rgb(24 24 27 / 0.06);
+  --shadow-color: rgb(24 24 27 / 0.16);
 }
 
 body {
-  background: var(--app-bg);
-  color: var(--fg);
+  background: var(--color-app);
+  color: var(--color-fg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 ::selection {
-  background: #075985;
-  color: #f0f9ff;
+  background: var(--selection-bg);
+  color: var(--selection-fg);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-color: var(--color-line-strong) transparent;
 }
 ::-webkit-scrollbar {
   width: 10px;
@@ -43,18 +144,18 @@ body {
 ::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 9999px;
-  background: var(--line-strong);
+  background: var(--color-line-strong);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: var(--color-fg-dim);
   background-clip: content-box;
 }
 
 /* One focus treatment for every control, instead of the per-input mix of
    none, a border tint, and the browser default. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -77,14 +178,14 @@ button:disabled {
 }
 input::placeholder,
 textarea::placeholder {
-  color: var(--fg-faint);
+  color: var(--color-fg-faint);
 }
 
 .connection-status {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -110,7 +211,7 @@ textarea::placeholder {
 }
 
 .runner-status {
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -124,7 +225,7 @@ textarea::placeholder {
   position: sticky;
   top: 0;
   z-index: 30;
-  background: color-mix(in srgb, var(--app-bg) 85%, transparent);
+  background: color-mix(in srgb, var(--color-app) 85%, transparent);
   backdrop-filter: blur(8px);
 }
 
@@ -136,8 +237,8 @@ textarea::placeholder {
   width: 232px;
   flex-shrink: 0;
   height: 100vh;
-  border-right: 1px solid var(--line);
-  background: var(--sidebar-bg);
+  border-right: 1px solid var(--color-line);
+  background: var(--color-sidebar);
 }
 
 .nav-link {
@@ -147,16 +248,16 @@ textarea::placeholder {
   padding: 8px 12px;
   margin: 2px 0;
   border-radius: 8px;
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   font-size: 14px;
 }
 .nav-link:hover {
-  color: var(--fg);
-  background: var(--surface);
+  color: var(--color-fg);
+  background: var(--color-surface);
 }
 .nav-link.is-active {
-  color: #fafafa;
-  background: var(--surface-hover);
+  color: var(--color-fg-strong);
+  background: var(--color-raised);
   font-weight: 500;
 }
 
@@ -174,12 +275,12 @@ textarea::placeholder {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  color: #d4d4d8;
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-surface);
+  color: var(--color-fg);
 }
 .mobile-menu-button:hover {
-  background: var(--surface-hover);
+  background: var(--color-raised);
 }
 
 @media (max-width: 767px) {
@@ -197,7 +298,7 @@ textarea::placeholder {
     transition:
       transform 0.2s ease,
       visibility 0s linear 0.2s;
-    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.5);
+    box-shadow: 12px 0 32px var(--shadow-color);
   }
   .sidebar.is-open {
     transform: translateX(0);
@@ -210,13 +311,13 @@ textarea::placeholder {
 
 .command-palette {
   width: min(560px, calc(100vw - 32px));
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--color-line-strong);
   border-radius: 12px;
-  background: var(--surface);
-  color: var(--fg);
+  background: var(--color-surface);
+  color: var(--color-fg);
   padding: 0;
   overflow: hidden;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 20px 50px var(--shadow-color);
 }
 .command-palette::backdrop {
   background: rgba(0, 0, 0, 0.6);
@@ -227,8 +328,8 @@ textarea::placeholder {
   align-items: center;
   gap: 10px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
-  color: var(--fg-muted);
+  border-bottom: 1px solid var(--color-line);
+  color: var(--color-fg-muted);
 }
 .command-input {
   flex: 1;
@@ -236,12 +337,12 @@ textarea::placeholder {
   background: transparent;
   border: none;
   outline: none;
-  color: var(--fg);
+  color: var(--color-fg);
   font-size: 15px;
 }
 .command-empty {
   padding: 22px 16px;
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   font-size: 13px;
 }
 .command-results {
@@ -257,27 +358,27 @@ textarea::placeholder {
   width: 100%;
   padding: 8px 10px;
   border-radius: 8px;
-  color: var(--fg);
+  color: var(--color-fg);
   font-size: 14px;
   text-align: left;
 }
 .command-result.is-active {
-  background: var(--surface-hover);
+  background: var(--color-raised);
 }
 .command-hint {
   display: block;
   margin-top: 1px;
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   font-size: 11px;
 }
 .command-arrow {
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   font-size: 13px;
 }
 .command-footer {
   padding: 8px 14px;
-  border-top: 1px solid var(--line);
-  color: var(--fg-faint);
+  border-top: 1px solid var(--color-line);
+  color: var(--color-fg-faint);
   font-size: 11px;
 }
 
@@ -294,30 +395,30 @@ textarea::placeholder {
   align-items: center;
   text-align: center;
   padding: 44px 24px;
-  border: 1px dashed var(--line);
+  border: 1px dashed var(--color-line);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--surface) 50%, transparent);
+  background: color-mix(in srgb, var(--color-surface) 50%, transparent);
 }
 .empty-icon {
   display: grid;
   place-items: center;
   width: 48px;
   height: 48px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--color-line);
   border-radius: 13px;
-  background: var(--surface);
-  color: var(--fg-faint);
+  background: var(--color-surface);
+  color: var(--color-fg-faint);
   margin-bottom: 14px;
 }
 .empty-state h3 {
   font-size: 14px;
   font-weight: 500;
-  color: var(--fg);
+  color: var(--color-fg);
 }
 .empty-state p {
   font-size: 13px;
   line-height: 1.6;
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
   max-width: 340px;
   margin-top: 6px;
 }
@@ -326,22 +427,21 @@ textarea::placeholder {
    border-width the Tailwind reset would collapse this to a borderless box. */
 .stop-button {
   padding: 4px 12px;
-  border: 1px solid #991b1b;
+  border: 1px solid var(--color-red-edge);
   border-radius: 4px;
-  background: rgba(69, 10, 10, 0.4);
-  color: #fca5a5;
+  background: var(--color-red-soft);
+  color: var(--color-red-ink);
   font-size: 14px;
 }
 .stop-button:hover:not(:disabled) {
-  background: #7f1d1d;
-  color: #fee2e2;
+  background: var(--color-red-soft-hover);
 }
 .stop-button:disabled {
   opacity: 0.5;
 }
 .run-button-error {
   margin: 4px 0 0;
-  color: #f87171;
+  color: var(--color-red-ink);
   font-size: 12px;
 }
 
@@ -351,36 +451,36 @@ textarea::placeholder {
   align-items: center;
   gap: 12px;
   padding: 8px 14px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--color-line);
   border-bottom: none;
   border-radius: 8px 8px 0 0;
   font-size: 11px;
-  background: var(--surface);
-  color: var(--fg-muted);
+  background: var(--color-surface);
+  color: var(--color-fg-muted);
 }
 .agent-log-last {
   margin-left: 12px;
-  color: #d4d4d8;
+  color: var(--color-fg);
 }
 .agent-log-header button {
-  background: var(--surface-hover);
-  color: #d4d4d8;
-  border: 1px solid var(--line-strong);
+  background: var(--color-raised);
+  color: var(--color-fg);
+  border: 1px solid var(--color-line-strong);
   padding: 3px 9px;
   border-radius: 4px;
   font-size: 11px;
   white-space: nowrap;
 }
 .agent-log-header button:hover {
-  background: var(--line-strong);
-  color: #fafafa;
+  background: var(--color-raised-strong);
+  color: var(--color-fg-strong);
 }
 .agent-log-scroll {
   height: 460px;
   overflow: auto;
-  border: 1px solid var(--line);
+  border: 1px solid var(--color-line);
   border-radius: 0 0 8px 8px;
-  background: var(--sunken);
+  background: var(--color-sunken);
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
   line-height: 18px;
@@ -395,18 +495,18 @@ textarea::placeholder {
     background-color 0.12s ease;
 }
 .issue-card:hover {
-  border-color: var(--line-strong);
+  border-color: var(--color-line-strong);
 }
 .run-row:hover,
 .attention-row:hover,
 .activity-item:hover,
 .issue-list-row:hover {
-  background: color-mix(in srgb, var(--surface-hover) 45%, transparent);
+  background: color-mix(in srgb, var(--color-raised) 45%, transparent);
 }
 
 .summary-markdown {
   font-size: 13px;
-  color: var(--fg);
+  color: var(--color-fg);
   line-height: 1.6;
 }
 .summary-markdown > :first-child {
@@ -432,14 +532,14 @@ textarea::placeholder {
   padding: 8px 10px;
   overflow-x: auto;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--code-bg);
   font-family: ui-monospace, monospace;
   font-size: 12px;
 }
 .summary-markdown code {
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--code-bg);
   font-family: ui-monospace, monospace;
   font-size: 0.92em;
 }
@@ -448,7 +548,7 @@ textarea::placeholder {
   background: none;
 }
 .summary-markdown a {
-  color: #7dd3fc;
+  color: var(--color-sky-ink);
   text-decoration: underline;
 }
 .summary-markdown h1,
@@ -477,10 +577,10 @@ textarea::placeholder {
 .summary-markdown blockquote {
   margin: 8px 0;
   padding-left: 10px;
-  border-left: 2px solid #b45309;
-  color: var(--fg-muted);
+  border-left: 2px solid var(--color-amber-ink);
+  color: var(--color-fg-muted);
 }
 .summary-markdown hr {
   margin: 10px 0;
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: var(--color-line);
 }
