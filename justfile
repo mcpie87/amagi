@@ -30,3 +30,9 @@ status:
 
 run:
     bun run packages/cli/src/index.ts run
+
+respond-to-mentions:
+    bun run packages/cli/src/index.ts respond-to-mentions
+
+check-prs:
+    bun run packages/cli/src/index.ts check-prs
