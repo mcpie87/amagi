@@ -55,9 +55,17 @@ status:
 serve:
     bun serve
 
-# Run the bot
-run:
-    bun run packages/cli/src/index.ts run
+# Run the bot. Pin the harness/model/effort to skip the interactive picker:
+# `just run -- --harness claude --model <model>` or `just run --harness claude`.
+[arg('model', long='model', help='model to pass to the harness')]
+[arg('effort', long='effort', help='reasoning effort to pass to the harness')]
+[arg('harness', long='harness', help='harness.definitions name or a kind (claude/codex/opencode)')]
+run harness='' model='' effort='' *extra:
+    bun run packages/cli/src/index.ts run \
+        {{ if harness != '' { '--harness ' + harness } else { '' } }} \
+        {{ if model != '' { '--model ' + model } else { '' } }} \
+        {{ if effort != '' { '--effort ' + effort } else { '' } }} \
+        {{ extra }}
 
 # Reply to mentions directed at the bot
 respond-to-mentions:

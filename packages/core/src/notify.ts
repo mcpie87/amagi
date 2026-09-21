@@ -1,4 +1,5 @@
 import type { Config } from './config.ts'
+import { errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 
 export interface Notifier {
@@ -26,7 +27,7 @@ export class LibnotifyNotifier implements Notifier {
         console.warn(`libnotify: notify-send exited ${result.exitCode}: ${result.stderr.trim()}`)
       }
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const detail = errMsg(err)
       console.warn(`libnotify: notify-send unavailable: ${detail}`)
     }
   }
