@@ -23,6 +23,16 @@ function mergeLabel(p: PrInfo, baseBranch: string): string {
   return 'CLEAN'
 }
 
+/** gh pr list reports UNKNOWN until GitHub computes mergeability; resolve per-PR. */
+async function resolveMergeStatuses(root: string, prs: PrInfo[]): Promise<PrInfo[]> {
+  return Promise.all(
+    prs.map(async (p) => {
+      if (p.mergeable !== 'UNKNOWN' && p.mergeStateStatus !== 'UNKNOWN') return p
+      return { ...p, ...(await prMergeStatus(root, p.number)) }
+    }),
+  )
+}
+
 async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<void> {
   console.log(`\n${bold(`#${pr.number}`)}  ${pr.title}`)
   console.log(dim(`  ${pr.url}`))
@@ -131,8 +141,9 @@ export const checkPrsCommand = defineCommand({
     }
 
     const base = config.repo.baseBranch
+    const resolved = await resolveMergeStatuses(root, prs)
     const header = ['PR', 'MERGE', 'BASE', 'HEAD', 'TITLE']
-    const rows = prs.map((p) => [
+    const rows = resolved.map((p) => [
       `#${p.number}`,
       mergeLabel(p, base),
       p.baseRefName,
@@ -147,7 +158,7 @@ export const checkPrsCommand = defineCommand({
       }),
     )
 
-    const conflicts = prs.filter((p) => isConflicting(p, base))
+    const conflicts = resolved.filter((p) => isConflicting(p, base))
     if (conflicts.length === 0) {
       console.log(dim('\nno merge conflicts'))
       return
