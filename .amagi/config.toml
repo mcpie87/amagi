@@ -1,7 +1,3 @@
-# Amagi config for its own repo: dogfood the backlog under the "am" bd prefix.
-# See README.md#configuration for the full schema; `amagi config` prints the
-# resolved result and where each value came from.
-
 [repo]
 baseBranch = "main"
 setupCmd = "bun install"
@@ -14,8 +10,8 @@ kind = "beads"
 kind = "github"
 remote = "origin"
 
-# just fresh-check wipes node_modules and reinstalls strictly from bun.lock before
-# rebuilding the dashboard, so a stale node_modules can no longer mask an unresolved
-# import (e.g. the 'marked' failure) until the first dev run after merging.
 [checks]
-commands = ["just check", "just fresh-check"]
+commands = [ "just check", "just fresh-check" ]
+
+[loop]
+maxParallel = 4

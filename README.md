@@ -29,13 +29,15 @@ to the API at `http://127.0.0.1:7777`.
 
 ### Dashboard
 
-The dashboard is the shared control room for the connected server. The header holds the repo selector, a runner status indicator (how many capacity slots are busy), and a button to register another repository. Four pages, plus a per-task detail:
+The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search workspace** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
 
-- **Queue** shows active runs with state badges, a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and a Workers panel: runner capacity, per-slot resource usage (RSS, CPU, process count), and any running background workers (`respond-to-mentions`, `check-prs`). A **Run next** button launches the next ready task.
-- **Tasks** browses the tracker's issues in Kanban or List view (the choice is remembered), with a status filter, pagination, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
+- **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button.
+- **Tasks** browses the tracker's issues in board or list view (the choice is remembered), with a search box, a status filter, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
+- **Inbox** collects everything that needs a human: every open question (with one-tap options and a free-text answer) and the tasks needing attention.
+- **Activity** is a feed of everything that happened across runs - claims, state changes, checks, commits, PRs, questions, retries, and errors - newest first, linked to the task.
 - **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
 - **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
-- **Task detail** (linked from Queue and Tasks) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place. Its actions cover reclaim, retry, stop, and instant close.
+- **Task detail** (linked from Overview, Tasks, Inbox, and Activity) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place, with Log/Checks tabs. Its actions cover reclaim, retry, stop, and instant close.
 
 Starting and stopping runs, editing tracker tasks, and registering repositories are all live from the dashboard; the event stream is scoped to the selected repo.
 
@@ -147,6 +149,19 @@ resumes where the dead one left off. Only in-progress states are watched;
 `pr_open` is excluded, since there the PR is out for human review and no
 worker runs the task.
 
+The stall watcher's inactivity signal only sees a dead worker, not a stuck
+one. A **doom-loop guard** (`loop.doomEnabled`, default on) runs on the same
+tick and scans the agent event stream of every task with a live worker for
+signs of busy-but-not-progressing work: repeated near-identical tool calls
+(same command or file within `loop.doomToolWindowSec`, e.g. re-running the
+same failing test forever), consecutive check rounds with the same failure
+signature (`loop.doomCheckRounds`), or a worktree diff that has not changed
+for `loop.doomDiffWindowSec` despite a live worker. When one trips, the guard
+releases the tracker claim (stopping the run) and parks the task in the
+terminal `needs_human` state with the reason, so a human looks instead of the
+next worker re-burning budget on the same loop. Set `doomEnabled = false` to
+turn it off.
+
 ## Configuration
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
@@ -173,6 +188,11 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
+| `loop.doomEnabled` | boolean | `true` | Doom-loop guard: the stall watcher also scans tasks with a live worker for busy-but-not-progressing agents and stops the run. Set false to disable. |
+| `loop.doomToolWindowSec` | integer >= 1 | `600` | Repeated near-identical tool calls (same command or file) within this many seconds trip the guard. |
+| `loop.doomToolRepeat` | integer >= 2 | `20` | How many near-identical tool calls within the window trip the guard. |
+| `loop.doomCheckRounds` | integer >= 2 | `3` | Consecutive check rounds sharing one failure signature that trip the guard. |
+| `loop.doomDiffWindowSec` | integer >= 60 | `1800` | A live worker whose worktree diff has not changed for this many seconds trips the guard. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
