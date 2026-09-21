@@ -20,6 +20,7 @@ import { startPrPoller } from './pr-poller.ts'
 
 class FakePr implements PrDriver {
   state: PrState = 'open'
+  mergeStatus = 'conflicted' as const
   readonly calls: number[] = []
 
   async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
@@ -28,6 +29,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, number: number): Promise<PrState> {
     this.calls.push(number)
     return this.state
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return this.mergeStatus
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -138,4 +142,33 @@ test('an open pr keeps the task in pr_open', async () => {
   expect(store.task('bd-1')?.state).toBe('pr_open')
   expect(tracker.closed).toEqual([])
   expect(tracker.statuses).toEqual([])
+})
+
+test('an open pr records its merge status for the pr_open task', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const tracker = new FakeTracker()
+  const forge = new FakePr()
+  forge.mergeStatus = 'conflicted'
+
+  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.prMergeStatus).toBe('conflicted')
+})
+
+test('an unresolvable merge status keeps the task in pr_open without settling it', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const tracker = new FakeTracker()
+  const forge = new FakePr()
+  forge.getMergeStatus = async () => {
+    throw new Error('forge down')
+  }
+
+  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.state).toBe('pr_open')
+  expect(store.task('bd-1')?.prMergeStatus).toBeNull()
 })

@@ -195,6 +195,10 @@ class FakePr implements PrDriver {
     return 'open'
   }
 
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
+
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
@@ -446,6 +450,28 @@ describe('Runner.runOnce', () => {
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
     expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
     expect(harness.calls).toHaveLength(1)
+  })
+
+  test('an agent that already committed its own work lands in pr_open, not no_pr', async () => {
+    const harness = new FakeHarness([
+      {
+        effect: (cwd) => {
+          writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+          Bun.spawnSync(['git', 'add', '-A'], { cwd })
+          expect(Bun.spawnSync(['git', 'commit', '-q', '-m', 'agent work'], { cwd }).exitCode).toBe(
+            0,
+          )
+        },
+        events: [{ kind: 'text', text: 'wrote and committed hello.txt' }],
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('commit.created')
+    const worktree = store.task(TASK.id)?.worktree ?? ''
+    const log = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: worktree })
+    expect(log).toContain('agent work')
   })
 
   test('a reclaimed task reuses the recorded worktree and branch', async () => {
