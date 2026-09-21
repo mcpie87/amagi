@@ -1,4 +1,3 @@
-import type { TaskState } from '@amagi/core/events'
 import type { ReactNode } from 'react'
 
 const paths = {
@@ -41,33 +40,6 @@ export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   )
 }
 
-export const stateLabels: Record<TaskState, string> = {
-  claimed: 'Queued',
-  worktree_ready: 'Preparing',
-  implementing: 'Implementing',
-  awaiting_answer: 'Awaiting answer',
-  checks: 'Running checks',
-  committed: 'Committed',
-  retrying: 'Retrying',
-  pr_open: 'PR open',
-  reviewing: 'Reviewing',
-  fixing: 'Fixing',
-  done: 'Completed',
-  no_pr: 'No PR needed',
-  needs_human: 'Needs attention',
-  abandoned: 'Abandoned',
-  cancelled: 'Cancelled',
-}
-
-export function Badge({ state }: { state: TaskState }) {
-  return (
-    <span className={`badge state-${state}`}>
-      <span className="status-dot" />
-      {stateLabels[state]}
-    </span>
-  )
-}
-
 export function EmptyState({
   icon = 'runs',
   title,
@@ -88,29 +60,6 @@ export function EmptyState({
   )
 }
 
-export function PageHeading({
-  eyebrow,
-  title,
-  description,
-  children,
-}: {
-  eyebrow: string
-  title: string
-  description: string
-  children?: ReactNode
-}) {
-  return (
-    <div className="page-heading">
-      <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h1>{title}</h1>
-        <p className="page-description">{description}</p>
-      </div>
-      {children && <div className="heading-actions">{children}</div>}
-    </div>
-  )
-}
-
 export function Time({ ts }: { ts: number }) {
   const date = new Date(ts)
   const today = date.toDateString() === new Date().toDateString()
@@ -122,28 +71,5 @@ export function Time({ ts }: { ts: number }) {
         minute: '2-digit',
       })}
     </time>
-  )
-}
-
-export function SearchField({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string
-  onChange: (value: string) => void
-  placeholder: string
-}) {
-  return (
-    <label className="search-field">
-      <Icon name="search" />
-      <input
-        type="search"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        aria-label={placeholder}
-      />
-    </label>
   )
 }
