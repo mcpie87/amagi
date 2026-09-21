@@ -2076,6 +2076,9 @@ function Markdown({ text }: { text: string }) {
  * criteria, priority, type, assignee, labels, parent, dependencies - fetched
  * on first expand and kept for the session.
  */
+/** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
+const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
+
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
   const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
@@ -2117,7 +2120,11 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
             <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
-                value={issue.priority === null ? null : `P${issue.priority}`}
+                value={
+                  issue.priority === null
+                    ? null
+                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+                }
               />
               <DetailRow label="type" value={issue.type} />
               <DetailRow label="assignee" value={issue.assignee} />
