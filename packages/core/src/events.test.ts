@@ -2,25 +2,19 @@ import { describe, expect, test } from 'bun:test'
 import { canTransition, isTerminal, TASK_STATES } from './events.ts'
 
 describe('state machine', () => {
-  test('happy path walks claimed to done', () => {
+  test('happy path walks claimed to pr_open, then settles to done', () => {
     const hops = [
       ['claimed', 'worktree_ready'],
       ['worktree_ready', 'implementing'],
       ['implementing', 'checks'],
       ['checks', 'committed'],
       ['committed', 'pr_open'],
-      ['pr_open', 'reviewing'],
-      ['reviewing', 'done'],
     ] as const
     for (const [from, to] of hops) {
       expect(canTransition(from, to)).toBe(true)
     }
-  })
-
-  test('review loop can cycle back through fixing', () => {
-    expect(canTransition('reviewing', 'fixing')).toBe(true)
-    expect(canTransition('fixing', 'checks')).toBe(true)
-    expect(canTransition('fixing', 'reviewing')).toBe(true)
+    // pr_open is settled to done by the server when the PR merges.
+    expect(canTransition('pr_open', 'done')).toBe(true)
   })
 
   test('questions park and resume the implementer', () => {
@@ -38,6 +32,7 @@ describe('state machine', () => {
       if (isTerminal(s)) continue
       expect(canTransition(s, 'needs_human')).toBe(true)
       expect(canTransition(s, 'abandoned')).toBe(true)
+      expect(canTransition(s, 'cancelled')).toBe(true)
     }
   })
 
@@ -48,6 +43,12 @@ describe('state machine', () => {
     }
   })
 
+  test('cancelled is terminal and only reclaim can resume it', () => {
+    expect(isTerminal('cancelled')).toBe(true)
+    expect(canTransition('cancelled', 'claimed')).toBe(false)
+    expect(canTransition('cancelled', 'implementing')).toBe(false)
+  })
+
   test('terminal states are absorbing', () => {
     expect(canTransition('done', 'implementing')).toBe(false)
     expect(canTransition('needs_human', 'implementing')).toBe(false)
@@ -56,10 +57,24 @@ describe('state machine', () => {
     expect(isTerminal('cancelled')).toBe(true)
   })
 
+  test('a parked needs-attention task can be abandoned by the close action', () => {
+    expect(canTransition('needs_human', 'abandoned')).toBe(true)
+    expect(canTransition('no_pr', 'abandoned')).toBe(true)
+  })
+
+  test('a parked task whose work was already satisfied can be marked done', () => {
+    expect(canTransition('needs_human', 'done')).toBe(true)
+    expect(canTransition('no_pr', 'done')).toBe(true)
+  })
+
+  test('a stopped run can be retired by instant close', () => {
+    expect(canTransition('cancelled', 'abandoned')).toBe(true)
+  })
+
   test('skipping stages is rejected', () => {
     expect(canTransition('claimed', 'implementing')).toBe(false)
     expect(canTransition('implementing', 'pr_open')).toBe(false)
-    expect(canTransition('committed', 'reviewing')).toBe(false)
+    expect(canTransition('committed', 'checks')).toBe(false)
   })
 
   test('self transitions are not transitions', () => {

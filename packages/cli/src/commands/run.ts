@@ -7,16 +7,12 @@ import {
   Runner,
   repoName,
   repoRoot,
-  Store,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, yellow } from '../format.ts'
+import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
-import { pickRunSelection, type RunSelection } from '../select-run.ts'
-
-function printBlock(text: string): void {
-  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
-}
+import { currentRepo } from '../repo.ts'
+import { pickRunSelection, type RunSelection, usageCounts } from '../select-run.ts'
 
 const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
@@ -31,23 +27,26 @@ const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
 export async function workOneTask(opts: {
   root: string
   taskId?: string
-  flags: { harness?: string; model?: string }
+  flags: { harness?: string; model?: string; effort?: string }
 }): Promise<void> {
   const { root, taskId } = opts
   const { config } = loadConfig(root)
+  const { key, store } = currentRepo()
   const selection: RunSelection = await pickRunSelection(
     config,
     opts.flags,
     interactive() ? picker : null,
     listModelsFor,
+    usageCounts(store.events()),
   )
 
-  const store = new Store()
   const implement = selection.harness
   if (selection.interactive) {
-    console.log(
-      dim(`harness: ${implement.kind}${implement.model ? ` (model ${implement.model})` : ''}`),
-    )
+    const bits = [
+      implement.model ? `model ${implement.model}` : null,
+      implement.effort ? `effort ${implement.effort}` : null,
+    ].filter(Boolean)
+    console.log(dim(`harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`))
   }
 
   const runner = new Runner({
@@ -66,12 +65,20 @@ export async function workOneTask(opts: {
         const details = [
           event.priority === null || event.priority === undefined ? null : `P${event.priority}`,
           event.taskType,
+          event.difficulty,
         ].filter(Boolean)
         if (details.length > 0) console.log(dim(`  ${details.join('  ')}`))
         if (event.url) console.log(dim(`  ${event.url}`))
         if (event.description?.trim()) printBlock(event.description)
         break
       }
+      case 'claim.rejected':
+        console.log(
+          yellow(
+            `  skipped ${event.title}${event.difficulty ? ` (${event.difficulty})` : ''}: ${event.reason}`,
+          ),
+        )
+        break
       case 'task.state':
         console.log(dim(`  -> ${event.to}${event.reason ? `: ${event.reason}` : ''}`))
         break
@@ -95,6 +102,12 @@ export async function workOneTask(opts: {
         }
         if (event.results.length === 0) console.log(dim('  checks: none configured'))
         break
+      case 'question.asked': {
+        console.log(`\n${bold(red('  AWAITING YOUR ANSWER'))}`)
+        printBlock(yellow(event.question))
+        if (event.options.length > 0) printBlock(dim(`options: ${event.options.join(' | ')}`))
+        break
+      }
       case 'pr.created':
         console.log(green(`  pull request: ${event.url}`))
         break
@@ -105,7 +118,7 @@ export async function workOneTask(opts: {
   })
 
   try {
-    if (taskId === undefined) console.log(dim('claiming next ready task...'))
+    if (taskId === undefined) console.log(dim(`claiming next ready task in ${key}...`))
     const result = await runner.runOnce(taskId)
     if (result === null) {
       console.log(dim(taskId === undefined ? 'nothing ready to work on' : `unknown task ${taskId}`))
@@ -132,11 +145,12 @@ export const runCommand = defineCommand({
       description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
+    effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },
   },
   async run({ args }) {
     await workOneTask({
       root: repoRoot(),
-      flags: { harness: args.harness, model: args.model },
+      flags: { harness: args.harness, model: args.model, effort: args.effort },
     })
   },
 })

@@ -18,21 +18,19 @@ const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
   needs_human: 'red',
   done: 'green',
-  reviewing: 'magenta',
-  fixing: 'magenta',
 }
 
 function Badge({ state }: { state: TaskState }) {
   return <Text color={STATE_COLOR[state] ?? 'gray'}>{state}</Text>
 }
 
-export type AppProps = { baseUrl: string }
+export type AppProps = { baseUrl: string; repo: string }
 
 type Screen = { name: 'queue' } | { name: 'detail'; taskId: string }
 
-export function App({ baseUrl }: AppProps) {
+export function App({ baseUrl, repo }: AppProps) {
   const { exit } = useApp()
-  const state = useDashboardStream(baseUrl)
+  const state = useDashboardStream(baseUrl, repo)
   const [screen, setScreen] = useState<Screen>({ name: 'queue' })
   const [showAll, setShowAll] = useState(false)
 
@@ -48,6 +46,7 @@ export function App({ baseUrl }: AppProps) {
     return (
       <TaskDetail
         baseUrl={baseUrl}
+        repo={repo}
         state={state}
         taskId={screen.taskId}
         onBack={() => setScreen({ name: 'queue' })}
@@ -109,8 +108,7 @@ function QueueScreen({
               <Badge state={task.state} />
               <Text wrap="truncate">{task.title}</Text>
               <Text dimColor>
-                {task.id}
-                {task.reviewRound > 0 ? ` r${task.reviewRound}` : ''} {relTime(task.updatedAt)}
+                {task.id} {relTime(task.updatedAt)}
               </Text>
             </Box>
           ))}
@@ -143,11 +141,13 @@ type AnswerMode =
 
 function TaskDetail({
   baseUrl,
+  repo,
   state,
   taskId,
   onBack,
 }: {
   baseUrl: string
+  repo: string
   state: DashboardState
   taskId: string
   onBack: () => void
@@ -156,13 +156,14 @@ function TaskDetail({
   const questions = openQuestionsFor(state, taskId)
   const [qIndex, setQIndex] = useState(0)
   const [mode, setMode] = useState<AnswerMode>({ kind: 'browse' })
+  const logKey = `${repo}/${taskId}`
 
   const version = useSyncExternalStore(
-    (listener) => agentLogStore.subscribe(taskId, listener),
-    () => agentLogStore.get(taskId).version,
+    (listener) => agentLogStore.subscribe(logKey, listener),
+    () => agentLogStore.get(logKey).version,
   )
   const tail = useMemo(() => {
-    const buffer = agentLogStore.get(taskId)
+    const buffer = agentLogStore.get(logKey)
     const start = Math.max(0, buffer.length - AGENT_LOG_TAIL)
     const lines = []
     for (let i = start; i < buffer.length; i++) {
@@ -170,7 +171,7 @@ function TaskDetail({
       if (line) lines.push(line)
     }
     return lines
-  }, [taskId, version])
+  }, [logKey, version])
 
   const agentStarts = state.events.filter(
     (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
@@ -186,7 +187,7 @@ function TaskDetail({
 
   async function answer(questionId: string, text: string): Promise<void> {
     setMode({ kind: 'answering', questionId, draft: text, busy: true, error: null })
-    const token = await fetchTaskToken(baseUrl, taskId)
+    const token = await fetchTaskToken(baseUrl, repo, taskId)
     if (token === null) {
       setMode({
         kind: 'answering',
@@ -197,7 +198,7 @@ function TaskDetail({
       })
       return
     }
-    const outcome = await submitAnswer(baseUrl, taskId, questionId, token, text)
+    const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, token, text)
     if (outcome.kind === 'error') {
       setMode({ kind: 'answering', questionId, draft: text, busy: false, error: outcome.message })
     } else {
@@ -261,7 +262,6 @@ function TaskDetail({
       <Box gap={1}>
         <Text bold>{task.title}</Text>
         <Badge state={task.state} />
-        {task.reviewRound > 0 && <Text dimColor>review round {task.reviewRound}</Text>}
       </Box>
       <Text dimColor>{task.id}</Text>
 
@@ -273,6 +273,24 @@ function TaskDetail({
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow label="PR" value={task.prUrl} />
+        {task.prMergeStatus !== null && (
+          <Box gap={1}>
+            <Box width={10}>
+              <Text dimColor>pr status</Text>
+            </Box>
+            <Text
+              color={
+                task.prMergeStatus === 'conflicted'
+                  ? 'red'
+                  : task.prMergeStatus === 'mergeable'
+                    ? 'green'
+                    : 'gray'
+              }
+            >
+              {task.prMergeStatus === 'conflicted' ? 'merge conflict' : task.prMergeStatus}
+            </Text>
+          </Box>
+        )}
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"
