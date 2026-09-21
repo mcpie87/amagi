@@ -1,14 +1,29 @@
 import { resolve, sep } from 'node:path'
-import type { BeadsIssue, PrDriver, RunServiceApi, Store, Tracker } from '@amagi/core'
+import type {
+  BeadsIssue,
+  Config,
+  PrDriver,
+  RunServiceApi,
+  Store,
+  Tracker,
+  WorkerActivity,
+} from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
+import { startMentionWatcher } from './mention-watcher.ts'
 import { startPrPoller } from './pr-poller.ts'
+import { startStallWatcher } from './stall-watcher.ts'
 
 export type ServeOptions = {
   store: Store
   host: string
   port: number
   tracker?: Tracker
+  /** Repo identity the mention watcher needs; without it the watcher is skipped. */
+  repoName?: string
+  repoRoot?: string
+  /** Cadence for the mention/stall watchers comes from the loop section. */
+  config?: Config
   listIssues?: () => Promise<BeadsIssue[]>
   getIssue?: (id: string) => Promise<BeadsIssue | null>
   gatePollIntervalMs?: number
@@ -20,6 +35,8 @@ export type ServeOptions = {
   forge?: PrDriver
   forgeCwd?: string
   prPollIntervalMs?: number
+  mentionWatchIntervalMs?: number
+  stallWatchIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
@@ -50,23 +67,21 @@ export function serve({
   host,
   port,
   tracker,
+  repoName,
+  repoRoot,
+  config,
+  listIssues,
   gatePollIntervalMs,
   forge,
   forgeCwd,
   prPollIntervalMs,
+  mentionWatchIntervalMs,
+  stallWatchIntervalMs,
   staticDir,
-  listIssues,
   runner,
   getIssue,
 }: ServeOptions) {
-  const app = createApp({
-    store,
-    ...(tracker === undefined ? {} : { tracker }),
-    ...(listIssues === undefined ? {} : { listIssues }),
-    ...(runner === undefined ? {} : { runner }),
-    ...(getIssue === undefined ? {} : { getIssue }),
-  })
-  const poller =
+  const gatePoller =
     tracker === undefined
       ? null
       : startGatePoller({
@@ -84,6 +99,49 @@ export function serve({
           cwd: forgeCwd,
           ...(prPollIntervalMs === undefined ? {} : { intervalMs: prPollIntervalMs }),
         })
+  // Background workers: a mention watcher wherever a forge driver exists and a
+  // stall watcher that recovers tasks whose worker stopped heartbeating. Their
+  // activity is surfaced through /api/runner, like main's orchestration panel.
+  const mentionPoller =
+    config === undefined ||
+    repoName === undefined ||
+    repoRoot === undefined ||
+    forge === undefined ||
+    tracker === undefined
+      ? null
+      : startMentionWatcher({
+          repo: repoName,
+          root: repoRoot,
+          repoName,
+          config,
+          driver: forge,
+          tracker,
+          intervalMs: mentionWatchIntervalMs ?? config.loop.mentionWatchIntervalSec * 1000,
+        })
+  const stallPoller =
+    tracker === undefined
+      ? null
+      : startStallWatcher({
+          repo: repoName ?? 'repo',
+          store,
+          tracker,
+          timeoutMs: (config?.loop.stallTimeoutSec ?? 3600) * 1000,
+          intervalMs: stallWatchIntervalMs ?? (config?.loop.stallWatchIntervalSec ?? 300) * 1000,
+        })
+  const workers = (): WorkerActivity[] => [
+    ...(mentionPoller === null ? [] : [mentionPoller.activity()]),
+    ...(stallPoller === null ? [] : [stallPoller.activity()]),
+  ]
+  const app = createApp({
+    store,
+    ...(tracker === undefined ? {} : { tracker }),
+    ...(listIssues === undefined ? {} : { listIssues }),
+    ...(runner === undefined ? {} : { runner }),
+    ...(getIssue === undefined ? {} : { getIssue }),
+    ...(repoRoot === undefined ? {} : { repoRoot }),
+    ...(config === undefined ? {} : { config }),
+    workers,
+  })
   const server = Bun.serve({
     hostname: host,
     port,
@@ -99,8 +157,10 @@ export function serve({
     port: server.port,
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
-      poller?.stop()
+      gatePoller?.stop()
       prPoller?.stop()
+      mentionPoller?.stop()
+      stallPoller?.stop()
       return server.stop(closeActiveConnections)
     },
   }

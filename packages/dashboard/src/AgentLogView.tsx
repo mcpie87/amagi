@@ -1,7 +1,7 @@
 import { type AgentLogLine, agentLogStore } from '@amagi/core/agent-log'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { EmptyState } from './ui.tsx'
+import { EmptyState, Time } from './ui.tsx'
 
 const ROW_HEIGHT = 18
 // how close to the bottom counts as "at the bottom" for autoscroll purposes
@@ -35,6 +35,7 @@ export function AgentLogView({ taskId }: { taskId: string }) {
     () => agentLogStore.get(taskId).version,
   )
   const buffer = agentLogStore.get(taskId)
+  const lastTs = buffer.at(buffer.length - 1)?.ts
 
   const rowVirtualizer = useVirtualizer({
     count: buffer.length,
@@ -65,7 +66,14 @@ export function AgentLogView({ taskId }: { taskId: string }) {
   return (
     <div>
       <div className="agent-log-header">
-        <span>{buffer.length} buffered lines</span>
+        <span>
+          {buffer.length} buffered lines
+          {lastTs !== undefined && (
+            <span className="agent-log-last">
+              last activity <Time ts={lastTs} />
+            </span>
+          )}
+        </span>
         <button
           type="button"
           aria-pressed={following}

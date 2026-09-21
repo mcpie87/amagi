@@ -32,6 +32,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // and batches renders on requestAnimationFrame instead.
         if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
           agentLogStore.append(parsed.taskId, parsed.role, parsed.ts, parsed.event)
+          // usage is sparse (one per step/turn, not per line): the only
+          // agent.stream event the reducer needs, for the sessions view.
+          // Chat runs are also routed to the reducer so the chat panel can
+          // fold their text into a conversation; the reducer itself ignores
+          // agent.stream, only the event log accumulates it.
+          if (parsed.event.kind === 'usage' || parsed.role === 'chat') dispatch(parsed)
         } else {
           dispatch(parsed)
         }

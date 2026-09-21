@@ -26,7 +26,6 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
         session_id   text,
         pr_url       text,
         pr_number    integer,
-        review_round integer not null default 0,
         last_error   text,
         created_at   integer not null,
         updated_at   integer not null
@@ -66,6 +65,18 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
       alter table tasks add column last_commit_subject text;
       alter table tasks add column checks text;
       alter table tasks add column checks_ok integer;
+    `,
+  },
+  {
+    name: '005_status_reason',
+    sql: `
+      alter table tasks add column status_reason text;
+    `,
+  },
+  {
+    name: '006_last_heartbeat_at',
+    sql: `
+      alter table tasks add column last_heartbeat_at integer;
     `,
   },
 ]

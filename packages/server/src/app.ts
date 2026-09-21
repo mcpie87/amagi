@@ -1,17 +1,25 @@
 import {
   type BeadsIssue,
   CAPABILITY_WORDS,
+  ChatService,
+  type Config,
+  classifyDifficulty,
   isTerminal,
+  makeHarness,
   type Notifier,
   type Question,
   type RunServiceApi,
+  removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
+  type WorkerActivity,
+  writeConfig,
 } from '@amagi/core'
+import type { Harness } from '@amagi/core/drivers/types'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -20,12 +28,15 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  ChatBody,
+  CloseTaskBody,
   EventQuery,
   IssueCreateBody,
   IssueIdParam,
   IssueUpdateBody,
   QuestionQuery,
   RunBody,
+  SettingsBody,
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
@@ -47,6 +58,14 @@ export type ServerDeps = {
   runner?: RunServiceApi
   /** Rich issue detail, including dependency blockers, when the tracker has it. */
   getIssue?: (id: string) => Promise<BeadsIssue | null>
+  /** Repo root, so an instant close can also remove the task's worktree. */
+  repoRoot?: string
+  /** Config for difficulty classification and the default chat harness. */
+  config?: Config
+  /** Background worker activity (mention/stall watchers), merged into /api/runner. */
+  workers?: () => WorkerActivity[]
+  /** Overridable so tests stub the harness a task's chat uses. */
+  chatHarnessFor?: () => Harness
 }
 
 /**
@@ -134,7 +153,20 @@ export function createApp({
   listIssues,
   runner,
   getIssue,
+  repoRoot,
+  config,
+  workers,
+  chatHarnessFor,
 }: ServerDeps) {
+  // One ChatService for the repo, so the in-flight guard survives requests.
+  let chat: ChatService | null = null
+  const chatService = (): ChatService | null => {
+    if (chat !== null) return chat
+    if (config === undefined) return null
+    const harness = chatHarnessFor?.() ?? makeHarness(config.harness.implement)
+    chat = new ChatService({ store, harness, config })
+    return chat
+  }
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
 
@@ -156,7 +188,15 @@ export function createApp({
       const cap = capabilityError(tracker, 'create')
       if (cap !== null) return c.json({ error: cap }, 501)
       try {
-        const created: TrackerTask = await tracker.createTask(c.req.valid('json'))
+        const body = c.req.valid('json')
+        const input =
+          config?.difficulty.enabled === true
+            ? {
+                ...body,
+                difficulty: await classifyDifficulty(body.title, body.description, config),
+              }
+            : body
+        const created: TrackerTask = await tracker.createTask(input)
         const issue = getIssue === undefined ? null : await getIssue(created.id)
         return c.json(issue ?? created, 201)
       } catch (err) {
@@ -234,9 +274,10 @@ export function createApp({
       if (task.worktree === null || task.branch === null) {
         return c.json({ error: `task ${id} has no worktree to resume` }, 409)
       }
-      // A cancelled run keeps its worktree for exactly this path: the operator
-      // stops a run and later reclaims it to resume where it left off.
-      if (isTerminal(task.state) && task.state !== 'cancelled') {
+      // A terminal run keeps its worktree for exactly this path: a cancelled
+      // run was deliberately stopped, and a needs_human/no_pr run was parked
+      // for attention, the operator retries each to resume where it left off.
+      if (isTerminal(task.state) && !['cancelled', 'needs_human', 'no_pr'].includes(task.state)) {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
@@ -252,9 +293,111 @@ export function createApp({
       return c.json({ task: store.task(id) })
     })
 
-    .get('/api/runner', (c) => {
+    .post(
+      '/api/tasks/:id/close',
+      valid('param', TaskIdParam),
+      valid('json', CloseTaskBody),
+      async (c) => {
+        const { id } = c.req.valid('param')
+        const { reason, to } = c.req.valid('json')
+        const task = store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        // Instant close retires any in-flight or parked task; only a task
+        // already settled (done/abandoned) has nothing left to close.
+        if (
+          isTerminal(task.state) &&
+          task.state !== 'needs_human' &&
+          task.state !== 'no_pr' &&
+          task.state !== 'cancelled'
+        ) {
+          return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
+        }
+        // Only a parked no_pr/needs_human task can be marked done: the agent
+        // left no changes because the work was already satisfied.
+        if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
+          return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
+        }
+        // Shut the worker down first: stop() kills the owned agent process and
+        // parks a live run in cancelled, releasing the tracker claim, so the
+        // close below retires it without racing the run. A task not running on
+        // this server's runner (CLI run, another server) is simply not stopped.
+        if (runner !== undefined) {
+          try {
+            await runner.stop(id)
+          } catch (err) {
+            console.warn(`stop on close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        const afterStop = store.task(id)
+        store.append(id, {
+          type: 'task.state',
+          from: afterStop?.state ?? task.state,
+          to,
+          reason,
+        })
+        // Best effort like reconcile: the store is authoritative, so a git or
+        // tracker hiccup logs the failure instead of losing the operator's close.
+        if (afterStop !== null && afterStop.worktree !== null && repoRoot !== undefined) {
+          const { worktree, branch } = afterStop
+          try {
+            await removeWorktree(store, id, {
+              repoRoot,
+              path: worktree,
+              branch: branch ?? null,
+            })
+          } catch (err) {
+            console.warn(
+              `worktree removal on close ${id}: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        }
+        if (tracker !== undefined) {
+          try {
+            await tracker.close(id, reason)
+          } catch (err) {
+            console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        return c.json({ task: store.task(id) })
+      },
+    )
+
+    .post('/api/tasks/:id/chat', valid('param', TaskIdParam), valid('json', ChatBody), (c) => {
+      const { id } = c.req.valid('param')
+      const { message } = c.req.valid('json')
+      const service = chatService()
+      if (service === null) {
+        return c.json({ error: 'chat is unavailable without a config' }, 501)
+      }
+      const result = service.send(id, message)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      // The answer streams back through the event stream like any agent run,
+      // so the request returns before the run finishes.
+      return c.json({ taskId: id }, 202)
+    })
+
+    .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      return c.json(runner.status())
+      const status = await runner.status()
+      if (workers === undefined) return c.json(status)
+      return c.json({ ...status, workers: workers() })
+    })
+
+    .get('/api/settings', (c) => {
+      if (config === undefined) return c.json({ error: 'settings are unavailable' }, 501)
+      return c.json({ maxParallel: config.loop.maxParallel })
+    })
+
+    .patch('/api/settings', valid('json', SettingsBody), (c) => {
+      if (config === undefined) return c.json({ error: 'settings are unavailable' }, 501)
+      const { maxParallel } = c.req.valid('json')
+      // Persist first so a restart keeps the value, then live-apply: the
+      // cached config and, when present, the runner capacity. In-flight runs
+      // are untouched, capacity gates new launches.
+      if (repoRoot !== undefined) writeConfig(repoRoot, { loop: { maxParallel } })
+      config.loop.maxParallel = maxParallel
+      runner?.setMaxParallel(maxParallel)
+      return c.json({ maxParallel })
     })
 
     .post('/api/runs', valid('json', RunBody), async (c) => {

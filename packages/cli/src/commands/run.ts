@@ -28,11 +28,12 @@ export const runCommand = defineCommand({
       description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
+    effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },
   },
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const flags = { harness: args.harness, model: args.model }
+    const flags = { harness: args.harness, model: args.model, effort: args.effort }
 
     const selection = await pickRunSelection(
       config,
@@ -44,8 +45,12 @@ export const runCommand = defineCommand({
     const store = new Store()
     const implement = selection.harness
     if (selection.interactive) {
+      const bits = [
+        implement.model ? `model ${implement.model}` : null,
+        implement.effort ? `effort ${implement.effort}` : null,
+      ].filter(Boolean)
       console.log(
-        dim(`harness: ${implement.kind}${implement.model ? ` (model ${implement.model})` : ''}`),
+        dim(`harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`),
       )
     }
 
@@ -65,12 +70,20 @@ export const runCommand = defineCommand({
           const details = [
             event.priority === null || event.priority === undefined ? null : `P${event.priority}`,
             event.taskType,
+            event.difficulty,
           ].filter(Boolean)
           if (details.length > 0) console.log(dim(`  ${details.join('  ')}`))
           if (event.url) console.log(dim(`  ${event.url}`))
           if (event.description?.trim()) printBlock(event.description)
           break
         }
+        case 'claim.rejected':
+          console.log(
+            yellow(
+              `  skipped ${event.title}${event.difficulty ? ` (${event.difficulty})` : ''}: ${event.reason}`,
+            ),
+          )
+          break
         case 'task.state':
           console.log(dim(`  -> ${event.to}${event.reason ? `: ${event.reason}` : ''}`))
           break

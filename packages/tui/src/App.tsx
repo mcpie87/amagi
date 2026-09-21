@@ -18,8 +18,6 @@ const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
   needs_human: 'red',
   done: 'green',
-  reviewing: 'magenta',
-  fixing: 'magenta',
 }
 
 function Badge({ state }: { state: TaskState }) {
@@ -109,8 +107,7 @@ function QueueScreen({
               <Badge state={task.state} />
               <Text wrap="truncate">{task.title}</Text>
               <Text dimColor>
-                {task.id}
-                {task.reviewRound > 0 ? ` r${task.reviewRound}` : ''} {relTime(task.updatedAt)}
+                {task.id} {relTime(task.updatedAt)}
               </Text>
             </Box>
           ))}
@@ -261,7 +258,6 @@ function TaskDetail({
       <Box gap={1}>
         <Text bold>{task.title}</Text>
         <Badge state={task.state} />
-        {task.reviewRound > 0 && <Text dimColor>review round {task.reviewRound}</Text>}
       </Box>
       <Text dimColor>{task.id}</Text>
 

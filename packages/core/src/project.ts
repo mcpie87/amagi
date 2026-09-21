@@ -27,7 +27,7 @@ export type ProjectedTask = {
   sessionId: string | null
   prUrl: string | null
   prNumber: number | null
-  reviewRound: number
+  statusReason: string | null
   lastError: string | null
   retryCount: number
   lastCommit: { sha: string; subject: string } | null
@@ -77,6 +77,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
             tracker: event.tracker,
             state: 'claimed',
             retryCount: 0,
+            statusReason: null,
             updatedAt: event.ts,
           }
         : {
@@ -89,7 +90,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
             sessionId: null,
             prUrl: null,
             prNumber: null,
-            reviewRound: 0,
+            statusReason: null,
             lastError: null,
             retryCount: 0,
             lastCommit: null,
@@ -108,7 +109,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         tasks[event.taskId] = {
           ...current,
           state: event.to,
-          reviewRound: event.to === 'reviewing' ? current.reviewRound + 1 : current.reviewRound,
+          statusReason: event.reason ?? null,
           updatedAt: event.ts,
         }
       }
@@ -116,7 +117,12 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'task.reclaimed':
       if (current) {
-        tasks[event.taskId] = { ...current, state: 'claimed', updatedAt: event.ts }
+        tasks[event.taskId] = {
+          ...current,
+          state: 'claimed',
+          statusReason: event.reason ?? null,
+          updatedAt: event.ts,
+        }
       }
       break
 

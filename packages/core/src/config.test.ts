@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadConfig } from './config.ts'
+import { loadConfig, writeConfig } from './config.ts'
 
 let home: string
 let repo: string
@@ -38,10 +38,11 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
-    expect(config.harness.review.kind).toBe('codex')
     expect(config.loop.maxParallel).toBe(1)
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
+    expect(config.loop.stallWatchIntervalSec).toBe(300)
+    expect(config.loop.stallTimeoutSec).toBe(3600)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {
@@ -115,5 +116,32 @@ describe('loadConfig', () => {
   test('malformed toml is not swallowed', () => {
     writeRepo('[tracker\nkind = "beads"\n')
     expect(() => loadConfig(repo)).toThrow()
+  })
+
+  test('rejects maxParallel above the ceiling', () => {
+    writeRepo('[loop]\nmaxParallel = 100\n')
+    expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+  })
+
+  test('stall watcher keys are overridable', () => {
+    writeRepo('[loop]\nstallWatchIntervalSec = 60\nstallTimeoutSec = 7200\n')
+    const config = loadConfig(repo).config
+    expect(config.loop.stallWatchIntervalSec).toBe(60)
+    expect(config.loop.stallTimeoutSec).toBe(7200)
+  })
+})
+
+describe('writeConfig', () => {
+  test('merges a patch into the repo config and preserves other keys', () => {
+    writeRepo('[forge]\nkind = "forgejo"\n\n[loop]\nmaxParallel = 1\n')
+    writeConfig(repo, { loop: { maxParallel: 6 } })
+    const { config } = loadConfig(repo)
+    expect(config.loop.maxParallel).toBe(6)
+    expect(config.forge.kind).toBe('forgejo')
+  })
+
+  test('creates the repo config file when absent', () => {
+    writeConfig(repo, { loop: { maxParallel: 3 } })
+    expect(loadConfig(repo).config.loop.maxParallel).toBe(3)
   })
 })
