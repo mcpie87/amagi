@@ -1,4 +1,3 @@
-import type { TaskState } from '@amagi/core/events'
 import type { ReactNode } from 'react'
 
 const paths = {
@@ -19,6 +18,9 @@ const paths = {
   board: 'M3 4h5v16H3z M10 4h5v11h-5z M17 4h5v14h-5z',
   refresh: 'M20 7v5h-5 M4 17v-5h5 M6 6a8 8 0 0 1 14 6 M18 18a8 8 0 0 1-14-6',
   menu: 'M3 6h18 M3 12h18 M3 18h18',
+  sessions: 'M3 5h6v14H3z M12 5h9v7h-9z M12 15h9v4h-9z',
+  settings:
+    'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z',
 } satisfies Record<string, string>
 
 export type IconName = keyof typeof paths
@@ -38,31 +40,6 @@ export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     >
       <path d={paths[name]} />
     </svg>
-  )
-}
-
-export const stateLabels: Record<TaskState, string> = {
-  claimed: 'Queued',
-  worktree_ready: 'Preparing',
-  implementing: 'Implementing',
-  awaiting_answer: 'Awaiting answer',
-  checks: 'Running checks',
-  committed: 'Committed',
-  retrying: 'Retrying',
-  pr_open: 'PR open',
-  reviewing: 'Reviewing',
-  fixing: 'Fixing',
-  done: 'Completed',
-  needs_human: 'Needs attention',
-  abandoned: 'Abandoned',
-}
-
-export function Badge({ state }: { state: TaskState }) {
-  return (
-    <span className={`badge state-${state}`}>
-      <span className="status-dot" />
-      {stateLabels[state]}
-    </span>
   )
 }
 
@@ -86,29 +63,6 @@ export function EmptyState({
   )
 }
 
-export function PageHeading({
-  eyebrow,
-  title,
-  description,
-  children,
-}: {
-  eyebrow: string
-  title: string
-  description: string
-  children?: ReactNode
-}) {
-  return (
-    <div className="page-heading">
-      <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h1>{title}</h1>
-        <p className="page-description">{description}</p>
-      </div>
-      {children && <div className="heading-actions">{children}</div>}
-    </div>
-  )
-}
-
 export function Time({ ts }: { ts: number }) {
   const date = new Date(ts)
   const today = date.toDateString() === new Date().toDateString()
@@ -120,28 +74,5 @@ export function Time({ ts }: { ts: number }) {
         minute: '2-digit',
       })}
     </time>
-  )
-}
-
-export function SearchField({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string
-  onChange: (value: string) => void
-  placeholder: string
-}) {
-  return (
-    <label className="search-field">
-      <Icon name="search" />
-      <input
-        type="search"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        aria-label={placeholder}
-      />
-    </label>
   )
 }

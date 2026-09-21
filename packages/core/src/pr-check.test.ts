@@ -36,6 +36,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'CONFLICTING',
   mergeStateStatus: 'DIRTY',
+  updatedAt: '2026-09-21T10:00:00Z',
   ...over,
 })
 
@@ -83,7 +84,7 @@ describe('listOpenPrs', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,updatedAt',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
