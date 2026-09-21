@@ -52,6 +52,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     this.listCalls++
     return this.comments

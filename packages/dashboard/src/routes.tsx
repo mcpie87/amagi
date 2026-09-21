@@ -1,7 +1,13 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
-import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import {
+  type AgentEvent,
+  isTerminal,
+  type MergeStatus,
+  type StoredEvent,
+  type TaskState,
+} from '@amagi/core/events'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -303,6 +309,22 @@ const stateBadge: Record<TaskState, string> = {
 
 function Badge({ state }: { state: TaskState }) {
   return <span className={`${PILL} ${stateBadge[state]}`}>{state}</span>
+}
+
+const mergeTone: Record<MergeStatus, string> = {
+  mergeable: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
+  conflicted: 'bg-red-soft text-red-ink ring-red-edge',
+  unknown: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
+}
+
+const mergeLabel: Record<MergeStatus, string> = {
+  mergeable: 'mergeable',
+  conflicted: 'merge conflict',
+  unknown: 'merge status unknown',
+}
+
+function PrStatusChip({ status }: { status: MergeStatus }) {
+  return <span className={`${PILL} ${mergeTone[status]}`}>{mergeLabel[status]}</span>
 }
 
 function readyOk(repo: RepoInfo): boolean {
@@ -1367,6 +1389,17 @@ function QueueView() {
                                 {task.statusReason}
                               </span>
                             )}
+                          {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
+                            <span
+                              className={`mt-1 block truncate text-xs ${
+                                task.prMergeStatus === 'conflicted'
+                                  ? 'text-red-400'
+                                  : 'text-emerald-400'
+                              }`}
+                            >
+                              PR {mergeLabel[task.prMergeStatus]}
+                            </span>
+                          )}
                         </Link>
                       </li>
                     ))}
@@ -2352,7 +2385,17 @@ function TaskDetailView() {
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
-        <DetailRow label="PR" value={task.prUrl === null ? null : <PrLink url={task.prUrl} />} />
+        <DetailRow
+          label="PR"
+          value={
+            task.prUrl === null ? null : (
+              <span className="flex items-center gap-2">
+                <PrLink url={task.prUrl} />
+                {task.prMergeStatus !== null && <PrStatusChip status={task.prMergeStatus} />}
+              </span>
+            )
+          }
+        />
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"
