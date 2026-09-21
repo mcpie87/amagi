@@ -1,5 +1,5 @@
 import { resolve, sep } from 'node:path'
-import type { Notifier, Workspace, Workspaces } from '@amagi/core'
+import type { Notifier, RunServiceApi, Workspace, Workspaces } from '@amagi/core'
 import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
@@ -13,6 +13,8 @@ export type ServeOptions = {
   prPollIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
+  /** When present, the launch/stop runner endpoints are live. */
+  runner?: RunServiceApi
 }
 
 /**
@@ -107,10 +109,12 @@ export function serve({
   gatePollIntervalMs,
   prPollIntervalMs,
   staticDir,
+  runner,
 }: ServeOptions) {
   const app = createApp({
     workspaces,
     ...(notify === undefined ? {} : { notify }),
+    ...(runner === undefined ? {} : { runner }),
   })
   const repoPollers = startRepoPollers(workspaces, {
     ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),

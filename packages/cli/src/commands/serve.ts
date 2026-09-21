@@ -1,5 +1,13 @@
 import { join } from 'node:path'
-import { addRegistryEntry, loadGlobalConfig, loadRegistry, repoRoot, Workspaces } from '@amagi/core'
+import {
+  addRegistryEntry,
+  loadGlobalConfig,
+  loadRegistry,
+  makeHarness,
+  RunService,
+  repoRoot,
+  Workspaces,
+} from '@amagi/core'
 import { serve } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
@@ -21,11 +29,36 @@ export const serveCommand = defineCommand({
     }
     const config = loadGlobalConfig()
     const workspaces = new Workspaces()
+    // The operator-facing runner service is bound to the repo the server is
+    // launched from, so the dashboard's launch/stop controls have one target.
+    const primary = workspaces.list()[0]
+    let runner: RunService | undefined
+    if (primary !== undefined) {
+      try {
+        const ws = workspaces.get(primary.key)
+        if (ws !== null) {
+          runner = new RunService({
+            store: ws.store,
+            tracker: ws.tracker,
+            harness: makeHarness(ws.config.harness.implement),
+            config: ws.config,
+            repoRoot: ws.root,
+            repoName: ws.name,
+            ...(ws.forge === null ? {} : { forge: ws.forge }),
+          })
+        }
+      } catch (err) {
+        console.warn(
+          `runner for ${primary.key} unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
     const server = serve({
       workspaces,
       host: config.server.host,
       port: config.server.port,
       staticDir: join(import.meta.dir, '..', '..', '..', 'dashboard', 'dist'),
+      ...(runner === undefined ? {} : { runner }),
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     for (const entry of workspaces.list()) {

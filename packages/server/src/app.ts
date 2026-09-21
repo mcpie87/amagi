@@ -6,6 +6,7 @@ import {
   type Question,
   type RegistryEntry,
   Runner,
+  type RunServiceApi,
   type Store,
   type Tracker,
   type TrackerCapabilities,
@@ -32,7 +33,9 @@ import {
   RepoQuestionParam,
   RepoRegisterBody,
   RepoTaskIdParam,
+  RunBody,
   StreamQuery,
+  TaskIdParam,
   TaskListQuery,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
@@ -40,6 +43,8 @@ import { eventStream } from './stream.ts'
 export type ServerDeps = {
   workspaces: Workspaces
   notify?: Notifier[]
+  /** When present, the launch/stop runner endpoints are live. */
+  runner?: RunServiceApi
 }
 
 /**
@@ -143,7 +148,7 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [] }: ServerDeps) {
+export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -317,7 +322,9 @@ export function createApp({ workspaces, notify = [] }: ServerDeps) {
       if (task.worktree === null || task.branch === null) {
         return c.json({ error: `task ${id} has no worktree to resume` }, 409)
       }
-      if (isTerminal(task.state)) {
+      // A cancelled run keeps its worktree for exactly this path: the operator
+      // stops a run and later reclaims it to resume where it left off.
+      if (isTerminal(task.state) && task.state !== 'cancelled') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
@@ -329,6 +336,27 @@ export function createApp({ workspaces, notify = [] }: ServerDeps) {
       }
       ws.store.append(id, { type: 'task.reclaimed' })
       return c.json({ task: ws.store.task(id) })
+    })
+
+    .get('/api/runner', (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      return c.json(runner.status())
+    })
+
+    .post('/api/runs', valid('json', RunBody), async (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const { taskId } = c.req.valid('json')
+      const result = await runner.start(taskId)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      return c.json({ taskId: result.taskId }, 201)
+    })
+
+    .post('/api/runs/:id/stop', valid('param', TaskIdParam), async (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const { id } = c.req.valid('param')
+      const result = await runner.stop(id)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      return c.json({ taskId: result.taskId })
     })
 
     .post(

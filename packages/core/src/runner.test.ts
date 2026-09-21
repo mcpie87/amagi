@@ -67,7 +67,7 @@ class FakeTracker implements Tracker {
   }
   async comment(): Promise<void> {}
   async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
-  async release(): Promise<void> {}
+  async release(_id: string): Promise<void> {}
   async close(): Promise<void> {}
   async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'gate', advisory: false }
@@ -128,6 +128,50 @@ class FakeHarness implements Harness {
       model: turn.model ?? null,
       effort: turn.effort ?? null,
     }
+  }
+}
+
+/** An agent process that stays running until killed, so a cancel can interrupt it. */
+class BlockingHarness implements Harness {
+  readonly kind = 'fake'
+  starts = 0
+  kills = 0
+  private process: AgentProcess | null = null
+
+  start(opts: AgentStartOptions): AgentProcess {
+    this.starts++
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    this.process = {
+      pid: 12345,
+      events: () => queue,
+      done,
+      kill: async () => {
+        this.kills++
+        queue.close()
+        resolveDone({
+          exitCode: 130,
+          ok: false,
+          sessionId: null,
+          summary: null,
+          usage: null,
+          stderr: 'killed',
+        })
+      },
+      model: null,
+      effort: opts.effort ?? null,
+    }
+    return this.process
+  }
+
+  resume(): AgentProcess {
+    throw new Error('no resume expected in the cancel test')
+  }
+  async listModels(): Promise<string[]> {
+    return []
   }
 }
 
@@ -538,5 +582,70 @@ describe('Runner.runOnce', () => {
       .filter((e) => e.type === 'task.state')
       .at(-1)
     expect(lastState?.type === 'task.state' && lastState.to).toBe('needs_human')
+  })
+})
+
+describe('Runner.cancel', () => {
+  test('kills the agent process, releases the lease, and parks the task in cancelled', async () => {
+    const harness = new BlockingHarness()
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(tracker, harness)
+    const pending = runner.runOnce()
+
+    await waitFor(() => harness.starts === 1)
+    expect(store.task(TASK.id)?.state).toBe('implementing')
+    runner.cancel()
+    const result = await pending
+
+    expect(harness.kills).toBe(1)
+    expect(released).toEqual([TASK.id])
+    expect(result?.state).toBe('cancelled')
+    expect(store.task(TASK.id)?.state).toBe('cancelled')
+    // the recorded worktree survives the stop for the reclaim path
+    expect(store.task(TASK.id)?.worktree).not.toBeNull()
+    expect(store.task(TASK.id)?.branch).not.toBeNull()
+  })
+
+  test('cancelling a parked question releases the lease and parks the task in cancelled', async () => {
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(tracker, new FakeHarness([parksOnQuestion]))
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'question.parked'))
+    runner.cancel()
+    const result = await pending
+
+    expect(result?.state).toBe('cancelled')
+    expect(released).toEqual([TASK.id])
+    expect(store.task(TASK.id)?.worktree).not.toBeNull()
+  })
+
+  test('cancel interrupts a retry backoff and parks the task in cancelled', async () => {
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(
+      tracker,
+      new FakeHarness([{ outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } }]),
+      config({ loop: { retryBaseMs: 60_000, retryMaxMs: 60_000 } }),
+    )
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'retry.scheduled'))
+    runner.cancel()
+    const result = await pending
+
+    expect(result?.state).toBe('cancelled')
+    expect(released).toEqual([TASK.id])
   })
 })

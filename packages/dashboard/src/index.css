@@ -772,6 +772,10 @@ time {
   color: #828577;
   background: #efefe9;
 }
+.state-cancelled {
+  color: #828577;
+  background: #efefe9;
+}
 .panel-footnote {
   padding: 12px 20px;
   display: flex;
@@ -1157,6 +1161,36 @@ select {
   color: #9ba48c;
   font-size: 10px;
   text-align: center;
+}
+.issue-card-wrap {
+  margin-bottom: 9px;
+}
+.issue-card-wrap .issue-card {
+  margin-bottom: 7px;
+}
+.run-button {
+  min-height: 26px;
+  padding: 4px 10px;
+  font-size: 10px;
+}
+.stop-button {
+  border-color: #e0c3b4;
+  color: #a0522f;
+  background: #fdf3ee;
+}
+.run-button-error {
+  margin: 6px 0 0;
+  color: #b26447;
+  font-size: 10px;
+}
+.issue-list-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid #edf0e7;
+}
+.issue-list-item .issue-list-row {
+  border-bottom: 0;
 }
 .issue-list-row {
   display: flex;

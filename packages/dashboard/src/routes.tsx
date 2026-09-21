@@ -18,9 +18,24 @@ import {
 import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { type RepoInfo, useDashboard } from './store.tsx'
+import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
+
+function RunnerIndicator() {
+  const { status } = useRunner()
+  if (status === null) {
+    return <span className="connection-status">runner: unknown</span>
+  }
+  return (
+    <span
+      className="connection-status"
+      title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
+    >
+      runner: {status.running.length}/{status.capacity} {status.available ? 'free' : 'busy'}
+    </span>
+  )
+}
 
 type Dependency = {
   id: string
@@ -74,6 +89,7 @@ const stateBadge: Record<TaskState, string> = {
   no_pr: 'bg-zinc-600',
   needs_human: 'bg-red-600',
   abandoned: 'bg-zinc-700',
+  cancelled: 'bg-zinc-600',
 }
 
 function Badge({ state }: { state: TaskState }) {
@@ -153,71 +169,74 @@ function RootLayout() {
   const [adding, setAdding] = useState(false)
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <header className="border-b border-zinc-800 px-6 py-3">
-        <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-4">
-          <Link to="/" className="text-lg font-semibold tracking-tight">
-            amagi
-          </Link>
-          {repos !== null && repos.length > 0 && (
-            <>
-              <nav className="flex gap-3 text-sm text-zinc-400">
-                <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
-                  Queue
-                </Link>
-                <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
-                  Tasks
-                </Link>
-              </nav>
-              <div className="ml-auto flex items-center gap-2">
-                <select
-                  value={selected ?? ''}
-                  onChange={(e) => selectRepo(e.target.value)}
-                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
-                >
-                  {repos.map((repo) => (
-                    <option key={repo.key} value={repo.key}>
-                      {readyOk(repo) ? '' : '! '}
-                      {repo.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => setAdding((v) => !v)}
-                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-300 hover:bg-zinc-800"
-                >
-                  {adding ? 'close' : '+ add'}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-        {adding && (
-          <div className="mx-auto mt-3 max-w-5xl">
-            <AddRepoForm />
+    <RunnerProvider>
+      <div className="min-h-screen bg-zinc-950 text-zinc-100">
+        <header className="border-b border-zinc-800 px-6 py-3">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-4">
+            <Link to="/" className="text-lg font-semibold tracking-tight">
+              amagi
+            </Link>
+            {repos !== null && repos.length > 0 && (
+              <>
+                <nav className="flex gap-3 text-sm text-zinc-400">
+                  <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
+                    Queue
+                  </Link>
+                  <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
+                    Tasks
+                  </Link>
+                </nav>
+                <div className="ml-auto flex items-center gap-2">
+                  <RunnerIndicator />
+                  <select
+                    value={selected ?? ''}
+                    onChange={(e) => selectRepo(e.target.value)}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+                  >
+                    {repos.map((repo) => (
+                      <option key={repo.key} value={repo.key}>
+                        {readyOk(repo) ? '' : '! '}
+                        {repo.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setAdding((v) => !v)}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-300 hover:bg-zinc-800"
+                  >
+                    {adding ? 'close' : '+ add'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
-        )}
-      </header>
-      <main className="mx-auto max-w-5xl px-6 py-6">
-        {repos === null ? (
-          <p className="text-zinc-500">loading repositories...</p>
-        ) : repos.length === 0 ? (
-          <section className="mx-auto max-w-xl pt-12">
-            <h1 className="text-xl font-semibold">Add a repository to start</h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              Point amagi at a git repository; its own .amagi/config.toml picks the tracker, forge,
-              harness and checks. No restart needed.
-            </p>
-            <div className="mt-4">
+          {adding && (
+            <div className="mx-auto mt-3 max-w-5xl">
               <AddRepoForm />
             </div>
-          </section>
-        ) : (
-          <Outlet />
-        )}
-      </main>
-    </div>
+          )}
+        </header>
+        <main className="mx-auto max-w-5xl px-6 py-6">
+          {repos === null ? (
+            <p className="text-zinc-500">loading repositories...</p>
+          ) : repos.length === 0 ? (
+            <section className="mx-auto max-w-xl pt-12">
+              <h1 className="text-xl font-semibold">Add a repository to start</h1>
+              <p className="mt-1 text-sm text-zinc-500">
+                Point amagi at a git repository; its own .amagi/config.toml picks the tracker,
+                forge, harness and checks. No restart needed.
+              </p>
+              <div className="mt-4">
+                <AddRepoForm />
+              </div>
+            </section>
+          ) : (
+            <Outlet />
+          )}
+        </main>
+      </div>
+    </RunnerProvider>
   )
 }
 
@@ -711,22 +730,17 @@ function IssuesView() {
   )
 }
 
-function RunButton({ repo }: { repo: string }) {
+function RunButton() {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
   const run = async () => {
     setBusy(true)
     setMessage(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/run`, { method: 'POST' })
-      if (!res.ok) setMessage((await res.json())?.error ?? `HTTP ${res.status}`)
-      else setMessage('run started')
-    } catch {
-      setMessage('could not reach the amagi server')
-    } finally {
-      setBusy(false)
-    }
+    const res = await start()
+    setBusy(false)
+    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
   return (
@@ -738,7 +752,7 @@ function RunButton({ repo }: { repo: string }) {
         onClick={() => void run()}
         className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
       >
-        Run
+        Run next
       </button>
     </div>
   )
@@ -776,7 +790,7 @@ function QueueView() {
     <section>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Queue</h1>
-        {selected !== null && <RunButton repo={selected} />}
+        {selected !== null && <RunButton />}
       </div>
       {attention.length > 0 && (
         <div className="mb-6">
@@ -973,6 +987,30 @@ function ReclaimButton({
   )
 }
 
+function StopButton({ taskId }: { taskId: string }) {
+  const { status, stop } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (status === null || !status.running.includes(taskId)) return null
+
+  const doStop = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await stop(taskId)
+    setBusy(false)
+    if (!res.ok) setError(res.error ?? 'stop failed')
+  }
+
+  return (
+    <div className="ml-auto">
+      <button type="button" className="stop-button" disabled={busy} onClick={() => void doStop()}>
+        Stop
+      </button>
+      {error !== null && <p className="run-button-error">{error}</p>}
+    </div>
+  )
+}
+
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
 
 function fmtTokens(n: number): string {
@@ -1071,6 +1109,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
 
