@@ -37,8 +37,9 @@ async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
 
 const EVENTS: StoredEvent[] = [
   ev(1, 'am-1', { type: 'task.claimed', title: 'Fix the thing', tracker: 'beads' }),
-  ev(2, 'am-1', { type: 'task.state', from: 'claimed', to: 'implementing' }),
-  ev(3, 'am-1', {
+  ev(2, 'am-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+  ev(3, 'am-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+  ev(4, 'am-1', {
     type: 'question.asked',
     questionId: 'q-1',
     question: 'Which registry?',
