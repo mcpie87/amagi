@@ -160,6 +160,12 @@ export type MentionPromptContext = {
   checks: readonly string[]
 }
 
+export type TakeDownMentionContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+  outPath: string
+}
+
 export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string {
   const lines = [
     'You are working inside a dedicated git worktree on a pull request, responding to review feedback from a human.',
@@ -254,6 +260,30 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     ctx.diff,
     '',
     'Write the explanation to the file and stop.',
+  ].join('\n')
+}
+
+export function takeDownSystemPrompt(): string {
+  return [
+    'You are deciding whether a pull request deserves to be taken down (closed or reverted).',
+    'Read the PR and the request, then write a verdict to the file.',
+    'Do not modify any files in the repository.',
+  ].join('\n')
+}
+
+export function takeDownPrompt(ctx: TakeDownMentionContext): string {
+  return [
+    `A human (@${ctx.mention.user}) asked to take down PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+    '',
+    `Write your verdict to this file: ${ctx.outPath}`,
+    '',
+    'Start the file with one of these verdict lines:',
+    '- `TAKE DOWN` when the PR deserves to be taken down, followed by the concise, direct reason on the next line.',
+    '- `KEEP` when it does not, followed by a short explanation.',
+    '',
+    'The reason is posted as a comment on the task issue, so keep it concise and direct.',
   ].join('\n')
 }
 
