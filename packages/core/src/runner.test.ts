@@ -44,12 +44,13 @@ class FakeTracker implements Tracker {
   /** Returned by get() in place of the null default, to simulate a re-read. */
   freshTask: TrackerTask | null = null
 
-  constructor(private queue: TrackerTask[] = []) {}
+  constructor(public queue: TrackerTask[] = []) {}
 
   async ready(): Promise<TrackerTask[]> {
     return this.queue
   }
-  async claim(): Promise<TrackerTask | null> {
+  async claim(id?: string): Promise<TrackerTask | null> {
+    if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
     return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
@@ -288,6 +289,61 @@ const parksOnQuestion: Turn = {
     })
     store.append(TASK.id, { type: 'task.state', from: 'implementing', to: 'awaiting_answer' })
   },
+}
+
+/** A harness whose agent never finishes until it is killed, for interrupt tests. */
+const hungHarness = () => {
+  const queue = new AsyncQueue<AgentEvent>()
+  let killed = false
+  let resolveDone: (o: AgentOutcome) => void = () => {}
+  const done = new Promise<AgentOutcome>((resolve) => {
+    resolveDone = resolve
+  })
+  const agent: AgentProcess = {
+    pid: 42,
+    events: () => queue,
+    done,
+    kill: async () => {
+      killed = true
+      queue.close()
+      resolveDone({
+        exitCode: 1,
+        ok: false,
+        sessionId: null,
+        summary: null,
+        usage: null,
+        stderr: '',
+      })
+    },
+    model: null,
+    effort: null,
+  }
+  const harness: Harness = {
+    kind: 'fake',
+    start: () => {
+      queue.push({ kind: 'text', text: 'working...' })
+      return agent
+    },
+    resume: () => agent,
+    listModels: async () => [],
+    listEfforts: async () => [],
+  }
+  return { harness, isKilled: () => killed }
+}
+
+/** Starts a run, lets it reach the agent, then parks the task in cancelled. */
+const cancelMidRun = async (): Promise<void> => {
+  const pending = makeRunner(new FakeTracker([TASK]), hungHarness().harness).runOnce()
+  await waitFor(() =>
+    store.events({ taskId: TASK.id, limit: 999 }).some((e) => e.type === 'agent.started'),
+  )
+  store.append(TASK.id, {
+    type: 'task.state',
+    from: 'implementing',
+    to: 'cancelled',
+    reason: 'operator interrupt',
+  })
+  expect((await pending)?.state).toBe('cancelled')
 }
 
 describe('Runner.runOnce', () => {
@@ -869,6 +925,69 @@ describe('Runner.runOnce', () => {
       .filter((e) => e.type === 'task.state')
       .at(-1)
     expect(lastState?.type === 'task.state' && lastState.to).toBe('needs_human')
+  })
+
+  test('runOnce with a task id drives that task instead of the next ready one', async () => {
+    const tracker = new FakeTracker([{ ...TASK, id: 'bd-other' }, TASK])
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(tracker, harness).runOnce(TASK.id)
+
+    expect(result?.state).toBe('pr_open')
+    expect(tracker.queue.some((t) => t.id === 'bd-other')).toBe(true)
+    expect(harness.calls[0]?.cwd).toContain('bd-a1b2')
+  })
+
+  test('an interrupt kills the running agent and parks the task in cancelled', async () => {
+    const { harness, isKilled } = hungHarness()
+
+    const pending = makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    await waitFor(() =>
+      store.events({ taskId: TASK.id, limit: 999 }).some((e) => e.type === 'agent.started'),
+    )
+    store.append(TASK.id, {
+      type: 'task.state',
+      from: 'implementing',
+      to: 'cancelled',
+      reason: 'operator interrupt',
+    })
+
+    const result = await pending
+    expect(result?.state).toBe('cancelled')
+    expect(isKilled()).toBe(true)
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+  })
+
+  test('continue resumes a cancelled task in its recorded worktree', async () => {
+    await cancelMidRun()
+    const worktree = store.task(TASK.id)?.worktree
+    expect(worktree).not.toBeNull()
+    expect(existsSync(worktree as string)).toBe(true)
+
+    const resumed = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+    ).runOnce(TASK.id)
+    expect(resumed?.state).toBe('pr_open')
+    expect(store.task(TASK.id)?.worktree).toBe(worktree)
+    // The resumed run re-records the reused worktree, like every other run.
+    expect(types(TASK.id).filter((t) => t === 'worktree.created')).toHaveLength(2)
+  })
+
+  test('continue falls back to a fresh worktree when the recorded one is gone', async () => {
+    await cancelMidRun()
+    const worktree = store.task(TASK.id)?.worktree
+    expect(worktree).not.toBeNull()
+    rmSync(worktree as string, { recursive: true, force: true })
+
+    const resumed = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+    ).runOnce(TASK.id)
+    expect(resumed?.state).toBe('pr_open')
+    expect(store.task(TASK.id)?.worktree).toBe(worktree)
+    expect(existsSync(worktree as string)).toBe(true)
+    expect(types(TASK.id).filter((t) => t === 'worktree.created')).toHaveLength(2)
   })
 })
 

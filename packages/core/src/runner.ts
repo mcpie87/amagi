@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -176,6 +177,7 @@ class Lease {
 
 export class Runner {
   private readonly exec: Exec
+  /** Set once the store flips the task to `cancelled`; guards the unwind. */
   private cancelled = false
   private currentProcess: AgentProcess | null = null
 
@@ -206,17 +208,23 @@ export class Runner {
     if (spent !== null) throw new BudgetExhaustedError(taskId, spent)
   }
 
-  /** Claims one ready task and drives it as far as the current milestone goes. */
-  async runOnce(): Promise<RunOnceResult> {
+  /**
+   * Claims the next ready task (or the given one, for `amagi continue`) and
+   * drives it as far as the current milestone goes.
+   */
+  async runOnce(taskId?: string): Promise<RunOnceResult> {
     const { store, tracker, config } = this.deps
-    const task = await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
-      store.append(null, {
-        type: 'claim.rejected',
-        title: skipped.title,
-        difficulty: skipped.difficulty ?? null,
-        reason,
-      })
-    })
+    const task =
+      taskId === undefined
+        ? await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+            store.append(null, {
+              type: 'claim.rejected',
+              title: skipped.title,
+              difficulty: skipped.difficulty ?? null,
+              reason,
+            })
+          })
+        : await tracker.claim(taskId)
     if (task === null) return null
     return this.runClaimed(task)
   }
@@ -296,6 +304,11 @@ export class Runner {
     })
   }
 
+  /** Whether the operator interrupted the run via the store's `cancelled` state. */
+  private isCancelled(taskId: string): boolean {
+    return this.cancelled || this.deps.store.task(taskId)?.state === 'cancelled'
+  }
+
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
@@ -311,14 +324,18 @@ export class Runner {
     // A reclaimed task already has its worktree and branch recorded in the
     // store; reuse them instead of creating a fresh worktree.
     const recorded = store.task(task.id)
-    const resume = recorded !== null && recorded.worktree !== null && recorded.branch !== null
+    const recordedWorktree =
+      recorded !== null && recorded.worktree !== null && recorded.branch !== null
+        ? { path: recorded.worktree, branch: recorded.branch }
+        : null
+    // Reuse only what still exists on disk: a reboot that cleared the worktree
+    // root must fall back to a fresh worktree, not run the agent in a dir that
+    // is gone.
+    const resume = recordedWorktree !== null && existsSync(recordedWorktree.path)
 
     let worktree: WorktreeSpec
-    if (resume) {
-      worktree = {
-        path: recorded.worktree as string,
-        branch: recorded.branch as string,
-      }
+    if (recordedWorktree !== null && resume) {
+      worktree = recordedWorktree
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
       // https; without one, fall back to the local base branch so git never
@@ -582,6 +599,7 @@ export class Runner {
       this.throwIfCancelled(taskId)
       this.throwIfBudgetExhausted(taskId, budget)
       if (lease.isLost) throw new LeaseLostError(taskId)
+      if (this.isCancelled(taskId)) return null
       const q = store.question(question.id)
       if (q !== null && q.answer !== null) {
         this.transition(taskId, 'implementing')
@@ -644,6 +662,16 @@ export class Runner {
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
 
+    // The store is the shared interrupt channel: `amagi stop` or the API parks
+    // the task in `cancelled`, and this poll kills the agent process so a hung
+    // harness is stopped without reaching into the runner process.
+    const cancelWatch = setInterval(() => {
+      if (store.task(taskId)?.state !== 'cancelled') return
+      this.cancelled = true
+      clearInterval(cancelWatch)
+      void proc.kill()
+    }, 500)
+
     // The stream is persisted anyway, so a failure is mined from what the
     // agent actually said or did instead of a bare exit code.
     let lastText: string | null = null
@@ -699,6 +727,8 @@ export class Runner {
         }
       }
 
+      clearInterval(cancelWatch)
+
       const outcome = await proc.done
       store.append(taskId, {
         type: 'agent.exited',
@@ -729,6 +759,7 @@ export class Runner {
       }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
+      clearInterval(cancelWatch)
     }
   }
 
