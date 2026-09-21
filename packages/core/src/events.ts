@@ -1,5 +1,10 @@
 import * as z from 'zod'
 
+/** Whether an open PR can merge, normalized across forges (GitHub and Forgejo report different vocabularies). */
+export const MERGE_STATUSES = ['mergeable', 'conflicted', 'unknown'] as const
+export const MergeStatus = z.enum(MERGE_STATUSES)
+export type MergeStatus = z.infer<typeof MergeStatus>
+
 export const TASK_STATES = [
   'claimed',
   'worktree_ready',
@@ -181,6 +186,7 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
+  z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),
