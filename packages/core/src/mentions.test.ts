@@ -15,6 +15,7 @@ import type {
 import type { Exec, ExecResult } from './exec.ts'
 import {
   listPrMentions,
+  type MentionProgress,
   mentionsPath,
   parseMentionKind,
   readHandledMentions,
@@ -313,5 +314,64 @@ describe('respondToMention', () => {
           }),
       }),
     ).rejects.toThrow('boom')
+  })
+
+  test('reports live progress with phases, tool use, and usage', async () => {
+    async function* events() {
+      yield { kind: 'tool_use' as const, name: 'bun test', input: {} }
+      yield {
+        kind: 'usage' as const,
+        inputTokens: 100,
+        outputTokens: 50,
+        cachedTokens: 20,
+        costUsd: 0.01,
+      }
+    }
+    const proc = {
+      pid: -1,
+      events: () => events(),
+      done: Promise.resolve({
+        exitCode: 0,
+        ok: true,
+        sessionId: null,
+        summary: 'explain',
+        usage: null,
+        stderr: '',
+      } satisfies AgentOutcome),
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const outPath = join(tmpdir(), `amagi-explain-7-9.md`)
+    writeFileSync(outPath, 'Because the old parser dropped unicode.\n')
+    const driver = new FakeDriver()
+    const progress: MentionProgress[] = []
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '9', user: 'bob', body: 'why did you make these changes' },
+      config: config(),
+      driver,
+      exec: fake((c) => (c.includes('rev-parse') ? fail('') : undefined)).exec,
+      makeHarnessFn: () => ({
+        kind: 'fake',
+        start: () => proc,
+        resume: () => proc,
+        listModels: async () => [],
+      }),
+      onProgress: (p) => progress.push(p),
+    })
+
+    expect(kind).toBe('explain')
+    const phases = progress.map((p) => p.phase)
+    expect(phases).toContain('classifying')
+    expect(phases).toContain('explaining')
+    expect(progress.some((p) => p.tool === 'bun test')).toBe(true)
+    expect(progress.some((p) => p.usage?.inputTokens === 100)).toBe(true)
+    for (const p of progress) {
+      expect(p.phaseMs).toBeGreaterThanOrEqual(0)
+      expect(p.totalMs).toBeGreaterThanOrEqual(p.phaseMs)
+    }
   })
 })
