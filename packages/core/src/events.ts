@@ -36,7 +36,8 @@ export function isTerminal(state: TaskState): boolean {
 /**
  * Any state may fall to a terminal state, so those edges are implicit rather
  * than listed here. Only forward progress is enumerated — except the two
- * parked states, which an operator settles as abandoned rather than resumes.
+ * parked states, which an operator settles as abandoned or, when the work
+ * was already satisfied, as done.
  */
 const FORWARD: Record<TaskState, readonly TaskState[]> = {
   claimed: ['worktree_ready'],
@@ -50,8 +51,8 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   reviewing: ['fixing', 'done'],
   fixing: ['awaiting_answer', 'checks', 'reviewing'],
   done: [],
-  no_pr: ['abandoned'],
-  needs_human: ['abandoned'],
+  no_pr: ['abandoned', 'done'],
+  needs_human: ['abandoned', 'done'],
   abandoned: [],
   cancelled: [],
 }
@@ -60,8 +61,13 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   if (from === to) return false
   // A parked or stopped task is retired by the operator's close action: a
   // stopped run parks as cancelled (worktree preserved), and instant close
-  // then abandons it and deletes the worktree.
+  // then abandons it and deletes the worktree. A no_pr/needs_human task whose
+  // agent left no changes because the work was already done may instead be
+  // marked done.
   if (to === 'abandoned' && (from === 'needs_human' || from === 'no_pr' || from === 'cancelled')) {
+    return true
+  }
+  if (to === 'done' && (from === 'needs_human' || from === 'no_pr')) {
     return true
   }
   if (isTerminal(from)) return false

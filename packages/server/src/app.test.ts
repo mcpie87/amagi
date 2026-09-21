@@ -555,6 +555,35 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     },
   )
 
+  test.each(['no_pr', 'needs_human'] as const)(
+    'marks a %s task done with the reason and closes it on the tracker',
+    async (state) => {
+      parked('bd-1', state)
+      const res = await app.request(`/api/repos/repo1/tasks/bd-1/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'already implemented elsewhere', to: 'done' }),
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: TaskRow }
+      expect(body.task.state).toBe('done')
+      expect(body.task.statusReason).toBe('already implemented elsewhere')
+      expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'already implemented elsewhere' }])
+    },
+  )
+
+  test('rejects marking an in-flight task done', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'nope', to: 'done' }),
+    })
+    expect(res.status).toBe(409)
+    expect(tracker.closed).toHaveLength(0)
+  })
+
   test('instantly closes an in-flight task, stopping the worker and deleting the worktree', async () => {
     const stopped: string[] = []
     app = createApp({
