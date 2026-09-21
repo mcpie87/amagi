@@ -70,12 +70,17 @@ describe('OpencodeTranslator against a recorded transcript', () => {
     const { events, translator } = await replay()
     const usageEvents = events.filter((e) => e.kind === 'usage')
     expect(usageEvents).toEqual([
-      { kind: 'usage', inputTokens: 12067, outputTokens: 68, costUsd: 0 },
-      { kind: 'usage', inputTokens: 118, outputTokens: 67, costUsd: 0 },
-      { kind: 'usage', inputTokens: 198, outputTokens: 54, costUsd: 0 },
-      { kind: 'usage', inputTokens: 279, outputTokens: 29, costUsd: 0 },
+      { kind: 'usage', inputTokens: 12067, outputTokens: 68, cachedTokens: 1792, costUsd: 0 },
+      { kind: 'usage', inputTokens: 118, outputTokens: 67, cachedTokens: 13824, costUsd: 0 },
+      { kind: 'usage', inputTokens: 198, outputTokens: 54, cachedTokens: 13824, costUsd: 0 },
+      { kind: 'usage', inputTokens: 279, outputTokens: 29, cachedTokens: 13824, costUsd: 0 },
     ])
-    expect(translator.usage).toEqual({ inputTokens: 12662, outputTokens: 218, costUsd: 0 })
+    expect(translator.usage).toEqual({
+      inputTokens: 12662,
+      outputTokens: 218,
+      cachedTokens: 43264,
+      costUsd: 0,
+    })
   })
 
   test('the final text is captured as the summary', async () => {
