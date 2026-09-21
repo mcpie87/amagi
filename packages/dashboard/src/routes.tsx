@@ -15,6 +15,7 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  currentUsageFor,
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
@@ -1195,6 +1196,7 @@ function WorkerSlot({
         ? 'starting…'
         : `${agent.role}: ${agent.harness}`
   const modelLabel = taskInfo?.model ?? agent?.model ?? 'unknown'
+  const usage = currentUsageFor(state, taskId)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1217,6 +1219,9 @@ function WorkerSlot({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>agent: {agentLabel}</span>
         <span>model: {modelLabel}</span>
+        <span>
+          ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
+        </span>
         {resource !== undefined && (
           <>
             <span>rss: {fmtBytes(resource.rssBytes)}</span>
