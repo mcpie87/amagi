@@ -1,19 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { AsyncQueue } from '../../async-queue.ts'
 import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
-import { jsonLines } from '../../jsonl.ts'
 import { parseModelLines } from '../../models.ts'
-import { killTree } from '../../process.ts'
-import type {
-  AgentOutcome,
-  AgentProcess,
-  AgentStartOptions,
-  AgentUsage,
-  Harness,
-} from '../types.ts'
-import { harnessEnv } from './env.ts'
+import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
+import { spawnAgent } from './spawn.ts'
 
 /**
  * Enough to implement a task and call `amagi ask`, without handing over the
@@ -217,54 +208,12 @@ export class ClaudeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    let env = { ...harnessEnv(), ...opts.env }
-    if (opts.effort) env = { ...env, CLAUDE_EFFORT: opts.effort }
-
-    const proc = Bun.spawn(argv, {
-      cwd: opts.cwd,
-      env,
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-
-    const queue = new AsyncQueue<AgentEvent>()
     const translator = new ClaudeTranslator()
-    const stderr = new Response(proc.stderr).text()
-
-    const done: Promise<AgentOutcome> = (async () => {
-      try {
-        for await (const raw of jsonLines(proc.stdout)) {
-          for (const event of translator.push(raw)) queue.push(event)
-        }
-      } catch (err) {
-        queue.push({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
-      } finally {
-        queue.close()
-      }
-
-      const exitCode = await proc.exited
-      return {
-        exitCode,
-        ok: translator.ok && exitCode === 0,
-        sessionId: translator.sessionId,
-        summary: translator.summary,
-        usage: translator.usage,
-        stderr: await stderr,
-      }
-    })()
-
-    return {
-      pid: proc.pid,
-      events: () => queue,
-      done,
-      kill: async () => {
-        await killTree(proc.pid)
-      },
-      get model() {
-        return translator.model
-      },
+    return spawnAgent(argv, opts, translator, {
+      // claude reads its effort from the CLAUDE_EFFORT env var, not a flag.
+      env: opts.effort ? { CLAUDE_EFFORT: opts.effort } : {},
+      model: () => translator.model,
       effort: opts.effort ?? this.defaultEffort,
-    }
+    })
   }
 }
