@@ -19,6 +19,7 @@ import {
   Outlet,
   useParams,
 } from '@tanstack/react-router'
+import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
@@ -1311,13 +1312,31 @@ function AgentLog({ events }: { events: AgentStreamEvent[] }) {
 
 const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
 
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+// Raw HTML from the agent is escaped, not rendered, so a prompt-injected tag cannot run.
+const markdown = new Marked({
+  renderer: {
+    html({ text }) {
+      return escapeHtml(text)
+    },
+  },
+})
+
+function Markdown({ text }: { text: string }) {
+  return (
+    <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
+  )
+}
+
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
   if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
   return (
     <div className="mt-6 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-300">Summary</h2>
-      <p className="mt-1 text-zinc-200">{task.statusReason}</p>
+      <Markdown text={task.statusReason} />
     </div>
   )
 }
