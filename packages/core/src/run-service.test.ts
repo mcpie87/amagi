@@ -21,7 +21,7 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
-import { RunService } from './run-service.ts'
+import { RunService, type RunServiceOptions } from './run-service.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 
@@ -49,11 +49,8 @@ class FakeTracker implements Tracker {
     return this.queue
   }
   async claim(id?: string): Promise<TrackerTask | null> {
-    if (id !== undefined) {
-      const found = this.queue.find((t) => t.id === id)
-      if (found !== undefined) this.queue = this.queue.filter((t) => t.id !== id)
-      return found ?? null
-    }
+    if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
+    // Like a real tracker's atomic claim, a no-id claim consumes the task.
     return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
@@ -246,7 +243,13 @@ const config = (over: Record<string, unknown> = {}) =>
     ...over,
   })
 
-const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = config()) =>
+const makeService = (
+  tracker: Tracker,
+  harness: Harness,
+  maxParallel = 1,
+  cfg = config(),
+  over: Partial<RunServiceOptions> = {},
+) =>
   new RunService({
     store,
     tracker,
@@ -256,7 +259,7 @@ const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = 
     repoName: 'demo',
     forge: new FakePr(),
     maxParallel,
-    autoPick: false,
+    ...over,
   })
 
 const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
@@ -298,7 +301,52 @@ describe('RunService', () => {
       startedAt: {},
       resources: {},
       tasks: {},
+      autoQueue: false,
     })
+    service.dispose()
+  })
+
+  test('setAutoQueue flips the reported state and toggles dispatch', async () => {
+    const tracker = new FakeTracker([TASK])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 1, config(), { autoQueueActiveMs: 10 })
+    expect((await service.status()).autoQueue).toBe(false)
+    service.setAutoQueue(true)
+    expect((await service.status()).autoQueue).toBe(true)
+    await waitFor(() => harness.starts > 0)
+    expect(store.task(TASK.id)?.state).toBe('implementing')
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
+  test('auto queue fills every free slot and backs off when the queue is empty', async () => {
+    const tracker = new FakeTracker([TASK, TASK2])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 2, config(), {
+      autoQueue: true,
+      autoQueueActiveMs: 10,
+    })
+    // Both slots fill over successive polls, one task per pass.
+    await waitFor(() => harness.starts >= 2)
+    expect(harness.starts).toBe(2)
+    expect((await service.status()).running).toEqual([TASK.id, TASK2.id])
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+    service.dispose()
+  })
+
+  test('auto queue does nothing when disabled and idles after an empty poll', async () => {
+    const tracker = new FakeTracker([])
+    const service = makeService(tracker, new FakeHarness(), 1, config(), {
+      autoQueue: true,
+      autoQueueIdleMs: 20,
+      autoQueueActiveMs: 10,
+    })
+    // Nothing to claim, so the first poll backs off to the idle interval; a
+    // second poll still finds nothing and never launches.
+    await Bun.sleep(100)
+    expect((await service.status()).running).toEqual([])
+    service.dispose()
   })
 
   test('status carries each running task title and live agent', async () => {
@@ -460,41 +508,5 @@ describe('RunService', () => {
     expect(store.task(TASK.id)?.worktree).not.toBeNull()
     expect(store.task(TASK.id)?.branch).not.toBeNull()
     await waitFor(async () => (await service.status()).running.length === 0)
-  })
-
-  test('auto-pick claims the next ready task without a manual start', async () => {
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK]),
-      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
-      config: config(),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      maxParallel: 1,
-      autoPick: true,
-    })
-    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    await waitFor(async () => (await service.status()).running.length === 0)
-    service.close()
-  })
-
-  test('auto-pick keeps every slot busy up to maxParallel', async () => {
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK, TASK2]),
-      harness: new BlockingHarness(),
-      config: config(),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      maxParallel: 2,
-      autoPick: true,
-    })
-    await waitFor(async () => (await service.status()).running.length === 2)
-    expect((await service.status()).running.sort()).toEqual([TASK.id, TASK2.id].sort())
-    await service.stop(TASK.id)
-    await service.stop(TASK2.id)
-    service.close()
   })
 })

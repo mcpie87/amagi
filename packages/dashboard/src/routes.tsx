@@ -273,6 +273,16 @@ type EligibleEpic = {
   closedChildren: number
 }
 
+/** Preset close reasons offered for an epic; '__other' falls back to free text. */
+const EPIC_CLOSE_REASONS = [
+  'completed',
+  'superseded / duplicate',
+  'abandoned',
+  'merged into another epic',
+  'out of scope',
+  '__other',
+]
+
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
 const columnHeader: Record<Issue['status'], string> = {
@@ -765,20 +775,24 @@ function CloseEpicButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(EPIC_CLOSE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
 
-  const close = async () => {
-    const reason = window.prompt(`Reason for closing ${epic.title}`)
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/epics/close-eligible`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim() }),
+        body: JSON.stringify({ reason: finalReason }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-      else onClosed()
+      else {
+        onClosed()
+        setOpen(false)
+      }
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -786,17 +800,89 @@ function CloseEpicButton({
     }
   }
 
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div className="ml-auto">
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => setOpen(true)}
         className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
       >
         Close
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Close {epic.id}</h2>
+            <div className="space-y-3">
+              <p className="text-sm text-fg-muted">{epic.title}</p>
+              <div>
+                <label className={label} htmlFor="epic-close-reason">
+                  Reason for closing
+                </label>
+                <select
+                  id="epic-close-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {EPIC_CLOSE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="epic-close-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="epic-close-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Close
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -1242,6 +1328,66 @@ function WorkerSlot({
  * strip sums RSS/CPU/process count over the live agent trees so the operator
  * can see which runner is eating the machine.
  */
+function AutoQueueToggle() {
+  const { status } = useRunner()
+  const { repos, selected } = useDashboard()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fromStatus = status?.autoQueue ?? false
+  const [on, setOn] = useState(fromStatus)
+  useEffect(() => setOn(fromStatus), [fromStatus])
+  // The toggle config lives with the repo the runner serves; address that repo
+  // so it live-applies even when another repo is selected in the dashboard.
+  const runnerRepo = repos?.find((r) => r.name === status?.name)?.key ?? selected
+
+  const toggle = async () => {
+    if (runnerRepo === null || busy) return
+    const next = !on
+    setBusy(true)
+    setError(null)
+    setOn(next)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${runnerRepo}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ autoQueue: next }),
+      })
+      if (!res.ok) {
+        setOn(!next)
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setOn(!next)
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {error !== null && <span className="text-sm text-red-400">{error}</span>}
+      <button
+        type="button"
+        disabled={busy || runnerRepo === null}
+        onClick={() => void toggle()}
+        title={
+          on
+            ? 'free runner slots get filled automatically as tasks become claimable'
+            : 'dispatch is manual: click Run next (or retry) to start a task'
+        }
+        className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
+          on
+            ? 'bg-emerald-600 text-zinc-950 hover:bg-emerald-500'
+            : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+        }`}
+      >
+        Auto queue: {on ? 'on' : 'off'}
+      </button>
+    </div>
+  )
+}
+
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
@@ -1267,9 +1413,12 @@ function WorkersPanel() {
   )
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        Workers ({running.length}/{status.capacity})
-      </h2>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Workers ({running.length}/{status.capacity})
+        </h2>
+        <AutoQueueToggle />
+      </div>
       <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-4 py-2 text-xs text-fg-muted">
         <span className="font-medium text-fg">{status.name}</span>
         <span>rss: {fmtBytes(total.rssBytes)}</span>
