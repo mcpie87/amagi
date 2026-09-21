@@ -28,6 +28,9 @@ export type RunnerStatus = {
   workers?: WorkerActivity[]
 }
 
+/** Lifecycle of a background worker: active = ticking, idle = waiting on the first tick, off = stopped. */
+export type WorkerStatus = 'active' | 'idle' | 'off'
+
 /** One background worker's latest tick, surfaced in the dashboard Workers section. */
 export type WorkerActivity = {
   /** Repo key the worker is bound to. */
@@ -39,8 +42,19 @@ export type WorkerActivity = {
   error: string | null
   /** Counters reported by the worker, rendered as label/value pairs in the dashboard. */
   counters: WorkerCounter[]
-  /** Human summary of the last tick for workers without counters. */
+  /** Human summary of the last tick: phase, what was scanned and dispatched/found. */
   detail?: string | null
+  /** Cumulative completed ticks since the watcher started. */
+  runs: number
+  /** Completed ticks that ended ok. */
+  successes: number
+  /** Completed ticks that failed. */
+  failures: number
+  /** Epoch ms of the next scheduled tick; 0 when the watcher is stopped. */
+  nextRunAt: number
+  /** Tick cadence in ms. */
+  intervalMs: number
+  status: WorkerStatus
 }
 
 /** One named counter a worker reports (e.g. scanned, responded, resolved). */

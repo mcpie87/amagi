@@ -56,6 +56,8 @@ export function startPrConflictWatcher({
   let scanned = 0
   let conflicting = 0
   let resolved = 0
+  let runs = 0
+  let failures = 0
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -68,10 +70,29 @@ export function startPrConflictWatcher({
     ok: true,
     error: null,
     counters: counters(),
+    detail: 'waiting for the first scan',
+    runs: 0,
+    successes: 0,
+    failures: 0,
+    nextRunAt: 0,
+    intervalMs,
+    status: 'idle',
   }
 
   async function tick(): Promise<void> {
-    const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
+    runs++
+    const next: WorkerActivity = {
+      ...activity,
+      lastRunAt: Date.now(),
+      ok: true,
+      error: null,
+      runs,
+      successes: runs - failures,
+      failures,
+      nextRunAt: Date.now() + intervalMs,
+      intervalMs,
+      status: 'active',
+    }
     try {
       const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
       scanned = prs.length
@@ -80,6 +101,7 @@ export function startPrConflictWatcher({
       const nextState: Record<string, { headOid: string }> = {}
       const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
       conflicting = conflicts.length
+      let resolvedNow = 0
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
@@ -99,15 +121,21 @@ export function startPrConflictWatcher({
         nextState[key] = { headOid }
         if (result.ok) {
           resolved++
+          resolvedNow++
         } else {
           console.warn(`pr conflict #${pr.number}: ${result.message}`)
         }
       }
       // Only PRs that are still conflicting stay tracked; the rest drop out.
       saveConflictWatch(statePath, nextState)
+      next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}`
     } catch (err) {
+      failures++
       next.ok = false
       next.error = errMsg(err)
+      next.failures = failures
+      next.successes = runs - failures
+      next.detail = 'scan failed'
       console.warn(`pr conflict watch: ${next.error}`)
     }
     next.counters = counters()
@@ -121,6 +149,7 @@ export function startPrConflictWatcher({
       stopped = true
       if (timer !== null) clearTimeout(timer)
       timer = null
+      activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,
   }

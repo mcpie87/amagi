@@ -127,6 +127,11 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(counter(w, 'resolved')).toBe(1)
   expect(started).toBe(1)
   expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(activity.runs).toBeGreaterThanOrEqual(1)
+  expect(activity.successes).toBe(activity.runs)
+  expect(activity.failures).toBe(0)
+  expect(activity.status).toBe('active')
+  expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
