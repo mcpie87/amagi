@@ -1,5 +1,4 @@
-import { type Config, HarnessConfig } from '@amagi/core'
-import { byUsage, type Usage } from './picker-usage.ts'
+import { type Config, HARDCODED_EFFORTS, HarnessConfig } from '@amagi/core'
 
 const KINDS = ['claude', 'codex', 'opencode'] as const
 
@@ -16,16 +15,12 @@ export type RunSelection = {
 }
 
 /** Harness choices for the picker: named definitions, or the three known kinds. */
-export function harnessChoices(
-  config: Config,
-  usage: Usage = {},
-): SelectOption<Config['harness']['implement']>[] {
+export function harnessChoices(config: Config): SelectOption<Config['harness']['implement']>[] {
   const defs = Object.entries(config.harness.definitions)
-  const base =
-    defs.length > 0
-      ? defs.map(([name, cfg]) => ({ label: name, value: cfg }))
-      : KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
-  return [...base].sort((a, b) => (usage[b.value.kind] ?? 0) - (usage[a.value.kind] ?? 0))
+  if (defs.length > 0) {
+    return defs.map(([name, cfg]) => ({ label: name, value: cfg }))
+  }
+  return KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
 }
 
 const withModel = (
@@ -38,41 +33,18 @@ const withEffort = (
   effort: string | undefined,
 ): Config['harness']['implement'] => (effort === undefined ? cfg : { ...cfg, effort })
 
-/** Builds the "pick one of N or a custom value" prompt shared by model and effort. */
-async function pickOne(
-  picker: Picker,
-  title: string,
-  customLabel: string,
-  value: string | undefined,
-  options: readonly string[],
-  usage: Usage = {},
-): Promise<string | undefined> {
-  const list: SelectOption<string | null>[] = []
-  if (value !== undefined) list.push({ label: `default (${value})`, value })
-  for (const o of options) if (o !== value) list.push({ label: o, value: o })
-  list.push({ label: customLabel, value: '' })
-
-  const picked = await picker.select(title, byUsage(usage, list))
-  if (picked === null) return value
-  if (picked === '') return (await picker.input(`${title}: `)) ?? value
-  return picked
-}
-
 /**
  * Resolves the harness, model and effort for a run. `--harness`/`--model`/
  * `--effort` win and never prompt; without flags a null picker (no TTY) falls
  * back to the config defaults; with a picker the operator chooses harness,
- * then model and effort from the harness's own lists. `usage` ranks the
- * harness and model options by how often each was used in past runs, so the
- * most common ones sit on top.
+ * then model from a cached model list, then effort from the hardcoded
+ * per-kind levels.
  */
 export async function pickRunSelection(
   config: Config,
   flags: { harness?: string; model?: string; effort?: string },
   picker: Picker | null,
   listModels: (cfg: Config['harness']['implement']) => Promise<string[]>,
-  listEfforts: (cfg: Config['harness']['implement'], model?: string) => Promise<string[]>,
-  usage: Usage = {},
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
     const named = config.harness.definitions[flags.harness]
@@ -90,14 +62,14 @@ export async function pickRunSelection(
     }
   }
 
-  const chosen = await picker.select('Which harness?', harnessChoices(config, usage))
+  const chosen = await picker.select('Which harness?', harnessChoices(config))
   if (chosen === null) {
     return {
       harness: withEffort(withModel(config.harness.implement, flags.model), flags.effort),
       interactive: true,
     }
   }
-  if (flags.model !== undefined) {
+  if (flags.model !== undefined || flags.effort !== undefined) {
     return {
       harness: withEffort(withModel(chosen, flags.model), flags.effort),
       interactive: true,
@@ -105,22 +77,39 @@ export async function pickRunSelection(
   }
 
   const defaultModel = chosen.model
-  const model = await pickOne(
-    picker,
-    'Which model?',
-    '(custom model)',
-    defaultModel,
-    await listModels(chosen),
-    usage,
-  )
+  const options: SelectOption<string | null>[] = []
+  if (defaultModel !== undefined) {
+    options.push({ label: `default (${defaultModel})`, value: defaultModel })
+  }
+  for (const m of await listModels(chosen)) {
+    if (m !== defaultModel) options.push({ label: m, value: m })
+  }
+  options.push({ label: '(custom model)', value: '' })
 
-  const picked = withModel(chosen, model)
-  const efforts = await listEfforts(picked, model)
-  const effort =
-    flags.effort !== undefined
-      ? flags.effort
-      : picked.effort === undefined && efforts.length === 0
-        ? undefined
-        : await pickOne(picker, 'Which effort?', '(custom effort)', picked.effort, efforts)
-  return { harness: withEffort(picked, effort), interactive: true }
+  const picked = await picker.select('Which model?', options)
+  let model: string | undefined
+  if (picked === null) model = defaultModel
+  else if (picked === '') model = (await picker.input('Model: ')) ?? defaultModel
+  else model = picked
+
+  const chosenWithModel = withModel(chosen, model)
+  const efforts = HARDCODED_EFFORTS[chosen.kind]
+  if (efforts === undefined) {
+    return { harness: chosenWithModel, interactive: true }
+  }
+
+  const defaultEffort = chosen.effort
+  const effortOptions: SelectOption<string | null>[] = []
+  if (defaultEffort !== undefined) {
+    effortOptions.push({ label: `default (${defaultEffort})`, value: defaultEffort })
+  }
+  for (const e of efforts) {
+    if (e !== defaultEffort) effortOptions.push({ label: e, value: e })
+  }
+
+  const pickedEffort = await picker.select('Which effort?', effortOptions)
+  let effort: string | undefined
+  if (pickedEffort === null) effort = defaultEffort
+  else effort = pickedEffort
+  return { harness: withEffort(chosenWithModel, effort), interactive: true }
 }

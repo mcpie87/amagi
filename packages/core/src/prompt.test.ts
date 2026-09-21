@@ -35,4 +35,10 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('### How to use')
     expect(prompt).toContain('description in the issue tracker')
   })
+
+  test('tells the agent not to pipe check or lint output through head/tail', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('Never pipe check or lint output through head/tail')
+    expect(prompt).toContain('Redirect to a file instead')
+  })
 })

@@ -1,4 +1,4 @@
-import { TaskState } from '@amagi/core'
+import { MAX_PARALLEL, TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -67,11 +67,36 @@ export type RunBody = z.infer<typeof RunBody>
 
 export const TaskIdParam = z.object({ id: z.string().min(1) })
 
+/** Operator-supplied reason for closing a needs_human/no_pr task. */
+export const CloseTaskBody = z.object({
+  reason: z.string().trim().min(1).max(1000),
+  /** Retire a parked no_pr/needs_human task as done instead of abandoned. */
+  to: z.enum(['done', 'abandoned']).default('abandoned'),
+})
+export type CloseTaskBody = z.infer<typeof CloseTaskBody>
+
+/** Operator-supplied reason for closing eligible epics. */
+export const EpicCloseBody = z.object({
+  reason: z.string().trim().min(1).max(1000),
+})
+export type EpicCloseBody = z.infer<typeof EpicCloseBody>
+
 export const AnswerBody = z.object({
   answer: z.string().min(1),
   via: z.enum(['web', 'cli', 'gate']).default('web'),
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
+
+/** A message from the operator to the worker behind a parked task. */
+export const ChatBody = z.object({
+  message: z.string().trim().min(1).max(4000),
+})
+export type ChatBody = z.infer<typeof ChatBody>
+
+export const SettingsBody = z.object({
+  maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
+})
+export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

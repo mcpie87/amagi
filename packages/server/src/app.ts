@@ -1,5 +1,7 @@
 import {
   CAPABILITY_WORDS,
+  ChatService,
+  classifyDifficulty,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -7,15 +9,19 @@ import {
   type RegistryEntry,
   Runner,
   type RunServiceApi,
+  removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
+  type WorkerActivity,
   type Workspace,
   type Workspaces,
+  writeConfig,
 } from '@amagi/core'
+import type { Harness } from '@amagi/core/drivers/types'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -25,6 +31,9 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  ChatBody,
+  CloseTaskBody,
+  EpicCloseBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -34,6 +43,7 @@ import {
   RepoRegisterBody,
   RepoTaskIdParam,
   RunBody,
+  SettingsBody,
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
@@ -45,6 +55,12 @@ export type ServerDeps = {
   notify?: Notifier[]
   /** When present, the launch/stop runner endpoints are live. */
   runner?: RunServiceApi
+  /** The repo key the runner is bound to, so settings apply live only to it. */
+  runnerRepo?: string
+  /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
+  workers?: () => WorkerActivity[]
+  /** Overridable so tests stub the harness a workspace's chat uses. */
+  chatHarnessFor?: (ws: Workspace) => Harness
 }
 
 /**
@@ -148,7 +164,25 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
+export function createApp({
+  workspaces,
+  notify = [],
+  runner,
+  runnerRepo,
+  workers,
+  chatHarnessFor,
+}: ServerDeps) {
+  // One ChatService per workspace, so the in-flight guard survives requests.
+  const chats = new Map<string, ChatService>()
+  const chatFor = (ws: Workspace): ChatService => {
+    let chat = chats.get(ws.key)
+    if (chat === undefined) {
+      const harness = chatHarnessFor?.(ws) ?? makeHarness(ws.config.harness.implement)
+      chat = new ChatService({ store: ws.store, harness, config: ws.config })
+      chats.set(ws.key, chat)
+    }
+    return chat
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -210,7 +244,14 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
         const cap = capabilityError(ws.tracker, 'create')
         if (cap !== null) return c.json({ error: cap }, 501)
         try {
-          const created: TrackerTask = await ws.tracker.createTask(c.req.valid('json'))
+          const body = c.req.valid('json')
+          const input = ws.config.difficulty.enabled
+            ? {
+                ...body,
+                difficulty: await classifyDifficulty(body.title, body.description, ws.config),
+              }
+            : body
+          const created: TrackerTask = await ws.tracker.createTask(input)
           const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
           return c.json(issue ?? created, 201)
         } catch (err) {
@@ -292,6 +333,30 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       return c.json(await ws.listIssues())
     })
 
+    .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.eligibleEpics === undefined) {
+        return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
+      }
+      return c.json(await ws.eligibleEpics())
+    })
+
+    .post(
+      '/api/repos/:repo/epics/close-eligible',
+      valid('param', RepoParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (ws.closeEligibleEpics === undefined) {
+          return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
+        }
+        return c.json(await ws.closeEligibleEpics(reason))
+      },
+    )
+
     .get(
       '/api/repos/:repo/tasks',
       valid('param', RepoParam),
@@ -339,10 +404,120 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       return c.json({ task: ws.store.task(id) })
     })
 
-    .get('/api/runner', (c) => {
+    .post(
+      '/api/repos/:repo/tasks/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', CloseTaskBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason, to } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        // Instant close retires any in-flight or parked task; only a task
+        // already settled (done/abandoned) has nothing left to close.
+        if (
+          isTerminal(task.state) &&
+          task.state !== 'needs_human' &&
+          task.state !== 'no_pr' &&
+          task.state !== 'cancelled'
+        ) {
+          return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
+        }
+        // Only a parked no_pr/needs_human task can be marked done: the agent
+        // left no changes because the work was already satisfied.
+        if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
+          return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
+        }
+        // Shut the worker down first: stop() kills the owned agent process and
+        // parks a live run in cancelled, releasing the tracker claim, so the
+        // close below retires it without racing the run. A task not running on
+        // this server's runner (CLI run, another server) is simply not stopped.
+        if (runner !== undefined) {
+          try {
+            await runner.stop(id)
+          } catch (err) {
+            console.warn(`stop on close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        const afterStop = ws.store.task(id)
+        ws.store.append(id, {
+          type: 'task.state',
+          from: afterStop?.state ?? task.state,
+          to,
+          reason,
+        })
+        // Best effort like reconcile: the store is authoritative, so a git or
+        // tracker hiccup logs the failure instead of losing the operator's close.
+        if (afterStop !== null && afterStop.worktree !== null) {
+          const { worktree, branch } = afterStop
+          try {
+            await removeWorktree(ws.store, id, {
+              repoRoot: ws.root,
+              path: worktree,
+              branch: branch ?? null,
+            })
+          } catch (err) {
+            console.warn(
+              `worktree removal on close ${id}: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        }
+        try {
+          await ws.tracker.close(id, reason)
+        } catch (err) {
+          console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        return c.json({ task: ws.store.task(id) })
+      },
+    )
+
+    .post(
+      '/api/repos/:repo/tasks/:id/chat',
+      valid('param', RepoTaskIdParam),
+      valid('json', ChatBody),
+      (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { message } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const result = chatFor(ws).send(id, message)
+        if (!result.ok) return c.json({ error: result.error }, result.status)
+        // The answer streams back through the repo event stream like any agent
+        // run, so the request returns before the run finishes.
+        return c.json({ taskId: id }, 202)
+      },
+    )
+
+    .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      return c.json(runner.status())
+      const status = await runner.status()
+      if (workers === undefined) return c.json(status)
+      return c.json({ ...status, workers: workers() })
     })
+
+    .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      return c.json({ maxParallel: ws.config.loop.maxParallel })
+    })
+
+    .patch(
+      '/api/repos/:repo/settings',
+      valid('param', RepoParam),
+      valid('json', SettingsBody),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const { maxParallel } = c.req.valid('json')
+        // Persist first so a restart keeps the value, then live-apply: the
+        // cached workspace config and, when this repo owns the runner, its
+        // capacity. In-flight runs are untouched — capacity gates new launches.
+        writeConfig(ws.root, { loop: { maxParallel } })
+        ws.config.loop.maxParallel = maxParallel
+        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        return c.json({ maxParallel })
+      },
+    )
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)

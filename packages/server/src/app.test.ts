@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdirSync } from 'node:fs'
 import type {
+  AgentEvent,
+  AgentOutcome,
+  AgentProcess,
+  AgentStartOptions,
   BeadsIssue,
   CreateTrackerTask,
+  EpicCloseEligible,
+  EpicCloseResult,
   GateRef,
+  Harness,
   Question,
   QuestionRow,
   RunServiceApi,
@@ -14,6 +22,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
+import { AsyncQueue, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -32,6 +41,7 @@ class FakeGateTracker implements Tracker {
   readonly opened: Question[] = []
   readonly resolved: string[] = []
   readonly released: string[] = []
+  readonly closed: { id: string; reason: string | undefined }[] = []
   releaseError: Error | null = null
 
   async ready(): Promise<TrackerTask[]> {
@@ -58,7 +68,9 @@ class FakeGateTracker implements Tracker {
     this.released.push(id)
     if (this.releaseError !== null) throw this.releaseError
   }
-  async close(): Promise<void> {}
+  async close(id: string, reason?: string): Promise<void> {
+    this.closed.push({ id, reason })
+  }
   async openGate(_id: string, question: Question): Promise<GateRef> {
     this.opened.push(question)
     return { id: 'gate-7', advisory: false }
@@ -217,7 +229,7 @@ class FakeIssueTracker implements Tracker {
   }
   async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
     this.created.push(input)
-    const blocker = (id: string): TrackerTask => ({
+    const blocker = (id: string): TrackerTask & { labels: string[] } => ({
       id,
       title: id,
       description: '',
@@ -225,6 +237,7 @@ class FakeIssueTracker implements Tracker {
       priority: null,
       type: null,
       url: null,
+      labels: [],
     })
     return this.seed({
       title: input.title,
@@ -256,6 +269,7 @@ class FakeIssueTracker implements Tracker {
                 priority: null,
                 type: null,
                 url: null,
+                labels: [],
               })),
               ...issue.dependencies.filter((d) => !dependencies.remove.includes(d.id)),
             ],
@@ -347,6 +361,7 @@ describe('issue mutations', () => {
           priority: null,
           type: null,
           url: null,
+          labels: [],
         },
       ],
     })
@@ -410,6 +425,91 @@ describe('issue mutations', () => {
     app = issueApp(tracker)
     const res = await app.request('/api/repos/repo1/issues/nope')
     expect(res.status).toBe(404)
+  })
+})
+
+class FakeEpicTracker extends FakeGateTracker {
+  readonly eligible = new Map<string, EpicCloseEligible>()
+  readonly closedReasons: { id: string; reason: string }[] = []
+  private epicSeq = 0
+
+  seedEligible(partial: Partial<EpicCloseEligible>): EpicCloseEligible {
+    const epic: EpicCloseEligible = {
+      id: `bd-${this.epicSeq++}`,
+      title: 'Eligible epic',
+      status: 'open',
+      totalChildren: 7,
+      closedChildren: 7,
+      ...partial,
+    }
+    this.eligible.set(epic.id, epic)
+    return epic
+  }
+
+  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+    return [...this.eligible.values()]
+  }
+
+  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+    const closed = [...this.eligible.keys()]
+    this.eligible.clear()
+    this.closedReasons.push({ id: closed.join(','), reason })
+    return { closed, reason }
+  }
+}
+
+describe('epic close-eligible endpoints', () => {
+  const post = (reason: string) =>
+    app.request('/api/repos/repo1/epics/close-eligible', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+
+  test('GET reports when epic closure is unavailable (non-beads tracker)', async () => {
+    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/epics/close-eligible')
+    expect(res.status).toBe(501)
+  })
+
+  test('GET previews the eligible epics', async () => {
+    const tracker = new FakeEpicTracker()
+    tracker.seedEligible({ id: 'bd-1', title: 'M4', totalChildren: 7, closedChildren: 7 })
+    tracker.seedEligible({ id: 'bd-2', title: 'M6', totalChildren: 5, closedChildren: 2 })
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/epics/close-eligible')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as EpicCloseEligible[]
+    expect(body.map((e) => e.id)).toEqual(['bd-1', 'bd-2'])
+    expect(body[0]).toMatchObject({ title: 'M4', totalChildren: 7, closedChildren: 7 })
+  })
+
+  test('POST closes with the reason and reports the closed epics', async () => {
+    const tracker = new FakeEpicTracker()
+    tracker.seedEligible({ id: 'bd-1' })
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await post('All children completed')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as EpicCloseResult
+    expect(body).toEqual({ closed: ['bd-1'], reason: 'All children completed' })
+    expect(tracker.closedReasons).toEqual([{ id: 'bd-1', reason: 'All children completed' }])
+  })
+
+  test('POST rejects a blank reason', async () => {
+    const tracker = new FakeEpicTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await post('   ')).status).toBe(400)
+    expect(tracker.closedReasons).toHaveLength(0)
+  })
+
+  test('POST is 501 on a tracker without epic closure', async () => {
+    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await post('x')).status).toBe(501)
   })
 })
 
@@ -505,11 +605,313 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/repos/:repo/tasks/:id/close', () => {
+  let tracker: FakeGateTracker
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const parked = (id: string, state: 'needs_human' | 'no_pr') => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'task.state', from: 'implementing', to: state, reason: 'parked' })
+  }
+  const close = (id: string, reason: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/close`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+
+  test('abandons a needs_human task with the reason and closes it on the tracker', async () => {
+    parked('bd-1', 'needs_human')
+    const res = await close('bd-1', 'operator says done')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('abandoned')
+    expect(body.task.statusReason).toBe('operator says done')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'operator says done' }])
+  })
+
+  test.each(['no_pr', 'needs_human'] as const)(
+    'abandons a %s task recording the reason',
+    async (state) => {
+      parked('bd-1', state)
+      const res = await close('bd-1', 'not needed')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: TaskRow }
+      expect(body.task.state).toBe('abandoned')
+      expect(body.task.statusReason).toBe('not needed')
+    },
+  )
+
+  test.each(['no_pr', 'needs_human'] as const)(
+    'marks a %s task done with the reason and closes it on the tracker',
+    async (state) => {
+      parked('bd-1', state)
+      const res = await app.request(`/api/repos/repo1/tasks/bd-1/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'already implemented elsewhere', to: 'done' }),
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: TaskRow }
+      expect(body.task.state).toBe('done')
+      expect(body.task.statusReason).toBe('already implemented elsewhere')
+      expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'already implemented elsewhere' }])
+    },
+  )
+
+  test('rejects marking an in-flight task done', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'nope', to: 'done' }),
+    })
+    expect(res.status).toBe(409)
+    expect(tracker.closed).toHaveLength(0)
+  })
+
+  test('instantly closes an in-flight task, stopping the worker and deleting the worktree', async () => {
+    const stopped: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: ['bd-1'],
+          resources: {},
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async (id) => {
+          stopped.push(id)
+          // Mirror the real stop: a live run parks in cancelled before close.
+          store.append(id, { type: 'task.state', from: 'implementing', to: 'cancelled' })
+          return { ok: true, taskId: id }
+        },
+        setMaxParallel: () => {},
+      },
+    })
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt/bd-1', branch: 'amagi/bd-1-x' })
+    // The fake workspace root does not exist; give git a valid cwd to run in.
+    const root = ws.workspaces.get('repo1')?.root
+    if (root) mkdirSync(root, { recursive: true })
+
+    const res = await close('bd-1', 'kill it')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(stopped).toEqual(['bd-1'])
+    expect(body.task.state).toBe('abandoned')
+    // The recorded worktree is dropped from the projection.
+    expect(body.task.worktree).toBeNull()
+    expect(body.task.branch).toBeNull()
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
+  test('closing an in-flight task does not require the runner service', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await close('bd-1', 'kill it')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await close('nope', 'x')
+    expect(res.status).toBe(404)
+  })
+
+  test('409s when the task is already settled', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'done' })
+    const res = await close('bd-1', 'no longer wanted')
+    expect(res.status).toBe(409)
+
+    store.append('bd-2', {
+      type: 'task.claimed',
+      title: 'withdrawn',
+      tracker: 'beads',
+    })
+    store.append('bd-2', { type: 'task.state', from: null, to: 'abandoned' })
+    expect((await close('bd-2', 'already gone')).status).toBe(409)
+  })
+
+  test('rejects a missing or blank reason', async () => {
+    parked('bd-1', 'needs_human')
+    const missing = await app.request('/api/repos/repo1/tasks/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(missing.status).toBe(400)
+    expect(tracker.closed).toHaveLength(0)
+
+    const blank = await close('bd-1', '   ')
+    expect(blank.status).toBe(400)
+    expect(tracker.closed).toHaveLength(0)
+  })
+
+  test('a tracker failure still records the abandonment', async () => {
+    tracker.close = async () => {
+      throw new Error('bd down')
+    }
+    parked('bd-1', 'no_pr')
+    const res = await close('bd-1', 'wont run')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('abandoned')
+    expect(body.task.statusReason).toBe('wont run')
+  })
+})
+
+describe('POST /api/repos/:repo/tasks/:id/chat', () => {
+  class FakeChatHarness implements Harness {
+    readonly kind = 'fake'
+    readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+    start(opts: AgentStartOptions): AgentProcess {
+      return this.run(null, opts)
+    }
+    resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
+      return this.run(sessionId, opts)
+    }
+    async listModels(): Promise<string[]> {
+      return []
+    }
+    async listEfforts(): Promise<string[]> {
+      return []
+    }
+    private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
+      this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
+      const queue = new AsyncQueue<AgentEvent>()
+      queue.push({ kind: 'text', text: 'the answer' })
+      queue.close()
+      const outcome: AgentOutcome = {
+        exitCode: 0,
+        ok: true,
+        sessionId: 'sess-1',
+        summary: 'the answer',
+        usage: null,
+        stderr: '',
+      }
+      return {
+        pid: -1,
+        events: () => queue,
+        done: Promise.resolve(outcome),
+        kill: async () => {},
+        model: null,
+        effort: null,
+      }
+    }
+  }
+
+  let harness: FakeChatHarness
+
+  beforeEach(() => {
+    harness = new FakeChatHarness()
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces, chatHarnessFor: () => harness })
+  })
+
+  const parked = (id: string) => {
+    store.append(id, { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'agent.exited', role: 'implement', exitCode: 0, sessionId: 'sess-1' })
+    store.append(id, {
+      type: 'task.state',
+      from: 'implementing',
+      to: 'no_pr',
+      reason: 'no changes',
+    })
+  }
+  const chat = (id: string, message: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message }),
+    })
+
+  test('accepts a message and resumes the recorded session on the worktree', async () => {
+    parked('bd-1')
+    const res = await chat('bd-1', 'why no pr?')
+    expect(res.status).toBe(202)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(harness.calls).toEqual([{ resumeFrom: 'sess-1', prompt: 'why no pr?', cwd: '/tmp/wt' }])
+    const events = store.events({ taskId: 'bd-1' })
+    expect(events.some((e) => e.type === 'chat.message' && e.text === 'why no pr?')).toBe(true)
+  })
+
+  test('rejects a missing or blank message', async () => {
+    parked('bd-1')
+    expect((await chat('bd-1', '')).status).toBe(400)
+    expect((await chat('bd-1', '   ')).status).toBe(400)
+    const empty = await app.request('/api/repos/repo1/tasks/bd-1/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(empty.status).toBe(400)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await chat('nope', 'hi')
+    expect(res.status).toBe(404)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task is not a parked no_pr task', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task has no summary to chat about', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', {
+      type: 'agent.exited',
+      role: 'implement',
+      exitCode: 0,
+      sessionId: 'sess-1',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'no_pr' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+})
+
 describe('runner endpoints', () => {
   const stubRunner = (over: Partial<RunServiceApi> = {}): RunServiceApi => ({
-    status: () => ({ available: true, capacity: 1, running: [] }),
+    status: async () => ({
+      name: 'repo1',
+      available: true,
+      capacity: 1,
+      running: [],
+      resources: {},
+    }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
+    setMaxParallel: () => {},
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -525,16 +927,60 @@ describe('runner endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET /api/runner reports availability and capacity', async () => {
+  test('GET /api/runner reports availability, capacity and per-task resources', async () => {
     app = createApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
-        status: () => ({ available: false, capacity: 1, running: ['bd-1'] }),
+        status: async () => ({
+          name: 'repo1',
+          available: false,
+          capacity: 1,
+          running: ['bd-1'],
+          resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+        }),
       }),
     })
     const res = await app.request('/api/runner')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ available: false, capacity: 1, running: ['bd-1'] })
+    expect(await res.json()).toEqual({
+      name: 'repo1',
+      available: false,
+      capacity: 1,
+      running: ['bd-1'],
+      resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+    })
+  })
+
+  test('GET /api/runner merges background worker activity when present', async () => {
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner(),
+      workers: () => [
+        {
+          repo: 'repo1',
+          name: 'mention-watcher',
+          lastRunAt: 1720000000000,
+          ok: true,
+          error: null,
+          prsScanned: 2,
+          mentionsResponded: 1,
+        },
+      ],
+    })
+    const res = await app.request('/api/runner')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { workers?: unknown }
+    expect(body.workers).toEqual([
+      {
+        repo: 'repo1',
+        name: 'mention-watcher',
+        lastRunAt: 1720000000000,
+        ok: true,
+        error: null,
+        prsScanned: 2,
+        mentionsResponded: 1,
+      },
+    ])
   })
 
   test('runner endpoints are 501 without a runner service', async () => {
@@ -608,6 +1054,74 @@ describe('runner endpoints', () => {
     expect(stopped).toEqual(['bd-1'])
 
     expect((await post('/api/runs/bd-9/stop')).status).toBe(404)
+  })
+})
+
+describe('repo settings endpoints', () => {
+  const patch = (repo: string, body: string) =>
+    app.request(`/api/repos/${repo}/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1', 'repo2'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('GET returns the current worker count', async () => {
+    const res = await app.request('/api/repos/repo1/settings')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ maxParallel: 1 })
+  })
+
+  test('PATCH persists, updates the workspace config, and is re-readable', async () => {
+    const res = await patch('repo1', '{"maxParallel":4}')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ maxParallel: 4 })
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
+      maxParallel: 4,
+    })
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
+  })
+
+  test('PATCH rejects worker counts outside the range', async () => {
+    for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
+      const res = await patch('repo1', JSON.stringify({ maxParallel }))
+      expect(res.status).toBe(400)
+    }
+  })
+
+  test('PATCH live-applies the runner only for the repo it serves', async () => {
+    const applied: number[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          resources: {},
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: (n) => applied.push(n),
+      },
+      runnerRepo: 'repo1',
+    })
+    expect((await patch('repo1', '{"maxParallel":3}')).status).toBe(200)
+    expect(applied).toEqual([3])
+    expect((await patch('repo2', '{"maxParallel":2}')).status).toBe(200)
+    expect(applied).toEqual([3])
+  })
+
+  test('404s for an unknown repo', async () => {
+    expect((await app.request('/api/repos/nope/settings')).status).toBe(404)
   })
 })
 
