@@ -35,11 +35,14 @@ export type WorkerActivity = {
   lastRunAt: number
   ok: boolean
   error: string | null
-  prsScanned: number
-  mentionsResponded: number
-  /** Human summary of the last tick for workers without PR/mention counters. */
+  /** Counters reported by the worker, rendered as label/value pairs in the dashboard. */
+  counters: WorkerCounter[]
+  /** Human summary of the last tick for workers without counters. */
   detail?: string | null
 }
+
+/** One named counter a worker reports (e.g. scanned, responded, resolved). */
+export type WorkerCounter = { label: string; value: number }
 
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }

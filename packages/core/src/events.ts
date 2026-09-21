@@ -71,7 +71,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'chat'])
 export type AgentRole = z.infer<typeof AgentRole>
 
 /** One harness dialect normalized into a single shape. */
