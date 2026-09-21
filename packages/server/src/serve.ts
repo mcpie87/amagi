@@ -11,6 +11,7 @@ import type {
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
 import { startMentionWatcher } from './mention-watcher.ts'
+import { startPrConflictWatcher } from './pr-conflict-watcher.ts'
 import { startPrPoller } from './pr-poller.ts'
 import { startStallWatcher } from './stall-watcher.ts'
 
@@ -36,6 +37,7 @@ export type ServeOptions = {
   forgeCwd?: string
   prPollIntervalMs?: number
   mentionWatchIntervalMs?: number
+  prConflictWatchIntervalMs?: number
   stallWatchIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
@@ -76,6 +78,7 @@ export function serve({
   forgeCwd,
   prPollIntervalMs,
   mentionWatchIntervalMs,
+  prConflictWatchIntervalMs,
   stallWatchIntervalMs,
   staticDir,
   runner,
@@ -118,6 +121,18 @@ export function serve({
           tracker,
           intervalMs: mentionWatchIntervalMs ?? config.loop.mentionWatchIntervalSec * 1000,
         })
+  // Resolves open PRs that conflict with the base branch, one per head SHA,
+  // reusing the check-prs flow. Runs wherever a config and repo identity exist.
+  const conflictPoller =
+    config === undefined || repoName === undefined || repoRoot === undefined
+      ? null
+      : startPrConflictWatcher({
+          repo: repoName,
+          root: repoRoot,
+          repoName,
+          config,
+          intervalMs: prConflictWatchIntervalMs ?? config.loop.prCheckIntervalSec * 1000,
+        })
   const stallPoller =
     tracker === undefined
       ? null
@@ -130,6 +145,7 @@ export function serve({
         })
   const workers = (): WorkerActivity[] => [
     ...(mentionPoller === null ? [] : [mentionPoller.activity()]),
+    ...(conflictPoller === null ? [] : [conflictPoller.activity()]),
     ...(stallPoller === null ? [] : [stallPoller.activity()]),
   ]
   const app = createApp({
@@ -160,6 +176,7 @@ export function serve({
       gatePoller?.stop()
       prPoller?.stop()
       mentionPoller?.stop()
+      conflictPoller?.stop()
       stallPoller?.stop()
       return server.stop(closeActiveConnections)
     },

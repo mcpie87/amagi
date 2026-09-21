@@ -583,6 +583,7 @@ describe('POST /api/tasks/:id/close', () => {
           available: true,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -815,6 +816,7 @@ describe('runner endpoints', () => {
       available: true,
       capacity: 1,
       running: [],
+      startedAt: {},
       resources: {},
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -838,6 +840,7 @@ describe('runner endpoints', () => {
           available: false,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
         }),
       }),
@@ -849,6 +852,7 @@ describe('runner endpoints', () => {
       available: false,
       capacity: 1,
       running: ['bd-1'],
+      startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
     })
   })
@@ -864,8 +868,10 @@ describe('runner endpoints', () => {
           lastRunAt: 1720000000000,
           ok: true,
           error: null,
-          prsScanned: 2,
-          mentionsResponded: 1,
+          counters: [
+            { label: 'scanned', value: 2 },
+            { label: 'responded', value: 1 },
+          ],
         },
       ],
     })
@@ -879,8 +885,10 @@ describe('runner endpoints', () => {
         lastRunAt: 1720000000000,
         ok: true,
         error: null,
-        prsScanned: 2,
-        mentionsResponded: 1,
+        counters: [
+          { label: 'scanned', value: 2 },
+          { label: 'responded', value: 1 },
+        ],
       },
     ])
   })
@@ -1011,6 +1019,7 @@ describe('settings endpoints', () => {
           available: true,
           capacity: 1,
           running: [],
+          startedAt: {},
           resources: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),

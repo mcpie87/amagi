@@ -51,6 +51,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
+  headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
   ...over,
 })
@@ -64,6 +65,9 @@ class FakeDriver implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return this.comments

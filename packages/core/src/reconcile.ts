@@ -30,7 +30,19 @@ export async function reconcilePrs(
       console.warn(`pr reconcile ${task.id}: ${err instanceof Error ? err.message : String(err)}`)
       continue
     }
-    if (state === 'open') continue
+    if (state === 'open') {
+      try {
+        const mergeStatus = await forge.getMergeStatus(cwd, task.prNumber)
+        if (task.prMergeStatus !== mergeStatus) {
+          store.append(task.id, { type: 'pr.status', mergeStatus })
+        }
+      } catch (err) {
+        console.warn(
+          `pr reconcile ${task.id}: merge status: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+      continue
+    }
     const to = state === 'merged' ? 'done' : 'abandoned'
     const reason = state === 'merged' ? 'PR merged' : 'PR closed without merge'
     store.append(task.id, { type: 'task.state', from: task.state, to, reason })

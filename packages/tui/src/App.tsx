@@ -269,6 +269,24 @@ function TaskDetail({
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow label="PR" value={task.prUrl} />
+        {task.prMergeStatus !== null && (
+          <Box gap={1}>
+            <Box width={10}>
+              <Text dimColor>pr status</Text>
+            </Box>
+            <Text
+              color={
+                task.prMergeStatus === 'conflicted'
+                  ? 'red'
+                  : task.prMergeStatus === 'mergeable'
+                    ? 'green'
+                    : 'gray'
+              }
+            >
+              {task.prMergeStatus === 'conflicted' ? 'merge conflict' : task.prMergeStatus}
+            </Text>
+          </Box>
+        )}
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"

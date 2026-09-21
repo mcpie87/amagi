@@ -153,6 +153,28 @@ describe('githubPr', () => {
     expect(await makePrDriver('github', open.exec).getPr('/repo', 7)).toBe('open')
   })
 
+  test('resolves the merge status from gh', async () => {
+    const conflicting = fake((c) =>
+      c.includes('view')
+        ? ok('{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}\n')
+        : undefined,
+    )
+    const mergeable = fake((c) =>
+      c.includes('view') ? ok('{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}\n') : undefined,
+    )
+    const unknown = fake((c) =>
+      c.includes('view') ? ok('{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}\n') : undefined,
+    )
+
+    expect(await makePrDriver('github', conflicting.exec).getMergeStatus('/repo', 7)).toBe(
+      'conflicted',
+    )
+    expect(await makePrDriver('github', mergeable.exec).getMergeStatus('/repo', 7)).toBe(
+      'mergeable',
+    )
+    expect(await makePrDriver('github', unknown.exec).getMergeStatus('/repo', 7)).toBe('unknown')
+  })
+
   test('collects conversation, review, and inline comments from the api', async () => {
     const { exec, calls } = fake((c) => {
       if (c.includes('repo') && c.includes('view') && c.includes('nameWithOwner')) {
@@ -261,6 +283,27 @@ describe('forgejoPr', () => {
       () => makePrDriver('forgejo', exec).getPr('/wt', 3),
     )
     expect(state).toBe('merged')
+  })
+
+  test('resolves the merge status from the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const mergeable = await withFetch(
+      () =>
+        new Response(JSON.stringify({ mergeable: true, mergeable_state: 'clean' }), {
+          status: 200,
+        }),
+      () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
+    )
+    const conflicted = await withFetch(
+      () =>
+        new Response(JSON.stringify({ mergeable: false, mergeable_state: 'has_conflicts' }), {
+          status: 200,
+        }),
+      () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
+    )
+    expect(mergeable).toBe('mergeable')
+    expect(conflicted).toBe('conflicted')
   })
 
   test('throws a clear error without a token', async () => {
