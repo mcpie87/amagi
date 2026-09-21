@@ -75,6 +75,14 @@ const SHOW_WITH_DEPS_JSON = `[
         "status": "blocked",
         "priority": 1,
         "issue_type": "task"
+      },
+      {
+        "id": "tst-human",
+        "title": "Human step",
+        "status": "open",
+        "priority": 3,
+        "issue_type": "task",
+        "labels": ["human"]
       }
     ]
   }
@@ -369,7 +377,7 @@ describe('BeadsTracker', () => {
     expect(returned).toHaveLength(1)
   })
 
-  test('getIssue surfaces dependency blockers with their state', async () => {
+  test('getIssue surfaces dependency blockers with their state and labels', async () => {
     const { exec } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
     const issue = await new BeadsTracker({ cwd: '/repo', exec }).getIssue('tst-1')
 
@@ -383,6 +391,17 @@ describe('BeadsTracker', () => {
         priority: 1,
         type: 'task',
         url: null,
+        labels: [],
+      },
+      {
+        id: 'tst-human',
+        title: 'Human step',
+        description: '',
+        status: 'open',
+        priority: 3,
+        type: 'task',
+        url: null,
+        labels: ['human'],
       },
     ])
   })

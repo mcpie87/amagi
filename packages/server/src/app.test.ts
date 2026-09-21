@@ -229,7 +229,7 @@ class FakeIssueTracker implements Tracker {
   }
   async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
     this.created.push(input)
-    const blocker = (id: string): TrackerTask => ({
+    const blocker = (id: string): TrackerTask & { labels: string[] } => ({
       id,
       title: id,
       description: '',
@@ -237,6 +237,7 @@ class FakeIssueTracker implements Tracker {
       priority: null,
       type: null,
       url: null,
+      labels: [],
     })
     return this.seed({
       title: input.title,
@@ -268,6 +269,7 @@ class FakeIssueTracker implements Tracker {
                 priority: null,
                 type: null,
                 url: null,
+                labels: [],
               })),
               ...issue.dependencies.filter((d) => !dependencies.remove.includes(d.id)),
             ],
@@ -359,6 +361,7 @@ describe('issue mutations', () => {
           priority: null,
           type: null,
           url: null,
+          labels: [],
         },
       ],
     })
