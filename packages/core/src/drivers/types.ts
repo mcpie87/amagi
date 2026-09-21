@@ -10,6 +10,8 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
+  difficulty?: string | null
 }
 
 /** Opaque handle to whatever the tracker uses to block an issue on a human. */
@@ -47,6 +49,8 @@ export type CreateTrackerTask = {
   labels: string[]
   /** Issue ids this task depends on (blocked by). */
   dependencies: string[]
+  /** Difficulty level stamped at creation; trackers that cannot store it ignore it. */
+  difficulty?: string | null
 }
 
 export type UpdateTrackerTask = Partial<{
@@ -123,6 +127,7 @@ export type AgentStartOptions = {
 export type AgentUsage = {
   inputTokens: number
   outputTokens: number
+  cachedTokens: number
   costUsd: number | null
 }
 
@@ -153,4 +158,6 @@ export interface Harness {
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess
   /** Models the harness can run, listed the way the harness lists them. */
   listModels(): Promise<string[]>
+  /** Reasoning-effort levels the harness can run (for `model`, when the harness scopes them), or [] when it cannot say. */
+  listEfforts(model?: string): Promise<string[]>
 }

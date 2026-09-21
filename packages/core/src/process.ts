@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { exec as defaultExec, type Exec } from './exec.ts'
 
 /**
@@ -40,6 +41,57 @@ function signal(pid: number, sig: NodeJS.Signals): void {
   } catch {
     // Already gone, or reparented away from us. Either way there is nothing to do.
   }
+}
+
+export type ProcessTreeStats = {
+  processes: number
+  rssBytes: number
+  cpuMs: number
+}
+
+/** USER_HZ is 100 on every Linux arch; /proc stat times are counted in these ticks. */
+const USER_HZ = 100
+
+function procRssBytes(pid: number): number {
+  try {
+    const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+    const line = status.split('\n').find((l) => l.startsWith('VmRSS:'))
+    if (line === undefined) return 0
+    const kB = Number.parseInt(line.slice('VmRSS:'.length).trim(), 10)
+    return Number.isFinite(kB) ? kB * 1024 : 0
+  } catch {
+    return 0
+  }
+}
+
+/** utime+stime from /proc/<pid>/stat; the comm field may contain spaces, so fields start after the last ')'. */
+function procCpuMs(pid: number): number {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    const utime = Number(fields[11])
+    const stime = Number(fields[12])
+    if (!Number.isFinite(utime) || !Number.isFinite(stime)) return 0
+    return ((utime + stime) * 1000) / USER_HZ
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Summed RSS, CPU time and process count over the whole tree rooted at pid,
+ * read from /proc on Linux. Non-Linux hosts have no /proc, so cpu and rss come
+ * back as zero while the process count still reflects the real tree.
+ */
+export async function processTreeStats(pid: number): Promise<ProcessTreeStats> {
+  const tree = await processTree(pid)
+  let rssBytes = 0
+  let cpuMs = 0
+  for (const p of tree) {
+    rssBytes += procRssBytes(p)
+    cpuMs += procCpuMs(p)
+  }
+  return { processes: tree.length, rssBytes, cpuMs }
 }
 
 export type KillTreeOptions = {
