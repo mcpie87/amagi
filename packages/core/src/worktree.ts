@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { configHome } from './paths.ts'
 
 const MAX_SLUG_WORDS = 5
 
@@ -52,7 +53,27 @@ export type CreateWorktreeOptions = {
   baseBranch: string
   worktreeRoot: string
   setupCmd?: string | null
+  /** Git persona name; the matching ~/.config/git/personas/<name>.gitconfig is included. */
+  persona?: string | null
   exec?: Exec
+}
+
+/** Absolute path of the persona gitconfig, or null when it does not exist. */
+export function personaGitconfig(name: string): string | null {
+  const file = join(configHome(), 'git', 'personas', `${name}.gitconfig`)
+  return existsSync(file) ? file : null
+}
+
+/**
+ * Applies a persona to a worktree via include.path in the worktree-scoped
+ * config, so commits in this worktree (and any PR opened from it) carry the
+ * persona's user identity without touching the shared repo config.
+ */
+export async function applyPersona(run: Exec, cwd: string, persona: string): Promise<void> {
+  const file = personaGitconfig(persona)
+  if (file === null) throw new Error(`persona not found: ${persona}`)
+  await execOk(run, ['git', 'config', 'extensions.worktreeConfig', 'true'], { cwd })
+  await execOk(run, ['git', 'config', '--worktree', 'include.path', file], { cwd })
 }
 
 export async function branchExists(run: Exec, repoRoot: string, branch: string): Promise<boolean> {
@@ -79,41 +100,13 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     await execOk(run, args, { cwd: opts.repoRoot })
   }
 
+  if (opts.persona) {
+    await applyPersona(run, path, opts.persona)
+  }
+
   if (opts.setupCmd) {
     await execOk(run, ['sh', '-c', opts.setupCmd], { cwd: path })
   }
 
   return { path, branch }
-}
-
-export async function removeWorktree(
-  repoRoot: string,
-  path: string,
-  opts: { force?: boolean; exec?: Exec } = {},
-): Promise<void> {
-  const run = opts.exec ?? defaultExec
-  const args = ['git', 'worktree', 'remove', path]
-  if (opts.force) args.push('--force')
-  await execOk(run, args, { cwd: repoRoot })
-}
-
-export async function listWorktrees(
-  repoRoot: string,
-  run: Exec = defaultExec,
-): Promise<WorktreeSpec[]> {
-  const out = await execOk(run, ['git', 'worktree', 'list', '--porcelain'], { cwd: repoRoot })
-  const found: WorktreeSpec[] = []
-  let path: string | null = null
-
-  for (const line of out.split('\n')) {
-    if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
-    else if (line.startsWith('branch ') && path !== null) {
-      found.push({ path, branch: line.slice('branch refs/heads/'.length) })
-      path = null
-    } else if (line === '' && path !== null) {
-      found.push({ path, branch: '' })
-      path = null
-    }
-  }
-  return found
 }

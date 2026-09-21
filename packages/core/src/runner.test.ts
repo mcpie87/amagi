@@ -1,20 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
+import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
   AgentStartOptions,
+  CreateTrackerTask,
   GateRef,
   Harness,
   Question,
   Tracker,
+  TrackerCapabilities,
   TrackerStatus,
   TrackerTask,
+  UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
@@ -35,8 +38,11 @@ const TASK: TrackerTask = {
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
   readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   heartbeats = 0
   leaseAlive = true
+  /** Returned by get() in place of the null default, to simulate a re-read. */
+  freshTask: TrackerTask | null = null
 
   constructor(private queue: TrackerTask[] = []) {}
 
@@ -47,7 +53,13 @@ class FakeTracker implements Tracker {
     return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
-    return null
+    return this.freshTask
+  }
+  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
+  }
+  async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
   }
   async heartbeat(): Promise<boolean> {
     this.heartbeats++
@@ -55,7 +67,7 @@ class FakeTracker implements Tracker {
   }
   async comment(): Promise<void> {}
   async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
-  async release(): Promise<void> {}
+  async release(_id: string): Promise<void> {}
   async close(): Promise<void> {}
   async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'gate', advisory: false }
@@ -76,7 +88,7 @@ type Turn = {
 
 class FakeHarness implements Harness {
   readonly kind = 'fake'
-  readonly calls: { resumeFrom: string | null; prompt: string }[] = []
+  readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
 
   constructor(private readonly turns: Turn[]) {}
 
@@ -86,9 +98,15 @@ class FakeHarness implements Harness {
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.run(sessionId, opts)
   }
+  async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
-    this.calls.push({ resumeFrom, prompt: opts.prompt })
+    this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
     const turn = this.turns.shift() ?? {}
     turn.effect?.(opts.cwd)
 
@@ -116,6 +134,53 @@ class FakeHarness implements Harness {
   }
 }
 
+/** An agent process that stays running until killed, so a cancel can interrupt it. */
+class BlockingHarness implements Harness {
+  readonly kind = 'fake'
+  starts = 0
+  kills = 0
+  private process: AgentProcess | null = null
+
+  start(opts: AgentStartOptions): AgentProcess {
+    this.starts++
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    this.process = {
+      pid: 12345,
+      events: () => queue,
+      done,
+      kill: async () => {
+        this.kills++
+        queue.close()
+        resolveDone({
+          exitCode: 130,
+          ok: false,
+          sessionId: null,
+          summary: null,
+          usage: null,
+          stderr: 'killed',
+        })
+      },
+      model: null,
+      effort: opts.effort ?? null,
+    }
+    return this.process
+  }
+
+  resume(): AgentProcess {
+    throw new Error('no resume expected in the cancel test')
+  }
+  async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+}
+
 class FakePr implements PrDriver {
   readonly calls: CreatePrOptions[] = []
   failWith: Error | null = null
@@ -129,6 +194,12 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
 }
 
 let repo: string
@@ -155,6 +226,12 @@ const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = 
 
 const types = (taskId: string): EventType[] =>
   store.events({ taskId, limit: 999 }).map((e) => e.type)
+
+const states = (taskId: string): (string | null | undefined)[] =>
+  store
+    .events({ taskId, limit: 999 })
+    .filter((e) => e.type === 'task.state')
+    .map((e) => (e as Extract<StoredEvent, { type: 'task.state' }>).to)
 
 beforeEach(async () => {
   delete process.env.GH_TOKEN
@@ -255,11 +332,39 @@ describe('Runner.runOnce', () => {
     ).runOnce()
 
     expect(pr.calls).toHaveLength(1)
-    expect(pr.calls[0]?.title).toBe('Add a greeting file')
+    expect(pr.calls[0]?.title).toBe('bd-a1b2: Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('## ✨ Add a greeting file')
+    expect(pr.calls[0]?.body).toContain('**Task:** `bd-a1b2`')
+    expect(pr.calls[0]?.body).toContain('Write `hello.txt`')
+    expect(pr.calls[0]?.body).toContain('- `hello.txt` +1 -0')
     expect(pr.calls[0]?.base).toBe('main')
     expect(pr.calls[0]?.branch).toContain('amagi/')
     const created = store.events({ taskId: TASK.id }).find((e) => e.type === 'pr.created')
     expect(created?.type === 'pr.created' && created.url).toBe('https://example.com/demo/pull/7')
+  })
+
+  test('the PR body carries the implement run model and effort', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([{ ...writesAFile, model: 'claude-sonnet-5', effort: 'high' }]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(pr.calls[0]?.body).toContain(
+      '<sub>Generated by amagi · fake · claude-sonnet-5 · effort high</sub>',
+    )
+  })
+
+  test('builds the PR body from a re-fetched task description', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = { ...TASK, description: 'Write hello.txt\n\n### How to use\n\nRun `hello`' }
+    const pr = new FakePr()
+    await makeRunner(tracker, new FakeHarness([writesAFile]), config(), pr).runOnce()
+
+    expect(pr.calls[0]?.body).toContain('### 🚀 How to use')
+    expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
   test('a failed pull request escalates but keeps the commit', async () => {
@@ -292,10 +397,73 @@ describe('Runner.runOnce', () => {
     expect(mainLog).toContain('init')
   })
 
-  test('an agent that changes nothing is escalated, not silently committed', async () => {
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([{}])).runOnce()
-    expect(result?.state).toBe('needs_human')
+  test('an agent that changes nothing lands in no_pr with its summary as the reason', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: 'already implemented upstream: nothing to do' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
     expect(types(TASK.id)).not.toContain('commit.created')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'already implemented upstream',
+    )
+  })
+
+  test('no_pr asks the agent why when it left no summary and uses that as the reason', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: null } },
+      { outcome: { summary: 'already handled by a sibling task; nothing to do here' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'already handled by a sibling task',
+    )
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('no changes')
+  })
+
+  test('no_pr falls back to the canned reason when there is no session to ask', async () => {
+    const harness = new FakeHarness([{ outcome: { summary: null, sessionId: null } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
+    expect(harness.calls).toHaveLength(1)
+  })
+
+  test('a reclaimed task reuses the recorded worktree and branch', async () => {
+    const wtPath = join(wtRoot, 'resume-worktree')
+    const branch = 'amagi/bd-a1b2-add-a-greeting-file'
+    await execOk(exec, ['git', 'worktree', 'add', '-b', branch, wtPath, 'main'], { cwd: repo })
+
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    store.append(TASK.id, { type: 'worktree.created', path: wtPath, branch })
+    store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(TASK.id, { type: 'task.reclaimed' })
+
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls[0]?.cwd).toBe(wtPath)
+    expect(harness.calls[0]?.prompt).toContain('resumed')
+    expect(harness.calls[0]?.prompt).toContain('continue')
+    expect(store.task(TASK.id)?.worktree).toBe(wtPath)
+    expect(store.task(TASK.id)?.branch).toBe(branch)
+    expect(existsSync(join(wtPath, 'hello.txt'))).toBe(true)
+    expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
   })
 
   test('failing checks are handed back to the same session and then commit', async () => {
@@ -338,16 +506,82 @@ describe('Runner.runOnce', () => {
   })
 
   test('a crashing agent still leaves an auditable trail', async () => {
-    const result = await makeRunner(
-      new FakeTracker([TASK]),
-      new FakeHarness([{ outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' } }]),
-    ).runOnce()
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(1)
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(errors.some((e) => e.type === 'error' && e.message.includes('model unavailable'))).toBe(
       true,
     )
+  })
+
+  test('a transient failure backs off and retries, then commits', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { retryBaseMs: 0, retryMaxMs: 0 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    const scheduled = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'retry.scheduled' }> => e.type === 'retry.scheduled',
+      )
+    expect(scheduled).toHaveLength(1)
+    expect(scheduled[0]?.attempt).toBe(1)
+    expect(scheduled[0]?.delayMs).toBe(0)
+    expect(scheduled[0]?.detail).toBe('rate limit exceeded')
+    expect(store.task(TASK.id)?.retryCount).toBe(1)
+    expect(states(TASK.id)).toContain('retrying')
+  })
+
+  test('transient failures escalate only after the retry budget is spent', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'quota exceeded' } },
+      { outcome: { ok: false, exitCode: 1, stderr: 'quota exceeded' } },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxRetries: 1, retryBaseMs: 0, retryMaxMs: 0 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(2)
+    const scheduled = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'retry.scheduled' }> => e.type === 'retry.scheduled',
+      )
+    expect(scheduled).toHaveLength(1)
+    expect(store.task(TASK.id)?.retryCount).toBe(1)
+    expect(states(TASK.id)).toContain('retrying')
+    expect(types(TASK.id)).not.toContain('commit.created')
+  })
+
+  test('an operator-actionable failure escalates without retrying', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'model not installed' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(1)
+    expect(
+      store.events({ taskId: TASK.id }).filter((e) => e.type === 'retry.scheduled'),
+    ).toHaveLength(0)
   })
 
   test('an unusable base branch escalates instead of throwing out of runOnce', async () => {
@@ -403,5 +637,70 @@ describe('Runner.runOnce', () => {
       .filter((e) => e.type === 'task.state')
       .at(-1)
     expect(lastState?.type === 'task.state' && lastState.to).toBe('needs_human')
+  })
+})
+
+describe('Runner.cancel', () => {
+  test('kills the agent process, releases the lease, and parks the task in cancelled', async () => {
+    const harness = new BlockingHarness()
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(tracker, harness)
+    const pending = runner.runOnce()
+
+    await waitFor(() => harness.starts === 1)
+    expect(store.task(TASK.id)?.state).toBe('implementing')
+    runner.cancel()
+    const result = await pending
+
+    expect(harness.kills).toBe(1)
+    expect(released).toEqual([TASK.id])
+    expect(result?.state).toBe('cancelled')
+    expect(store.task(TASK.id)?.state).toBe('cancelled')
+    // the recorded worktree survives the stop for the reclaim path
+    expect(store.task(TASK.id)?.worktree).not.toBeNull()
+    expect(store.task(TASK.id)?.branch).not.toBeNull()
+  })
+
+  test('cancelling a parked question releases the lease and parks the task in cancelled', async () => {
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(tracker, new FakeHarness([parksOnQuestion]))
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'question.parked'))
+    runner.cancel()
+    const result = await pending
+
+    expect(result?.state).toBe('cancelled')
+    expect(released).toEqual([TASK.id])
+    expect(store.task(TASK.id)?.worktree).not.toBeNull()
+  })
+
+  test('cancel interrupts a retry backoff and parks the task in cancelled', async () => {
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(
+      tracker,
+      new FakeHarness([{ outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } }]),
+      config({ loop: { retryBaseMs: 60_000, retryMaxMs: 60_000 } }),
+    )
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'retry.scheduled'))
+    runner.cancel()
+    const result = await pending
+
+    expect(result?.state).toBe('cancelled')
+    expect(released).toEqual([TASK.id])
   })
 })

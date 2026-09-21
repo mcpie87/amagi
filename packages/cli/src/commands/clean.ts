@@ -1,6 +1,7 @@
-import { cleanTerminalWorktrees, loadConfig, repoRoot, Store } from '@amagi/core'
+import { cleanTerminalWorktrees, loadConfig, repoRoot } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, yellow } from '../format.ts'
+import { currentRepo } from '../repo.ts'
 
 export const cleanCommand = defineCommand({
   meta: {
@@ -17,7 +18,7 @@ export const cleanCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     loadConfig(root)
-    const store = new Store()
+    const { store } = currentRepo()
 
     const plans = await cleanTerminalWorktrees(store, { repoRoot: root, dryRun: !args.apply })
 
