@@ -14,6 +14,16 @@ export type RunnerResource = {
   cpuMs: number
 }
 
+/** A running task's identity, so the dashboard can show it from the polled
+ *  channel like rss/cpu instead of relying on the SSE projection. */
+export type RunnerTask = {
+  title: string
+  /** The configured implement harness for the run. */
+  harness: string
+  model: string | null
+  effort: string | null
+}
+
 export type RunnerStatus = {
   /** Repo name the runner is bound to, so several runners can be told apart. */
   name: string
@@ -22,6 +32,8 @@ export type RunnerStatus = {
   running: string[]
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
+  /** Title and live agent per running task, keyed by task id. */
+  tasks: Record<string, RunnerTask>
   /** Activity of background workers (e.g. the mention watcher), when any. */
   workers?: WorkerActivity[]
 }
@@ -94,11 +106,23 @@ export class RunService implements RunServiceApi {
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
     const resources: Record<string, RunnerResource> = {}
+    const tasks: Record<string, RunnerTask> = {}
     await Promise.all(
       running.map(async (id) => {
         const pid = this.runs.get(id)?.runner.currentPid()
-        if (pid === null || pid === undefined || pid <= 0) return
-        resources[id] = await processTreeStats(pid)
+        if (pid !== null && pid !== undefined && pid > 0) {
+          resources[id] = await processTreeStats(pid)
+        }
+        const task = this.opts.store.task(id)
+        const agent = this.opts.store.currentAgent(id)
+        tasks[id] = {
+          title: task?.title ?? id,
+          // The configured harness is known at launch; only the model/effort
+          // wait for the agent run to report them.
+          harness: this.opts.harness.kind,
+          model: agent?.model ?? null,
+          effort: agent?.effort ?? null,
+        }
       }),
     )
     return {
@@ -107,6 +131,7 @@ export class RunService implements RunServiceApi {
       capacity: this.capacity,
       running,
       resources,
+      tasks,
     }
   }
 

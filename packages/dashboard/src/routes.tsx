@@ -2,7 +2,7 @@ import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import { MAX_PARALLEL } from '@amagi/core/limits'
-import type { RunnerResource } from '@amagi/core/run-service'
+import type { RunnerResource, RunnerTask } from '@amagi/core/run-service'
 import {
   activeTasks,
   chatInFlight,
@@ -1129,11 +1129,13 @@ function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
 function WorkerSlot({
   taskId,
   resource,
+  taskInfo,
   state,
   selected,
 }: {
   taskId: string | null
   resource?: RunnerResource | undefined
+  taskInfo?: RunnerTask | undefined
   state: DashboardState
   selected: string | null
 }) {
@@ -1146,6 +1148,17 @@ function WorkerSlot({
   }
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
+  const title = taskInfo?.title ?? task?.title ?? taskId
+  // The runner's per-task identity is authoritative for what is actually
+  // running (rss/cpu arrive the same way); the SSE projection only fills in
+  // when the polled status has not caught up.
+  const agentLabel =
+    taskInfo?.harness !== undefined
+      ? `implement: ${taskInfo.harness}`
+      : agent === null
+        ? 'starting…'
+        : `${agent.role}: ${agent.harness}`
+  const modelLabel = taskInfo?.model ?? agent?.model ?? 'unknown'
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1155,14 +1168,14 @@ function WorkerSlot({
           params={{ id: taskId }}
           className="flex min-w-0 items-baseline gap-x-3 hover:underline"
         >
-          <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+          <span className="min-w-0 truncate font-medium">{title}</span>
           <span className="text-xs text-fg-faint">{task?.id ?? taskId}</span>
         </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-        <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
-        <span>model: {agent?.model ?? 'unknown'}</span>
+        <span>agent: {agentLabel}</span>
+        <span>model: {modelLabel}</span>
         {resource !== undefined && (
           <>
             <span>rss: {fmtBytes(resource.rssBytes)}</span>
@@ -1218,6 +1231,7 @@ function WorkersPanel() {
             key={i}
             taskId={running[i] ?? null}
             resource={running[i] === undefined ? undefined : status.resources[running[i]]}
+            taskInfo={running[i] === undefined ? undefined : status.tasks?.[running[i]]}
             state={state}
             selected={selected}
           />
@@ -2127,9 +2141,11 @@ type DetailTab = 'log' | 'checks'
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
+  const { status } = useRunner()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
+  const runnerTask = status?.tasks?.[id]
   const [tab, setTab] = useState<DetailTab>('log')
   const usageEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
@@ -2211,10 +2227,16 @@ function TaskDetailView() {
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow
           label="agent"
-          value={currentAgent ? `${currentAgent.role}: ${currentAgent.harness}` : null}
+          value={
+            currentAgent
+              ? `${currentAgent.role}: ${currentAgent.harness}`
+              : runnerTask?.harness
+                ? `implement: ${runnerTask.harness}`
+                : null
+          }
         />
-        <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
-        <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
+        <DetailRow label="model" value={currentAgent?.model ?? runnerTask?.model ?? 'unknown'} />
+        <DetailRow label="effort" value={currentAgent?.effort ?? runnerTask?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />

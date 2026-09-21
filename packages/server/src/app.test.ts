@@ -690,6 +690,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           capacity: 1,
           running: ['bd-1'],
           resources: {},
+          tasks: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async (id) => {
@@ -908,6 +909,7 @@ describe('runner endpoints', () => {
       capacity: 1,
       running: [],
       resources: {},
+      tasks: {},
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -937,6 +939,7 @@ describe('runner endpoints', () => {
           capacity: 1,
           running: ['bd-1'],
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+          tasks: {},
         }),
       }),
     })
@@ -948,6 +951,7 @@ describe('runner endpoints', () => {
       capacity: 1,
       running: ['bd-1'],
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+      tasks: {},
     })
   })
 
@@ -1107,6 +1111,7 @@ describe('repo settings endpoints', () => {
           capacity: 1,
           running: [],
           resources: {},
+          tasks: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
