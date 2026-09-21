@@ -180,6 +180,7 @@ export class Runner {
   private readonly exec: Exec
   /** Set once the store flips the task to `cancelled`; guards the unwind. */
   private cancelled = false
+  private retryNowRequested = false
   private currentProcess: AgentProcess | null = null
 
   constructor(private readonly deps: RunnerDeps) {
@@ -193,6 +194,15 @@ export class Runner {
   cancel(): void {
     this.cancelled = true
     if (this.currentProcess !== null) void this.currentProcess.kill()
+  }
+
+  /**
+   * Wake a task sleeping out its retry backoff so the next attempt starts
+   * immediately instead of waiting out the full delay. No-op while the agent
+   * is live or the task is not deferring a retry.
+   */
+  retryNow(): void {
+    this.retryNowRequested = true
   }
 
   /** The pid of the live agent process, or null between agent phases. */
@@ -831,10 +841,13 @@ export class Runner {
       // cannot be resumed; the retry starts a fresh session in the same worktree.
       if (isSessionLimit(run.detail ?? '')) sessionId = null
       this.transition(taskId, 'retrying')
-      // Polled so a stop interrupts the backoff instead of waiting it out.
+      // Polled so a stop interrupts the backoff instead of waiting it out,
+      // and a retry-now request skips the wait for an immediate retry.
+      this.retryNowRequested = false
       const deadline = Date.now() + delayMs
       while (Date.now() < deadline) {
         this.throwIfCancelled(taskId)
+        if (this.retryNowRequested) break
         await Bun.sleep(Math.min(100, deadline - Date.now()))
       }
       if (lease.isLost) throw new LeaseLostError(taskId)
