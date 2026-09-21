@@ -321,6 +321,35 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
   return parts.join('\n')
 }
 
+export type PrFailurePromptContext = {
+  task: TrackerTask
+  message: string
+  branch: string
+  base: string
+}
+
+/** The first PR creation attempt failed; the agent fixes what it can or explains for the operator. */
+export function prFailurePrompt(ctx: PrFailurePromptContext): string {
+  const parts = [
+    `Task ${ctx.task.id}: ${ctx.task.title}`,
+    '',
+    `Opening the pull request against ${ctx.base} failed with: ${ctx.message}`,
+    '',
+    `The branch ${ctx.branch} is committed in this worktree, but the pull request could not be created.`,
+    'Investigate the failure here and fix whatever you can: correct a wrong remote',
+    'URL, push the branch, or remove anything that would make a retry fail again.',
+    '',
+    'If your fix is done, say the pull request can be retried now. If you cannot fix',
+    'it, explain what happened and exactly what the operator must do to open the',
+    'pull request by hand. Your reply is shown verbatim to the operator as the',
+    'reason the task needs attention, so be concrete.',
+    '',
+    'End with a concise summary of what you found and did.',
+  ]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  return parts.join('\n')
+}
+
 /** The slice of an issue the triage decider sees, stripped of tracker plumbing. */
 export type TriageTaskView = {
   id: string

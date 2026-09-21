@@ -15,6 +15,7 @@ import {
   fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prFailurePrompt,
   prTitle,
   reclaimPrompt,
   whyNoChangesPrompt,
@@ -530,21 +531,32 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, current.model, current.effort)
+    await this.openPullRequest(
+      task,
+      cwd,
+      branch,
+      current.sessionId,
+      current.model,
+      current.effort,
+      budget,
+    )
     this.throwIfCancelled(task.id)
   }
 
   /**
    * Pushes the worktree branch and opens a pull request. A failed PR (gh not
-   * authenticated, remote gone) leaves the commit in place and escalates, so
-   * the operator can push and open it by hand.
+   * authenticated, remote gone) leaves the commit in place, gives the agent one
+   * shot at fixing the underlying cause and retries once, then escalates with
+   * the agent's explanation so the operator can push and open it by hand.
    */
   private async openPullRequest(
     task: TrackerTask,
     cwd: string,
     branch: string,
+    sessionId: string | null,
     model: string | null,
     effort: string | null,
+    budget: TaskBudget,
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
@@ -599,7 +611,72 @@ export class Runner {
         message: `pull request: ${message}${hint}`,
         fatal: false,
       })
-      this.transition(task.id, 'needs_human', 'pull request creation failed')
+      // The first attempt failed. Let the agent fix the underlying cause (wrong
+      // remote, unpushed branch, ...) and retry once; if it still fails, the
+      // agent's explanation becomes the needs_human reason instead of the bland
+      // "pull request creation failed".
+      const reason = await this.resolvePrFailure(
+        task,
+        cwd,
+        branch,
+        sessionId,
+        `${message}${hint}`,
+        opts,
+        budget,
+      )
+      this.throwIfCancelled(task.id)
+      if (reason !== null) this.transition(task.id, 'needs_human', reason)
+    }
+  }
+
+  /**
+   * The first PR creation attempt failed. Runs the agent over the failure so it
+   * can fix the underlying cause (remote URL, branch push, ...), then retries
+   * the creation once. Returns the needs_human reason when the retry still
+   * fails, or null when the retry opened the PR.
+   */
+  private async resolvePrFailure(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    sessionId: string | null,
+    message: string,
+    opts: CreatePrOptions,
+    budget: TaskBudget,
+  ): Promise<string | null> {
+    const { store, config } = this.deps
+    const attempt = await this.runAgent(
+      task.id,
+      sessionId,
+      {
+        cwd,
+        prompt: prFailurePrompt({ task, message, branch, base: config.repo.baseBranch }),
+        permissions: config.harness.implement.permissions,
+        extraArgs: config.harness.implement.extraArgs,
+      },
+      'resolve pull request',
+      budget,
+    )
+    this.throwIfCancelled(task.id)
+    if (!attempt.ok) {
+      return attempt.detail ?? `pull request creation failed: ${message}`
+    }
+    try {
+      const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
+      const pr = await forge.createPr(opts)
+      store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
+      this.transition(task.id, 'pr_open')
+      return null
+    } catch (err2) {
+      const message2 = errMsg(err2)
+      store.append(task.id, {
+        type: 'error',
+        message: `pull request retry: ${message2}`,
+        fatal: false,
+      })
+      return attempt.summary?.trim() !== '' && attempt.summary !== null
+        ? attempt.summary
+        : `pull request creation failed: ${message}`
     }
   }
 

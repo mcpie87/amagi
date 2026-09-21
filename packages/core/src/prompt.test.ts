@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
-import { implementSystemPrompt, prTitle } from './prompt.ts'
+import { implementSystemPrompt, prFailurePrompt, prTitle } from './prompt.ts'
 
 const task = (title: string): TrackerTask => ({
   id: 'am-544',
@@ -40,5 +40,20 @@ describe('implementSystemPrompt', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('Never pipe check or lint output through head/tail')
     expect(prompt).toContain('Redirect to a file instead')
+  })
+})
+
+describe('prFailurePrompt', () => {
+  test('shows the failure and asks for a fix or a concrete explanation', () => {
+    const prompt = prFailurePrompt({
+      task: task('Add a flag'),
+      message: 'gh not authenticated',
+      branch: 'amagi/am-1-add-a-flag',
+      base: 'main',
+    })
+    expect(prompt).toContain('Opening the pull request against main failed')
+    expect(prompt).toContain('gh not authenticated')
+    expect(prompt).toContain('amagi/am-1-add-a-flag')
+    expect(prompt).toContain('shown verbatim to the operator')
   })
 })

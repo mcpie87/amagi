@@ -185,10 +185,14 @@ class BlockingHarness implements Harness {
 class FakePr implements PrDriver {
   readonly calls: CreatePrOptions[] = []
   failWith: Error | null = null
+  /** With failCount 0 the failure persists; with N>0 only the first N calls fail. */
+  failCount = 0
 
   async createPr(opts: CreatePrOptions): Promise<PullRequest> {
     this.calls.push(opts)
-    if (this.failWith !== null) throw this.failWith
+    if (this.failWith !== null && (this.failCount === 0 || this.calls.length <= this.failCount)) {
+      throw this.failWith
+    }
     return { url: 'https://example.com/demo/pull/7', number: 7 }
   }
 
@@ -457,6 +461,46 @@ describe('Runner.runOnce', () => {
     expect(
       errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
     ).toBe(true)
+  })
+
+  test('the resolve agent is asked why the pull request failed and its reply becomes the reason', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('gh not authenticated')
+    const harness = new FakeHarness([
+      writesAFile,
+      { outcome: { summary: 'gh has no token: set GH_TOKEN in the amagi process environment' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(pr.calls).toHaveLength(2)
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'needs_human')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'gh has no token: set GH_TOKEN',
+    )
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('Opening the pull request')
+  })
+
+  test('the resolve agent can fix the failure and the retry opens the pull request', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('remote URL is wrong')
+    pr.failCount = 1
+    const harness = new FakeHarness([
+      writesAFile,
+      {
+        outcome: { summary: 'fixed the remote URL; retry should succeed' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('pr.created')
+    expect(pr.calls).toHaveLength(2)
   })
 
   test('a committed task whose diff against base is empty goes to no_pr without a PR', async () => {
