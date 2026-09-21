@@ -12,7 +12,7 @@ import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
 import { currentRepo } from '../repo.ts'
-import { pickRunSelection } from '../select-run.ts'
+import { pickRunSelection, usageCounts } from '../select-run.ts'
 
 const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
@@ -42,6 +42,7 @@ export const runCommand = defineCommand({
       flags,
       interactive() ? picker : null,
       listModelsFor,
+      usageCounts(store.events()),
     )
 
     const implement = selection.harness
