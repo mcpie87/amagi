@@ -93,6 +93,9 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
   const path = join(opts.worktreeRoot, worktreeDirName(opts.repoName, opts.taskId, opts.title))
 
   if (!existsSync(path)) {
+    // A wiped worktree dir (temp cleanup, reboot) leaves a stale registration
+    // that `git worktree add` rejects; prune it first so the re-add succeeds.
+    await run(['git', 'worktree', 'prune'], { cwd: opts.repoRoot })
     const exists = await branchExists(run, opts.repoRoot, branch)
     const args = exists
       ? ['git', 'worktree', 'add', path, branch]

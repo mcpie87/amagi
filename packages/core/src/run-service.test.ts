@@ -21,7 +21,7 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
-import { RunService } from './run-service.ts'
+import { RunService, type RunServiceOptions } from './run-service.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 
@@ -43,14 +43,15 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
   readonly released: string[] = []
 
-  constructor(private readonly queue: TrackerTask[] = []) {}
+  constructor(private queue: TrackerTask[] = []) {}
 
   async ready(): Promise<TrackerTask[]> {
     return this.queue
   }
   async claim(id?: string): Promise<TrackerTask | null> {
     if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
-    return this.queue[0] ?? null
+    // Like a real tracker's atomic claim, a no-id claim consumes the task.
+    return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
     return null
@@ -181,6 +182,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
@@ -198,7 +202,13 @@ const config = (over: Record<string, unknown> = {}) =>
     ...over,
   })
 
-const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = config()) =>
+const makeService = (
+  tracker: Tracker,
+  harness: Harness,
+  maxParallel = 1,
+  cfg = config(),
+  over: Partial<RunServiceOptions> = {},
+) =>
   new RunService({
     store,
     tracker,
@@ -208,6 +218,7 @@ const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = 
     repoName: 'demo',
     forge: new FakePr(),
     maxParallel,
+    ...over,
   })
 
 const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
@@ -246,8 +257,54 @@ describe('RunService', () => {
       available: true,
       capacity: 2,
       running: [],
+      startedAt: {},
       resources: {},
+      autoQueue: false,
     })
+    service.dispose()
+  })
+
+  test('setAutoQueue flips the reported state and toggles dispatch', async () => {
+    const tracker = new FakeTracker([TASK])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 1, config(), { autoQueueActiveMs: 10 })
+    expect((await service.status()).autoQueue).toBe(false)
+    service.setAutoQueue(true)
+    expect((await service.status()).autoQueue).toBe(true)
+    await waitFor(() => harness.starts > 0)
+    expect(store.task(TASK.id)?.state).toBe('implementing')
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
+  test('auto queue fills every free slot and backs off when the queue is empty', async () => {
+    const tracker = new FakeTracker([TASK, TASK2])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 2, config(), {
+      autoQueue: true,
+      autoQueueActiveMs: 10,
+    })
+    // Both slots fill over successive polls, one task per pass.
+    await waitFor(() => harness.starts >= 2)
+    expect(harness.starts).toBe(2)
+    expect((await service.status()).running).toEqual([TASK.id, TASK2.id])
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+    service.dispose()
+  })
+
+  test('auto queue does nothing when disabled and idles after an empty poll', async () => {
+    const tracker = new FakeTracker([])
+    const service = makeService(tracker, new FakeHarness(), 1, config(), {
+      autoQueue: true,
+      autoQueueIdleMs: 20,
+      autoQueueActiveMs: 10,
+    })
+    // Nothing to claim, so the first poll backs off to the idle interval; a
+    // second poll still finds nothing and never launches.
+    await Bun.sleep(100)
+    expect((await service.status()).running).toEqual([])
+    service.dispose()
   })
 
   test('setMaxParallel changes capacity live without touching running runs', async () => {

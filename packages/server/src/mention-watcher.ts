@@ -17,6 +17,7 @@ import {
   type Tracker,
   type WorkerActivity,
 } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type MentionWatcherOptions = {
   /** Repo key, so activity can be attributed across registered repos. */
@@ -60,19 +61,23 @@ export function startMentionWatcher({
   exec,
   makeHarnessFn,
 }: MentionWatcherOptions): MentionWatcher {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
+  /** Cumulative across ticks, so the dashboard counters keep rising. */
+  let scanned = 0
+  let responded = 0
+  const counters = (): WorkerActivity['counters'] => [
+    { label: 'scanned', value: scanned },
+    { label: 'responded', value: responded },
+  ]
   let activity: WorkerActivity = {
     repo,
     name: 'mention-watcher',
     lastRunAt: 0,
     ok: true,
     error: null,
-    prsScanned: 0,
-    mentionsResponded: 0,
+    counters: counters(),
   }
 
-  async function tick(): Promise<void> {
+  const { stop } = startPoller(intervalMs, async () => {
     const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
     try {
       const handledPath = mentionsPath(repoName)
@@ -95,7 +100,7 @@ export function startMentionWatcher({
           console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
           continue
         }
-        next.prsScanned++
+        scanned++
         const maxId = comments.reduce((m, c) => Math.max(m, Number(c.id) || 0), 0)
         const lastId = seen?.lastCommentId ?? 0
         const mentions = comments.filter(
@@ -120,7 +125,7 @@ export function startMentionWatcher({
             })
             handled.add(mention.id)
             saveHandledMentions(handledPath, handled)
-            next.mentionsResponded++
+            responded++
           } catch (err) {
             allOk = false
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
@@ -135,17 +140,12 @@ export function startMentionWatcher({
       next.error = errMsg(err)
       console.warn(`mention watch: ${next.error}`)
     }
+    next.counters = counters()
     activity = next
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
-  }
+  })
 
-  timer = setTimeout(() => void tick(), intervalMs)
   return {
-    stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
-    },
+    stop,
     activity: () => activity,
   }
 }
