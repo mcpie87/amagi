@@ -25,7 +25,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
-  CloseBody,
+  CloseTaskBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -343,21 +343,24 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
     .post(
       '/api/repos/:repo/tasks/:id/close',
       valid('param', RepoTaskIdParam),
-      valid('json', CloseBody),
+      valid('json', CloseTaskBody),
       async (c) => {
         const { repo, id } = c.req.valid('param')
         const { reason } = c.req.valid('json')
         const ws = resolveWorkspace(workspaces, repo)
         const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        // Only a parked needs-attention task can be retired this way; a live
-        // or already-settled task must not be yanked out of its run.
         if (task.state !== 'needs_human' && task.state !== 'no_pr') {
-          return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
+          return c.json(
+            {
+              error: `task ${id} is in state ${task.state}; only needs_human/no_pr tasks can be closed`,
+            },
+            409,
+          )
         }
+        // The state lands before the tracker call so the dashboard updates even
+        // if the tracker is unreachable; the close is best effort like reconcile.
         ws.store.append(id, { type: 'task.state', from: task.state, to: 'abandoned', reason })
-        // Best effort like reconcile: the store is authoritative, so a tracker
-        // hiccup logs the failure instead of losing the operator's close.
         try {
           await ws.tracker.close(id, reason)
         } catch (err) {
