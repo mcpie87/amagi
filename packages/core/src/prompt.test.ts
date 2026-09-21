@@ -41,4 +41,13 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('Never pipe check or lint output through head/tail')
     expect(prompt).toContain('Redirect to a file instead')
   })
+
+  test('tells the agent to append a mandatory conclusion written against the real diff', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('### Conclusion')
+    expect(prompt).toContain('git diff <base>...HEAD')
+    expect(prompt).toContain('file by file')
+    expect(prompt).toContain('mandatory')
+    expect(prompt).toContain('deviations from')
+  })
 })

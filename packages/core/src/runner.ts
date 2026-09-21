@@ -390,7 +390,7 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, model, effort)
+    await this.openPullRequest(task, cwd, branch, model, effort, summary)
     this.throwIfCancelled(task.id)
   }
 
@@ -405,6 +405,7 @@ export class Runner {
     branch: string,
     model: string | null,
     effort: string | null,
+    fallbackSummary?: string | null,
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
@@ -424,11 +425,16 @@ export class Runner {
       base: config.repo.baseBranch,
       remote: config.forge.remote,
       title: prTitle(current),
-      body: formatPrBody(current, changes, {
-        harness: this.deps.harness.kind,
-        model,
-        effort,
-      }),
+      body: formatPrBody(
+        current,
+        changes,
+        {
+          harness: this.deps.harness.kind,
+          model,
+          effort,
+        },
+        fallbackSummary,
+      ),
       labels: amagiLabels(current.type),
     }
     try {

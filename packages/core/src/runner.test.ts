@@ -367,6 +367,37 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
+  test('renders the agent-authored conclusion after the changed-files list', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = {
+      ...TASK,
+      description: 'Write hello.txt\n\n### Conclusion\n\nAdded hello.txt with a greeting.',
+    }
+    const pr = new FakePr()
+    await makeRunner(tracker, new FakeHarness([writesAFile]), config(), pr).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body.indexOf('### 🛠️ What changed')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Added `hello.txt` with a greeting.')
+  })
+
+  test('falls back to the run summary when the agent wrote no conclusion', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([
+        { ...writesAFile, outcome: { summary: 'wrote hello.txt, fixed the greeting' } },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('wrote `hello.txt`, fixed the greeting')
+  })
+
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')

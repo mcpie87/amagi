@@ -26,6 +26,12 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    "- Once the work is finished, append a `### Conclusion` section to the task's",
+    '  description in the issue tracker, written against the real diff',
+    '  (`git diff <base>...HEAD`), not against the task: what the changes do',
+    '  file by file and anything the reviewer needs to know (deviations from the',
+    '  task, what was left out, why a file that looks unrelated was touched). It',
+    '  is mandatory for every PR.',
     '- End your final message with a short summary of what was done; it is used as',
     '  the reason when no pull request is opened.',
   ]
