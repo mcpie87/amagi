@@ -70,16 +70,13 @@ class Lease {
   constructor(
     private readonly tracker: Tracker,
     private readonly taskId: string,
-    private readonly onLost: () => void,
   ) {}
 
   start(): void {
     const period = Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
     this.timer = setInterval(() => {
       void this.tracker.heartbeat(this.taskId).then((alive) => {
-        if (alive || this.lost) return
-        this.lost = true
-        this.onLost()
+        if (!alive) this.lost = true
       })
     }, period)
   }
@@ -199,8 +196,8 @@ export class Runner {
     const resume = recorded !== null && recorded.worktree !== null && recorded.branch !== null
 
     let worktree: WorktreeSpec
-    if (recorded !== null && recorded.worktree !== null && recorded.branch !== null) {
-      worktree = { path: recorded.worktree, branch: recorded.branch }
+    if (resume) {
+      worktree = { path: recorded.worktree!, branch: recorded.branch! }
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
       // https; without one, fall back to the local base branch so the ssh key
@@ -232,7 +229,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, task.id, () => {})
+    const lease = new Lease(this.deps.tracker, task.id)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, resume)
