@@ -4,7 +4,7 @@ import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
 import { parseModelLines } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 /**
  * Enough to implement a task and call `amagi ask`, without handing over the
@@ -42,20 +42,6 @@ type ClaudeMessage = {
   model?: string
   message?: { model?: string; content?: ContentBlock[] }
   usage?: { input_tokens?: number; output_tokens?: number }
-}
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
 }
 
 /**

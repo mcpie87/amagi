@@ -6,6 +6,25 @@ import type { AgentOutcome, AgentProcess, AgentStartOptions, AgentUsage } from '
 import { harnessEnv } from './env.ts'
 
 /**
+ * Renders a harness tool_result payload into a single string: strings pass
+ * through, arrays of content blocks join their `text` fields, anything else
+ * falls back to JSON. Shared by every translator.
+ */
+export function renderToolResult(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === 'object' && part !== null && 'text' in part
+          ? String((part as { text: unknown }).text)
+          : JSON.stringify(part),
+      )
+      .join('\n')
+  }
+  return JSON.stringify(content ?? '')
+}
+
+/**
  * Everything the spawn loop reads off the translator after the stream ends.
  * Each harness's translator class satisfies this structurally.
  */
