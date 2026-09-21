@@ -966,6 +966,29 @@ function WorkersPanel() {
           />
         ))}
       </div>
+      {status.workers !== undefined && status.workers.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {status.workers.map((w) => (
+            <div
+              key={`${w.repo}/${w.name}`}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2 text-xs text-zinc-400"
+            >
+              <span className="shrink-0 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white">
+                {w.name}
+              </span>
+              <span className="font-medium text-zinc-200">{w.repo}</span>
+              <span>last run: {fmtLastRun(w.lastRunAt)}</span>
+              {w.error === null ? (
+                <span>
+                  scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
+                </span>
+              ) : (
+                <span className="text-red-400">error: {w.error}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -1386,6 +1409,17 @@ function fmtBytes(n: number): string {
 function fmtCpu(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0s'
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Compact "x ago" for a worker's last-run stamp; empty before the first tick. */
+function fmtLastRun(epochMs: number): string {
+  if (epochMs <= 0) return 'never'
+  const s = Math.floor((Date.now() - epochMs) / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}min ago`
+  const h = Math.floor(m / 60)
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
 function lineFor(event: AgentStreamEvent): string {

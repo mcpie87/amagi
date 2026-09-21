@@ -66,6 +66,13 @@ export const Config = z.object({
       maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
+      /**
+       * How often the agent-mention watcher polls open PRs for comments and
+       * reviews mentioning the agent handle. Defaults to 5 minutes: paired
+       * with last-seen-per-PR tracking, unchanged PRs are not re-scanned, so
+       * the default stays inside GitHub REST rate limits.
+       */
+      mentionWatchIntervalSec: z.number().int().min(1).default(300),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */

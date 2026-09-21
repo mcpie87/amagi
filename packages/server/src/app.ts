@@ -14,6 +14,7 @@ import {
   type TrackerTask,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
+  type WorkerActivity,
   type Workspace,
   type Workspaces,
   writeConfig,
@@ -52,6 +53,8 @@ export type ServerDeps = {
   runner?: RunServiceApi
   /** The repo key the runner is bound to, so settings apply live only to it. */
   runnerRepo?: string
+  /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
+  workers?: () => WorkerActivity[]
 }
 
 /**
@@ -155,7 +158,7 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [], runner, runnerRepo }: ServerDeps) {
+export function createApp({ workspaces, notify = [], runner, runnerRepo, workers }: ServerDeps) {
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -440,7 +443,9 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
 
     .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      return c.json(await runner.status())
+      const status = await runner.status()
+      if (workers === undefined) return c.json(status)
+      return c.json({ ...status, workers: workers() })
     })
 
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
