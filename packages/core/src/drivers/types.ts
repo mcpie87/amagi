@@ -106,6 +106,14 @@ export interface Tracker {
   release(id: string): Promise<void>
   close(id: string, reason?: string): Promise<void>
 
+  /**
+   * Ids of tasks the tracker currently considers open, for recovering a task
+   * id from a branch/PR head ref when nothing else names it. Optional: only
+   * the pre-trailer PR fallback needs it, and a test double need not implement
+   * it just to satisfy the interface.
+   */
+  openIds?(limit?: number): Promise<string[]>
+
   openGate(taskId: string, question: Question): Promise<GateRef>
   gateResolved(ref: GateRef): Promise<boolean>
   resolveGate(ref: GateRef): Promise<void>

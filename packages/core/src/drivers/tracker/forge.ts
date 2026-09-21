@@ -129,6 +129,10 @@ export abstract class ForgeTracker implements Tracker {
     await this.removeClaimLabel(id)
   }
 
+  async openIds(limit = 500): Promise<string[]> {
+    return (await this.listOpen(limit)).map((i) => i.id)
+  }
+
   async close(id: string, _reason?: string): Promise<void> {
     await this.setState(id, true)
   }

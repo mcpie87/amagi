@@ -167,6 +167,14 @@ export class BeadsTracker implements Tracker {
     )
   }
 
+  /** `bd list` without `--all` excludes closed issues, which is exactly "open" here. */
+  async openIds(limit = 500): Promise<string[]> {
+    const issues = parseIssues(
+      await this.bd(['list', '--brief', '--json', '--limit', String(limit)]),
+    )
+    return issues.map((i) => i.id)
+  }
+
   async children(id: string): Promise<BeadsIssue[]> {
     return parseIssues(await this.bd(['children', id, '--json'])).map(toIssue)
   }

@@ -107,6 +107,12 @@ describe('GithubTracker', () => {
     })
   })
 
+  test('openIds includes claimed issues too, unlike ready', async () => {
+    const { exec } = fake(() => ok(GH_READY))
+    const ids = await new GithubTracker({ cwd: '/repo', exec }).openIds()
+    expect(ids).toEqual(['3', '5'])
+  })
+
   test('claim marks the issue with the claim label', async () => {
     const { exec, calls } = fake((c) => (c.includes('view') ? ok(GH_VIEW) : undefined))
     const task = await new GithubTracker({ cwd: '/repo', exec }).claim('3')

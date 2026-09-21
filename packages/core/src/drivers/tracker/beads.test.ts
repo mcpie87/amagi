@@ -278,6 +278,13 @@ describe('BeadsTracker', () => {
     expect(seenStdin).toBe('--not-a-flag\n"quoted"')
   })
 
+  test('openIds lists without --all, so closed issues are excluded', async () => {
+    const { exec, calls } = fake((c) => (c.includes('list') ? ok(READY_JSON) : undefined))
+    const ids = await new BeadsTracker({ cwd: '/repo', exec }).openIds()
+    expect(ids).toEqual(['tst-lmc'])
+    expect(calls[0]).not.toContain('--all')
+  })
+
   test('gate id comes from a tagged lookup, not from parsing prose', async () => {
     const title = gateTitle('q-1')
     const { exec, calls } = fake((c) => {
