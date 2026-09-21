@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync } from 'node:fs'
 import type {
+  AgentEvent,
+  AgentOutcome,
+  AgentProcess,
+  AgentStartOptions,
   BeadsIssue,
   CreateTrackerTask,
   EpicCloseEligible,
   EpicCloseResult,
   GateRef,
+  Harness,
   Question,
   QuestionRow,
   RunServiceApi,
@@ -17,7 +22,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { loadConfig } from '@amagi/core'
+import { AsyncQueue, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -766,6 +771,129 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const body = (await res.json()) as { task: TaskRow }
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('wont run')
+  })
+})
+
+describe('POST /api/repos/:repo/tasks/:id/chat', () => {
+  class FakeChatHarness implements Harness {
+    readonly kind = 'fake'
+    readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+    start(opts: AgentStartOptions): AgentProcess {
+      return this.run(null, opts)
+    }
+    resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
+      return this.run(sessionId, opts)
+    }
+    async listModels(): Promise<string[]> {
+      return []
+    }
+    async listEfforts(): Promise<string[]> {
+      return []
+    }
+    private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
+      this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
+      const queue = new AsyncQueue<AgentEvent>()
+      queue.push({ kind: 'text', text: 'the answer' })
+      queue.close()
+      const outcome: AgentOutcome = {
+        exitCode: 0,
+        ok: true,
+        sessionId: 'sess-1',
+        summary: 'the answer',
+        usage: null,
+        stderr: '',
+      }
+      return {
+        pid: -1,
+        events: () => queue,
+        done: Promise.resolve(outcome),
+        kill: async () => {},
+        model: null,
+        effort: null,
+      }
+    }
+  }
+
+  let harness: FakeChatHarness
+
+  beforeEach(() => {
+    harness = new FakeChatHarness()
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces, chatHarnessFor: () => harness })
+  })
+
+  const parked = (id: string) => {
+    store.append(id, { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'agent.exited', role: 'implement', exitCode: 0, sessionId: 'sess-1' })
+    store.append(id, {
+      type: 'task.state',
+      from: 'implementing',
+      to: 'no_pr',
+      reason: 'no changes',
+    })
+  }
+  const chat = (id: string, message: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message }),
+    })
+
+  test('accepts a message and resumes the recorded session on the worktree', async () => {
+    parked('bd-1')
+    const res = await chat('bd-1', 'why no pr?')
+    expect(res.status).toBe(202)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(harness.calls).toEqual([{ resumeFrom: 'sess-1', prompt: 'why no pr?', cwd: '/tmp/wt' }])
+    const events = store.events({ taskId: 'bd-1' })
+    expect(events.some((e) => e.type === 'chat.message' && e.text === 'why no pr?')).toBe(true)
+  })
+
+  test('rejects a missing or blank message', async () => {
+    parked('bd-1')
+    expect((await chat('bd-1', '')).status).toBe(400)
+    expect((await chat('bd-1', '   ')).status).toBe(400)
+    const empty = await app.request('/api/repos/repo1/tasks/bd-1/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(empty.status).toBe(400)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await chat('nope', 'hi')
+    expect(res.status).toBe(404)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task is not a parked no_pr task', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task has no summary to chat about', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', {
+      type: 'agent.exited',
+      role: 'implement',
+      exitCode: 0,
+      sessionId: 'sess-1',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'no_pr' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
   })
 })
 
