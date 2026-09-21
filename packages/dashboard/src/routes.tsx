@@ -1,6 +1,7 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
+import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
   isTerminal,
@@ -8,6 +9,7 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
+import { fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -945,7 +947,7 @@ function IssuesView() {
           current === null ? null : (items.find((i) => i.id === current.id) ?? null),
         )
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setError(errMsg(err)))
   }, [selected, refresh])
 
   useEffect(() => {
@@ -1625,7 +1627,13 @@ const KANBAN_COLUMNS: KanbanColumn[] = [
     key: 'implementing',
     title: 'In progress',
     accent: 'bg-blue-600',
-    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks', 'retrying'],
+    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks'],
+  },
+  {
+    key: 'retrying',
+    title: 'Retrying',
+    accent: 'bg-orange-600',
+    states: ['retrying'],
   },
   {
     key: 'needs_human',
@@ -1712,6 +1720,14 @@ function QueueView() {
                                 {task.statusReason}
                               </span>
                             )}
+                          {column.key === 'retrying' && (
+                            <span className="mt-1 block truncate text-xs text-orange-300">
+                              {task.retryAt !== null
+                                ? `retries in ${fmtRetryIn(task.retryAt)}`
+                                : 'retry pending'}
+                              {task.lastError !== null && ` · ${task.lastError}`}
+                            </span>
+                          )}
                           {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
                             <span
                               className={`mt-1 block truncate text-xs ${
@@ -1873,6 +1889,12 @@ function RunList({
               <span className="block truncate text-xs text-fg-faint">{task.id}</span>
               {showReason && task.statusReason !== null && (
                 <span className="block truncate text-xs text-fg-muted">{task.statusReason}</span>
+              )}
+              {task.state === 'retrying' && (
+                <span className="block truncate text-xs text-orange-ink">
+                  {task.retryAt !== null ? `retrying in ${fmtRetryIn(task.retryAt)}` : 'retrying'}
+                  {task.lastError !== null && ` · ${task.lastError}`}
+                </span>
               )}
             </span>
           </Link>
@@ -2105,7 +2127,9 @@ function ReclaimButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (worktree === null || isTerminal(state)) return null
+  // A retrying task is still owned by its runner, which will retry on its own;
+  // reclaiming it here would hand the tracker claim to a second worker.
+  if (worktree === null || isTerminal(state) || state === 'retrying') return null
 
   const reclaim = async () => {
     setBusy(true)
@@ -2433,6 +2457,53 @@ function RequeueButton({
   )
 }
 
+/**
+ * Skip a deferred automatic retry's backoff and run it now, only meaningful
+ * while the task sits in retrying (the runner owns it and is sleeping).
+ */
+function RetryNowButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'retrying') return null
+
+  const retryNow = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/retry`, {
+        method: 'POST',
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void retryNow()}
+        className="rounded border border-orange-edge bg-orange-soft px-3 py-1 text-sm text-orange-ink hover:bg-orange-soft-hover disabled:opacity-50"
+      >
+        Retry now
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -2458,10 +2529,6 @@ function StopButton({ taskId }: { taskId: string }) {
 }
 
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-}
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
@@ -2512,6 +2579,17 @@ function fmtAgo(ts: number): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
+/** How long until a scheduled retry fires, e.g. "in 45s". */
+function fmtRetryIn(ts: number): string {
+  const s = Math.max(0, Math.round((ts - Date.now()) / 1000))
+  if (s <= 0) return 'now'
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
+}
+
 const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
 
 const escapeHtml = (s: string) =>
@@ -2555,7 +2633,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
           return res.json() as Promise<Issue>
         })
         .then(setIssue)
-        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => setError(errMsg(err)))
     }
   }
 
@@ -2628,6 +2706,29 @@ function SummaryPanel({ task }: { task: TaskView }) {
         {needsHuman ? 'Needs human attention' : 'Summary'}
       </h2>
       {task.statusReason !== null && <Markdown text={task.statusReason} />}
+    </div>
+  )
+}
+
+/** A task deferring an automatic retry: when it fires and why, plus the reason. */
+function RetryPanel({ task }: { task: TaskView }) {
+  if (task.state !== 'retrying') return null
+  return (
+    <div className="mt-6 rounded-lg border border-orange-edge bg-orange-soft px-4 py-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-orange-ink">
+        Deferred automatic retry
+      </h2>
+      <p className="mt-1 text-sm text-fg">
+        {task.retryAt !== null
+          ? `Retrying in ${fmtRetryIn(task.retryAt)} (attempt ${task.retryCount}).`
+          : `Retry pending (attempt ${task.retryCount}).`}{' '}
+        No human action is needed; use Retry now to skip the wait, or Close to abandon.
+      </p>
+      {task.lastError !== null && (
+        <p className="mt-1 text-sm text-fg-muted">
+          Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
+        </p>
+      )}
     </div>
   )
 }
@@ -2789,12 +2890,17 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && (
+          <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
+        )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
 
       <SummaryPanel task={task} />
+
+      <RetryPanel task={task} />
 
       {selected !== null &&
         task.state === 'no_pr' &&

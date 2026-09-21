@@ -704,7 +704,7 @@ describe('Runner.runOnce', () => {
         events: [
           { kind: 'text', text: 'working on it' },
           { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
-          { kind: 'result', ok: false, summary: 'the build broke' },
+          { kind: 'result', ok: false, summary: 'registry unreachable' },
         ],
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
@@ -718,7 +718,7 @@ describe('Runner.runOnce', () => {
     ).runOnce()
 
     expect(result?.state).toBe('needs_human')
-    expect(stateReason(TASK.id)).toContain('the build broke')
+    expect(stateReason(TASK.id)).toContain('registry unreachable')
   })
 
   test('a failed agent falls back to the failing tool output when there is no result or text', async () => {
@@ -1093,5 +1093,30 @@ describe('Runner.cancel', () => {
 
     expect(result?.state).toBe('cancelled')
     expect(released).toEqual([TASK.id])
+  })
+
+  test('retryNow wakes a deferred retry so the next attempt runs immediately', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      writesAFile,
+    ])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { retryBaseMs: 60_000, retryMaxMs: 60_000 } }),
+    )
+    const pending = runner.runOnce()
+
+    // The task parks in retrying for a 60s backoff; retryNow skips the wait.
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'retry.scheduled'))
+    expect(store.task(TASK.id)?.state).toBe('retrying')
+    const started = Date.now()
+    runner.retryNow()
+    const result = await pending
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    // The run completed well inside the 60s backoff, so it cannot have slept it out.
+    expect(Date.now() - started).toBeLessThan(10_000)
   })
 })

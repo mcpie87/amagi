@@ -70,6 +70,11 @@ export interface RunServiceApi {
   stop(taskId: string): Promise<StopResult>
   /** Live capacity change; only affects new launches, never in-flight runs. */
   setMaxParallel(n: number): void
+  /**
+   * Skip the backoff of a task currently deferring an automatic retry and
+   * start the next attempt immediately. 404 when the task runs elsewhere.
+   */
+  retryNow(taskId: string): Promise<StopResult>
   /** Live automatic-dispatch toggle; a fresh launch loop starts or stops. */
   setAutoQueue(enabled: boolean): void
   /** Stops the automatic-dispatch loop, for server shutdown. */
@@ -312,6 +317,15 @@ export class RunService implements RunServiceApi {
     }
     entry.runner.cancel()
     await entry.done
+    return { ok: true, taskId }
+  }
+
+  async retryNow(taskId: string): Promise<StopResult> {
+    const entry = this.runs.get(taskId)
+    if (entry === undefined) {
+      return { ok: false, status: 404, error: `task ${taskId} is not running here` }
+    }
+    entry.runner.retryNow()
     return { ok: true, taskId }
   }
 

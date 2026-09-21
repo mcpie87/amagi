@@ -1,5 +1,6 @@
 import {
   type Config,
+  errMsg,
   isConflicting,
   listOpenPrs,
   loadConfig,
@@ -68,11 +69,7 @@ export const checkPrsCommand = defineCommand({
     try {
       prs = await listOpenPrs({ cwd: root })
     } catch (err) {
-      console.log(
-        red(
-          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is gh installed and authenticated?)`,
-        ),
-      )
+      console.log(red(`failed to list PRs: ${errMsg(err)} (is gh installed and authenticated?)`))
       return
     }
     if (prs.length === 0) {

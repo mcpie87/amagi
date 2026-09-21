@@ -1,6 +1,7 @@
 import {
   type Config,
   type Exec,
+  errMsg,
   isAgentMention,
   listOpenPrs,
   type MentionWatchState,
@@ -40,8 +41,6 @@ export type MentionWatcher = {
 
 const DEFAULT_INTERVAL_MS = 300_000
 
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
-
 /**
  * Continuously scans open PRs for comments and reviews mentioning the agent
  * handle and responds to each exactly once (comment id dedup). Rate-limit
@@ -49,6 +48,11 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
  * last-seen state that skips fetching comments for PRs whose updatedAt has
  * not changed since the last scan. A PR's state only advances once every
  * mention on it was responded to, so a failed response is retried next tick.
+ *
+ * Dedup is by exact comment id through the handled set, never by a numeric
+ * watermark: `listComments` mixes issue comments, reviews and inline review
+ * comments, which have separate id spaces, so comparing ids numerically would
+ * silently drop mentions in a lower-numbered space.
  */
 export function startMentionWatcher({
   repo,
@@ -89,7 +93,7 @@ export function startMentionWatcher({
       for (const pr of prs) {
         const key = String(pr.number)
         const seen = state[key]
-        if (seen !== undefined && seen.updatedAt === pr.updatedAt) {
+        if (seen !== undefined && seen === pr.updatedAt) {
           nextState[key] = seen
           continue
         }
@@ -101,13 +105,8 @@ export function startMentionWatcher({
           continue
         }
         scanned++
-        const maxId = comments.reduce((m, c) => Math.max(m, Number(c.id) || 0), 0)
-        const lastId = seen?.lastCommentId ?? 0
         const mentions = comments.filter(
-          (c) =>
-            Number(c.id) > lastId &&
-            isAgentMention(c, config.forge.agentHandle) &&
-            !handled.has(c.id),
+          (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
         )
         let allOk = true
         for (const mention of mentions) {
@@ -131,7 +130,7 @@ export function startMentionWatcher({
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
           }
         }
-        if (allOk) nextState[key] = { updatedAt: pr.updatedAt, lastCommentId: maxId }
+        if (allOk) nextState[key] = pr.updatedAt
       }
       // Dropping closed PRs from the state keeps the file bounded.
       saveMentionWatch(watchPath, nextState)
