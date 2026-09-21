@@ -17,7 +17,7 @@ import {
   reclaimPrompt,
   whyNoChangesPrompt,
 } from './prompt.ts'
-import { backoffDelayMs, isTransientFailure } from './retry.ts'
+import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
@@ -635,6 +635,9 @@ export class Runner {
         reason: 'transient harness failure',
         detail: run.detail ?? '',
       })
+      // A session that hit its own limit (turn/context window) is spent and
+      // cannot be resumed; the retry starts a fresh session in the same worktree.
+      if (isSessionLimit(run.detail ?? '')) sessionId = null
       this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out.
       const deadline = Date.now() + delayMs
