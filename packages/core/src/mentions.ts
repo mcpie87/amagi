@@ -84,8 +84,8 @@ export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrCom
   return comments.filter((c) => isAgentMention(c, opts.handle))
 }
 
-/** Last-seen comment per open PR, so the watcher skips PRs that have not changed. */
-export type MentionWatchState = Record<string, { updatedAt: string; lastCommentId: number }>
+/** Last-seen updatedAt per open PR, so the watcher skips PRs that have not changed. */
+export type MentionWatchState = Record<string, string>
 
 export function mentionWatchPath(repoName: string): string {
   return join(cacheHome(), 'amagi', 'mentions', `${repoName}.watch.json`)
