@@ -1,4 +1,5 @@
 import type { Store, Tracker } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type GatePollerOptions = {
   store: Store
@@ -23,10 +24,7 @@ export function startGatePoller({
   tracker,
   intervalMs = DEFAULT_INTERVAL_MS,
 }: GatePollerOptions): GatePoller {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
-
-  async function tick(): Promise<void> {
+  return startPoller(intervalMs, async () => {
     // unansweredQuestions, not openQuestions: a question whose await poll timed
     // out is still unanswered, and the parked runner must be able to resume on
     // a gate the human resolves out of band.
@@ -58,15 +56,5 @@ export function startGatePoller({
         )
       }
     }
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
-  }
-
-  timer = setTimeout(() => void tick(), intervalMs)
-  return {
-    stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
-    },
-  }
+  })
 }

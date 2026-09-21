@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync } from 'node:fs'
 import type {
+  AgentEvent,
+  AgentOutcome,
+  AgentProcess,
+  AgentStartOptions,
   BeadsIssue,
   CreateTrackerTask,
   EpicCloseEligible,
   EpicCloseResult,
   GateRef,
+  Harness,
   Question,
   QuestionRow,
   RunServiceApi,
@@ -17,7 +22,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { loadConfig } from '@amagi/core'
+import { AsyncQueue, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -199,6 +204,7 @@ class FakeIssueTracker implements Tracker {
       labels: [],
       parent: null,
       dependencies: [],
+      childCount: 0,
       ...partial,
     }
     this.issues.set(issue.id, issue)
@@ -224,7 +230,7 @@ class FakeIssueTracker implements Tracker {
   }
   async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
     this.created.push(input)
-    const blocker = (id: string): TrackerTask => ({
+    const blocker = (id: string): TrackerTask & { labels: string[] } => ({
       id,
       title: id,
       description: '',
@@ -232,6 +238,7 @@ class FakeIssueTracker implements Tracker {
       priority: null,
       type: null,
       url: null,
+      labels: [],
     })
     return this.seed({
       title: input.title,
@@ -263,6 +270,7 @@ class FakeIssueTracker implements Tracker {
                 priority: null,
                 type: null,
                 url: null,
+                labels: [],
               })),
               ...issue.dependencies.filter((d) => !dependencies.remove.includes(d.id)),
             ],
@@ -354,6 +362,7 @@ describe('issue mutations', () => {
           priority: null,
           type: null,
           url: null,
+          labels: [],
         },
       ],
     })
@@ -416,6 +425,24 @@ describe('issue mutations', () => {
     const tracker = new FakeIssueTracker()
     app = issueApp(tracker)
     const res = await app.request('/api/repos/repo1/issues/nope')
+    expect(res.status).toBe(404)
+  })
+})
+
+describe('GET /api/repos/:repo/ready-queue', () => {
+  test('returns the tracker-ready queue in its given order', async () => {
+    const tracker = new FakeIssueTracker()
+    const a = tracker.seed({ id: 'bd-old', title: 'oldest' })
+    const b = tracker.seed({ id: 'bd-new', title: 'newest' })
+    app = issueApp(tracker)
+    const res = await app.request('/api/repos/repo1/ready-queue')
+    expect(res.status).toBe(200)
+    expect((await res.json()) as TrackerTask[]).toEqual([a, b])
+  })
+
+  test('404s on an unknown repository', async () => {
+    app = issueApp(new FakeIssueTracker())
+    const res = await app.request('/api/repos/nope/ready-queue')
     expect(res.status).toBe(404)
   })
 })
@@ -597,6 +624,41 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/tasks/:id/stop', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const running = (id: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+  }
+
+  test('parks a running task in cancelled', async () => {
+    running('bd-1')
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('cancelled')
+    expect(store.task('bd-1')?.state).toBe('cancelled')
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/tasks/nope/stop', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('409s on an already terminal task', async () => {
+    running('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/close', () => {
   let tracker: FakeGateTracker
 
@@ -681,7 +743,9 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           available: true,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async (id) => {
@@ -691,6 +755,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           return { ok: true, taskId: id }
         },
         setMaxParallel: () => {},
+        setAutoQueue: () => {},
       },
     })
     claim('bd-1')
@@ -769,6 +834,129 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
   })
 })
 
+describe('POST /api/repos/:repo/tasks/:id/chat', () => {
+  class FakeChatHarness implements Harness {
+    readonly kind = 'fake'
+    readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+    start(opts: AgentStartOptions): AgentProcess {
+      return this.run(null, opts)
+    }
+    resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
+      return this.run(sessionId, opts)
+    }
+    async listModels(): Promise<string[]> {
+      return []
+    }
+    async listEfforts(): Promise<string[]> {
+      return []
+    }
+    private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
+      this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
+      const queue = new AsyncQueue<AgentEvent>()
+      queue.push({ kind: 'text', text: 'the answer' })
+      queue.close()
+      const outcome: AgentOutcome = {
+        exitCode: 0,
+        ok: true,
+        sessionId: 'sess-1',
+        summary: 'the answer',
+        usage: null,
+        stderr: '',
+      }
+      return {
+        pid: -1,
+        events: () => queue,
+        done: Promise.resolve(outcome),
+        kill: async () => {},
+        model: null,
+        effort: null,
+      }
+    }
+  }
+
+  let harness: FakeChatHarness
+
+  beforeEach(() => {
+    harness = new FakeChatHarness()
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces, chatHarnessFor: () => harness })
+  })
+
+  const parked = (id: string) => {
+    store.append(id, { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'agent.exited', role: 'implement', exitCode: 0, sessionId: 'sess-1' })
+    store.append(id, {
+      type: 'task.state',
+      from: 'implementing',
+      to: 'no_pr',
+      reason: 'no changes',
+    })
+  }
+  const chat = (id: string, message: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message }),
+    })
+
+  test('accepts a message and resumes the recorded session on the worktree', async () => {
+    parked('bd-1')
+    const res = await chat('bd-1', 'why no pr?')
+    expect(res.status).toBe(202)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(harness.calls).toEqual([{ resumeFrom: 'sess-1', prompt: 'why no pr?', cwd: '/tmp/wt' }])
+    const events = store.events({ taskId: 'bd-1' })
+    expect(events.some((e) => e.type === 'chat.message' && e.text === 'why no pr?')).toBe(true)
+  })
+
+  test('rejects a missing or blank message', async () => {
+    parked('bd-1')
+    expect((await chat('bd-1', '')).status).toBe(400)
+    expect((await chat('bd-1', '   ')).status).toBe(400)
+    const empty = await app.request('/api/repos/repo1/tasks/bd-1/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(empty.status).toBe(400)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await chat('nope', 'hi')
+    expect(res.status).toBe(404)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task is not a parked no_pr task', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('409s when the task has no summary to chat about', async () => {
+    store.append('bd-1', { type: 'task.claimed', title: 't', tracker: 'beads' })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt', branch: 'amagi/x' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', {
+      type: 'agent.exited',
+      role: 'implement',
+      exitCode: 0,
+      sessionId: 'sess-1',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'no_pr' })
+    const res = await chat('bd-1', 'hi')
+    expect(res.status).toBe(409)
+    expect(harness.calls).toHaveLength(0)
+  })
+})
+
 describe('runner endpoints', () => {
   const stubRunner = (over: Partial<RunServiceApi> = {}): RunServiceApi => ({
     status: async () => ({
@@ -776,11 +964,14 @@ describe('runner endpoints', () => {
       available: true,
       capacity: 1,
       running: [],
+      startedAt: {},
       resources: {},
+      autoQueue: false,
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
     setMaxParallel: () => {},
+    setAutoQueue: () => {},
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -805,7 +996,9 @@ describe('runner endpoints', () => {
           available: false,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+          autoQueue: false,
         }),
       }),
     })
@@ -816,8 +1009,46 @@ describe('runner endpoints', () => {
       available: false,
       capacity: 1,
       running: ['bd-1'],
+      startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+      autoQueue: false,
     })
+  })
+
+  test('GET /api/runner merges background worker activity when present', async () => {
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner(),
+      workers: () => [
+        {
+          repo: 'repo1',
+          name: 'mention-watcher',
+          lastRunAt: 1720000000000,
+          ok: true,
+          error: null,
+          counters: [
+            { label: 'scanned', value: 2 },
+            { label: 'responded', value: 1 },
+          ],
+        },
+      ],
+    })
+    const res = await app.request('/api/runner')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { workers?: unknown }
+    expect(body.workers).toEqual([
+      {
+        repo: 'repo1',
+        name: 'mention-watcher',
+        lastRunAt: 1720000000000,
+        ok: true,
+        error: null,
+        counters: [
+          { label: 'scanned', value: 2 },
+          { label: 'responded', value: 1 },
+        ],
+      },
+    ])
   })
 
   test('runner endpoints are 501 without a runner service', async () => {
@@ -908,29 +1139,66 @@ describe('repo settings endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET returns the current worker count', async () => {
+  test('GET returns the current worker count and auto-queue state', async () => {
     const res = await app.request('/api/repos/repo1/settings')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 1 })
+    expect(await res.json()).toEqual({ maxParallel: 1, autoQueue: false })
   })
 
   test('PATCH persists, updates the workspace config, and is re-readable', async () => {
     const res = await patch('repo1', '{"maxParallel":4}')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 4 })
+    expect(await res.json()).toEqual({ maxParallel: 4, autoQueue: false })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       maxParallel: 4,
+      autoQueue: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
   })
 
-  test('PATCH rejects worker counts outside the range', async () => {
+  test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
+    const applied: boolean[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          resources: {},
+          startedAt: {},
+          autoQueue: true,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: () => {},
+        setAutoQueue: (enabled) => applied.push(enabled),
+      },
+      runnerRepo: 'repo1',
+    })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(applied).toEqual([true])
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
+      maxParallel: 1,
+      autoQueue: true,
+    })
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+    // the toggle only reaches the runner bound to this repo
+    expect((await patch('repo2', '{"autoQueue":false}')).status).toBe(200)
+    expect(applied).toEqual([true])
+  })
+
+  test('PATCH rejects worker counts outside the range and an empty body', async () => {
     for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
       const res = await patch('repo1', JSON.stringify({ maxParallel }))
       expect(res.status).toBe(400)
     }
+    expect((await patch('repo1', '{}')).status).toBe(400)
   })
 
   test('PATCH live-applies the runner only for the repo it serves', async () => {
@@ -943,11 +1211,14 @@ describe('repo settings endpoints', () => {
           available: true,
           capacity: 1,
           running: [],
+          startedAt: {},
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         setMaxParallel: (n) => applied.push(n),
+        setAutoQueue: () => {},
       },
       runnerRepo: 'repo1',
     })
@@ -1297,6 +1568,26 @@ describe('POST /api/repos/:repo/run', () => {
     ws = testWorkspaces(['repo1'])
     app = createApp({ workspaces: ws.workspaces })
     expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
+  })
+})
+
+describe('POST /api/repos/:repo/triage', () => {
+  test('starts a triage pass in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/triage', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker is not triage-capable, so the pass ends without a claim
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/triage', { method: 'POST' })).status).toBe(404)
   })
 })
 

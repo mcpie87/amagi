@@ -58,7 +58,106 @@ export function currentAgentFor(
 ): Extract<StoredEvent, { type: 'agent.started' }> | null {
   for (let i = state.events.length - 1; i >= 0; i--) {
     const event = state.events[i]
-    if (event?.taskId === taskId && event.type === 'agent.started') return event
+    // A chat run is not the implementing agent; skip it so the task detail
+    // keeps naming the agent that actually did the work.
+    if (event?.taskId === taskId && event.type === 'agent.started' && event.role !== 'chat') {
+      return event
+    }
   }
   return null
+}
+
+/** Context size of the agent currently running on the task, if any usage has been reported. */
+export function currentUsageFor(
+  state: DashboardState,
+  taskId: string,
+): { inputTokens: number; outputTokens: number; cachedTokens: number } | null {
+  let inputTokens = 0
+  let outputTokens = 0
+  let cachedTokens = 0
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const event = state.events[i]
+    if (event?.taskId !== taskId) continue
+    // Stop at the current implementing run; earlier runs are another context.
+    // Chat runs are not the implementing agent, so their usage is skipped like
+    // currentAgentFor skips their starts.
+    if (event.type === 'agent.started' && event.role !== 'chat') break
+    if (event.type === 'agent.stream' && event.event.kind === 'usage' && event.role !== 'chat') {
+      inputTokens += event.event.inputTokens
+      outputTokens += event.event.outputTokens
+      cachedTokens += event.event.cachedTokens ?? 0
+    }
+  }
+  if (inputTokens === 0 && outputTokens === 0 && cachedTokens === 0) return null
+  return { inputTokens, outputTokens, cachedTokens }
+}
+
+/** One message in the operator/worker chat: a user message or an assistant turn. */
+export type ChatTurn = {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  ts: number
+  /** The assistant turn is still streaming in (no agent.exited yet). */
+  pending: boolean
+}
+
+/**
+ * Folds the event log into a conversation: chat.message events are the
+ * operator's side, and the text chunks of each 'chat'-role agent run fold into
+ * one assistant turn. A chat run still in flight comes back as a pending turn
+ * so the UI can show the worker typing as its text streams in.
+ */
+export function chatTurns(state: DashboardState, taskId: string): ChatTurn[] {
+  const turns: ChatTurn[] = []
+  let open: { text: string; seq: number; ts: number } | null = null
+  const flush = (pending = false) => {
+    if (open === null) return
+    turns.push({
+      id: `a${open.seq}`,
+      role: 'assistant',
+      text: open.text,
+      ts: open.ts,
+      pending,
+    })
+    open = null
+  }
+  for (const event of state.events) {
+    if (event.taskId !== taskId) continue
+    if (event.type === 'chat.message') {
+      flush()
+      turns.push({
+        id: `u${event.seq}`,
+        role: 'user',
+        text: event.text,
+        ts: event.ts,
+        pending: false,
+      })
+    } else if (event.type === 'agent.started' && event.role === 'chat') {
+      flush()
+      open = { text: '', seq: event.seq, ts: event.ts }
+    } else if (
+      event.type === 'agent.stream' &&
+      event.role === 'chat' &&
+      event.event.kind === 'text' &&
+      open !== null
+    ) {
+      open.text += event.event.text
+    } else if (event.type === 'agent.exited' && event.role === 'chat') {
+      flush()
+    }
+  }
+  flush(true)
+  return turns
+}
+
+/** Whether a chat run is currently in flight for the task (worker responding). */
+export function chatInFlight(state: DashboardState, taskId: string): boolean {
+  let started = false
+  for (const event of state.events) {
+    if (event.taskId !== taskId) continue
+    if (event.type === 'agent.started' && event.role === 'chat') started = true
+    else if (event.type === 'agent.exited' && event.role === 'chat') started = false
+  }
+  return started
 }

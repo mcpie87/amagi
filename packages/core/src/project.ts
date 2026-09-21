@@ -1,4 +1,10 @@
-import { type CheckResult, canTransition, type StoredEvent, type TaskState } from './events.ts'
+import {
+  type CheckResult,
+  canTransition,
+  type MergeStatus,
+  type StoredEvent,
+  type TaskState,
+} from './events.ts'
 
 export class InvalidTransitionError extends Error {
   constructor(
@@ -27,7 +33,8 @@ export type ProjectedTask = {
   sessionId: string | null
   prUrl: string | null
   prNumber: number | null
-  reviewRound: number
+  /** Merge status of the task's open PR, set by the pr poller while the PR is open. */
+  prMergeStatus: MergeStatus | null
   statusReason: string | null
   lastError: string | null
   retryCount: number
@@ -91,7 +98,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
             sessionId: null,
             prUrl: null,
             prNumber: null,
-            reviewRound: 0,
+            prMergeStatus: null,
             statusReason: null,
             lastError: null,
             retryCount: 0,
@@ -112,7 +119,6 @@ export function project(state: Projection, event: StoredEvent): Projection {
           ...current,
           state: event.to,
           statusReason: event.reason ?? null,
-          reviewRound: event.to === 'reviewing' ? current.reviewRound + 1 : current.reviewRound,
           updatedAt: event.ts,
         }
       }
@@ -123,7 +129,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         tasks[event.taskId] = {
           ...current,
           state: 'claimed',
-          statusReason: null,
+          statusReason: event.reason ?? null,
           updatedAt: event.ts,
         }
       }
@@ -170,6 +176,12 @@ export function project(state: Projection, event: StoredEvent): Projection {
           prNumber: event.number,
           updatedAt: event.ts,
         }
+      }
+      break
+
+    case 'pr.status':
+      if (current) {
+        tasks[event.taskId] = { ...current, prMergeStatus: event.mergeStatus, updatedAt: event.ts }
       }
       break
 

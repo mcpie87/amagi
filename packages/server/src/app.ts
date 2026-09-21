@@ -1,5 +1,7 @@
 import {
   CAPABILITY_WORDS,
+  ChatService,
+  classifyDifficulty,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -12,12 +14,15 @@ import {
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
+  Triage,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
+  type WorkerActivity,
   type Workspace,
   type Workspaces,
   writeConfig,
 } from '@amagi/core'
+import type { Harness } from '@amagi/core/drivers/types'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
 import { Hono } from 'hono'
@@ -27,6 +32,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  ChatBody,
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
@@ -52,6 +58,10 @@ export type ServerDeps = {
   runner?: RunServiceApi
   /** The repo key the runner is bound to, so settings apply live only to it. */
   runnerRepo?: string
+  /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
+  workers?: () => WorkerActivity[]
+  /** Overridable so tests stub the harness a workspace's chat uses. */
+  chatHarnessFor?: (ws: Workspace) => Harness
 }
 
 /**
@@ -155,7 +165,31 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [], runner, runnerRepo }: ServerDeps) {
+export function createApp({
+  workspaces,
+  notify = [],
+  runner,
+  runnerRepo,
+  workers,
+  chatHarnessFor,
+}: ServerDeps) {
+  // One ChatService per workspace, so the in-flight guard survives requests.
+  const chats = new Map<string, ChatService>()
+  const chatFor = (ws: Workspace): ChatService => {
+    let chat = chats.get(ws.key)
+    if (chat === undefined) {
+      const harness = chatHarnessFor?.(ws) ?? makeHarness(ws.config.harness.implement)
+      chat = new ChatService({ store: ws.store, harness, config: ws.config })
+      chats.set(ws.key, chat)
+    }
+    return chat
+  }
+  // The legacy non-scoped stop route predates the repo registry; it targets the
+  // first registered workspace, which is the default repo for single-repo use.
+  const defaultStore = (): Store | null => {
+    const entry = workspaces.list()[0]
+    return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -217,7 +251,14 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
         const cap = capabilityError(ws.tracker, 'create')
         if (cap !== null) return c.json({ error: cap }, 501)
         try {
-          const created: TrackerTask = await ws.tracker.createTask(c.req.valid('json'))
+          const body = c.req.valid('json')
+          const input = ws.config.difficulty.enabled
+            ? {
+                ...body,
+                difficulty: await classifyDifficulty(body.title, body.description, ws.config),
+              }
+            : body
+          const created: TrackerTask = await ws.tracker.createTask(input)
           const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
           return c.json(issue ?? created, 201)
         } catch (err) {
@@ -290,6 +331,13 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       return c.json(await workspaces.diagnose(entry))
     })
 
+    .get('/api/repos/:repo/ready-queue', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      // The tracker orders the queue FCFS (bd ready --sort oldest).
+      return c.json(await ws.tracker.ready())
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -306,6 +354,27 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
         return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
       }
       return c.json(await ws.eligibleEpics())
+    })
+
+    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
+      const store = defaultStore()
+      if (store === null) return c.json({ error: 'no repository registered' }, 409)
+      const { id } = c.req.valid('param')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (isTerminal(task.state)) {
+        return c.json({ error: `task ${id} is already in terminal state ${task.state}` }, 409)
+      }
+      // Park the run in `cancelled`; a live runner watches the store, kills
+      // the agent process and unwinds. A crashed runner leaves the task parked
+      // for the operator to reclaim via the restart flow.
+      store.append(id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'cancelled',
+        reason: 'operator interrupt',
+      })
+      return c.json({ task: store.task(id) })
     })
 
     .post(
@@ -438,15 +507,36 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       },
     )
 
+    .post(
+      '/api/repos/:repo/tasks/:id/chat',
+      valid('param', RepoTaskIdParam),
+      valid('json', ChatBody),
+      (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { message } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const result = chatFor(ws).send(id, message)
+        if (!result.ok) return c.json({ error: result.error }, result.status)
+        // The answer streams back through the repo event stream like any agent
+        // run, so the request returns before the run finishes.
+        return c.json({ taskId: id }, 202)
+      },
+    )
+
     .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      return c.json(await runner.status())
+      const status = await runner.status()
+      if (workers === undefined) return c.json(status)
+      return c.json({ ...status, workers: workers() })
     })
 
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      return c.json({ maxParallel: ws.config.loop.maxParallel })
+      return c.json({
+        maxParallel: ws.config.loop.maxParallel,
+        autoQueue: ws.config.loop.autoQueue,
+      })
     })
 
     .patch(
@@ -456,14 +546,27 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { maxParallel } = c.req.valid('json')
+        const { maxParallel, autoQueue } = c.req.valid('json')
         // Persist first so a restart keeps the value, then live-apply: the
         // cached workspace config and, when this repo owns the runner, its
-        // capacity. In-flight runs are untouched — capacity gates new launches.
-        writeConfig(ws.root, { loop: { maxParallel } })
-        ws.config.loop.maxParallel = maxParallel
-        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
-        return c.json({ maxParallel })
+        // capacity and automatic dispatch. In-flight runs are untouched, both
+        // gate and poll only affect new launches.
+        const patch: Record<string, unknown> = {}
+        if (maxParallel !== undefined) patch.maxParallel = maxParallel
+        if (autoQueue !== undefined) patch.autoQueue = autoQueue
+        writeConfig(ws.root, { loop: patch })
+        if (maxParallel !== undefined) {
+          ws.config.loop.maxParallel = maxParallel
+          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        }
+        if (autoQueue !== undefined) {
+          ws.config.loop.autoQueue = autoQueue
+          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+        }
+        return c.json({
+          maxParallel: ws.config.loop.maxParallel,
+          autoQueue: ws.config.loop.autoQueue,
+        })
       },
     )
 
@@ -638,6 +741,27 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       // A full agent run takes minutes, so the request returns immediately and
       // the run reports through the repo's own event stream.
       void runner.runOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
+
+    .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const triage = new Triage({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.triage),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // Triage may hand off to a long implementation run; the request returns
+      // immediately and every decision reports through the repo's event stream.
+      void triage.triageOnce().catch((err) => {
         const message = err instanceof Error ? err.message : String(err)
         ws.store.append(null, { type: 'error', message, fatal: false })
       })

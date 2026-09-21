@@ -29,17 +29,17 @@ to the API at `http://127.0.0.1:7777`.
 
 ### Dashboard
 
-The dashboard is the shared control room for the connected server:
+The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search workspace** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
 
-- **Overview** brings active runs, open pull requests, questions, and recent activity together.
-- **Runs** searches and filters running, completed, and attention-needed work. Each run has live agent output with follow/pause, check results, a timeline, and workspace context.
-- **Task board** browses tracker tasks with search, status filters, and a saved board/list preference.
-- **Inbox** collects agent questions and stopped runs. Answer questions directly to resume waiting agents.
-- **Activity** shows a searchable timeline of run milestones and decisions.
+- **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button. An **Auto queue** toggle turns automatic dispatch on or off (when on, free slots are filled as tasks become claimable).
+- **Tasks** browses the tracker's issues in board or list view (the choice is remembered), with a search box, a status filter, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
+- **Inbox** collects everything that needs a human: every open question (with one-tap options and a free-text answer) and the tasks needing attention.
+- **Activity** is a feed of everything that happened across runs - claims, state changes, checks, commits, PRs, questions, retries, and errors - newest first, linked to the task.
+- **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
+- **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
+- **Task detail** (linked from Overview, Tasks, Inbox, and Activity) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place, with Log/Checks tabs. Its actions cover reclaim, retry, stop, and instant close.
 
-Use Ctrl+K or Cmd+K to find a page or run. Connection status shows when the event stream is reconnecting and displayed data may be stale. On small screens, navigation opens from the menu button.
-
-Starting and stopping runs, editing tracker tasks, and registering multiple repositories still require backend support. The dashboard currently operates on the repository connected to its server.
+Starting and stopping runs, editing tracker tasks, and registering repositories are all live from the dashboard; the event stream is scoped to the selected repo.
 
 ## Usage
 
@@ -50,6 +50,9 @@ bun run packages/cli/src/index.ts <command>
 | Command | Description |
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
+| `triage` | Pick an unclaimed task the runner skips (epics, milestones, blocked, orphaned) and decide what to do with it: implement, decompose, close, ask the operator, or skip with a recorded reason. `--harness`, `--model` and `--effort` pin the decision harness (defaults to `harness.triage`) |
+| `continue <task-id>` | Resume a task in its recorded worktree. `--harness`/`--model` restart it with a different harness or model |
+| `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -83,7 +86,7 @@ picks the tracker, forge, harness and checks. The CLI (`run`, `status`, `clean`,
 `git rev-parse --show-toplevel`, reads and writes that repo's own store, and addresses the
 server's repo-scoped routes by that key.
 
-The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default) and, for the `github` tracker/forge, a `GH_TOKEN` or `GITHUB_TOKEN` in the environment so `gh` and the unattended `git push`/`fetch` never block on interactive auth.
+The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default). Forge access is token-only: export the bot's token into the Amagi process environment (`GH_TOKEN`/`GITHUB_TOKEN` for `github`, `FORGEJO_TOKEN` for `forgejo`) and Amagi uses it for `gh`, `tea` and the unattended `git push`/`fetch` with no `gh auth login` or `tea login` step. Harness agents never inherit forge credentials: token env vars are stripped and their `gh`/`tea` are pointed at empty Amagi-owned config dirs, so an agent that reaches for the forge fails closed instead of using the operator's stored login.
 
 ## The task state machine
 
@@ -97,18 +100,14 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `awaiting_answer` | The agent called `amagi ask` and is parked on a human answer | `implementing` |
 | `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `committed` (checks passed) |
 | `committed` | Changes committed to the branch | `pr_open` |
-| `pr_open` | Pull request opened against `repo.baseBranch` | `reviewing` |
-| `reviewing` | Review harness runs against the PR | `fixing`, `done` |
-| `fixing` | Implement harness addresses review findings | `awaiting_answer`, `checks`, `reviewing` |
+| `pr_open` | Pull request opened against `repo.baseBranch` | — |
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
-| `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
+| `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
-**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
-
-A task also carries a `reviewRound` counter (visible in `amagi status`) for when that loop lands.
+**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. The review loop (a reviewer that inspects the PR and a fixing pass that addresses its findings) is not built yet; a task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 ## The runner service
 
@@ -141,6 +140,65 @@ Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
 run`) relies on the tracker's atomic claim to avoid double-claiming.
 
+## The triage worker
+
+The runner only claims the next ready task, so everything not directly
+claimable is invisible to it: epics and milestones sit open, finished
+containers stay open, blocked and orphaned tasks go untouched. The **triage
+worker** (`packages/core/src/triage.ts`, `amagi triage`) is a separate decision
+role that picks one unclaimed task a worker is not currently holding and asks a
+harness to decide what to do with it:
+
+- **implement**: the task is concrete ready work: claim it and hand it to the
+  implementation runner (the triage role never writes code itself).
+- **decompose**: the task is a container (epic/milestone) with no concrete
+  children: break it into implementable subtasks under it.
+- **close**: all children are done, or the work is already satisfied.
+- **ask**: genuinely ambiguous: post a question on the task (surfaced in the
+  dashboard inbox) and park it; once the operator answers, the next pass acts
+  on that answer.
+- **skip**: not for amagi to do: record the reason as a comment on the task.
+
+Every decision is recorded as a `triage.decision` event in the store. Leaf
+tasks are triaged once; a decomposed container is re-triaged only once all its
+children have closed, so a finished epic gets closed instead of re-decomposed.
+`amagi serve` also exposes `POST /api/repos/:repo/triage` to trigger a pass for
+a repo through the dashboard.
+
+A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
+runs inside `amagi serve`. Every worker process records a liveness heartbeat
+in the store while it drives a task; a worker that dies or hangs leaves its
+task in an in-progress state with no fresh heartbeat. Once a task has been
+silent for `loop.stallTimeoutSec` (default 1h) the watcher recovers it: it
+releases the tracker claim (the issue reads ready again, and any surviving
+runner of that task detects the lost lease and stops itself) and parks the
+task back to `claimed` with its recorded worktree kept, so the next worker
+resumes where the dead one left off. Only in-progress states are watched;
+`pr_open` is excluded, since there the PR is out for human review and no
+worker runs the task.
+
+A per-repo **PR conflict watcher** (`loop.prCheckIntervalSec`, default 5
+minutes) is the same idea as the mention watcher but for the `check-prs` flow:
+each interval it lists open PRs, and any that conflict with `repo.baseBranch`
+get a resolution agent dispatched on the same code path the `check-prs` CLI
+uses. Ticks are sequential, and a PR is only attempted once per head SHA (the
+attempted head is kept on disk), so an unresolvable conflict is not retried
+until its head changes. Both watchers appear in the dashboard Workers section
+with their own last-run stamp and counters.
+
+The stall watcher's inactivity signal only sees a dead worker, not a stuck
+one. A **doom-loop guard** (`loop.doomEnabled`, default on) runs on the same
+tick and scans the agent event stream of every task with a live worker for
+signs of busy-but-not-progressing work: repeated near-identical tool calls
+(same command or file within `loop.doomToolWindowSec`, e.g. re-running the
+same failing test forever), consecutive check rounds with the same failure
+signature (`loop.doomCheckRounds`), or a worktree diff that has not changed
+for `loop.doomDiffWindowSec` despite a live worker. When one trips, the guard
+releases the tracker claim (stopping the run) and parks the task in the
+terminal `needs_human` state with the reason, so a human looks instead of the
+next worker re-burning budget on the same loop. Set `doomEnabled = false` to
+turn it off.
+
 ## Configuration
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
@@ -154,7 +212,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
 | `repo.persona` | string \| null | `null` | Git persona for commits/PRs: the name of a gitconfig fragment under `~/.config/git/personas/<name>.gitconfig` (e.g. `"agent-chise"`), included in each fresh worktree's own config so its `user.name`/`user.email` apply there without touching the main repo. |
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
-| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. Only `github` (via `gh`) is implemented today; `forgejo` throws `NotImplementedDriverError` if selected. |
+| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. `github` goes through `gh`, `forgejo` through a direct token-authenticated Forgejo API client; both are token-only and never require an interactive login. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
@@ -167,12 +225,26 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
 | `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
 | `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
+| `harness.triage.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that decides what to do with unclaimed tasks the runner skips. It reads task context and reports a structured decision; it never touches the repository. |
+| `harness.triage.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
+| `harness.triage.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
+| `harness.triage.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
+| `harness.triage.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
 | `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
-| `loop.maxReviewRounds` | integer >= 0 | `3` | Review/fix rounds before escalating to `needs_human`. Reserved for the review loop. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
+| `loop.prCheckIntervalSec` | integer >= 1 | `300` | How often the PR conflict watcher scans open PRs and dispatches a resolution agent per one conflicting with `repo.baseBranch`. Each PR is only attempted once per head SHA, so the default 5 minutes stays inside GitHub REST rate limits. |
+| `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
+| `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
+| `loop.doomEnabled` | boolean | `true` | Doom-loop guard: the stall watcher also scans tasks with a live worker for busy-but-not-progressing agents and stops the run. Set false to disable. |
+| `loop.doomToolWindowSec` | integer >= 1 | `600` | Repeated near-identical tool calls (same command or file) within this many seconds trip the guard. |
+| `loop.doomToolRepeat` | integer >= 2 | `20` | How many near-identical tool calls within the window trip the guard. |
+| `loop.doomCheckRounds` | integer >= 2 | `3` | Consecutive check rounds sharing one failure signature that trip the guard. |
+| `loop.doomDiffWindowSec` | integer >= 60 | `1800` | A live worker whose worktree diff has not changed for this many seconds trips the guard. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
+| `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
+| `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |
@@ -206,10 +278,13 @@ commands = ["just check"]
 
 | Variable | Effect |
 | --- | --- |
-| `GH_TOKEN` / `GITHUB_TOKEN` | Used for the `github` tracker/forge: rewrites the remote to push/fetch over HTTPS with the token so an unattended run never prompts for an SSH passphrase. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | The bot's GitHub token, exported into the Amagi process environment. Used for the `github` tracker/forge: `gh` runs against an Amagi-owned `GH_CONFIG_DIR` with this token (no `gh auth` state) and the remote is rewritten to push/fetch over HTTPS so an unattended run never prompts for an SSH passphrase. |
+| `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step) and uses it for the direct Forgejo PR API client. `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
 | `AMAGI_DB` | Overrides the SQLite store path (default `$XDG_STATE_HOME/amagi/amagi.db`). Mainly for tests and running multiple isolated instances. |
 | `AMAGI_TASK_TOKEN` | Set by the runner in the harness's environment; `amagi ask` uses it to authenticate its request to the server. Not meant to be set by hand. |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Standard XDG overrides that relocate the global config, the SQLite store, and the default worktree root, respectively. |
+
+Forge credentials never reach harness agents: token env vars are stripped from the agent's environment and `gh`/`tea` are pointed at empty Amagi-owned config dirs (`$XDG_STATE_HOME/amagi/forge/agents/`), so an agent that tries the forge fails closed instead of inheriting the operator's or the bot's stored login.
 
 For OpenCode with a local provider, select the provider/model name OpenCode already knows and, when NixOS wraps the default executable, set `bin` to the unconfined wrapper:
 
@@ -245,6 +320,23 @@ permissions = "bypass"
 kind = "claude"
 model = "claude-opus-5"
 ```
+
+### Interrupting and restarting a task
+
+A task that hangs (the harness process stops producing output, the machine
+froze, the runner died) is not stranded: interrupt it, then start it again in
+the same worktree, optionally with a different harness or model.
+
+```bash
+amagi stop bd-1234        # park the run in `cancelled`; a live runner kills its agent process
+amagi continue bd-1234    # resume in the recorded worktree with the configured harness
+amagi continue bd-1234 --harness opencode --model local/...   # same worktree, different harness/model
+```
+
+`amagi continue` re-claims the task and drives it in the worktree and branch
+already recorded for it, so no work is lost. The same stop/restart flow is
+available over the API (`POST /api/tasks/:id/stop` and
+`POST /api/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 

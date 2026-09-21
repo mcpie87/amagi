@@ -87,9 +87,20 @@ export const AnswerBody = z.object({
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
 
-export const SettingsBody = z.object({
-  maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
+/** A message from the operator to the worker behind a parked task. */
+export const ChatBody = z.object({
+  message: z.string().trim().min(1).max(4000),
 })
+export type ChatBody = z.infer<typeof ChatBody>
+
+export const SettingsBody = z
+  .object({
+    maxParallel: z.number().int().min(1).max(MAX_PARALLEL).optional(),
+    autoQueue: z.boolean().optional(),
+  })
+  .refine((body) => body.maxParallel !== undefined || body.autoQueue !== undefined, {
+    message: 'provide at least one of maxParallel or autoQueue',
+  })
 export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
@@ -111,6 +122,8 @@ export const IssueCreateBody = z.object({
   labels: z.array(z.string()).default([]),
   /** Issue ids the new task is blocked by. */
   dependencies: z.array(z.string()).default([]),
+  /** Parent issue id when the task is a child of a container (epic/milestone). */
+  parent: z.string().nullable().default(null),
 })
 export type IssueCreateBody = z.infer<typeof IssueCreateBody>
 

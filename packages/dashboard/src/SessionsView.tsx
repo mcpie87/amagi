@@ -61,8 +61,8 @@ function groupByHarnessModel(sessions: SessionView[]): Group[] {
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
-      <div className="text-xs text-zinc-500">{label}</div>
+    <div className="rounded-lg border border-line bg-surface px-4 py-3">
+      <div className="text-xs text-fg-faint">{label}</div>
       <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
     </div>
   )
@@ -86,7 +86,7 @@ export function SessionsView() {
     <section>
       <div className="mb-4">
         <h1 className="text-xl font-semibold">Sessions</h1>
-        <p className="text-sm text-zinc-500">
+        <p className="text-sm text-fg-faint">
           Agent runs across the harness
           {running > 0 ? ` · ${running} in flight` : ''}
         </p>
@@ -100,12 +100,12 @@ export function SessionsView() {
       </div>
 
       <div className="mt-6">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
           By model + harness
         </h2>
-        <div className="overflow-x-auto rounded-lg border border-zinc-800">
+        <div className="overflow-x-auto rounded-lg border border-line">
           <table className="w-full text-sm">
-            <thead className="bg-zinc-900 text-left text-xs uppercase tracking-wide text-zinc-500">
+            <thead className="bg-surface text-left text-xs uppercase tracking-wide text-fg-faint">
               <tr>
                 <th className="px-4 py-2 font-medium">model</th>
                 <th className="px-4 py-2 font-medium">harness</th>
@@ -115,7 +115,7 @@ export function SessionsView() {
                 <th className="px-4 py-2 text-right font-medium">tokens cached</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-zinc-800 bg-zinc-950">
+            <tbody className="divide-y divide-line bg-sunken">
               {groups.map((g) => (
                 <tr key={`${g.harness}/${g.model}`}>
                   <td className="px-4 py-2 font-mono text-xs">{g.model}</td>
@@ -130,7 +130,7 @@ export function SessionsView() {
               ))}
               {groups.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-zinc-500">
+                  <td colSpan={6} className="px-4 py-6 text-center text-fg-faint">
                     No sessions recorded yet.
                   </td>
                 </tr>
@@ -141,31 +141,31 @@ export function SessionsView() {
       </div>
 
       <div className="mt-6">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
           Recent sessions
         </h2>
-        <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {recent.map((s) => (
             <li key={`${s.taskId}/${s.startedAt}`} className="flex items-center gap-3 px-4 py-2.5">
               <span className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-xs text-zinc-400">{s.taskId}</span>
+                <span className="block truncate font-mono text-xs text-fg-muted">{s.taskId}</span>
                 <span className="block truncate text-sm font-medium">
                   {s.model ?? 'unknown'} · {s.harness} · {s.role}
                 </span>
               </span>
-              <span className="shrink-0 text-xs tabular-nums text-zinc-400">
+              <span className="shrink-0 text-xs tabular-nums text-fg-muted">
                 {fmtDuration(s.durationMs)}
               </span>
-              <span className="shrink-0 text-xs tabular-nums text-zinc-400">
+              <span className="shrink-0 text-xs tabular-nums text-fg-muted">
                 {fmtTokens(s.usedTokens)} used
               </span>
-              <span className="shrink-0 text-xs tabular-nums text-zinc-400">
+              <span className="shrink-0 text-xs tabular-nums text-fg-muted">
                 {fmtTokens(s.cachedTokens)} cached
               </span>
             </li>
           ))}
           {recent.length === 0 && (
-            <li className="px-4 py-6 text-center text-sm text-zinc-500">
+            <li className="px-4 py-6 text-center text-sm text-fg-faint">
               No sessions recorded yet.
             </li>
           )}

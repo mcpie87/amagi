@@ -8,13 +8,13 @@ const ROW_HEIGHT = 18
 const STICK_THRESHOLD = ROW_HEIGHT * 2
 
 const kindClass: Record<AgentLogLine['kind'], string> = {
-  text: 'text-zinc-200',
-  reasoning: 'text-zinc-500 italic',
-  tool_use: 'text-sky-400',
-  tool_result: 'text-zinc-400',
-  usage: 'text-zinc-600',
-  result: 'text-emerald-400',
-  error: 'text-red-400',
+  text: 'text-fg',
+  reasoning: 'text-fg-faint italic',
+  tool_use: 'text-sky-ink',
+  tool_result: 'text-fg-muted',
+  usage: 'text-fg-dim',
+  result: 'text-emerald-ink',
+  error: 'text-red-ink',
 }
 
 /**
@@ -46,7 +46,6 @@ export function AgentLogView({ repo, taskId }: { repo: string; taskId: string })
     overscan: 30,
   })
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: A full ring buffer changes version without changing length.
   useEffect(() => {
     if (!stickToBottom.current || buffer.length === 0) return
     rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })

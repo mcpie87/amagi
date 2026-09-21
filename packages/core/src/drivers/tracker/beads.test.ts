@@ -21,6 +21,20 @@ const READY_JSON = `[
   }
 ]`
 
+const READY_WITH_DIFFICULTY_JSON = `[
+  {
+    "id": "tst-dif",
+    "title": "Harden the merge path",
+    "description": "Handle edge cases",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "metadata": {
+      "difficulty": "high"
+    }
+  }
+]`
+
 const CLAIMED_JSON = `[
   {
     "id": "tst-lmc",
@@ -75,6 +89,14 @@ const SHOW_WITH_DEPS_JSON = `[
         "status": "blocked",
         "priority": 1,
         "issue_type": "task"
+      },
+      {
+        "id": "tst-human",
+        "title": "Human step",
+        "status": "open",
+        "priority": 3,
+        "issue_type": "task",
+        "labels": ["human"]
       }
     ]
   }
@@ -161,6 +183,13 @@ describe('BeadsTracker', () => {
       url: null,
     })
     expect(calls[0]).toContain('--json')
+    expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
+  })
+
+  test('surfaces the difficulty level stored in metadata', async () => {
+    const { exec } = fake((c) => (c.includes('ready') ? ok(READY_WITH_DIFFICULTY_JSON) : undefined))
+    const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
+    expect(tasks[0]?.difficulty).toBe('high')
   })
 
   test('an empty queue is an empty array, not an error', async () => {
@@ -177,6 +206,7 @@ describe('BeadsTracker', () => {
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
+    expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
   })
 
   test('claim falls back to a by-id claim when ready --claim skips a pre-assigned issue', async () => {
@@ -306,6 +336,7 @@ describe('BeadsTracker', () => {
       priority: 1,
       labels: ['ui', 'board'],
       dependencies: ['tst-abc'],
+      parent: 'tst-epic',
     })
 
     expect(task?.id).toBe('tst-new')
@@ -321,6 +352,24 @@ describe('BeadsTracker', () => {
     expect(call).toContain('ui,board')
     expect(call).toContain('--deps')
     expect(call).toContain('tst-abc')
+    expect(call).toContain('--parent')
+    expect(call).toContain('tst-epic')
+  })
+
+  test('create stamps the difficulty level as metadata', async () => {
+    const { exec, calls } = fake((c) => (c.includes('create') ? ok(CREATE_JSON) : undefined))
+    await new BeadsTracker({ cwd: '/repo', exec }).createTask({
+      title: 'Ship the board',
+      description: '',
+      acceptanceCriteria: null,
+      priority: null,
+      labels: [],
+      dependencies: [],
+      parent: null,
+      difficulty: 'high',
+    })
+    const call = calls[0]
+    expect(call?.[call.indexOf('--metadata') + 1]).toBe('{"difficulty":"high"}')
   })
 
   test('create omits unset fields instead of passing empties', async () => {
@@ -332,6 +381,7 @@ describe('BeadsTracker', () => {
       priority: null,
       labels: [],
       dependencies: [],
+      parent: null,
     })
     const call = calls[0]?.join(' ')
     expect(call).toContain('--title')
@@ -340,6 +390,7 @@ describe('BeadsTracker', () => {
     expect(call).not.toContain('--priority')
     expect(call).not.toContain('--labels')
     expect(call).not.toContain('--deps')
+    expect(call).not.toContain('--parent')
   })
 
   test('update writes fields and adds and removes dependencies', async () => {
@@ -369,7 +420,18 @@ describe('BeadsTracker', () => {
     expect(returned).toHaveLength(1)
   })
 
-  test('getIssue surfaces dependency blockers with their state', async () => {
+  test('children surfaces the child issues of a container', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('children') ? ok(SHOW_WITH_DEPS_JSON) : undefined,
+    )
+    const children = await new BeadsTracker({ cwd: '/repo', exec }).children('tst-epic')
+
+    expect(children).toHaveLength(1)
+    expect(children[0]?.id).toBe('tst-1')
+    expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'children', 'tst-epic', '--json'])
+  })
+
+  test('getIssue surfaces dependency blockers with their state and labels', async () => {
     const { exec } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
     const issue = await new BeadsTracker({ cwd: '/repo', exec }).getIssue('tst-1')
 
@@ -383,6 +445,17 @@ describe('BeadsTracker', () => {
         priority: 1,
         type: 'task',
         url: null,
+        labels: [],
+      },
+      {
+        id: 'tst-human',
+        title: 'Human step',
+        description: '',
+        status: 'open',
+        priority: 3,
+        type: 'task',
+        url: null,
+        labels: ['human'],
       },
     ])
   })
