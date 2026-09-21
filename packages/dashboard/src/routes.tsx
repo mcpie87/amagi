@@ -20,7 +20,7 @@ import {
 } from '@tanstack/react-router'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
-import { useConnection, useDashboard } from './store.tsx'
+import { RunnerProvider, useConnection, useDashboard, useRunner } from './store.tsx'
 import {
   Badge,
   EmptyState,
@@ -38,6 +38,21 @@ function taskAttentionText(task: TaskView): string {
     return 'No changes were made. Verify the task is already done, then close it explicitly.'
   }
   return 'The run stopped and needs your attention.'
+}
+
+function RunnerIndicator() {
+  const { status } = useRunner()
+  if (status === null) {
+    return <span className="connection-status">runner: unknown</span>
+  }
+  return (
+    <span
+      className="connection-status"
+      title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
+    >
+      runner: {status.running.length}/{status.capacity} {status.available ? 'free' : 'busy'}
+    </span>
+  )
 }
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
@@ -106,157 +121,160 @@ function RootLayout() {
   }, [])
 
   return (
-    <div className="app-shell">
-      <a className="skip-link" href="#main">
-        Skip to content
-      </a>
-      {mobileOpen && (
-        <button
-          type="button"
-          className="sidebar-scrim"
-          tabIndex={-1}
-          aria-label="Close navigation"
-          onClick={() => setMobileOpen(false)}
-        />
-      )}
-      <aside ref={sidebarRef} className={`sidebar ${mobileOpen ? 'is-open' : ''}`}>
-        <button
-          type="button"
-          className="mobile-nav-close icon-button"
-          aria-label="Close navigation"
-          onClick={() => setMobileOpen(false)}
-        >
-          <Icon name="close" />
-        </button>
-        <Link to="/" className="brand" onClick={() => setMobileOpen(false)}>
-          <span className="brand-mark">
-            a<span>.</span>
-          </span>
-          <span>
-            amagi<span className="brand-subtitle">AGENT WORKSPACE</span>
-          </span>
-        </Link>
-        <div className="workspace-label">
-          <span className="workspace-avatar">
-            <Icon name="branch" size={16} />
-          </span>
-          <span>
-            Current workspace<small>Connected server</small>
-          </span>
-          <span className={`connection-dot ${connection}`} />
-        </div>
-        <div className="nav-label">WORKSPACE</div>
-        <nav aria-label="Main navigation">
-          {navigation.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className="nav-link"
-              activeOptions={{ exact: item.to === '/' }}
-              activeProps={{ className: 'nav-link active', 'aria-current': 'page' }}
-              onClick={() => setMobileOpen(false)}
-            >
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-              {item.to === '/inbox' && attentionCount > 0 && (
-                <span className="nav-count">{attentionCount}</span>
-              )}
-              {item.to === '/runs' && (
-                <span className="nav-count subtle">{activeTasks(state).length}</span>
-              )}
-            </Link>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="sidebar-note">
-            <span className="orbital-mark">
-              <Icon name="agent" size={24} />
-            </span>
-            <h3>
-              A little less terminal.
-              <br />A lot more possibility.
-            </h3>
-            <p>
-              Your agents work.
-              <br />
-              You set the direction.
-            </p>
-          </div>
-          <button type="button" className="sidebar-search" onClick={() => setPaletteOpen(true)}>
-            <Icon name="search" />
-            <span>Quick navigation</span>
-            <kbd>⌘ / Ctrl K</kbd>
-          </button>
-          <div className="sidebar-footer">
-            <span className="operator-avatar">O</span>
-            <span>
-              Operator<small>Local workspace</small>
-            </span>
-            <span className="local-label">LOCAL</span>
-          </div>
-        </div>
-      </aside>
-      <div className="workspace" inert={mobileOpen}>
-        <header className="topbar">
-          <div className="breadcrumb">
-            <button
-              type="button"
-              className="icon-button mobile-menu"
-              ref={menuRef}
-              aria-label="Open navigation"
-              aria-expanded={mobileOpen}
-              onClick={() => setMobileOpen(true)}
-            >
-              <Icon name="menu" />
-            </button>
-            <span>Workspace</span>
-            <span className="breadcrumb-divider">/</span>
-            <strong>{currentPage}</strong>
-          </div>
-          <div className="topbar-actions">
-            <span className={`connection-status ${connection}`} role="status">
-              <span className="connection-dot" />
-              {connection === 'connected'
-                ? 'Live updates'
-                : connection === 'connecting'
-                  ? 'Connecting'
-                  : 'Reconnecting'}
-            </span>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Search workspace"
-              onClick={() => setPaletteOpen(true)}
-            >
-              <Icon name="search" />
-            </button>
-            <Link
-              to="/inbox"
-              className="icon-button inbox-shortcut"
-              aria-label={`Inbox, ${attentionCount} items need attention`}
-            >
-              <Icon name="inbox" />
-              {attentionCount > 0 && <span className="notification-dot" />}
-            </Link>
-          </div>
-        </header>
-        {connection === 'reconnecting' && (
-          <div className="connection-banner" role="status">
-            Connection interrupted. Showing the last received state while reconnecting.
-          </div>
+    <RunnerProvider>
+      <div className="app-shell">
+        <a className="skip-link" href="#main">
+          Skip to content
+        </a>
+        {mobileOpen && (
+          <button
+            type="button"
+            className="sidebar-scrim"
+            tabIndex={-1}
+            aria-label="Close navigation"
+            onClick={() => setMobileOpen(false)}
+          />
         )}
-        <main id="main" className="main-content">
-          <Outlet />
-        </main>
-        <footer className="workspace-footer">
-          <span>
-            amagi <span className="footer-dot">/</span> your orchestration workspace
-          </span>
-          <span>Built for the work ahead.</span>
-        </footer>
+        <aside ref={sidebarRef} className={`sidebar ${mobileOpen ? 'is-open' : ''}`}>
+          <button
+            type="button"
+            className="mobile-nav-close icon-button"
+            aria-label="Close navigation"
+            onClick={() => setMobileOpen(false)}
+          >
+            <Icon name="close" />
+          </button>
+          <Link to="/" className="brand" onClick={() => setMobileOpen(false)}>
+            <span className="brand-mark">
+              a<span>.</span>
+            </span>
+            <span>
+              amagi<span className="brand-subtitle">AGENT WORKSPACE</span>
+            </span>
+          </Link>
+          <div className="workspace-label">
+            <span className="workspace-avatar">
+              <Icon name="branch" size={16} />
+            </span>
+            <span>
+              Current workspace<small>Connected server</small>
+            </span>
+            <span className={`connection-dot ${connection}`} />
+          </div>
+          <div className="nav-label">WORKSPACE</div>
+          <nav aria-label="Main navigation">
+            {navigation.map((item) => (
+              <Link
+                key={item.to}
+                to={item.to}
+                className="nav-link"
+                activeOptions={{ exact: item.to === '/' }}
+                activeProps={{ className: 'nav-link active', 'aria-current': 'page' }}
+                onClick={() => setMobileOpen(false)}
+              >
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+                {item.to === '/inbox' && attentionCount > 0 && (
+                  <span className="nav-count">{attentionCount}</span>
+                )}
+                {item.to === '/runs' && (
+                  <span className="nav-count subtle">{activeTasks(state).length}</span>
+                )}
+              </Link>
+            ))}
+          </nav>
+          <div className="sidebar-bottom">
+            <div className="sidebar-note">
+              <span className="orbital-mark">
+                <Icon name="agent" size={24} />
+              </span>
+              <h3>
+                A little less terminal.
+                <br />A lot more possibility.
+              </h3>
+              <p>
+                Your agents work.
+                <br />
+                You set the direction.
+              </p>
+            </div>
+            <button type="button" className="sidebar-search" onClick={() => setPaletteOpen(true)}>
+              <Icon name="search" />
+              <span>Quick navigation</span>
+              <kbd>⌘ / Ctrl K</kbd>
+            </button>
+            <div className="sidebar-footer">
+              <span className="operator-avatar">O</span>
+              <span>
+                Operator<small>Local workspace</small>
+              </span>
+              <span className="local-label">LOCAL</span>
+            </div>
+          </div>
+        </aside>
+        <div className="workspace" inert={mobileOpen}>
+          <header className="topbar">
+            <div className="breadcrumb">
+              <button
+                type="button"
+                className="icon-button mobile-menu"
+                ref={menuRef}
+                aria-label="Open navigation"
+                aria-expanded={mobileOpen}
+                onClick={() => setMobileOpen(true)}
+              >
+                <Icon name="menu" />
+              </button>
+              <span>Workspace</span>
+              <span className="breadcrumb-divider">/</span>
+              <strong>{currentPage}</strong>
+            </div>
+            <div className="topbar-actions">
+              <RunnerIndicator />
+              <span className={`connection-status ${connection}`} role="status">
+                <span className="connection-dot" />
+                {connection === 'connected'
+                  ? 'Live updates'
+                  : connection === 'connecting'
+                    ? 'Connecting'
+                    : 'Reconnecting'}
+              </span>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Search workspace"
+                onClick={() => setPaletteOpen(true)}
+              >
+                <Icon name="search" />
+              </button>
+              <Link
+                to="/inbox"
+                className="icon-button inbox-shortcut"
+                aria-label={`Inbox, ${attentionCount} items need attention`}
+              >
+                <Icon name="inbox" />
+                {attentionCount > 0 && <span className="notification-dot" />}
+              </Link>
+            </div>
+          </header>
+          {connection === 'reconnecting' && (
+            <div className="connection-banner" role="status">
+              Connection interrupted. Showing the last received state while reconnecting.
+            </div>
+          )}
+          <main id="main" className="main-content">
+            <Outlet />
+          </main>
+          <footer className="workspace-footer">
+            <span>
+              amagi <span className="footer-dot">/</span> your orchestration workspace
+            </span>
+            <span>Built for the work ahead.</span>
+          </footer>
+        </div>
+        {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
       </div>
-      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
-    </div>
+    </RunnerProvider>
   )
 }
 
@@ -826,6 +844,69 @@ function IssueFormModal({
   )
 }
 
+const NOT_WORK_TYPES = ['epic', 'milestone', 'gate']
+
+function RunButton({ taskId }: { taskId: string }) {
+  const { start } = useRunner()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await start(taskId)
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error ?? 'launch failed')
+      return
+    }
+    navigate({ to: '/tasks/$id', params: { id: res.taskId } })
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="button secondary run-button"
+        disabled={busy}
+        onClick={() => void run()}
+      >
+        Run
+      </button>
+      {error !== null && <p className="run-button-error">{error}</p>}
+    </div>
+  )
+}
+
+function RunNextButton() {
+  const { start } = useRunner()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await start()
+    setBusy(false)
+    if (!res.ok) {
+      setError(res.error ?? 'launch failed')
+      return
+    }
+    navigate({ to: '/tasks/$id', params: { id: res.taskId } })
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button type="button" className="button primary" disabled={busy} onClick={() => void run()}>
+        Run next
+      </button>
+      {error !== null && <span className="run-button-error">{error}</span>}
+    </div>
+  )
+}
+
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
   const [form, setForm] = useState<{ mode: 'create' } | { mode: 'edit'; issue: Issue } | null>(null)
@@ -884,6 +965,10 @@ function IssuesView() {
         .toLowerCase()
         .includes(query.toLowerCase()),
   )
+  const isRunnable = (issue: Issue) =>
+    issue.status === 'open' &&
+    !NOT_WORK_TYPES.includes(issue.type ?? '') &&
+    !issue.labels.includes('human')
   if (selected)
     return (
       <>
@@ -973,6 +1058,7 @@ function IssuesView() {
           <Icon name="refresh" size={16} />
           {loading ? 'Refreshing…' : 'Refresh tasks'}
         </button>
+        <RunNextButton />
       </PageHeading>
       <div className="toolbar">
         <div className="task-tools">
@@ -1059,33 +1145,35 @@ function IssuesView() {
                   </div>
                   <div className="kanban-cards">
                     {items.map((issue) => (
-                      <button
-                        key={issue.id}
-                        type="button"
-                        className="issue-card"
-                        onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
-                      >
-                        <span className="issue-card-top">
-                          <span className="mono">{issue.id}</span>
-                          {issue.priority !== null && (
-                            <span className={`priority priority-${issue.priority}`}>
-                              P{issue.priority}
+                      <div key={issue.id} className="issue-card-wrap">
+                        <button
+                          type="button"
+                          className="issue-card"
+                          onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
+                        >
+                          <span className="issue-card-top">
+                            <span className="mono">{issue.id}</span>
+                            {issue.priority !== null && (
+                              <span className={`priority priority-${issue.priority}`}>
+                                P{issue.priority}
+                              </span>
+                            )}
+                          </span>
+                          <strong>{issue.title}</strong>
+                          {issue.labels.length > 0 && (
+                            <span className="issue-tags">
+                              {issue.labels.slice(0, 3).map((label) => (
+                                <span key={label}>{label}</span>
+                              ))}
                             </span>
                           )}
-                        </span>
-                        <strong>{issue.title}</strong>
-                        {issue.labels.length > 0 && (
-                          <span className="issue-tags">
-                            {issue.labels.slice(0, 3).map((label) => (
-                              <span key={label}>{label}</span>
-                            ))}
+                          <span className="issue-card-footer">
+                            <span>{issue.type ?? 'Task'}</span>
+                            <span>{issue.assignee ?? 'Unassigned'}</span>
                           </span>
-                        )}
-                        <span className="issue-card-footer">
-                          <span>{issue.type ?? 'Task'}</span>
-                          <span>{issue.assignee ?? 'Unassigned'}</span>
-                        </span>
-                      </button>
+                        </button>
+                        {isRunnable(issue) && <RunButton taskId={issue.id} />}
+                      </div>
                     ))}
                     {items.length === 0 && <p className="column-empty">No tasks here yet</p>}
                   </div>
@@ -1096,18 +1184,20 @@ function IssuesView() {
       ) : (
         <section className="panel issue-list">
           {visible.map((issue) => (
-            <button
-              key={issue.id}
-              type="button"
-              className="issue-list-row"
-              onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
-            >
-              <span className="mono">{issue.id}</span>
-              <strong>{issue.title}</strong>
-              <span className="muted">{issue.priority === null ? '' : `P${issue.priority}`}</span>
-              <IssueBadge issue={issue} />
-              <Icon name="arrow" size={16} />
-            </button>
+            <div key={issue.id} className="issue-list-item">
+              <button
+                type="button"
+                className="issue-list-row"
+                onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
+              >
+                <span className="mono">{issue.id}</span>
+                <strong>{issue.title}</strong>
+                <span className="muted">{issue.priority === null ? '' : `P${issue.priority}`}</span>
+                <IssueBadge issue={issue} />
+                <Icon name="arrow" size={16} />
+              </button>
+              {isRunnable(issue) && <RunButton taskId={issue.id} />}
+            </div>
           ))}
         </section>
       )}
@@ -1478,6 +1568,35 @@ function PrLink({ url, number }: { url: string; number: number | null }) {
   )
 }
 
+function StopButton({ taskId }: { taskId: string }) {
+  const { status, stop } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (status === null || !status.running.includes(taskId)) return null
+
+  const doStop = async () => {
+    setBusy(true)
+    setError(null)
+    const res = await stop(taskId)
+    setBusy(false)
+    if (!res.ok) setError(res.error ?? 'stop failed')
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="button stop-button"
+        disabled={busy}
+        onClick={() => void doStop()}
+      >
+        Stop
+      </button>
+      {error !== null && <p className="run-button-error">{error}</p>}
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const state = useDashboard()
@@ -1519,6 +1638,7 @@ function TaskDetailView() {
       >
         <Badge state={task.state} />
         {task.prUrl && <PrLink url={task.prUrl} number={task.prNumber} />}
+        <StopButton taskId={task.id} />
       </PageHeading>
       <ol className="run-pipeline" aria-label="Run progress">
         {phases.map((item, index) => (

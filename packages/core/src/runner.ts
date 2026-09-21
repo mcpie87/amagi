@@ -7,7 +7,7 @@ import {
   type PrDriver,
 } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
-import type { CheckResult, TaskState } from './events.ts'
+import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { changesSinceBase, formatPrBody } from './pr-body.ts'
 import {
@@ -50,6 +50,14 @@ class LeaseLostError extends Error {
   }
 }
 
+/** Thrown inside the drive loop once the operator asks for a stop. */
+export class RunCancelledError extends Error {
+  constructor(taskId: string) {
+    super(`task ${taskId}: run cancelled by operator`)
+    this.name = 'RunCancelledError'
+  }
+}
+
 /**
  * Keeps the tracker claim alive for as long as the task is in flight. bd hands
  * out a short lease and reverts the issue to ready once it lapses, so a long
@@ -88,16 +96,38 @@ class Lease {
 
 export class Runner {
   private readonly exec: Exec
+  private cancelled = false
+  private currentProcess: AgentProcess | null = null
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
+  }
+
+  /**
+   * Ask the run to stop: kill the owned agent process and unwind through the
+   * next phase boundary into the cancelled state, keeping the worktree.
+   */
+  cancel(): void {
+    this.cancelled = true
+    if (this.currentProcess !== null) void this.currentProcess.kill()
+  }
+
+  private throwIfCancelled(taskId: string): void {
+    if (this.cancelled) throw new RunCancelledError(taskId)
   }
 
   /** Claims one ready task and drives it as far as the current milestone goes. */
   async runOnce(): Promise<RunOnceResult> {
     const task = await this.deps.tracker.claim()
     if (task === null) return null
+    return this.runClaimed(task)
+  }
 
+  /**
+   * Drives a task the caller already claimed (the runner service claims first
+   * so it can answer a launch request with the exact task id).
+   */
+  async runClaimed(task: TrackerTask): Promise<RunOnceResult> {
     const { store } = this.deps
     store.append(task.id, {
       type: 'task.claimed',
@@ -112,14 +142,41 @@ export class Runner {
     try {
       await this.drive(task)
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      store.append(task.id, { type: 'error', message, fatal: true })
-      this.transition(task.id, 'needs_human', message)
+      if (err instanceof RunCancelledError) {
+        await this.finishCancelled(task.id)
+      } else {
+        const message = err instanceof Error ? err.message : String(err)
+        store.append(task.id, { type: 'error', message, fatal: true })
+        this.transition(task.id, 'needs_human', message)
+      }
     }
 
     const row = store.task(task.id)
     if (row === null) throw new Error(`task ${task.id} vanished from the store mid-run`)
     return { task: row, state: row.state }
+  }
+
+  /**
+   * Graceful stop tail: park the task in the explicit cancelled terminal state
+   * and hand the tracker lease back, but leave the recorded worktree and
+   * branch untouched so the existing reclaim path can resume the work later.
+   */
+  private async finishCancelled(taskId: string): Promise<void> {
+    const { store, tracker } = this.deps
+    const current = store.task(taskId)
+    if (current !== null && !isTerminal(current.state)) {
+      store.append(taskId, {
+        type: 'task.state',
+        from: current.state,
+        to: 'cancelled',
+        reason: 'operator stopped the run',
+      })
+    }
+    try {
+      await tracker.release(taskId)
+    } catch (err) {
+      console.warn(`release ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   private transition(taskId: string, to: TaskState, reason?: string): void {
@@ -173,6 +230,7 @@ export class Runner {
       branch: worktree.branch,
     })
     this.transition(task.id, 'worktree_ready')
+    this.throwIfCancelled(task.id)
 
     const lease = new Lease(this.deps.tracker, task.id, () => {})
     lease.start()
@@ -193,6 +251,7 @@ export class Runner {
     const { store, config } = this.deps
     const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
 
+    this.throwIfCancelled(task.id)
     this.transition(task.id, 'implementing')
     const first = await this.runAgentWithRetry(
       task.id,
@@ -222,6 +281,7 @@ export class Runner {
     sessionId = parked
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
+      this.throwIfCancelled(task.id)
       this.transition(task.id, 'checks')
       const results = await this.runChecks(cwd)
       const ok = results.every((r) => r.exitCode === 0)
@@ -274,6 +334,7 @@ export class Runner {
     }
     this.transition(task.id, 'committed')
     await this.openPullRequest(task, cwd, branch)
+    this.throwIfCancelled(task.id)
   }
 
   /**
@@ -343,6 +404,7 @@ export class Runner {
 
     const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
     while (Date.now() < deadline) {
+      this.throwIfCancelled(taskId)
       if (lease.isLost) throw new LeaseLostError(taskId)
       const q = store.question(question.id)
       if (q !== null && q.answer !== null) {
@@ -388,40 +450,45 @@ export class Runner {
     }
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
+    this.currentProcess = proc
 
-    // The resolved model only exists once the harness reports it (claude's
-    // init line), so the started event lands on the first stream event.
-    let started = false
-    for await (const event of proc.events()) {
-      if (!started) {
-        started = true
-        store.append(taskId, {
-          type: 'agent.started',
-          role: 'implement',
-          harness: harness.kind,
-          model: proc.model ?? opts.model ?? null,
-          effort: proc.effort ?? null,
-          cwd: opts.cwd,
-          resumed: resumeFrom !== null,
-        })
+    try {
+      // The resolved model only exists once the harness reports it (claude's
+      // init line), so the started event lands on the first stream event.
+      let started = false
+      for await (const event of proc.events()) {
+        if (!started) {
+          started = true
+          store.append(taskId, {
+            type: 'agent.started',
+            role: 'implement',
+            harness: harness.kind,
+            model: proc.model ?? opts.model ?? null,
+            effort: proc.effort ?? null,
+            cwd: opts.cwd,
+            resumed: resumeFrom !== null,
+          })
+        }
+        store.append(taskId, { type: 'agent.stream', role: 'implement', event })
       }
-      store.append(taskId, { type: 'agent.stream', role: 'implement', event })
-    }
 
-    const outcome = await proc.done
-    store.append(taskId, {
-      type: 'agent.exited',
-      role: 'implement',
-      exitCode: outcome.exitCode,
-      sessionId: outcome.sessionId,
-    })
+      const outcome = await proc.done
+      store.append(taskId, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: outcome.exitCode,
+        sessionId: outcome.sessionId,
+      })
 
-    let detail: string | null = null
-    if (!outcome.ok) {
-      detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
-      store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
+      let detail: string | null = null
+      if (!outcome.ok && !this.cancelled) {
+        detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
+        store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
+      }
+      return { sessionId: outcome.sessionId, ok: outcome.ok, detail }
+    } finally {
+      if (this.currentProcess === proc) this.currentProcess = null
     }
-    return { sessionId: outcome.sessionId, ok: outcome.ok, detail }
   }
 
   /**
@@ -442,6 +509,7 @@ export class Runner {
 
     for (let attempt = 1; ; attempt++) {
       const run = await this.runAgent(taskId, sessionId, opts)
+      this.throwIfCancelled(taskId)
       sessionId = run.sessionId
       if (run.ok) return { sessionId, stopped: false }
       if (lease.isLost) throw new LeaseLostError(taskId)
@@ -459,7 +527,12 @@ export class Runner {
         detail: run.detail ?? '',
       })
       this.transition(taskId, 'retrying')
-      await Bun.sleep(delayMs)
+      // Polled so a stop interrupts the backoff instead of waiting it out.
+      const deadline = Date.now() + delayMs
+      while (Date.now() < deadline) {
+        this.throwIfCancelled(taskId)
+        await Bun.sleep(Math.min(100, deadline - Date.now()))
+      }
       if (lease.isLost) throw new LeaseLostError(taskId)
       this.transition(taskId, 'implementing')
     }

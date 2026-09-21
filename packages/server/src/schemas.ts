@@ -44,6 +44,12 @@ export const AskBody = z.object({
 })
 export type AskBody = z.infer<typeof AskBody>
 
+/** Empty body (or `{}`) launches the next ready task. */
+export const RunBody = z.object({
+  taskId: z.string().min(1).optional(),
+})
+export type RunBody = z.infer<typeof RunBody>
+
 export const AnswerBody = z.object({
   answer: z.string().min(1),
   via: z.enum(['web', 'cli', 'gate']).default('web'),

@@ -84,10 +84,28 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn | — |
+| `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 A task also carries a `reviewRound` counter (visible in `amagi status`) for when that loop lands.
+
+## The runner service
+
+`amagi serve` also hosts an operator-facing runner service. It reports
+availability and capacity (`GET /api/runner`), launches a specific ready task
+or the next ready one (`POST /api/runs`, with an optional `{ "taskId": ... }`
+body), and stops a run it owns (`POST /api/runs/:id/stop`). Stop is graceful:
+the owned agent process is killed, the tracker lease is released, and the task
+is parked in the terminal `cancelled` state with its worktree untouched, so the
+existing Reclaim action (or a fresh launch) resumes it where it left off. The
+server runs up to `loop.maxParallel` tasks at once and refuses launch requests
+that would exceed that or claim a task that is already running. The dashboard
+surfaces all of this from the task board and task detail pages.
+
+Capacity is enforced per server process: each `amagi serve` owns the runs it
+launches. Launching the same task from a second server or from the CLI (`amagi
+run`) relies on the tracker's atomic claim to avoid double-claiming.
 
 ## Configuration
 

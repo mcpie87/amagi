@@ -56,6 +56,7 @@ export const stateLabels: Record<TaskState, string> = {
   no_pr: 'No PR needed',
   needs_human: 'Needs attention',
   abandoned: 'Abandoned',
+  cancelled: 'Cancelled',
 }
 
 export function Badge({ state }: { state: TaskState }) {
