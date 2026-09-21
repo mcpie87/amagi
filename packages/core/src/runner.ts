@@ -40,6 +40,27 @@ export type RunOnceResult = {
   state: TaskState
 } | null
 
+/**
+ * The session, summary, model and effort an agent run leaves behind. Every
+ * agent phase produces one of these and later phases merge into it.
+ */
+type AgentRun = {
+  sessionId: string | null
+  summary: string | null
+  model: string | null
+  effort: string | null
+}
+
+/** Merge a newer run into the accumulated state, keeping the earlier value where the newer run is null. */
+function mergeAgentRuns(prev: AgentRun, next: AgentRun): AgentRun {
+  return {
+    sessionId: next.sessionId,
+    summary: next.summary ?? prev.summary,
+    model: next.model ?? prev.model,
+    effort: next.effort ?? prev.effort,
+  }
+}
+
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
 
@@ -420,19 +441,18 @@ export class Runner {
       budget,
     )
     if (first.stopped) return
-    let sessionId = first.sessionId
-    let summary = first.summary
-    let model = first.model
-    let effort = first.effort
+    let current: AgentRun = {
+      sessionId: first.sessionId,
+      summary: first.summary,
+      model: first.model,
+      effort: first.effort,
+    }
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
-    const parked = await this.parkAndResume(task.id, sessionId, cwd, lease, budget)
+    const parked = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
     if (parked === null) return
-    sessionId = parked.sessionId
-    summary = parked.summary ?? summary
-    model = parked.model ?? model
-    effort = parked.effort ?? effort
+    current = mergeAgentRuns(current, parked)
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
@@ -447,7 +467,7 @@ export class Runner {
         this.transition(task.id, 'needs_human', 'project checks still failing')
         return
       }
-      if (sessionId === null) {
+      if (current.sessionId === null) {
         this.transition(
           task.id,
           'needs_human',
@@ -459,7 +479,7 @@ export class Runner {
       this.transition(task.id, 'implementing')
       const fix = await this.runAgentWithRetry(
         task.id,
-        sessionId,
+        current.sessionId,
         {
           cwd,
           prompt: fixChecksPrompt(results),
@@ -471,28 +491,22 @@ export class Runner {
         budget,
       )
       if (fix.stopped) return
-      sessionId = fix.sessionId
-      summary = fix.summary
-      model = fix.model
-      effort = fix.effort
+      current = mergeAgentRuns(current, fix)
       if (lease.isLost) throw new LeaseLostError(task.id)
 
-      const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease, budget)
+      const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
       if (resumed === null) return
-      sessionId = resumed.sessionId
-      summary = resumed.summary ?? summary
-      model = resumed.model ?? model
-      effort = resumed.effort ?? effort
+      current = mergeAgentRuns(current, resumed)
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch)
     if (!committed) {
-      let reason = summary?.trim() !== '' ? summary : null
-      if (reason === null && sessionId !== null) {
+      let reason = current.summary?.trim() !== '' ? current.summary : null
+      if (reason === null && current.sessionId !== null) {
         this.transition(task.id, 'implementing')
         const why = await this.runAgentWithRetry(
           task.id,
-          sessionId,
+          current.sessionId,
           {
             cwd,
             prompt: whyNoChangesPrompt(task),
@@ -516,7 +530,7 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, model, effort)
+    await this.openPullRequest(task, cwd, branch, current.model, current.effort)
     this.throwIfCancelled(task.id)
   }
 
@@ -604,12 +618,7 @@ export class Runner {
     cwd: string,
     lease: Lease,
     budget: TaskBudget,
-  ): Promise<{
-    sessionId: string | null
-    summary: string | null
-    model: string | null
-    effort: string | null
-  } | null> {
+  ): Promise<AgentRun | null> {
     const { store, config } = this.deps
     if (store.task(taskId)?.state !== 'awaiting_answer') {
       return { sessionId, summary: null, model: null, effort: null }
@@ -670,14 +679,7 @@ export class Runner {
     opts: Parameters<Harness['start']>[0],
     phase: string,
     budget: TaskBudget,
-  ): Promise<{
-    sessionId: string | null
-    ok: boolean
-    detail: string | null
-    summary: string | null
-    model: string | null
-    effort: string | null
-  }> {
+  ): Promise<AgentRun & { ok: boolean; detail: string | null }> {
     const { store, harness } = this.deps
     const spawn = {
       ...opts,
@@ -802,13 +804,7 @@ export class Runner {
     phase: string,
     lease: Lease,
     budget: TaskBudget,
-  ): Promise<{
-    sessionId: string | null
-    stopped: boolean
-    summary: string | null
-    model: string | null
-    effort: string | null
-  }> {
+  ): Promise<AgentRun & { stopped: boolean }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
     let summary: string | null = null
