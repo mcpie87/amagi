@@ -84,13 +84,25 @@ describe('dashboard state reducer', () => {
   })
 
   test('review round increments once per reviewing entry', () => {
+    // recorded ends am-1 at 'done'; replay without the terminal event so the
+    // second cycle starts from a legal reviewing state.
     const withSecondReview = [
-      ...recorded,
-      ev(16, 'am-1', 2500, { type: 'task.state', from: 'done', to: 'fixing' }),
+      ...recorded.filter((e) => e.seq !== 12),
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'reviewing', to: 'fixing' }),
       ev(17, 'am-1', 2600, { type: 'task.state', from: 'fixing', to: 'reviewing' }),
     ]
     const state = withSecondReview.reduce(reduceState, initialDashboardState())
     expect(state.tasks['am-1']?.reviewRound).toBe(2)
+  })
+
+  test('the shared reducer rejects illegal transitions like the server does', () => {
+    const state = recorded.reduce(reduceState, initialDashboardState())
+    expect(() =>
+      reduceState(
+        state,
+        ev(16, 'am-2', 2500, { type: 'task.state', from: 'claimed', to: 'pr_open' }),
+      ),
+    ).toThrow(/illegal transition/)
   })
 
   test('reclaim returns a stuck task to the queue while keeping its worktree', () => {
@@ -116,8 +128,8 @@ describe('dashboard state reducer', () => {
 
   test('attention list includes only tasks stopped for a human', () => {
     const state = [
-      ...recorded,
-      ev(16, 'am-1', 2500, { type: 'task.state', from: 'done', to: 'needs_human' }),
+      ...recorded.filter((e) => e.seq !== 12),
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'reviewing', to: 'needs_human' }),
       ev(17, 'am-3', 2600, { type: 'task.claimed', title: 'Still running', tracker: 'bd' }),
     ].reduce(reduceState, initialDashboardState())
 

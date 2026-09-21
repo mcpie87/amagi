@@ -59,4 +59,13 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
       alter table tasks add column retry_count integer not null default 0;
     `,
   },
+  {
+    name: '004_last_commit_checks',
+    sql: `
+      alter table tasks add column last_commit_sha text;
+      alter table tasks add column last_commit_subject text;
+      alter table tasks add column checks text;
+      alter table tasks add column checks_ok integer;
+    `,
+  },
 ]

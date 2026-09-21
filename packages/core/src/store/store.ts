@@ -1,35 +1,20 @@
-import type { Database } from 'bun:sqlite'
-import { canTransition, type EventBody, type StoredEvent, type TaskState } from '../events.ts'
+import type { Database, SQLQueryBindings } from 'bun:sqlite'
+import type { CheckResult, EventBody, StoredEvent, TaskState } from '../events.ts'
+import {
+  emptyProjection,
+  type ProjectedQuestion,
+  type ProjectedTask,
+  type Projection,
+  project,
+} from '../project.ts'
 import { openDatabase } from './db.ts'
 
-export type TaskRow = {
-  id: string
-  title: string
-  tracker: string
-  state: TaskState
-  branch: string | null
-  worktree: string | null
-  sessionId: string | null
-  prUrl: string | null
-  prNumber: number | null
-  reviewRound: number
-  lastError: string | null
-  retryCount: number
-  createdAt: number
-  updatedAt: number
-}
+export { InvalidTransitionError } from '../project.ts'
+export type { ProjectedQuestion, ProjectedTask, Projection }
 
-export type QuestionRow = {
-  id: string
-  taskId: string
-  question: string
-  options: string[]
-  gateRef: string | null
-  answer: string | null
-  answeredVia: string | null
-  askedAt: number
-  resolvedAt: number | null
-}
+/** The SQL projection rows are the very same shape the shared reducer produces. */
+export type TaskRow = ProjectedTask
+export type QuestionRow = ProjectedQuestion
 
 type RawTask = {
   id: string
@@ -44,6 +29,10 @@ type RawTask = {
   review_round: number
   last_error: string | null
   retry_count: number
+  last_commit_sha: string | null
+  last_commit_subject: string | null
+  checks: string | null
+  checks_ok: number | null
   created_at: number
   updated_at: number
 }
@@ -60,7 +49,7 @@ type RawQuestion = {
   resolved_at: number | null
 }
 
-const toTask = (r: RawTask): TaskRow => ({
+const toTask = (r: RawTask): ProjectedTask => ({
   id: r.id,
   title: r.title,
   tracker: r.tracker,
@@ -73,11 +62,17 @@ const toTask = (r: RawTask): TaskRow => ({
   reviewRound: r.review_round,
   lastError: r.last_error,
   retryCount: r.retry_count,
+  lastCommit:
+    r.last_commit_sha === null
+      ? null
+      : { sha: r.last_commit_sha, subject: r.last_commit_subject ?? '' },
+  checks: r.checks === null ? null : (JSON.parse(r.checks) as CheckResult[]),
+  checksOk: r.checks_ok === null ? null : r.checks_ok === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 })
 
-const toQuestion = (r: RawQuestion): QuestionRow => ({
+const toQuestion = (r: RawQuestion): ProjectedQuestion => ({
   id: r.id,
   taskId: r.task_id,
   question: r.question,
@@ -89,15 +84,65 @@ const toQuestion = (r: RawQuestion): QuestionRow => ({
   resolvedAt: r.resolved_at,
 })
 
-export class InvalidTransitionError extends Error {
-  constructor(
-    readonly taskId: string,
-    readonly from: TaskState,
-    readonly to: TaskState,
-  ) {
-    super(`task ${taskId}: illegal transition ${from} -> ${to}`)
-    this.name = 'InvalidTransitionError'
+type Column<T> = { col: string; from: (value: T) => SQLQueryBindings }
+
+/** Every projected field maps to exactly one column, so SQL mirrors the reducer. */
+const TASK_COLUMNS: Column<ProjectedTask>[] = [
+  { col: 'id', from: (t) => t.id },
+  { col: 'title', from: (t) => t.title },
+  { col: 'tracker', from: (t) => t.tracker },
+  { col: 'state', from: (t) => t.state },
+  { col: 'branch', from: (t) => t.branch },
+  { col: 'worktree', from: (t) => t.worktree },
+  { col: 'session_id', from: (t) => t.sessionId },
+  { col: 'pr_url', from: (t) => t.prUrl },
+  { col: 'pr_number', from: (t) => t.prNumber },
+  { col: 'review_round', from: (t) => t.reviewRound },
+  { col: 'last_error', from: (t) => t.lastError },
+  { col: 'retry_count', from: (t) => t.retryCount },
+  { col: 'created_at', from: (t) => t.createdAt },
+  { col: 'updated_at', from: (t) => t.updatedAt },
+  { col: 'last_commit_sha', from: (t) => t.lastCommit?.sha ?? null },
+  { col: 'last_commit_subject', from: (t) => t.lastCommit?.subject ?? null },
+  { col: 'checks', from: (t) => (t.checks === null ? null : JSON.stringify(t.checks)) },
+  { col: 'checks_ok', from: (t) => (t.checksOk === null ? null : t.checksOk ? 1 : 0) },
+]
+
+const QUESTION_COLUMNS: Column<ProjectedQuestion>[] = [
+  { col: 'id', from: (q) => q.id },
+  { col: 'task_id', from: (q) => q.taskId },
+  { col: 'question', from: (q) => q.question },
+  { col: 'options', from: (q) => JSON.stringify(q.options) },
+  { col: 'gate_ref', from: (q) => q.gateRef },
+  { col: 'answer', from: (q) => q.answer },
+  { col: 'answered_via', from: (q) => q.answeredVia },
+  { col: 'asked_at', from: (q) => q.askedAt },
+  { col: 'resolved_at', from: (q) => q.resolvedAt },
+]
+
+/** Inserts on first sight, else updates only the columns the reducer changed. */
+function writeDiff<T>(
+  db: Database,
+  table: string,
+  columns: Column<T>[],
+  before: T | undefined,
+  after: T | undefined,
+  key: string,
+  keyValue: string,
+): void {
+  if (before === undefined && after !== undefined) {
+    const cols = columns.map((c) => c.col)
+    db.query(
+      `insert into ${table} (${cols.join(', ')}) values (${cols.map(() => '?').join(', ')})`,
+    ).run(...columns.map((c) => c.from(after)))
+    return
   }
+  if (before === undefined || after === undefined) return
+  const changes = columns.filter((c) => c.col !== key && !Object.is(c.from(before), c.from(after)))
+  if (changes.length === 0) return
+  db.query(
+    `update ${table} set ${changes.map((c) => `${c.col} = ?`).join(', ')} where ${key} = ?`,
+  ).run(...changes.map((c) => c.from(after)), keyValue)
 }
 
 export type Listener = (event: StoredEvent) => void
@@ -131,105 +176,60 @@ export class Store {
 
   private apply(taskId: string | null, ts: number, body: EventBody): void {
     if (taskId === null) return
-    const set = (col: string, value: unknown) =>
-      this.db
-        .query(`update tasks set ${col} = ?, updated_at = ? where id = ?`)
-        .run(value as never, ts, taskId)
+    // The same pure reducer the clients fold events through; only the
+    // persistence differs: the server diffs the projection to SQL.
+    const event = { seq: 0, ts, taskId, ...body } as StoredEvent
+    const before = this.projectionFor(event)
+    const after = project(before, event)
 
-    switch (body.type) {
-      case 'task.claimed':
-        this.db
-          .query(
-            `insert into tasks (id, title, tracker, state, created_at, updated_at)
-             values (?, ?, ?, 'claimed', ?, ?)
-             on conflict(id) do update
-               set title = excluded.title, state = 'claimed',
-                   retry_count = 0, updated_at = excluded.updated_at`,
-          )
-          .run(taskId, body.title, body.tracker, ts, ts)
-        break
-
-      case 'task.state': {
-        const current = this.task(taskId)
-        if (current && !canTransition(current.state, body.to)) {
-          throw new InvalidTransitionError(taskId, current.state, body.to)
-        }
-        set('state', body.to)
-        if (body.to === 'reviewing') {
-          this.db
-            .query('update tasks set review_round = review_round + 1, updated_at = ? where id = ?')
-            .run(ts, taskId)
-        }
-        break
-      }
-
-      case 'task.reclaimed':
-        // Back to a claimable state; the recorded worktree and branch are kept
-        // so the next run resumes them instead of creating a fresh worktree.
-        set('state', 'claimed')
-        break
-
-      case 'worktree.created':
-        this.db
-          .query('update tasks set worktree = ?, branch = ?, updated_at = ? where id = ?')
-          .run(body.path, body.branch, ts, taskId)
-        break
-
-      case 'worktree.removed':
-        this.db
-          .query('update tasks set worktree = null, branch = null, updated_at = ? where id = ?')
-          .run(ts, taskId)
-        break
-
-      case 'agent.exited':
-        if (body.sessionId !== null) set('session_id', body.sessionId)
-        break
-
-      case 'pr.created':
-        this.db
-          .query('update tasks set pr_url = ?, pr_number = ?, updated_at = ? where id = ?')
-          .run(body.url, body.number, ts, taskId)
-        break
-
-      case 'question.asked':
-        this.db
-          .query(
-            `insert into questions (id, task_id, question, options, gate_ref, asked_at)
-             values (?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            body.questionId,
-            taskId,
-            body.question,
-            JSON.stringify(body.options),
-            body.gateRef,
-            ts,
-          )
-        break
-
-      case 'question.answered':
-        this.db
-          .query('update questions set answer = ?, answered_via = ?, resolved_at = ? where id = ?')
-          .run(body.answer, body.via, ts, body.questionId)
-        break
-
-      case 'question.timedout':
-        this.db.query('update questions set resolved_at = ? where id = ?').run(ts, body.questionId)
-        break
-
-      case 'retry.scheduled':
-        this.db
-          .query('update tasks set retry_count = retry_count + 1, updated_at = ? where id = ?')
-          .run(ts, taskId)
-        break
-
-      case 'error':
-        set('last_error', body.message)
-        break
-
-      default:
-        break
+    if (event.taskId !== null) {
+      writeDiff(
+        this.db,
+        'tasks',
+        TASK_COLUMNS,
+        before.tasks[event.taskId],
+        after.tasks[event.taskId],
+        'id',
+        event.taskId,
+      )
     }
+    if (
+      event.type === 'question.asked' ||
+      event.type === 'question.answered' ||
+      event.type === 'question.timedout'
+    ) {
+      writeDiff(
+        this.db,
+        'questions',
+        QUESTION_COLUMNS,
+        before.questions[event.questionId],
+        after.questions[event.questionId],
+        'id',
+        event.questionId,
+      )
+    }
+  }
+
+  /** Loads the rows the event may touch into a projection, from SQL. */
+  private projectionFor(event: StoredEvent): Projection {
+    const projection = emptyProjection()
+    if (event.taskId !== null) {
+      const row = this.db
+        .query('select * from tasks where id = ?')
+        .get(event.taskId) as RawTask | null
+      if (row) projection.tasks[row.id] = toTask(row)
+    }
+    if (
+      event.type === 'question.asked' ||
+      event.type === 'question.answered' ||
+      event.type === 'question.timedout'
+    ) {
+      const row = this.db
+        .query('select * from questions where id = ?')
+        .get(event.questionId) as RawQuestion | null
+      if (row) projection.questions[row.id] = toQuestion(row)
+    }
+    return projection
   }
 
   task(id: string): TaskRow | null {
