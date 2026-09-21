@@ -43,6 +43,11 @@ describe('loadConfig', () => {
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
+    expect(config.loop.doomEnabled).toBe(true)
+    expect(config.loop.doomToolWindowSec).toBe(600)
+    expect(config.loop.doomToolRepeat).toBe(20)
+    expect(config.loop.doomCheckRounds).toBe(3)
+    expect(config.loop.doomDiffWindowSec).toBe(1800)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {
@@ -128,6 +133,18 @@ describe('loadConfig', () => {
     const config = loadConfig(repo).config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
     expect(config.loop.stallTimeoutSec).toBe(7200)
+  })
+
+  test('doom guard keys are overridable and can be disabled', () => {
+    writeRepo(
+      '[loop]\ndoomEnabled = false\ndoomToolWindowSec = 60\ndoomToolRepeat = 5\ndoomCheckRounds = 2\ndoomDiffWindowSec = 120\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.loop.doomEnabled).toBe(false)
+    expect(config.loop.doomToolWindowSec).toBe(60)
+    expect(config.loop.doomToolRepeat).toBe(5)
+    expect(config.loop.doomCheckRounds).toBe(2)
+    expect(config.loop.doomDiffWindowSec).toBe(120)
   })
 })
 

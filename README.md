@@ -149,6 +149,19 @@ resumes where the dead one left off. Only in-progress states are watched;
 `pr_open` is excluded, since there the PR is out for human review and no
 worker runs the task.
 
+The stall watcher's inactivity signal only sees a dead worker, not a stuck
+one. A **doom-loop guard** (`loop.doomEnabled`, default on) runs on the same
+tick and scans the agent event stream of every task with a live worker for
+signs of busy-but-not-progressing work: repeated near-identical tool calls
+(same command or file within `loop.doomToolWindowSec`, e.g. re-running the
+same failing test forever), consecutive check rounds with the same failure
+signature (`loop.doomCheckRounds`), or a worktree diff that has not changed
+for `loop.doomDiffWindowSec` despite a live worker. When one trips, the guard
+releases the tracker claim (stopping the run) and parks the task in the
+terminal `needs_human` state with the reason, so a human looks instead of the
+next worker re-burning budget on the same loop. Set `doomEnabled = false` to
+turn it off.
+
 ## Configuration
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
@@ -175,6 +188,11 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
+| `loop.doomEnabled` | boolean | `true` | Doom-loop guard: the stall watcher also scans tasks with a live worker for busy-but-not-progressing agents and stops the run. Set false to disable. |
+| `loop.doomToolWindowSec` | integer >= 1 | `600` | Repeated near-identical tool calls (same command or file) within this many seconds trip the guard. |
+| `loop.doomToolRepeat` | integer >= 2 | `20` | How many near-identical tool calls within the window trip the guard. |
+| `loop.doomCheckRounds` | integer >= 2 | `3` | Consecutive check rounds sharing one failure signature that trip the guard. |
+| `loop.doomDiffWindowSec` | integer >= 60 | `1800` | A live worker whose worktree diff has not changed for this many seconds trips the guard. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
 | `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |

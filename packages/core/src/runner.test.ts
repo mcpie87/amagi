@@ -233,6 +233,12 @@ const states = (taskId: string): (string | null | undefined)[] =>
     .filter((e) => e.type === 'task.state')
     .map((e) => (e as Extract<StoredEvent, { type: 'task.state' }>).to)
 
+const stateReason = (taskId: string): string =>
+  store
+    .events({ taskId, limit: 999 })
+    .filter((e): e is Extract<StoredEvent, { type: 'task.state' }> => e.type === 'task.state')
+    .at(-1)?.reason ?? ''
+
 beforeEach(async () => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
@@ -466,6 +472,45 @@ describe('Runner.runOnce', () => {
     expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
   })
 
+  test('a task deferred in retrying is picked up after its retry time, reusing the worktree', async () => {
+    const wtPath = join(wtRoot, 'resume-worktree')
+    const branch = 'amagi/bd-a1b2-add-a-greeting-file'
+    await execOk(exec, ['git', 'worktree', 'add', '-b', branch, wtPath, 'main'], { cwd: repo })
+
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    store.append(TASK.id, { type: 'worktree.created', path: wtPath, branch })
+    store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(TASK.id, {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 0,
+      reason: 'transient harness failure',
+      detail: 'hit the session limit',
+    })
+    store.append(TASK.id, { type: 'task.state', from: 'implementing', to: 'retrying' })
+
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    // Fresh harness turn in the recorded worktree; no second worktree is created.
+    expect(harness.calls[0]?.cwd).toBe(wtPath)
+    expect(harness.calls[0]?.resumeFrom).toBeNull()
+    expect(harness.calls[0]?.prompt).toContain('resumed')
+    expect(store.task(TASK.id)?.worktree).toBe(wtPath)
+    expect(store.task(TASK.id)?.branch).toBe(branch)
+    expect(
+      store.events({ taskId: TASK.id }).filter((e) => e.type === 'worktree.created'),
+    ).toHaveLength(2)
+    const created = store
+      .events({ taskId: TASK.id })
+      .filter((e) => e.type === 'worktree.created')
+      .map((e) => (e as Extract<StoredEvent, { type: 'worktree.created' }>).path)
+    expect(new Set(created)).toEqual(new Set([wtPath]))
+    expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
+  })
+
   test('failing checks are handed back to the same session and then commit', async () => {
     const harness = new FakeHarness([
       { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n') },
@@ -519,6 +564,68 @@ describe('Runner.runOnce', () => {
     )
   })
 
+  test('a failed agent with no stderr or summary mines the last assistant text as the reason', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'text', text: 'I cannot finish: the registry is unreachable' },
+          { kind: 'tool_result', name: 'Bash', ok: true, output: 'ok' },
+        ],
+        outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('registry is unreachable')
+    expect(reason).not.toContain('exit 1')
+  })
+
+  test('a failed agent prefers the harness result message over stream noise', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'text', text: 'working on it' },
+          { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
+          { kind: 'result', ok: false, summary: 'hit the turn limit' },
+        ],
+        outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('hit the turn limit')
+  })
+
+  test('a failed agent falls back to the failing tool output when there is no result or text', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'tool_result', name: 'Bash', ok: false, output: 'command not found: lint' },
+        ],
+        outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('command not found: lint')
+  })
+
+  test('a failed agent with nothing mined names the phase and points at the log', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 7, summary: null, stderr: '' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('implement phase failed (exit 7)')
+    expect(reason).toContain('task log')
+  })
+
   test('a transient failure backs off and retries, then commits', async () => {
     const harness = new FakeHarness([
       { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
@@ -544,6 +651,40 @@ describe('Runner.runOnce', () => {
     expect(scheduled[0]?.detail).toBe('rate limit exceeded')
     expect(store.task(TASK.id)?.retryCount).toBe(1)
     expect(states(TASK.id)).toContain('retrying')
+  })
+
+  test('a session-limit failure defers, retries in a fresh session, and keeps one worktree', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'hit the session limit', sessionId: 'sess-1' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { retryBaseMs: 0, retryMaxMs: 0 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    // The spent session is not resumed; the retry starts a fresh harness turn.
+    expect(harness.calls[1]?.resumeFrom).toBeNull()
+    const scheduled = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'retry.scheduled' }> => e.type === 'retry.scheduled',
+      )
+    expect(scheduled).toHaveLength(1)
+    expect(scheduled[0]?.detail).toBe('hit the session limit')
+    expect(states(TASK.id)).toContain('retrying')
+    // The retry keeps the original worktree; none is created a second time.
+    const created = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'worktree.created' }> =>
+          e.type === 'worktree.created',
+      )
+    expect(created).toHaveLength(1)
+    expect(created[0]?.path ?? null).toEqual(store.task(TASK.id)?.worktree ?? null)
   })
 
   test('transient failures escalate only after the retry budget is spent', async () => {
