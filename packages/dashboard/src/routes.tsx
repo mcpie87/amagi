@@ -16,6 +16,7 @@ import {
   useNavigate,
   useParams,
   useRouterState,
+  useSearch,
 } from '@tanstack/react-router'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
@@ -908,7 +909,6 @@ function RunNextButton() {
 
 function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
-  const [selected, setSelected] = useState<Issue | null>(null)
   const [form, setForm] = useState<{ mode: 'create' } | { mode: 'edit'; issue: Issue } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -923,6 +923,9 @@ function IssuesView() {
     }
   })
   const state = useDashboard()
+  const navigate = useNavigate()
+  const { issue: selectedId } = useSearch({ from: issuesRoute.id })
+  const selected = issues.find((issue) => issue.id === selectedId) ?? null
   // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh deliberately re-fetches the tracker snapshot.
   useEffect(() => {
     const controller = new AbortController()
@@ -935,12 +938,7 @@ function IssuesView() {
         return response.json() as Promise<Issue[]>
       })
       .then((items) => {
-        if (controller.signal.aborted) return
-        setIssues(items)
-        setSelected((current) => {
-          if (current === null) return current
-          return items.find((issue) => issue.id === current.id) ?? current
-        })
+        if (!controller.signal.aborted) setIssues(items)
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err))
@@ -974,7 +972,11 @@ function IssuesView() {
   if (selected)
     return (
       <>
-        <button type="button" className="back-link" onClick={() => setSelected(null)}>
+        <button
+          type="button"
+          className="back-link"
+          onClick={() => navigate({ to: '/issues', search: {} })}
+        >
           ← Back to task board
         </button>
         <PageHeading
@@ -1147,7 +1149,7 @@ function IssuesView() {
                         <button
                           type="button"
                           className="issue-card"
-                          onClick={() => setSelected(issue)}
+                          onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
                         >
                           <span className="issue-card-top">
                             <span className="mono">{issue.id}</span>
@@ -1183,7 +1185,11 @@ function IssuesView() {
         <section className="panel issue-list">
           {visible.map((issue) => (
             <div key={issue.id} className="issue-list-item">
-              <button type="button" className="issue-list-row" onClick={() => setSelected(issue)}>
+              <button
+                type="button"
+                className="issue-list-row"
+                onClick={() => navigate({ to: '/issues', search: { issue: issue.id } })}
+              >
                 <span className="mono">{issue.id}</span>
                 <strong>{issue.title}</strong>
                 <span className="muted">{issue.priority === null ? '' : `P${issue.priority}`}</span>
@@ -1752,6 +1758,9 @@ const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
   component: IssuesView,
+  validateSearch: (search: Record<string, unknown>) => ({
+    issue: typeof search.issue === 'string' ? search.issue : undefined,
+  }),
 })
 const inboxRoute = createRoute({
   getParentRoute: () => rootRoute,
