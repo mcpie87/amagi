@@ -128,6 +128,9 @@ class FakeHarness implements Harness {
   async listModels(): Promise<string[]> {
     return []
   }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
 }
 
 class BlockingHarness implements Harness {
@@ -164,6 +167,9 @@ class BlockingHarness implements Harness {
     throw new Error('no resume in run-service tests')
   }
   async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
     return []
   }
 }
@@ -204,9 +210,9 @@ const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = 
     maxParallel,
   })
 
-const waitFor = async (fn: () => boolean, timeoutMs = 2000): Promise<void> => {
+const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
   const started = Date.now()
-  while (!fn()) {
+  while (!(await fn())) {
     if (Date.now() - started > timeoutMs) throw new Error('waitFor timed out')
     await new Promise((r) => setTimeout(r, 10))
   }
@@ -233,9 +239,41 @@ afterEach(() => {
 })
 
 describe('RunService', () => {
-  test('status reports availability and capacity', () => {
+  test('status reports availability and capacity', async () => {
     const service = makeService(new FakeTracker(), new FakeHarness(), 2)
-    expect(service.status()).toEqual({ available: true, capacity: 2, running: [] })
+    expect(await service.status()).toEqual({
+      name: 'demo',
+      available: true,
+      capacity: 2,
+      running: [],
+      resources: {},
+    })
+  })
+
+  test('setMaxParallel changes capacity live without touching running runs', async () => {
+    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1)
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    service.setMaxParallel(4)
+    const status = await service.status()
+    expect(status.available).toBe(true)
+    expect(status.capacity).toBe(4)
+    expect(status.running).toEqual([TASK.id])
+    // a buggy caller cannot zero the runner out
+    service.setMaxParallel(0)
+    expect((await service.status()).capacity).toBe(1)
+    await service.stop(TASK.id)
+  })
+
+  test('setMaxParallel raises the ceiling for new launches', async () => {
+    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 1)
+    expect((await service.start(TASK.id)).ok).toBe(true)
+    expect((await service.start(TASK2.id)).ok).toBe(false)
+    service.setMaxParallel(2)
+    expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
   })
 
   test('start launches the next ready task and it completes', async () => {
@@ -247,7 +285,7 @@ describe('RunService', () => {
     expect(res).toEqual({ ok: true, taskId: TASK.id })
 
     await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    await waitFor(() => service.status().running.length === 0)
+    await waitFor(async () => (await service.status()).running.length === 0)
   })
 
   test('start launches a specific ready task', async () => {
@@ -313,6 +351,6 @@ describe('RunService', () => {
     expect(tracker.released).toEqual([TASK.id])
     expect(store.task(TASK.id)?.worktree).not.toBeNull()
     expect(store.task(TASK.id)?.branch).not.toBeNull()
-    await waitFor(() => service.status().running.length === 0)
+    await waitFor(async () => (await service.status()).running.length === 0)
   })
 })

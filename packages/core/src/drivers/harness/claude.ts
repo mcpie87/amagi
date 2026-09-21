@@ -41,7 +41,7 @@ type ClaudeMessage = {
   total_cost_usd?: number
   model?: string
   message?: { model?: string; content?: ContentBlock[] }
-  usage?: { input_tokens?: number; output_tokens?: number }
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number }
 }
 
 /**
@@ -115,12 +115,14 @@ export class ClaudeTranslator {
       this.usage = {
         inputTokens: msg.usage.input_tokens ?? 0,
         outputTokens: msg.usage.output_tokens ?? 0,
+        cachedTokens: msg.usage.cache_read_input_tokens ?? 0,
         costUsd: msg.total_cost_usd ?? null,
       }
       events.push({
         kind: 'usage',
         inputTokens: this.usage.inputTokens,
         outputTokens: this.usage.outputTokens,
+        ...(this.usage.cachedTokens === 0 ? {} : { cachedTokens: this.usage.cachedTokens }),
         ...(this.usage.costUsd === null ? {} : { costUsd: this.usage.costUsd }),
       })
     }
@@ -171,6 +173,10 @@ export class ClaudeHarness implements Harness {
     const result = await exec(cmd)
     if (result.exitCode !== 0) throw new CommandError(cmd, result)
     return parseClaudeModelHint(result.stdout)
+  }
+
+  async listEfforts(): Promise<string[]> {
+    return ['low', 'medium', 'high', 'xhigh']
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {

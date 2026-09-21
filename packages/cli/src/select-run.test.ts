@@ -100,7 +100,7 @@ describe('pickRunSelection', () => {
     expect(harness.kind).toBe('claude')
   })
 
-  test('--model skips the model prompt after an interactive harness pick', async () => {
+  test('interactive: --model skips the model prompt after an interactive harness pick', async () => {
     const picker = scripted(['fast'])
     const { harness } = await pickRunSelection(
       config(),
@@ -109,5 +109,44 @@ describe('pickRunSelection', () => {
       listModels,
     )
     expect(harness.model).toBe('opencode/forced')
+  })
+
+  test('interactive: picks harness, model, then effort from the hardcoded levels', async () => {
+    const picker = scripted(['careful', 'sonnet', 'high'])
+    const claudeModels = async () => ['sonnet', 'opus', 'haiku']
+    const { harness } = await pickRunSelection(config(), {}, picker, claudeModels)
+    expect(harness.kind).toBe('claude')
+    expect(harness.model).toBe('sonnet')
+    expect(harness.effort).toBe('high')
+  })
+
+  test('interactive: cancelling the effort pick keeps the configured default', async () => {
+    const withEffort = config({
+      definitions: { careful: { kind: 'claude', effort: 'medium' } },
+    })
+    const picker = scripted(['careful', 'sonnet', null])
+    const claudeModels = async () => ['sonnet', 'opus', 'haiku']
+    const { harness } = await pickRunSelection(withEffort, {}, picker, claudeModels)
+    expect(harness.effort).toBe('medium')
+  })
+
+  test('interactive: opencode gets no effort prompt', async () => {
+    const picker = scripted(['fast', 'opencode/big-pickle'])
+    const { harness } = await pickRunSelection(config(), {}, picker, listModels)
+    expect(harness.kind).toBe('opencode')
+    expect(harness.effort).toBeUndefined()
+  })
+
+  test('--effort is applied without prompting', async () => {
+    const picker = scripted(['careful'])
+    const { harness } = await pickRunSelection(config(), { effort: 'high' }, picker, listModels)
+    expect(harness.kind).toBe('claude')
+    expect(harness.effort).toBe('high')
+  })
+
+  test('--effort with no tty falls through to the config harness', async () => {
+    const { harness } = await pickRunSelection(config(), { effort: 'xhigh' }, null, listModels)
+    expect(harness.kind).toBe('claude')
+    expect(harness.effort).toBe('xhigh')
   })
 })

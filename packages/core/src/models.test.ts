@@ -2,7 +2,47 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { listModelsCached, parseClaudeModelHint, parseModelLines } from './models.ts'
+import {
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  listModelsCached,
+  parseClaudeModelHint,
+  parseModelLines,
+} from './models.ts'
+
+describe('HARDCODED_MODELS', () => {
+  test('claude and codex each expose a curated list', () => {
+    expect(HARDCODED_MODELS.claude.length).toBeGreaterThan(0)
+    expect(HARDCODED_MODELS.codex.length).toBeGreaterThan(0)
+    expect(HARDCODED_MODELS.opencode).toBeUndefined()
+  })
+
+  test('claude lists its exact model IDs, not bare aliases', () => {
+    expect(HARDCODED_MODELS.claude).toEqual([
+      'claude-fable-5-1',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-haiku-4-5',
+    ])
+  })
+
+  test('codex lists the current gpt family', () => {
+    expect(HARDCODED_MODELS.codex).toEqual([
+      'gpt-6-astra',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+    ])
+  })
+})
+
+describe('HARDCODED_EFFORTS', () => {
+  test('claude uses its effort levels, codex its model_reasoning_effort values', () => {
+    expect(HARDCODED_EFFORTS.claude).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(HARDCODED_EFFORTS.codex).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh'])
+    expect(HARDCODED_EFFORTS.opencode).toBeUndefined()
+  })
+})
 
 describe('parseModelLines', () => {
   test('parses opencode provider/model lines', () => {

@@ -123,6 +123,7 @@ export type AgentStartOptions = {
 export type AgentUsage = {
   inputTokens: number
   outputTokens: number
+  cachedTokens: number
   costUsd: number | null
 }
 
@@ -153,4 +154,6 @@ export interface Harness {
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess
   /** Models the harness can run, listed the way the harness lists them. */
   listModels(): Promise<string[]>
+  /** Reasoning-effort levels the harness can run (for `model`, when the harness scopes them), or [] when it cannot say. */
+  listEfforts(model?: string): Promise<string[]>
 }
