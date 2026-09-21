@@ -51,6 +51,8 @@ bun run packages/cli/src/index.ts <command>
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
 | `triage` | Pick an unclaimed task the runner skips (epics, milestones, blocked, orphaned) and decide what to do with it: implement, decompose, close, ask the operator, or skip with a recorded reason. `--harness`, `--model` and `--effort` pin the decision harness (defaults to `harness.triage`) |
+| `continue <task-id>` | Resume a task in its recorded worktree. `--harness`/`--model` restart it with a different harness or model |
+| `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -103,7 +105,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
-| `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
+| `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. The review loop (a reviewer that inspects the PR and a fixing pass that addresses its findings) is not built yet; a task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
@@ -316,6 +318,23 @@ permissions = "bypass"
 kind = "claude"
 model = "claude-opus-5"
 ```
+
+### Interrupting and restarting a task
+
+A task that hangs (the harness process stops producing output, the machine
+froze, the runner died) is not stranded: interrupt it, then start it again in
+the same worktree, optionally with a different harness or model.
+
+```bash
+amagi stop bd-1234        # park the run in `cancelled`; a live runner kills its agent process
+amagi continue bd-1234    # resume in the recorded worktree with the configured harness
+amagi continue bd-1234 --harness opencode --model local/...   # same worktree, different harness/model
+```
+
+`amagi continue` re-claims the task and drives it in the worktree and branch
+already recorded for it, so no work is lost. The same stop/restart flow is
+available over the API (`POST /api/tasks/:id/stop` and
+`POST /api/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 

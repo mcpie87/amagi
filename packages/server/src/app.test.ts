@@ -624,6 +624,41 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/tasks/:id/stop', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const running = (id: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+  }
+
+  test('parks a running task in cancelled', async () => {
+    running('bd-1')
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('cancelled')
+    expect(store.task('bd-1')?.state).toBe('cancelled')
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/tasks/nope/stop', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('409s on an already terminal task', async () => {
+    running('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/close', () => {
   let tracker: FakeGateTracker
 

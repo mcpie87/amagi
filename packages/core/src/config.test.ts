@@ -117,6 +117,11 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
   })
 
+  test('accepts a per-harness tool allowlist', () => {
+    writeRepo('[harness.implement]\nkind = "claude"\nallowedTools = ["Read", "Bash"]\n')
+    expect(loadConfig(repo).config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
