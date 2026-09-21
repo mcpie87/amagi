@@ -93,6 +93,19 @@ describe('dashboard state reducer', () => {
     ).toThrow(/illegal transition/)
   })
 
+  test('a pr.status event records the open PR merge status', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'pr.created', url: 'https://g/x/pull/1', number: 1 }),
+      ...([...['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open']] as const).map(
+        (to, i) => ev(3 + i, 'am-1', 1200 + i, { type: 'task.state', from: null, to }),
+      ),
+      ev(8, 'am-1', 1900, { type: 'pr.status', mergeStatus: 'conflicted' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(state.tasks['am-1']?.prMergeStatus).toBe('conflicted')
+    expect(state.tasks['am-1']?.updatedAt).toBe(1900)
+  })
+
   test('reclaim returns a stuck task to the queue while keeping its worktree', () => {
     const state = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
