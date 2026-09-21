@@ -18,7 +18,7 @@ test('re-arms each tick and stops cleanly', async () => {
   await Bun.sleep(45)
   expect(ticks).toBeGreaterThanOrEqual(3)
 
-  pollers[0]!.stop()
+  pollers[0]?.stop()
   const after = ticks
   await Bun.sleep(45)
   expect(ticks).toBe(after)

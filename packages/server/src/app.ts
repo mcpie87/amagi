@@ -454,6 +454,22 @@ export function createApp({
       return c.json({ task: ws.store.task(id) })
     })
 
+    .post('/api/repos/:repo/tasks/:id/retry', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      // The runner's backoff only reacts to a wake-up while the task is
+      // actually deferring a retry; anything else would mislead the operator.
+      if (task.state !== 'retrying') {
+        return c.json({ error: `task ${id} is not deferring a retry` }, 409)
+      }
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const result = await runner.retryNow(id)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      return c.json({ taskId: result.taskId })
+    })
+
     .post(
       '/api/repos/:repo/tasks/:id/filed-as-error',
       valid('param', RepoTaskIdParam),

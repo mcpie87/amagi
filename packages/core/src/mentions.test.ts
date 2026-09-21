@@ -248,10 +248,8 @@ describe('handled mentions', () => {
     try {
       const path = join(dir, 'watch.json')
       expect(readMentionWatch(path)).toEqual({})
-      saveMentionWatch(path, { 7: { updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 3 } })
-      expect(readMentionWatch(path)).toEqual({
-        7: { updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 3 },
-      })
+      saveMentionWatch(path, { 7: '2026-09-21T10:00:00Z' })
+      expect(readMentionWatch(path)).toEqual({ 7: '2026-09-21T10:00:00Z' })
       expect(mentionWatchPath('amagi')).toContain('amagi/mentions/amagi.watch.json')
     } finally {
       rmSync(dir, { recursive: true, force: true })
