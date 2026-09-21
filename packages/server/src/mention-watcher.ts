@@ -5,14 +5,11 @@ import {
   listOpenPrs,
   type MentionWatchState,
   type makeHarness,
-  mentionsPath,
   mentionWatchPath,
   type PrComment,
   type PrDriver,
-  readHandledMentions,
   readMentionWatch,
   respondToMention,
-  saveHandledMentions,
   saveMentionWatch,
   type Tracker,
   type WorkerActivity,
@@ -75,9 +72,7 @@ export function startMentionWatcher({
   async function tick(): Promise<void> {
     const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
     try {
-      const handledPath = mentionsPath(repoName)
       const watchPath = mentionWatchPath(repoName)
-      const handled = readHandledMentions(handledPath)
       const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
       const state = readMentionWatch(watchPath)
       const nextState: MentionWatchState = {}
@@ -99,10 +94,7 @@ export function startMentionWatcher({
         const maxId = comments.reduce((m, c) => Math.max(m, Number(c.id) || 0), 0)
         const lastId = seen?.lastCommentId ?? 0
         const mentions = comments.filter(
-          (c) =>
-            Number(c.id) > lastId &&
-            isAgentMention(c, config.forge.agentHandle) &&
-            !handled.has(c.id),
+          (c) => Number(c.id) > lastId && isAgentMention(c, config.forge.agentHandle),
         )
         let allOk = true
         for (const mention of mentions) {
@@ -118,8 +110,6 @@ export function startMentionWatcher({
               ...(exec === undefined ? {} : { exec }),
               ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
             })
-            handled.add(mention.id)
-            saveHandledMentions(handledPath, handled)
             next.mentionsResponded++
           } catch (err) {
             allOk = false

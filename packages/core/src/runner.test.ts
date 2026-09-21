@@ -593,7 +593,11 @@ describe('Runner.runOnce', () => {
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
     ])
-    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxRetries: 0 } }),
+    ).runOnce()
 
     expect(result?.state).toBe('needs_human')
     expect(stateReason(TASK.id)).toContain('hit the turn limit')
