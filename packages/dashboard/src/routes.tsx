@@ -846,7 +846,7 @@ function QueueView() {
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[]) => (
+  const taskList = (tasks: TaskView[], showReason: boolean) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
         <li key={task.id}>
@@ -862,6 +862,9 @@ function QueueView() {
                 {task.id}
                 {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
               </span>
+              {showReason && task.statusReason !== null && (
+                <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
+              )}
             </span>
           </Link>
         </li>
@@ -881,10 +884,14 @@ function QueueView() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention)}
+          {taskList(attention, true)}
         </div>
       )}
-      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
+      {queue.length === 0 ? (
+        <p className="text-zinc-500">No active tasks.</p>
+      ) : (
+        taskList(queue, false)
+      )}
     </section>
   )
 }
@@ -1141,6 +1148,19 @@ function AgentLog({ events }: { events: AgentStreamEvent[] }) {
   )
 }
 
+const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+
+/** Why a task stopped, in plain language, when the operator actually needs it. */
+function SummaryPanel({ task }: { task: TaskView }) {
+  if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
+  return (
+    <div className="mt-6 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-300">Summary</h2>
+      <p className="mt-1 text-zinc-200">{task.statusReason}</p>
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
@@ -1196,6 +1216,8 @@ function TaskDetailView() {
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
+
+      <SummaryPanel task={task} />
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
