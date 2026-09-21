@@ -2,6 +2,7 @@ import {
   CAPABILITY_WORDS,
   ChatService,
   classifyDifficulty,
+  errMsg,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -103,7 +104,7 @@ async function notifyChannels(
     try {
       await notifier.notify(title, body)
     } catch (err) {
-      console.warn(`notify ${notifier.kind}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`notify ${notifier.kind}: ${errMsg(err)}`)
     }
     store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
   }
@@ -123,7 +124,7 @@ async function openQuestionGate(
   try {
     return (await tracker.openGate(taskId, question)).id
   } catch (err) {
-    console.warn(`openGate ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+    console.warn(`openGate ${taskId}: ${errMsg(err)}`)
     return null
   }
 }
@@ -136,7 +137,7 @@ async function resolveQuestionGate(
   try {
     await tracker.resolveGate({ id: gateRef, advisory: false })
   } catch (err) {
-    console.warn(`resolveGate ${gateRef}: ${err instanceof Error ? err.message : String(err)}`)
+    console.warn(`resolveGate ${gateRef}: ${errMsg(err)}`)
   }
 }
 
@@ -157,7 +158,7 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   try {
     ws = workspaces.get(repo)
   } catch (err) {
-    throw new RepoError(500, `repo ${repo}: ${err instanceof Error ? err.message : String(err)}`)
+    throw new RepoError(500, `repo ${repo}: ${errMsg(err)}`)
   }
   if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
   return ws
@@ -201,7 +202,7 @@ export function createApp({
               {
                 name: 'workspace',
                 ok: false,
-                detail: err instanceof Error ? err.message : String(err),
+                detail: errMsg(err),
               },
             ],
           })
@@ -216,7 +217,7 @@ export function createApp({
       try {
         entry = workspaces.add(path, key)
       } catch (err) {
-        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+        return c.json({ error: errMsg(err) }, 400)
       }
       const ready = await workspaces.diagnose(entry)
       return c.json({ ...entry, ready }, 201)
@@ -404,7 +405,7 @@ export function createApp({
       try {
         await ws.tracker.release(id)
       } catch (err) {
-        console.warn(`release ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`release ${id}: ${errMsg(err)}`)
       }
       ws.store.append(id, { type: 'task.reclaimed' })
       return c.json({ task: ws.store.task(id) })
@@ -443,7 +444,7 @@ export function createApp({
           try {
             await runner.stop(id)
           } catch (err) {
-            console.warn(`stop on close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+            console.warn(`stop on close ${id}: ${errMsg(err)}`)
           }
         }
         const afterStop = ws.store.task(id)
@@ -464,15 +465,13 @@ export function createApp({
               branch: branch ?? null,
             })
           } catch (err) {
-            console.warn(
-              `worktree removal on close ${id}: ${err instanceof Error ? err.message : String(err)}`,
-            )
+            console.warn(`worktree removal on close ${id}: ${errMsg(err)}`)
           }
         }
         try {
           await ws.tracker.close(id, reason)
         } catch (err) {
-          console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          console.warn(`close ${id}: ${errMsg(err)}`)
         }
         return c.json({ task: ws.store.task(id) })
       },

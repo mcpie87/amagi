@@ -1,4 +1,4 @@
-import { type RegistryEntry, Workspaces } from '@amagi/core'
+import { errMsg, type RegistryEntry, Workspaces } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, red } from '../format.ts'
 
@@ -22,9 +22,7 @@ export const addCommand = defineCommand({
     try {
       entry = workspaces.add(args.path, args.key || undefined)
     } catch (err) {
-      console.log(
-        red(`failed to register ${args.path}: ${err instanceof Error ? err.message : String(err)}`),
-      )
+      console.log(red(`failed to register ${args.path}: ${errMsg(err)}`))
       process.exitCode = 1
       return
     }

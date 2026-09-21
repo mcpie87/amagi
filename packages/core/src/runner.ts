@@ -3,6 +3,7 @@ import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
@@ -171,7 +172,7 @@ export class Runner {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
       } else {
-        const message = err instanceof Error ? err.message : String(err)
+        const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
         this.transition(task.id, 'needs_human', message)
       }
@@ -201,7 +202,7 @@ export class Runner {
     try {
       await tracker.release(taskId)
     } catch (err) {
-      console.warn(`release ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`release ${taskId}: ${errMsg(err)}`)
     }
   }
 
@@ -444,7 +445,7 @@ export class Runner {
       store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
       this.transition(task.id, 'pr_open')
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
         ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''

@@ -2,6 +2,7 @@ import type { Config } from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import type { Exec } from './exec.ts'
 import { processTreeStats } from './process.ts'
 import { Runner, type RunOnceResult } from './runner.ts'
@@ -142,7 +143,7 @@ export class RunService implements RunServiceApi {
       try {
         await this.fillSlots()
       } catch (err) {
-        console.warn(`auto-pick: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`auto-pick: ${errMsg(err)}`)
       }
       await new Promise((resolve) => {
         this.pollTimer = setTimeout(resolve, AUTO_PICK_POLL_MS)
