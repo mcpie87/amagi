@@ -20,10 +20,14 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
+    '- Do not pipe check output through head/tail; show the relevant lines in your',
+    '  reply so the failure is not cut off.',
     '- If your changes add a user-facing feature (new CLI command or flag, new config',
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    '- End your final message with a short summary of what was done; it is used as',
+    '  the reason when no pull request is opened.',
   ]
 
   if (ctx.askCommand) {
