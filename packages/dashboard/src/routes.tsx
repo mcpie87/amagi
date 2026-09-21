@@ -20,6 +20,7 @@ import {
 import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
+import { SessionsView } from './SessionsView.tsx'
 import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
@@ -186,6 +187,9 @@ function RootLayout() {
                   </Link>
                   <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
                     Tasks
+                  </Link>
+                  <Link to="/sessions" activeProps={{ className: 'text-zinc-100' }}>
+                    Sessions
                   </Link>
                 </nav>
                 <div className="ml-auto flex items-center gap-2">
@@ -1283,11 +1287,16 @@ const issuesRoute = createRoute({
   path: '/issues',
   component: IssuesView,
 })
+const sessionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/sessions',
+  component: SessionsView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, taskRoute])
+const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, sessionsRoute, taskRoute])
 export const router = createRouter({ routeTree })

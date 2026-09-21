@@ -80,6 +80,8 @@ export const AgentEvent = z.discriminatedUnion('kind', [
     kind: z.literal('usage'),
     inputTokens: z.number().int(),
     outputTokens: z.number().int(),
+    /** Input tokens served from the provider's prompt cache, when reported. */
+    cachedTokens: z.number().int().optional(),
     costUsd: z.number().optional(),
   }),
   z.object({ kind: z.literal('result'), ok: z.boolean(), summary: z.string().optional() }),
