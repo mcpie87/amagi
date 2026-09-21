@@ -899,8 +899,14 @@ function WorkerSlot({
         <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
           busy
         </span>
-        <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
-        <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        <Link
+          to="/tasks/$id"
+          params={{ id: taskId }}
+          className="flex min-w-0 items-baseline gap-x-3 hover:underline"
+        >
+          <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+          <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
