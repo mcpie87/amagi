@@ -187,6 +187,7 @@ class FakeIssueTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
   readonly created: CreateTrackerTask[] = []
   readonly updated: { id: string; input: UpdateTrackerTask }[] = []
+  readonly released: string[] = []
   issues = new Map<string, BeadsIssue>()
   private seq = 0
 
@@ -282,7 +283,9 @@ class FakeIssueTracker implements Tracker {
   }
   async comment(): Promise<void> {}
   async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
-  async release(): Promise<void> {}
+  async release(id: string): Promise<void> {
+    this.released.push(id)
+  }
   async close(): Promise<void> {}
   async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'g', advisory: false }
@@ -621,6 +624,80 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
       expect(tracker.released).toEqual(['bd-1'])
     },
   )
+})
+
+describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
+  const parkedError = (id: string, reason: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'task.state', from: 'implementing', to: 'needs_human', reason })
+  }
+  const file = (id: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/filed-as-error`, {
+      method: 'POST',
+    })
+
+  test('files the error as a human task, blocks the original on it and releases it', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', title: 'work on bd-1' })
+    app = issueApp(tracker)
+    parkedError('bd-1', 'agent failed: model quota exhausted')
+
+    const res = await file('bd-1')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow; errorTask: BeadsIssue }
+
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]).toMatchObject({
+      title: 'Error: work on bd-1',
+      labels: ['human'],
+    })
+    expect(tracker.created[0]?.description).toContain('agent failed: model quota exhausted')
+    expect(tracker.updated).toHaveLength(1)
+    expect(tracker.updated[0]?.input).toEqual({
+      dependencies: { add: [body.errorTask.id], remove: [] },
+    })
+    expect(tracker.released).toEqual(['bd-1'])
+    expect(body.errorTask.labels).toEqual(['human'])
+    const event = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'retry.filed_as_error')
+    expect(event).toMatchObject({
+      type: 'retry.filed_as_error',
+      errorTaskId: body.errorTask.id,
+      reason: 'agent failed: model quota exhausted',
+    })
+  })
+
+  test('404s on an unknown task', async () => {
+    app = issueApp(new FakeIssueTracker())
+    expect((await file('nope')).status).toBe(404)
+  })
+
+  test('409s when the task is not parked for human attention', async () => {
+    app = issueApp(new FakeIssueTracker())
+    claim('bd-1')
+    const res = await file('bd-1')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toContain(
+      'not waiting for human attention',
+    )
+  })
+
+  test('409s when the task has no recorded error to carry', async () => {
+    app = issueApp(new FakeIssueTracker())
+    parkedError('bd-1', '  ')
+    const res = await file('bd-1')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toContain('no recorded error')
+  })
+
+  test('501s on a tracker without create or dependency support', async () => {
+    app = issueApp(new FakeGateTracker())
+    parkedError('bd-1', 'agent failed')
+    const res = await file('bd-1')
+    expect(res.status).toBe(501)
+    expect(((await res.json()) as { error: string }).error).toContain('does not support')
+  })
 })
 
 describe('POST /api/repos/:repo/tasks/:id/close', () => {
