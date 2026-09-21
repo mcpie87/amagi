@@ -43,14 +43,18 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
   readonly released: string[] = []
 
-  constructor(private readonly queue: TrackerTask[] = []) {}
+  constructor(private queue: TrackerTask[] = []) {}
 
   async ready(): Promise<TrackerTask[]> {
     return this.queue
   }
   async claim(id?: string): Promise<TrackerTask | null> {
-    if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
-    return this.queue[0] ?? null
+    if (id !== undefined) {
+      const found = this.queue.find((t) => t.id === id)
+      if (found !== undefined) this.queue = this.queue.filter((t) => t.id !== id)
+      return found ?? null
+    }
+    return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
     return null
@@ -208,6 +212,7 @@ const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = 
     repoName: 'demo',
     forge: new FakePr(),
     maxParallel,
+    autoPick: false,
   })
 
 const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
@@ -375,5 +380,41 @@ describe('RunService', () => {
     expect(store.task(TASK.id)?.worktree).not.toBeNull()
     expect(store.task(TASK.id)?.branch).not.toBeNull()
     await waitFor(async () => (await service.status()).running.length === 0)
+  })
+
+  test('auto-pick claims the next ready task without a manual start', async () => {
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config(),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      maxParallel: 1,
+      autoPick: true,
+    })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    await waitFor(async () => (await service.status()).running.length === 0)
+    service.close()
+  })
+
+  test('auto-pick keeps every slot busy up to maxParallel', async () => {
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK, TASK2]),
+      harness: new BlockingHarness(),
+      config: config(),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      maxParallel: 2,
+      autoPick: true,
+    })
+    await waitFor(async () => (await service.status()).running.length === 2)
+    expect((await service.status()).running.sort()).toEqual([TASK.id, TASK2.id].sort())
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+    service.close()
   })
 })

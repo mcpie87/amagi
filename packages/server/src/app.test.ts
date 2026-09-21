@@ -428,6 +428,24 @@ describe('issue mutations', () => {
   })
 })
 
+describe('GET /api/repos/:repo/ready-queue', () => {
+  test('returns the tracker-ready queue in its given order', async () => {
+    const tracker = new FakeIssueTracker()
+    const a = tracker.seed({ id: 'bd-old', title: 'oldest' })
+    const b = tracker.seed({ id: 'bd-new', title: 'newest' })
+    app = issueApp(tracker)
+    const res = await app.request('/api/repos/repo1/ready-queue')
+    expect(res.status).toBe(200)
+    expect((await res.json()) as TrackerTask[]).toEqual([a, b])
+  })
+
+  test('404s on an unknown repository', async () => {
+    app = issueApp(new FakeIssueTracker())
+    const res = await app.request('/api/repos/nope/ready-queue')
+    expect(res.status).toBe(404)
+  })
+})
+
 class FakeEpicTracker extends FakeGateTracker {
   readonly eligible = new Map<string, EpicCloseEligible>()
   readonly closedReasons: { id: string; reason: string }[] = []
@@ -1440,26 +1458,6 @@ describe('POST /api/repos (onboarding)', () => {
       body: JSON.stringify({ path: '/nonexistent-path-xyz' }),
     })
     expect(res.status).toBe(400)
-  })
-})
-
-describe('POST /api/repos/:repo/run', () => {
-  test('starts a run in the background for the repo', async () => {
-    const tracker = new FakeGateTracker()
-    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-    const res = await app.request('/api/repos/repo1/run', { method: 'POST' })
-    expect(res.status).toBe(202)
-    await Bun.sleep(20)
-    // the fake tracker has nothing ready, so the run ends without events
-    expect(tracker.released).toEqual([])
-  })
-
-  test('404s for an unknown repo', async () => {
-    ws = testWorkspaces(['repo1'])
-    app = createApp({ workspaces: ws.workspaces })
-    expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
   })
 })
 
