@@ -14,11 +14,12 @@ export const runCommand = defineCommand({
       description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
+    effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },
   },
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const flags = { harness: args.harness, model: args.model }
+    const flags = { harness: args.harness, model: args.model, effort: args.effort }
 
     const selection = await pickRunSelection(
       config,

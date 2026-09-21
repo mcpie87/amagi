@@ -51,6 +51,10 @@ fresh-check:
 status:
     bun run packages/cli/src/index.ts status
 
+# Serve the API and dashboard (dev, watch mode)
+serve:
+    bun serve
+
 # Run the bot
 run:
     bun run packages/cli/src/index.ts run
