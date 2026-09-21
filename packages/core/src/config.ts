@@ -9,6 +9,22 @@ export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
 
+export const DifficultyConfig = z.object({
+  /**
+   * Master switch: when off, no LLM pass runs at task creation and no claim is
+   * gated. Defaults off so the feature is opt-in.
+   */
+  enabled: z.boolean().default(false),
+  /** Difficulty levels a task can be classified into, easiest first. */
+  levels: z.array(z.string().min(1)).default(['low', 'medium', 'high']),
+  /** Model tiers, weakest first; a model's tier is its index in this list. */
+  tierOrder: z.array(z.string().min(1)).default(['fast', 'smart']),
+  /** The minimum tier a task of a given difficulty needs; unlisted levels require the weakest tier. */
+  requiredTier: z.record(z.string(), z.string()).default({ high: 'smart' }),
+  /** Explicit model id -> tier mapping; an unlisted model counts as the weakest tier. */
+  modelTiers: z.record(z.string(), z.string()).default({}),
+})
+
 export const HarnessConfig = z.object({
   kind: HarnessKind,
   /** Command used to invoke the harness. Defaults to the harness name. */
@@ -57,13 +73,11 @@ export const Config = z.object({
        */
       definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
-      review: HarnessConfig.prefault({ kind: 'codex' }),
     })
     .prefault({}),
   loop: z
     .object({
       maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
-      maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
       /**
@@ -93,6 +107,20 @@ export const Config = z.object({
        * claim and park it back to claimed, keeping the worktree). Default 1h.
        */
       stallTimeoutSec: z.number().int().min(60).default(3600),
+      /**
+       * Doom-loop guard: the stall watcher also scans busy workers for a
+       * busy-but-not-progressing agent and stops the run. Set false to disable
+       * while tuning the thresholds below for a repo.
+       */
+      doomEnabled: z.boolean().default(true),
+      /** Repeated near-identical tool calls (same command or file) within this many seconds trip the guard. */
+      doomToolWindowSec: z.number().int().min(1).default(600),
+      /** How many near-identical tool calls within the window trip the guard. */
+      doomToolRepeat: z.number().int().min(2).default(20),
+      /** Consecutive check rounds sharing one failure signature that trip the guard. */
+      doomCheckRounds: z.number().int().min(2).default(3),
+      /** A live worker whose worktree diff has not changed for this many seconds trips the guard. */
+      doomDiffWindowSec: z.number().int().min(60).default(1800),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */
@@ -109,6 +137,7 @@ export const Config = z.object({
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
+  difficulty: DifficultyConfig.prefault({}),
   notify: z
     .object({
       desktop: z.boolean().default(true),

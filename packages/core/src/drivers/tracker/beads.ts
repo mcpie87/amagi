@@ -22,6 +22,13 @@ type BdIssue = {
   labels?: string[]
   parent?: string
   dependencies?: BdIssue[]
+  metadata?: Record<string, string>
+}
+
+/** A blocker behind a BeadsIssue, with the labels the dashboard needs to tell
+ * dependency blockers from human-only ones (`human` label). */
+export type BeadsBlocker = TrackerTask & {
+  labels: string[]
 }
 
 export type BeadsIssue = TrackerTask & {
@@ -30,7 +37,7 @@ export type BeadsIssue = TrackerTask & {
   labels: string[]
   parent: string | null
   /** Issues this one is blocked by, when the tracker reports them (bd show does). */
-  dependencies: TrackerTask[]
+  dependencies: BeadsBlocker[]
 }
 
 export type BeadsOptions = {
@@ -75,6 +82,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 }
 
 function toTask(issue: BdIssue): TrackerTask {
+  const difficulty = issue.metadata?.difficulty
   return {
     id: issue.id,
     title: issue.title,
@@ -83,6 +91,7 @@ function toTask(issue: BdIssue): TrackerTask {
     priority: issue.priority ?? null,
     type: issue.issue_type ?? null,
     url: null,
+    ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
   }
 }
 
@@ -93,7 +102,10 @@ function toIssue(issue: BdIssue): BeadsIssue {
     assignee: issue.assignee ?? null,
     labels: issue.labels ?? [],
     parent: issue.parent ?? null,
-    dependencies: (issue.dependencies ?? []).map(toTask),
+    dependencies: (issue.dependencies ?? []).map((d) => ({
+      ...toTask(d),
+      labels: d.labels ?? [],
+    })),
   }
 }
 
@@ -196,6 +208,9 @@ export class BeadsTracker implements Tracker {
       ...(input.priority === null ? [] : ['--priority', `P${input.priority}`]),
       ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
       ...(input.dependencies.length === 0 ? [] : ['--deps', input.dependencies.join(',')]),
+      ...(input.difficulty === undefined || input.difficulty === null
+        ? []
+        : ['--metadata', JSON.stringify({ difficulty: input.difficulty })]),
     ]
     const issues = parseIssues(await this.bd(args))
     const created = issues[0]

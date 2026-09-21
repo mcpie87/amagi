@@ -8,8 +8,6 @@ export const TASK_STATES = [
   'checks',
   'committed',
   'pr_open',
-  'reviewing',
-  'fixing',
   'retrying',
   'done',
   'no_pr',
@@ -47,9 +45,7 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   checks: ['implementing', 'committed'],
   retrying: ['implementing'],
   committed: ['pr_open'],
-  pr_open: ['reviewing'],
-  reviewing: ['fixing', 'done'],
-  fixing: ['awaiting_answer', 'checks', 'reviewing'],
+  pr_open: [],
   done: [],
   no_pr: ['abandoned', 'done'],
   needs_human: ['abandoned', 'done'],
@@ -102,19 +98,6 @@ export const AgentEvent = z.discriminatedUnion('kind', [
 ])
 export type AgentEvent = z.infer<typeof AgentEvent>
 
-export const Severity = z.enum(['blocker', 'major', 'minor', 'nit'])
-export type Severity = z.infer<typeof Severity>
-
-/** Doubles as the JSON Schema handed to `codex exec review --output-schema`. */
-export const Finding = z.object({
-  severity: Severity,
-  title: z.string(),
-  detail: z.string(),
-  file: z.string().optional(),
-  line: z.number().int().optional(),
-})
-export type Finding = z.infer<typeof Finding>
-
 export const CheckResult = z.object({
   command: z.string(),
   exitCode: z.number().int(),
@@ -131,6 +114,13 @@ export const EventBody = z.discriminatedUnion('type', [
     priority: z.number().nullable().optional(),
     taskType: z.string().nullable().optional(),
     url: z.string().nullable().optional(),
+    difficulty: z.string().nullable().optional(),
+  }),
+  z.object({
+    type: z.literal('claim.rejected'),
+    title: z.string(),
+    difficulty: z.string().nullable().optional(),
+    reason: z.string(),
   }),
   z.object({
     type: z.literal('task.state'),
@@ -139,6 +129,12 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string().optional(),
   }),
   z.object({ type: z.literal('task.reclaimed'), reason: z.string().optional() }),
+  z.object({
+    type: z.literal('doom.detected'),
+    /** Which heuristic tripped: repeated tool calls, identical check failures, static diff. */
+    kind: z.enum(['tool_repeat', 'check_repeat', 'diff_static']),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
   z.object({
@@ -167,11 +163,6 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
-  z.object({
-    type: z.literal('review.finished'),
-    round: z.number().int(),
-    findings: z.array(Finding),
-  }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),

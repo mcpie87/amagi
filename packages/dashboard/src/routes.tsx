@@ -1,4 +1,5 @@
 import { agentLogStore } from '@amagi/core/agent-log'
+import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
@@ -19,25 +20,57 @@ import {
   createRouter,
   Link,
   Outlet,
+  useNavigate,
   useParams,
 } from '@tanstack/react-router'
 import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { SessionsView } from './SessionsView.tsx'
-import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
+import { type RepoInfo, RunnerProvider, useConnection, useDashboard, useRunner } from './store.tsx'
+import { setThemePref, type ThemePref, useTheme, useThemePref } from './theme.ts'
+import { EmptyState, Icon, type IconName } from './ui.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
+
+function ConnectionStatus() {
+  const connection = useConnection()
+  const label =
+    connection === 'connected'
+      ? 'Live updates'
+      : connection === 'reconnecting'
+        ? 'Reconnecting'
+        : 'Connecting'
+  const tone =
+    connection === 'connected'
+      ? 'bg-emerald-500'
+      : connection === 'reconnecting'
+        ? 'bg-amber-500'
+        : 'bg-fg-faint'
+  return (
+    <span className="connection-status" title="live connection to the amagi server">
+      <span className={`connection-dot ${tone}`} />
+      {label}
+    </span>
+  )
+}
 
 function RunnerIndicator() {
   const { status } = useRunner()
   if (status === null) {
-    return <span className="connection-status">runner: unknown</span>
+    return <span className="runner-status">runner: unknown</span>
   }
   return (
     <span
-      className="connection-status"
+      className="runner-status"
       title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
     >
       runner: {status.running.length}/{status.capacity} {status.available ? 'free' : 'busy'}
@@ -45,9 +78,161 @@ function RunnerIndicator() {
   )
 }
 
+/**
+ * The search workspace command palette: a native dialog listing tasks and
+ * pages matching the query. Escape closes it natively; Enter or a click jumps
+ * to the highlighted entry.
+ */
+function CommandPalette() {
+  const { state, selected } = useDashboard()
+  const navigate = useNavigate()
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const [query, setQuery] = useState('')
+  const [index, setIndex] = useState(0)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const open = () => {
+    setQuery('')
+    setIndex(0)
+    dialogRef.current?.showModal()
+    inputRef.current?.focus()
+  }
+  const close = () => dialogRef.current?.close()
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        open()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const q = query.trim().toLowerCase()
+  const taskMatches =
+    q === ''
+      ? []
+      : Object.values(state.tasks)
+          .filter((t) => t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, 8)
+  const pages = [
+    { to: '/', label: 'Overview' },
+    { to: '/issues', label: 'Tasks' },
+    { to: '/inbox', label: 'Inbox' },
+    { to: '/activity', label: 'Activity' },
+    { to: '/sessions', label: 'Sessions' },
+    { to: '/settings', label: 'Settings' },
+  ].filter((p) => q === '' || p.label.toLowerCase().includes(q))
+  const results: { key: string; to: string; label: string; hint: string; task: boolean }[] = [
+    ...pages.map((p) => ({
+      key: `page:${p.to}`,
+      to: p.to,
+      label: p.label,
+      hint: 'page',
+      task: false,
+    })),
+    ...taskMatches.map((t) => ({
+      key: `task:${t.id}`,
+      to: `/tasks/${t.id}`,
+      label: t.title,
+      hint: `${t.id} · ${t.state}`,
+      task: true,
+    })),
+  ]
+
+  const go = (entry: (typeof results)[number]) => {
+    close()
+    navigate({ href: entry.to })
+  }
+  const onKeyDown = (event: ReactKeyboardEvent) => {
+    if (results.length === 0) return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setIndex((i) => (i + 1) % results.length)
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setIndex((i) => (i - 1 + results.length) % results.length)
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      const selected = results[index]
+      if (selected !== undefined) go(selected)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="Search workspace"
+        onClick={open}
+        className="inline-flex items-center gap-2 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted hover:border-line-strong hover:text-fg"
+      >
+        <Icon name="search" size={15} />
+        <span className="hidden sm:inline">Search workspace</span>
+        <kbd className="hidden rounded border border-line-strong px-1 font-mono text-[10px] sm:inline">
+          ⌘K
+        </kbd>
+      </button>
+      <dialog
+        ref={dialogRef}
+        onCancel={(event) => {
+          event.preventDefault()
+          close()
+        }}
+        className="command-palette"
+      >
+        <div className="command-input-row">
+          <Icon name="search" size={17} />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              setIndex(0)
+            }}
+            onKeyDown={onKeyDown}
+            placeholder={selected === null ? 'search pages…' : 'search tasks and pages…'}
+            className="command-input"
+          />
+        </div>
+        {results.length === 0 ? (
+          <p className="command-empty">No matches.</p>
+        ) : (
+          <ul className="command-results">
+            {results.map((entry, i) => (
+              <li key={entry.key}>
+                <button
+                  type="button"
+                  onMouseEnter={() => setIndex(i)}
+                  onClick={() => go(entry)}
+                  className={`command-result ${i === index ? 'is-active' : ''}`}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{entry.label}</span>
+                    <span className="command-hint">{entry.hint}</span>
+                  </span>
+                  {entry.task && <span className="command-arrow">↵</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="command-footer">↑↓ navigate · ↵ open · esc close</p>
+      </dialog>
+    </>
+  )
+}
+
 type Dependency = {
   id: string
   title: string
+  /** Tracker status of the blocker: open/in_progress/blocked/closed. */
+  status: string
+  /** Human-only blockers carry the `human` label and need an operator, not an agent. */
+  labels: string[]
 }
 
 type Issue = {
@@ -73,8 +258,6 @@ type EligibleEpic = {
   closedChildren: number
 }
 
-const PAGE_SIZE = 10
-
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
 const columnHeader: Record<Issue['status'], string> = {
@@ -84,39 +267,34 @@ const columnHeader: Record<Issue['status'], string> = {
   closed: 'Closed',
 }
 
-const columnColor: Record<Issue['status'], string> = {
-  open: 'bg-zinc-600',
-  in_progress: 'bg-blue-600',
-  blocked: 'bg-red-600',
-  closed: 'bg-emerald-600',
+const columnDot: Record<Issue['status'], string> = {
+  open: 'bg-fg-faint',
+  in_progress: 'bg-blue-500',
+  blocked: 'bg-red-500',
+  closed: 'bg-emerald-500',
 }
 
+/** Shared pill shape; the tone supplies the tint, text and ring. */
+const PILL = 'inline-block shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset'
+
 const stateBadge: Record<TaskState, string> = {
-  claimed: 'bg-zinc-500',
-  worktree_ready: 'bg-sky-600',
-  implementing: 'bg-blue-600',
-  awaiting_answer: 'bg-amber-500',
-  checks: 'bg-violet-600',
-  committed: 'bg-cyan-600',
-  retrying: 'bg-orange-500',
-  pr_open: 'bg-sky-600',
-  reviewing: 'bg-purple-600',
-  fixing: 'bg-blue-600',
-  done: 'bg-emerald-600',
-  no_pr: 'bg-zinc-600',
-  needs_human: 'bg-red-600',
-  abandoned: 'bg-zinc-700',
-  cancelled: 'bg-zinc-600',
+  claimed: 'bg-neutral-soft text-fg ring-neutral-edge',
+  worktree_ready: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  implementing: 'bg-blue-soft text-blue-ink ring-blue-edge',
+  awaiting_answer: 'bg-amber-soft text-amber-ink ring-amber-edge',
+  checks: 'bg-violet-soft text-violet-ink ring-violet-edge',
+  committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
+  retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
+  pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
+  no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
+  needs_human: 'bg-red-soft text-red-ink ring-red-edge',
+  abandoned: 'bg-neutral-soft text-fg-faint ring-neutral-edge',
+  cancelled: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
 }
 
 function Badge({ state }: { state: TaskState }) {
-  return (
-    <span
-      className={`inline-block rounded px-2 py-0.5 text-xs font-medium text-white ${stateBadge[state]}`}
-    >
-      {state}
-    </span>
-  )
+  return <span className={`${PILL} ${stateBadge[state]}`}>{state}</span>
 }
 
 function readyOk(repo: RepoInfo): boolean {
@@ -151,28 +329,28 @@ function AddRepoForm() {
           value={path}
           onChange={(e) => setPath(e.target.value)}
           placeholder="/path/to/repository"
-          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm"
+          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1.5 text-sm"
         />
         <button
           type="submit"
           disabled={busy || path.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-zinc-950 disabled:opacity-50"
+          className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           Add repository
         </button>
       </form>
       {result !== null && 'error' in result && (
-        <p className="mt-2 text-sm text-red-400">{result.error}</p>
+        <p className="mt-2 text-sm text-red-ink">{result.error}</p>
       )}
       {ready && (
-        <ul className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm">
+        <ul className="mt-3 rounded-lg border border-line bg-surface px-4 py-3 text-sm">
           {result.ready.map((d) => (
             <li key={d.name} className="flex gap-2 py-0.5">
-              <span className={d.ok ? 'text-emerald-400' : 'text-red-400'}>
+              <span className={d.ok ? 'text-emerald-ink' : 'text-red-ink'}>
                 {d.ok ? 'ok' : '!!'}
               </span>
-              <span className="w-40 shrink-0 text-zinc-400">{d.name}</span>
-              <span className="min-w-0 break-all text-zinc-300">{d.detail ?? ''}</span>
+              <span className="w-40 shrink-0 text-fg-muted">{d.name}</span>
+              <span className="min-w-0 break-all text-fg">{d.detail ?? ''}</span>
             </li>
           ))}
         </ul>
@@ -181,102 +359,180 @@ function AddRepoForm() {
   )
 }
 
-function RootLayout() {
+const NAV_ITEMS: {
+  to: '/' | '/issues' | '/inbox' | '/activity' | '/sessions' | '/settings'
+  label: string
+  icon: IconName
+}[] = [
+  { to: '/', label: 'Overview', icon: 'overview' },
+  { to: '/issues', label: 'Tasks', icon: 'tasks' },
+  { to: '/inbox', label: 'Inbox', icon: 'inbox' },
+  { to: '/activity', label: 'Activity', icon: 'activity' },
+  { to: '/sessions', label: 'Sessions', icon: 'sessions' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
+]
+
+function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => void }) {
   const { repos, selected, selectRepo } = useDashboard()
   const [adding, setAdding] = useState(false)
 
   return (
-    <RunnerProvider>
-      <div className="min-h-screen bg-zinc-950 text-zinc-100">
-        <header className="border-b border-zinc-800 px-6 py-3">
-          <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-4">
-            <Link to="/" className="text-lg font-semibold tracking-tight">
-              amagi
+    <aside className={`sidebar ${navOpen ? 'is-open' : ''}`}>
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex items-center gap-2 px-5 py-4">
+          <Link to="/" onClick={onNavigate} className="text-lg font-semibold tracking-tight">
+            amagi
+          </Link>
+          <span className="rounded bg-raised px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted">
+            control room
+          </span>
+        </div>
+        <nav className="flex-1 overflow-y-auto px-3">
+          {NAV_ITEMS.map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              onClick={onNavigate}
+              activeProps={{ className: 'nav-link is-active' }}
+              inactiveProps={{ className: 'nav-link' }}
+            >
+              <Icon name={item.icon} size={17} />
+              {item.label}
             </Link>
-            {repos !== null && repos.length > 0 && (
-              <>
-                <nav className="flex gap-3 text-sm text-zinc-400">
-                  <Link to="/" activeProps={{ className: 'text-zinc-100' }}>
-                    Queue
-                  </Link>
-                  <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
-                    Tasks
-                  </Link>
-                  <Link to="/sessions" activeProps={{ className: 'text-zinc-100' }}>
-                    Sessions
-                  </Link>
-                  <Link to="/settings" activeProps={{ className: 'text-zinc-100' }}>
-                    Settings
-                  </Link>
-                </nav>
-                <div className="ml-auto flex items-center gap-2">
-                  <RunnerIndicator />
-                  <select
-                    value={selected ?? ''}
-                    onChange={(e) => selectRepo(e.target.value)}
-                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
-                  >
-                    {repos.map((repo) => (
-                      <option key={repo.key} value={repo.key}>
-                        {readyOk(repo) ? '' : '! '}
-                        {repo.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => setAdding((v) => !v)}
-                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-300 hover:bg-zinc-800"
-                  >
-                    {adding ? 'close' : '+ add'}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+          ))}
+        </nav>
+        <div className="border-t border-line p-3">
+          {repos !== null && repos.length > 0 && (
+            <div className="mb-2">
+              <label
+                htmlFor="repo-select"
+                className="mb-1 block text-[10px] uppercase tracking-wider text-fg-faint"
+              >
+                Repository
+              </label>
+              <select
+                id="repo-select"
+                value={selected ?? ''}
+                onChange={(e) => selectRepo(e.target.value)}
+                className="w-full rounded border border-line-strong bg-surface px-2 py-1 text-sm"
+              >
+                {repos.map((repo) => (
+                  <option key={repo.key} value={repo.key}>
+                    {readyOk(repo) ? '' : '! '}
+                    {repo.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setAdding((v) => !v)}
+            className="w-full rounded border border-line-strong bg-surface px-2 py-1.5 text-sm text-fg hover:bg-raised"
+          >
+            {adding ? 'Close' : '+ Add repository'}
+          </button>
           {adding && (
-            <div className="mx-auto mt-3 max-w-5xl">
+            <div className="mt-2">
               <AddRepoForm />
             </div>
           )}
-        </header>
-        <main className="mx-auto max-w-5xl px-6 py-6">
-          {repos === null ? (
-            <p className="text-zinc-500">loading repositories...</p>
-          ) : repos.length === 0 ? (
-            <section className="mx-auto max-w-xl pt-12">
-              <h1 className="text-xl font-semibold">Add a repository to start</h1>
-              <p className="mt-1 text-sm text-zinc-500">
-                Point amagi at a git repository; its own .amagi/config.toml picks the tracker,
-                forge, harness and checks. No restart needed.
-              </p>
-              <div className="mt-4">
-                <AddRepoForm />
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+function RootLayout() {
+  const { repos } = useDashboard()
+  const [navOpen, setNavOpen] = useState(false)
+  const sidebarRef = useRef<HTMLDivElement>(null)
+  const openButtonRef = useRef<HTMLButtonElement>(null)
+  const firstRender = useRef(true)
+
+  const openNav = () => setNavOpen(true)
+  const closeNav = () => setNavOpen(false)
+
+  // Move focus into the open navigation (and back to its trigger on close)
+  // only after the DOM has committed the is-open state and the inert flag has
+  // been released, so the target is actually focusable.
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false
+      return
+    }
+    if (navOpen) sidebarRef.current?.querySelector('a')?.focus()
+    else openButtonRef.current?.focus()
+  }, [navOpen])
+
+  useEffect(() => {
+    if (!navOpen) return
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') closeNav()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navOpen])
+
+  return (
+    <RunnerProvider>
+      <div className="app-shell">
+        <div ref={sidebarRef}>
+          <Sidebar navOpen={navOpen} onNavigate={() => setNavOpen(false)} />
+        </div>
+        <div className="workspace" inert={navOpen}>
+          <header className="app-header border-b border-line px-4 py-3 sm:px-6">
+            <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
+              <button
+                ref={openButtonRef}
+                type="button"
+                aria-label="Open navigation"
+                className="mobile-menu-button"
+                onClick={() => (navOpen ? closeNav() : openNav())}
+              >
+                <Icon name="menu" size={20} />
+              </button>
+              <div className="ml-auto flex items-center gap-3">
+                <ConnectionStatus />
+                <RunnerIndicator />
+                <CommandPalette />
               </div>
-            </section>
-          ) : (
-            <Outlet />
-          )}
-        </main>
+            </div>
+          </header>
+          <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
+            {repos === null ? (
+              <p className="text-fg-faint">loading repositories...</p>
+            ) : repos.length === 0 ? (
+              <section className="mx-auto max-w-xl pt-12">
+                <h1 className="text-xl font-semibold">Add a repository to start</h1>
+                <p className="mt-1 text-sm text-fg-faint">
+                  Point amagi at a git repository; its own .amagi/config.toml picks the tracker,
+                  forge, harness and checks. No restart needed.
+                </p>
+                <div className="mt-4">
+                  <AddRepoForm />
+                </div>
+              </section>
+            ) : (
+              <Outlet />
+            )}
+          </main>
+        </div>
       </div>
     </RunnerProvider>
   )
 }
 
 function IssueBadge({ issue }: { issue: Issue }) {
-  const color =
+  const tone =
     issue.status === 'closed'
-      ? 'bg-emerald-600'
+      ? 'bg-emerald-soft text-emerald-ink ring-emerald-edge'
       : issue.status === 'blocked'
-        ? 'bg-red-600'
+        ? 'bg-red-soft text-red-ink ring-red-edge'
         : issue.status === 'in_progress'
-          ? 'bg-blue-600'
-          : 'bg-zinc-600'
-  return (
-    <span className={`rounded px-2 py-0.5 text-xs font-medium text-white ${color}`}>
-      {issue.status}
-    </span>
-  )
+          ? 'bg-blue-soft text-blue-ink ring-blue-edge'
+          : 'bg-neutral-soft text-fg ring-neutral-edge'
+  return <span className={`${PILL} ${tone}`}>{issue.status}</span>
 }
 
 type IssuesViewMode = 'kanban' | 'list'
@@ -349,14 +605,15 @@ function IssueFormModal({
     }
   }
 
-  const input = 'w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm text-zinc-100'
-  const label = 'mb-1 block text-sm text-zinc-400'
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <form
         onSubmit={submit}
-        className="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-900 p-4"
+        className="w-full max-w-lg rounded-lg border border-line-strong bg-surface p-4"
       >
         <h2 className="mb-3 text-lg font-semibold">
           {mode === 'create' ? 'New task' : `Edit ${initial?.id ?? ''}`}
@@ -442,19 +699,19 @@ function IssueFormModal({
             <p className={label}>The task waits on these issues before it can run.</p>
           </div>
         </div>
-        {error !== null && <p className="mt-3 text-sm text-red-400">{error}</p>}
+        {error !== null && <p className="mt-3 text-sm text-red-ink">{error}</p>}
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+            className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={busy || title.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
           >
             {mode === 'create' ? 'Create task' : 'Save changes'}
           </button>
@@ -503,11 +760,11 @@ function CloseEpicButton({
         type="button"
         disabled={busy}
         onClick={() => void close()}
-        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-emerald-500 disabled:opacity-50"
+        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
       >
         Close
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -519,13 +776,13 @@ function IssuesView() {
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
-  const [page, setPage] = useState(0)
+  const [search, setSearch] = useState('')
   const [form, setForm] = useState<{ mode: 'create' } | { mode: 'edit'; issue: Issue } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const repoRef = useRef(selected)
   const [view, setView] = useState<IssuesViewMode>(() => {
     try {
-      return localStorage.getItem('issues:view') === 'list' ? 'list' : 'kanban'
+      return localStorage.getItem('amagi:issue-view') === 'list' ? 'list' : 'kanban'
     } catch {
       // storage unavailable (private mode, blocked), keep the default
       return 'kanban'
@@ -535,7 +792,7 @@ function IssuesView() {
   const setMode = (mode: IssuesViewMode) => {
     setView(mode)
     try {
-      localStorage.setItem('issues:view', mode)
+      localStorage.setItem('amagi:issue-view', mode)
     } catch {
       // storage unavailable, the choice just won't persist
     }
@@ -581,10 +838,14 @@ function IssuesView() {
     setRefresh((value) => value + 1)
   }
 
+  const q = search.trim().toLowerCase()
   const filtered = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const currentPage = Math.min(page, pageCount - 1)
-  const pageItems = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
+  const searched =
+    q === ''
+      ? filtered
+      : filtered.filter(
+          (issue) => issue.title.toLowerCase().includes(q) || issue.id.toLowerCase().includes(q),
+        )
 
   if (selectedIssue !== null) {
     return (
@@ -592,7 +853,7 @@ function IssuesView() {
         <button
           type="button"
           onClick={() => setSelectedIssue(null)}
-          className="text-sm text-sky-400 hover:underline"
+          className="text-sm text-sky-ink hover:underline"
         >
           &larr; tasks
         </button>
@@ -603,17 +864,17 @@ function IssuesView() {
             <button
               type="button"
               onClick={() => setForm({ mode: 'edit', issue: selectedIssue })}
-              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+              className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
             >
               Edit
             </button>
           )}
         </div>
-        <p className="mt-1 text-sm text-zinc-500">
+        <p className="mt-1 text-sm text-fg-faint">
           {selectedIssue.id}
           {selectedIssue.parent ? ` · child of ${selectedIssue.parent}` : ''}
         </p>
-        <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+        <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
           <DetailRow
             label="priority"
             value={selectedIssue.priority === null ? null : `P${selectedIssue.priority}`}
@@ -622,20 +883,21 @@ function IssuesView() {
           <DetailRow label="assignee" value={selectedIssue.assignee} />
           <DetailRow label="labels" value={selectedIssue.labels.join(', ') || null} />
         </dl>
+        <Blockers issue={selectedIssue} />
         <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Description
           </h2>
-          <p className="whitespace-pre-wrap text-zinc-300">
+          <p className="whitespace-pre-wrap text-fg">
             {selectedIssue.description || 'No description.'}
           </p>
         </div>
         {selectedIssue.acceptanceCriteria !== null && (
           <div className="mt-6">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
               Acceptance criteria
             </h2>
-            <p className="whitespace-pre-wrap text-zinc-300">{selectedIssue.acceptanceCriteria}</p>
+            <p className="whitespace-pre-wrap text-fg">{selectedIssue.acceptanceCriteria}</p>
           </div>
         )}
         {selected !== null && form !== null && (
@@ -652,30 +914,39 @@ function IssuesView() {
   }
   return (
     <section>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">Tasks</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-zinc-500">
-            {issues.length} {issues.length === 1 ? 'task' : 'tasks'}
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search tasks…"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
+          />
+          <span className="text-sm text-fg-faint">
+            {searched.length} {searched.length === 1 ? 'task' : 'tasks'}
             {status !== 'all' && ` · ${filtered.length} shown`}
           </span>
-          <div className="flex rounded-lg border border-zinc-700 p-0.5">
+          <div className="flex rounded-lg border border-line-strong p-0.5">
             <button
               type="button"
+              aria-label="Board view"
               onClick={() => setMode('kanban')}
               className={`rounded px-2 py-1 text-sm ${
                 view === 'kanban'
-                  ? 'bg-zinc-700 text-zinc-100'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'bg-raised-strong text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
               }`}
             >
-              Kanban
+              Board
             </button>
             <button
               type="button"
+              aria-label="List view"
               onClick={() => setMode('list')}
               className={`rounded px-2 py-1 text-sm ${
-                view === 'list' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'
+                view === 'list' ? 'bg-raised-strong text-fg-strong' : 'text-fg-muted hover:text-fg'
               }`}
             >
               List
@@ -683,11 +954,8 @@ function IssuesView() {
           </div>
           <select
             value={status}
-            onChange={(event) => {
-              setStatus(event.target.value as typeof status)
-              setPage(0)
-            }}
-            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+            onChange={(event) => setStatus(event.target.value as typeof status)}
+            className="rounded border border-line-strong bg-surface px-2 py-1 text-sm"
           >
             <option value="all">All statuses</option>
             <option value="open">Open</option>
@@ -699,7 +967,7 @@ function IssuesView() {
             <button
               type="button"
               onClick={() => setForm({ mode: 'create' })}
-              className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500"
+              className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
             >
               New task
             </button>
@@ -708,15 +976,15 @@ function IssuesView() {
       </div>
       {selected !== null && eligibleEpics.length > 0 && (
         <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-emerald-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-emerald-ink">
             Eligible epics ({eligibleEpics.length})
           </h2>
-          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+          <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
             {eligibleEpics.map((epic) => (
               <li key={epic.id} className="flex items-center gap-3 px-4 py-3">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{epic.title}</span>
-                  <span className="block truncate text-xs text-zinc-500">
+                  <span className="block truncate text-xs text-fg-faint">
                     {epic.id} · {epic.closedChildren}/{epic.totalChildren} children done
                   </span>
                 </span>
@@ -727,24 +995,27 @@ function IssuesView() {
         </section>
       )}
       {error !== null ? (
-        <p className="text-red-400">{error}</p>
+        <p className="text-red-ink">{error}</p>
       ) : view === 'kanban' ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {ISSUE_STATES.map((state) => {
             if (status !== 'all' && status !== state) return null
-            const columnIssues = filtered.filter((issue) => issue.status === state)
+            const columnIssues = searched.filter((issue) => issue.status === state)
             return (
               <div
                 key={state}
-                className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
+                className="flex min-w-0 flex-col rounded-lg border border-line bg-surface"
               >
-                <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
-                  <span
-                    className={`truncate rounded px-2 py-0.5 text-xs font-medium text-white ${columnColor[state]}`}
-                  >
-                    {columnHeader[state]}
+                <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${columnDot[state]}`} />
+                    <span className="truncate text-xs font-medium uppercase tracking-wide text-fg">
+                      {columnHeader[state]}
+                    </span>
                   </span>
-                  <span className="text-xs text-zinc-500">{columnIssues.length}</span>
+                  <span className="rounded bg-raised px-1.5 text-xs tabular-nums text-fg-muted">
+                    {columnIssues.length}
+                  </span>
                 </div>
                 <ul className="flex flex-col gap-2 p-2">
                   {columnIssues.map((issue) => (
@@ -752,13 +1023,13 @@ function IssuesView() {
                       <button
                         type="button"
                         onClick={() => setSelectedIssue(issue)}
-                        className="w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left hover:bg-zinc-800"
+                        className="issue-card w-full rounded border border-line bg-sunken px-3 py-2 text-left hover:bg-raised"
                       >
-                        <span className="block text-xs text-zinc-500">{issue.id}</span>
+                        <span className="block text-xs text-fg-faint">{issue.id}</span>
                         <span className="mt-0.5 block break-words font-medium leading-snug">
                           {issue.title}
                         </span>
-                        <span className="mt-1 block text-xs text-zinc-500">
+                        <span className="mt-1 block text-xs text-fg-faint">
                           {[issue.priority === null ? null : `P${issue.priority}`, issue.type]
                             .filter(Boolean)
                             .join(' · ') || '\u00a0'}
@@ -767,7 +1038,7 @@ function IssuesView() {
                     </li>
                   ))}
                   {columnIssues.length === 0 && (
-                    <li className="px-1 py-2 text-xs text-zinc-600">No tasks.</li>
+                    <li className="px-1 py-2 text-xs text-fg-dim">No tasks.</li>
                   )}
                 </ul>
               </div>
@@ -775,52 +1046,32 @@ function IssuesView() {
           })}
         </div>
       ) : (
-        <>
-          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
-            {pageItems.map((issue) => (
-              <li key={issue.id}>
-                <button
-                  type="button"
-                  onClick={() => setSelectedIssue(issue)}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
-                >
-                  <IssueBadge issue={issue} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">{issue.title}</span>
-                    <span className="block truncate text-xs text-zinc-500">
-                      {issue.id}
-                      {issue.priority === null ? '' : ` · P${issue.priority}`}
-                      {issue.type === null ? '' : ` · ${issue.type}`}
-                    </span>
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+          {searched.map((issue) => (
+            <li key={issue.id}>
+              <button
+                type="button"
+                onClick={() => setSelectedIssue(issue)}
+                className="issue-list-row flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
+              >
+                <IssueBadge issue={issue} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{issue.title}</span>
+                  <span className="block truncate text-xs text-fg-faint">
+                    {issue.id}
+                    {issue.priority === null ? '' : ` · P${issue.priority}`}
+                    {issue.type === null ? '' : ` · ${issue.type}`}
                   </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          {pageCount > 1 && (
-            <div className="mt-4 flex items-center justify-between">
-              <button
-                type="button"
-                disabled={currentPage === 0}
-                onClick={() => setPage(currentPage - 1)}
-                className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
-              >
-                &larr; prev
+                </span>
               </button>
-              <span className="text-sm text-zinc-500">
-                page {currentPage + 1} of {pageCount}
-              </span>
-              <button
-                type="button"
-                disabled={currentPage >= pageCount - 1}
-                onClick={() => setPage(currentPage + 1)}
-                className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800 disabled:opacity-40"
-              >
-                next &rarr;
-              </button>
-            </div>
+            </li>
+          ))}
+          {searched.length === 0 && (
+            <li className="px-4 py-6 text-center text-sm text-fg-faint">
+              No tasks match "{search}".
+            </li>
           )}
-        </>
+        </ul>
       )}
       {selected !== null && form !== null && (
         <IssueFormModal
@@ -850,12 +1101,12 @@ function RunButton() {
 
   return (
     <div className="flex items-center gap-2">
-      {message !== null && <span className="text-sm text-zinc-400">{message}</span>}
+      {message !== null && <span className="text-sm text-fg-muted">{message}</span>}
       <button
         type="button"
         disabled={busy}
         onClick={() => void run()}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
         Run next
       </button>
@@ -872,7 +1123,7 @@ function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
   )
   const line = agentLogStore.get(key).at(-1)
   if (line === undefined || line.text === '') return null
-  return <p className="mt-2 truncate font-mono text-xs text-zinc-400">{line.text}</p>
+  return <p className="mt-2 truncate font-mono text-xs text-fg-muted">{line.text}</p>
 }
 
 function WorkerSlot({
@@ -888,7 +1139,7 @@ function WorkerSlot({
 }) {
   if (taskId === null) {
     return (
-      <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/40 px-4 py-2 text-sm text-zinc-600">
+      <div className="rounded-lg border border-dashed border-line bg-surface/40 px-4 py-2 text-sm text-fg-dim">
         free slot
       </div>
     )
@@ -896,22 +1147,20 @@ function WorkerSlot({
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
   return (
-    <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3">
+    <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
-          busy
-        </span>
+        <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
           className="flex min-w-0 items-baseline gap-x-3 hover:underline"
         >
           <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
-          <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+          <span className="text-xs text-fg-faint">{task?.id ?? taskId}</span>
         </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
         <span>model: {agent?.model ?? 'unknown'}</span>
         {resource !== undefined && (
@@ -954,11 +1203,11 @@ function WorkersPanel() {
   )
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
         Workers ({running.length}/{status.capacity})
       </h2>
-      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs text-zinc-400">
-        <span className="font-medium text-zinc-200">{status.name}</span>
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-4 py-2 text-xs text-fg-muted">
+        <span className="font-medium text-fg">{status.name}</span>
         <span>rss: {fmtBytes(total.rssBytes)}</span>
         <span>cpu: {fmtCpu(total.cpuMs)}</span>
         <span>procs: {total.processes}</span>
@@ -979,12 +1228,10 @@ function WorkersPanel() {
           {status.workers.map((w) => (
             <div
               key={`${w.repo}/${w.name}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2 text-xs text-zinc-400"
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-xs text-fg-muted"
             >
-              <span className="shrink-0 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white">
-                {w.name}
-              </span>
-              <span className="font-medium text-zinc-200">{w.repo}</span>
+              <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>{w.name}</span>
+              <span className="font-medium text-fg">{w.repo}</span>
               <span>last run: {fmtLastRun(w.lastRunAt)}</span>
               {w.error === null ? (
                 w.detail !== null && w.detail !== undefined ? (
@@ -993,7 +1240,7 @@ function WorkersPanel() {
                   <span>{w.counters.map((c) => `${c.label} ${c.value}`).join(' · ')}</span>
                 )
               ) : (
-                <span className="text-red-400">error: {w.error}</span>
+                <span className="text-red-ink">error: {w.error}</span>
               )}
             </div>
           ))}
@@ -1003,33 +1250,141 @@ function WorkersPanel() {
   )
 }
 
-function QueueView() {
+const metricTone = {
+  red: { box: 'border-red-edge bg-red-soft', value: 'text-red-ink' },
+  amber: { box: 'border-amber-edge bg-amber-soft', value: 'text-amber-ink' },
+  none: { box: 'border-line bg-surface', value: 'text-fg-strong' },
+} as const
+
+function Metric({ label, value, tone }: { label: string; value: string; tone?: 'red' | 'amber' }) {
+  const t = metricTone[tone ?? 'none']
+  return (
+    <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-fg-faint">{label}</div>
+      <div className={`mt-1 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
+    </div>
+  )
+}
+
+function OverviewView() {
   const { state, selected } = useDashboard()
+  const { status } = useRunner()
+  const [search, setSearch] = useState('')
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
+  const openQuestions = Object.values(state.questions).filter((q) => q.resolvedAt === null).length
 
-  const taskList = (
-    tasks: TaskView[],
-    showReason: boolean,
-    action?: (task: TaskView) => ReactNode,
-  ) => (
-    <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+  const q = search.trim().toLowerCase()
+  const visible =
+    q === ''
+      ? queue
+      : queue.filter((t) => t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
+
+  const workers = status === null ? '—' : `${status.running.length}/${status.capacity}`
+
+  return (
+    <section>
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Overview</h1>
+          <p className="text-sm text-fg-faint">Live runs, capacity and anything that needs you.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search runs…"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
+          />
+          {selected !== null && <RunButton />}
+        </div>
+      </div>
+
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Metric label="Active runs" value={String(queue.length)} />
+        <Metric label="Workers busy" value={workers} />
+        <Metric
+          label="Needs attention"
+          value={String(attention.length)}
+          {...(attention.length > 0 ? { tone: 'red' as const } : {})}
+        />
+        <Metric
+          label="Open questions"
+          value={String(openQuestions)}
+          {...(openQuestions > 0 ? { tone: 'amber' as const } : {})}
+        />
+      </div>
+
+      <WorkersPanel />
+
+      {attention.length > 0 && (
+        <section className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-ink">
+            Needs attention ({attention.length})
+          </h2>
+          <RunList
+            tasks={attention}
+            showReason
+            rowClass="attention-row"
+            {...(selected === null
+              ? {}
+              : {
+                  action: (task: TaskView) => (
+                    <CloseButtons repo={selected} taskId={task.id} state={task.state} />
+                  ),
+                })}
+          />
+        </section>
+      )}
+
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Runs ({visible.length})
+        </h2>
+        <Link to="/activity" className="text-sm text-sky-ink hover:underline">
+          activity feed &rarr;
+        </Link>
+      </div>
+      {visible.length === 0 ? (
+        <EmptyState icon="runs" title={q === '' ? 'No active runs' : 'No matching runs'}>
+          {q === ''
+            ? 'Claim the next ready issue with Run next, and it will show up here.'
+            : `Nothing in the queue matches "${search}".`}
+        </EmptyState>
+      ) : (
+        <RunList tasks={visible} showReason={false} />
+      )}
+    </section>
+  )
+}
+
+function RunList({
+  tasks,
+  showReason,
+  action,
+  rowClass = 'run-row',
+}: {
+  tasks: TaskView[]
+  showReason: boolean
+  action?: (task: TaskView) => ReactNode
+  rowClass?: string
+}) {
+  return (
+    <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
       {tasks.map((task) => (
-        <li key={task.id} className="flex items-center">
+        <li key={task.id} className={`${rowClass} flex items-center`}>
           <Link
             to="/tasks/$id"
             params={{ id: task.id }}
-            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-raised"
           >
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
               <span className="block truncate font-medium">{task.title}</span>
-              <span className="block truncate text-xs text-zinc-500">
-                {task.id}
-                {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
-              </span>
+              <span className="block truncate text-xs text-fg-faint">{task.id}</span>
               {showReason && task.statusReason !== null && (
-                <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
+                <span className="block truncate text-xs text-fg-muted">{task.statusReason}</span>
               )}
             </span>
           </Link>
@@ -1038,43 +1393,70 @@ function QueueView() {
       ))}
     </ul>
   )
-
-  return (
-    <section>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Queue</h1>
-        {selected !== null && <RunButton />}
-      </div>
-      <WorkersPanel />
-      {attention.length > 0 && (
-        <div className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
-            Needs attention ({attention.length})
-          </h2>
-          {taskList(
-            attention,
-            true,
-            selected === null
-              ? undefined
-              : (task) => <CloseButtons repo={selected} taskId={task.id} state={task.state} />,
-          )}
-        </div>
-      )}
-      {queue.length === 0 ? (
-        <p className="text-zinc-500">No active tasks.</p>
-      ) : (
-        taskList(queue, false)
-      )}
-    </section>
-  )
 }
 
 function DetailRow({ label, value }: { label: string; value: string | ReactNode | null }) {
   if (value === null) return null
   return (
     <div className="flex gap-2 py-1">
-      <dt className="w-28 shrink-0 text-zinc-500">{label}</dt>
+      <dt className="w-28 shrink-0 text-fg-faint">{label}</dt>
       <dd className="min-w-0 break-all">{value}</dd>
+    </div>
+  )
+}
+
+/** Why a task cannot run: its dependency and human-only blockers, from issue detail. */
+function Blockers({ issue }: { issue: Issue }) {
+  const blocking = issue.dependencies.filter((d) => d.status !== 'closed')
+  if (blocking.length === 0) return null
+  const humanOnly = blocking.filter((d) => d.labels.includes(HUMAN_ONLY_LABEL))
+  const dependencies = blocking.filter((d) => !d.labels.includes(HUMAN_ONLY_LABEL))
+
+  const group = (title: string, items: Dependency[], tone: 'red' | 'amber') => (
+    <div>
+      <h3
+        className={`mb-1 text-xs font-semibold uppercase tracking-wide ${
+          tone === 'red' ? 'text-red-ink' : 'text-amber-ink'
+        }`}
+      >
+        {title} ({items.length})
+      </h3>
+      <ul
+        className={`rounded-lg border px-3 py-1 ${
+          tone === 'red' ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
+        }`}
+      >
+        {items.map((d) => (
+          <li key={d.id} className="flex items-center gap-2 py-1 text-sm">
+            <span
+              className={`rounded px-1.5 py-0.5 text-xs ${
+                tone === 'red'
+                  ? 'bg-red-soft-hover text-red-ink'
+                  : 'bg-amber-soft-hover text-amber-ink'
+              }`}
+            >
+              {d.status}
+            </span>
+            <span className="shrink-0 text-fg-faint">{d.id}</span>
+            <span className="min-w-0 truncate text-fg">{d.title}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-red-ink">
+        Blocked by
+      </h2>
+      <p className="mb-2 text-sm text-fg-faint">
+        This task cannot run until every blocker is resolved.
+      </p>
+      <div className="space-y-3">
+        {dependencies.length > 0 && group('Dependency blockers', dependencies, 'red')}
+        {humanOnly.length > 0 && group('Human-only blockers', humanOnly, 'amber')}
+      </div>
     </div>
   )
 }
@@ -1102,7 +1484,7 @@ function PrLink({ url }: { url: string }) {
       href={url}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-1.5 text-sky-400 hover:underline"
+      className="inline-flex items-center gap-1.5 text-sky-ink hover:underline"
     >
       {isGithub ? <GithubIcon className="h-4 w-4" /> : <ForgejoIcon className="h-4 w-4" />}
       {url}
@@ -1168,7 +1550,11 @@ function AnswerBox({
   }
 
   if (token === null) {
-    return <p className="mt-2 text-sm text-zinc-500">answer box unavailable</p>
+    return <p className="mt-2 text-sm text-fg-faint">answer box unavailable</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   if (submitted) {
@@ -1178,14 +1564,14 @@ function AnswerBox({
   return (
     <div className="mt-2">
       {question.options.length > 0 && (
-        <div className="flex flex-wrap gap-2">
+        <div className="answer-options flex flex-wrap gap-2">
           {question.options.map((option) => (
             <button
               key={option}
               type="button"
               disabled={busy}
               onClick={() => void send(option)}
-              className="rounded border border-amber-700 bg-amber-900/40 px-3 py-1 text-sm hover:bg-amber-800 disabled:opacity-50"
+              className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm hover:bg-amber-soft-hover disabled:opacity-50"
             >
               {option}
             </button>
@@ -1197,17 +1583,17 @@ function AnswerBox({
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="answer"
-          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm"
+          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm"
         />
         <button
           type="submit"
           disabled={busy || text.trim() === ''}
-          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-zinc-950 disabled:opacity-50"
+          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           Answer
         </button>
       </form>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1248,11 +1634,11 @@ function ReclaimButton({
         type="button"
         disabled={busy}
         onClick={() => void reclaim()}
-        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Reclaim
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1306,13 +1692,13 @@ function CloseButton({
         onClick={() => void close()}
         className={
           target === 'done'
-            ? 'rounded border border-green-800 bg-green-950/40 px-3 py-1 text-sm text-green-300 hover:bg-green-900 disabled:opacity-50'
-            : 'rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50'
+            ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
+            : 'rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50'
         }
       >
         {target === 'done' ? 'Mark done' : 'Close'}
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1371,11 +1757,95 @@ function RetryButton({
         type="button"
         disabled={busy}
         onClick={() => void retry()}
-        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Retry
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
+/**
+ * Put a parked needs_human/no_pr task back in the tracker queue so the runner
+ * can pick it up again, and tell the operator whether the runner is available
+ * to do so. Unlike Retry this does not launch immediately: a requeued task
+ * waits for a free slot (Run next on the queue), which is exactly why the
+ * runner's availability is surfaced next to the action.
+ */
+function RequeueButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const { status } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
+
+  const requeue = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setResult({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
+        return
+      }
+      const availability =
+        status === null
+          ? 'the runner is offline, so the task waits for a runner'
+          : status.available
+            ? 'the runner has a free slot'
+            : `the runner is busy (${status.running.length}/${status.capacity})`
+      setResult({
+        kind: 'ok',
+        text: `requeued; ${availability}. Launch it from the queue with Run next when ready.`,
+      })
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const availability =
+    status === null
+      ? 'offline'
+      : status.available
+        ? `${status.running.length}/${status.capacity} free`
+        : `busy (${status.running.length}/${status.capacity})`
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void requeue()}
+        className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
+      >
+        Requeue
+      </button>
+      <p
+        className="mt-1 text-right text-xs text-fg-faint"
+        title="whether the runner can pick up a requeued task"
+      >
+        runner: {availability}
+      </p>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
     </div>
   )
 }
@@ -1438,44 +1908,15 @@ function fmtLastRun(epochMs: number): string {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
-function lineFor(event: AgentStreamEvent): string {
-  const ev = event.event
-  switch (ev.kind) {
-    case 'text':
-    case 'reasoning':
-      return ev.text
-    case 'tool_use':
-      return `[tool] ${ev.name}`
-    case 'tool_result':
-      return `[${ev.ok ? 'ok' : 'FAIL'}] ${ev.name}`
-    case 'usage':
-      return `[usage] in=${ev.inputTokens} out=${ev.outputTokens}`
-    case 'result':
-      return `[result] ${ev.summary ?? (ev.ok ? 'ok' : 'failed')}`
-    case 'error':
-      return `[error] ${ev.message}`
-  }
-}
-
-/** Plain recent log. The virtualization task (am-b2z.4) replaces this. */
-function AgentLog({ events }: { events: AgentStreamEvent[] }) {
-  const ref = useRef<HTMLDivElement>(null)
-  // no deps on purpose: tail the log after every render, not just on mount
-  useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight
-  })
-  return (
-    <div
-      ref={ref}
-      className="max-h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs text-zinc-300"
-    >
-      {events.map((e) => (
-        <div key={e.seq} className="whitespace-pre-wrap break-words">
-          {lineFor(e)}
-        </div>
-      ))}
-    </div>
-  )
+function fmtAgo(ts: number): string {
+  const s = Math.floor((Date.now() - ts) / 1000)
+  if (s < 10) return 'just now'
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}min ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
 }
 
 const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
@@ -1530,18 +1971,18 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
       <button
         type="button"
         onClick={toggle}
-        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
       >
         {open ? 'hide issue details' : 'show issue details'}
       </button>
       {open &&
         (error !== null ? (
-          <p className="mt-3 text-sm text-red-400">{error}</p>
+          <p className="mt-3 text-sm text-red-ink">{error}</p>
         ) : issue === null ? (
-          <p className="mt-3 text-sm text-zinc-500">loading issue...</p>
+          <p className="mt-3 text-sm text-fg-faint">loading issue...</p>
         ) : (
           <div className="mt-3">
-            <dl className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+            <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
                 value={issue.priority === null ? null : `P${issue.priority}`}
@@ -1550,29 +1991,22 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
               <DetailRow label="assignee" value={issue.assignee} />
               <DetailRow label="labels" value={issue.labels.join(', ') || null} />
               <DetailRow label="parent" value={issue.parent} />
-              <DetailRow
-                label="blocked by"
-                value={
-                  issue.dependencies.length === 0
-                    ? null
-                    : issue.dependencies.map((d) => d.title).join(', ')
-                }
-              />
             </dl>
+            <Blockers issue={issue} />
             <div className="mt-6">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
                 Description
               </h2>
-              <p className="whitespace-pre-wrap text-zinc-300">
+              <p className="whitespace-pre-wrap text-fg">
                 {issue.description || 'No description.'}
               </p>
             </div>
             {issue.acceptanceCriteria !== null && (
               <div className="mt-6">
-                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
                   Acceptance criteria
                 </h2>
-                <p className="whitespace-pre-wrap text-zinc-300">{issue.acceptanceCriteria}</p>
+                <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
               </div>
             )}
           </div>
@@ -1590,12 +2024,12 @@ function SummaryPanel({ task }: { task: TaskView }) {
   return (
     <div
       className={`mt-6 rounded-lg border px-4 py-3 ${
-        needsHuman ? 'border-red-700 bg-red-950/40' : 'border-amber-700 bg-amber-950/40'
+        needsHuman ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
       }`}
     >
       <h2
         className={`text-sm font-semibold uppercase tracking-wide ${
-          needsHuman ? 'text-red-300' : 'text-amber-300'
+          needsHuman ? 'text-red-ink' : 'text-amber-ink'
         }`}
       >
         {needsHuman ? 'Needs human attention' : 'Summary'}
@@ -1641,24 +2075,24 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   }
 
   return (
-    <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+    <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
         Chat with worker
       </h2>
       <div
         ref={scrollRef}
-        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3"
+        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-line bg-sunken p-3"
       >
         {messages.length === 0 && (
-          <p className="text-sm text-zinc-500">Ask the worker about why there is no PR.</p>
+          <p className="text-sm text-fg-faint">Ask the worker about why there is no PR.</p>
         )}
         {messages.map((m) => (
           <div
             key={m.id}
             className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
               m.role === 'user'
-                ? 'ml-auto bg-sky-600 text-zinc-950'
-                : 'mr-auto border border-zinc-700 bg-zinc-800 text-zinc-200'
+                ? 'ml-auto bg-sky-600 text-on-solid'
+                : 'mr-auto border border-line-strong bg-raised text-fg'
             }`}
           >
             {m.role === 'user'
@@ -1675,32 +2109,32 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
           onChange={(e) => setText(e.target.value)}
           disabled={responding}
           placeholder={responding ? 'worker is responding...' : 'ask the worker'}
-          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm disabled:opacity-50"
+          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
         />
         <button
           type="submit"
           disabled={responding || text.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
         >
           Send
         </button>
       </form>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
+
+type DetailTab = 'log' | 'checks'
 
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
-  // ponytail: last 500 rendered, the virtualization task (am-b2z.4) removes the cap
-  const agentEvents = state.events
-    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
-    .slice(-500)
   const currentAgent = currentAgentFor(state, id)
-  const usageEvents = agentEvents
+  const [tab, setTab] = useState<DetailTab>('log')
+  const usageEvents = state.events
+    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
   const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
@@ -1715,25 +2149,29 @@ function TaskDetailView() {
   if (!task) {
     return (
       <section>
-        <Link to="/" className="text-sm text-sky-400 hover:underline">
-          &larr; queue
+        <Link to="/" className="text-sm text-sky-ink hover:underline">
+          &larr; overview
         </Link>
-        <p className="mt-4 text-zinc-500">No events yet for {id}.</p>
+        <p className="mt-4 text-fg-faint">No events yet for {id}.</p>
       </section>
     )
   }
 
+  const tabs: { key: DetailTab; label: string }[] = [
+    { key: 'log', label: 'Log' },
+    ...(task.checks !== null
+      ? [{ key: 'checks', label: `Checks ${task.checksOk ? '(passed)' : '(failed)'}` } as const]
+      : []),
+  ]
+
   return (
     <section>
-      <Link to="/" className="text-sm text-sky-400 hover:underline">
-        &larr; queue
+      <Link to="/" className="text-sm text-sky-ink hover:underline">
+        &larr; overview
       </Link>
-      <div className="mt-3 flex items-center gap-3">
+      <div className="mt-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
-        {task.reviewRound > 0 && (
-          <span className="text-sm text-zinc-400">review round {task.reviewRound}</span>
-        )}
         {selected !== null && (
           <ReclaimButton
             repo={selected}
@@ -1750,10 +2188,18 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && (
+          <RequeueButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
-      <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
+      <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
 
       <SummaryPanel task={task} />
 
@@ -1763,7 +2209,7 @@ function TaskDetailView() {
         task.sessionId !== null &&
         task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
 
-      <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+      <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow
           label="agent"
@@ -1787,18 +2233,60 @@ function TaskDetailView() {
 
       {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
-      {selected !== null && <AgentLogView repo={selected} taskId={id} />}
+      <div className="mt-6">
+        {tabs.length > 1 && (
+          <div className="detail-tabs mb-3 flex gap-1 border-b border-line">
+            {tabs.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setTab(t.key)}
+                className={`rounded-t px-3 py-1.5 text-sm ${
+                  tab === t.key
+                    ? 'border-b-2 border-sky-500 text-fg-strong'
+                    : 'text-fg-muted hover:text-fg'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {tab === 'log' && selected !== null && <AgentLogView repo={selected} taskId={id} />}
+        {tab === 'checks' && task.checks !== null && (
+          <ul className="space-y-2">
+            {task.checks.map((c) => (
+              <li
+                key={c.command}
+                className="check-result rounded-lg border border-line bg-surface px-4 py-3"
+              >
+                <p className="font-mono text-sm">
+                  <span className={c.exitCode === 0 ? 'text-emerald-ink' : 'text-red-ink'}>
+                    exit {c.exitCode}
+                  </span>{' '}
+                  {c.command}
+                </p>
+                {c.output !== '' && (
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-sunken p-2 font-mono text-xs text-fg-muted">
+                    {c.output}
+                  </pre>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       {questions.length > 0 && selected !== null && (
         <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Questions
           </h2>
           <ul className="space-y-2">
             {questions.map((q) => (
               <li
                 key={q.id}
-                className="rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3"
+                className="rounded-lg border border-amber-edge bg-amber-soft px-4 py-3"
               >
                 <p className="font-medium">{q.question}</p>
                 <AnswerBox repo={selected} taskId={id} question={q} />
@@ -1807,44 +2295,399 @@ function TaskDetailView() {
           </ul>
         </div>
       )}
+    </section>
+  )
+}
 
-      {agentEvents.length > 0 && (
-        <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Agent output
-          </h2>
-          <AgentLog events={agentEvents} />
-        </div>
-      )}
+function InboxView() {
+  const { state, selected } = useDashboard()
+  const attention = tasksNeedingAttention(state)
+  const questions = Object.values(state.questions)
+    .filter((q) => q.resolvedAt === null)
+    .sort((a, b) => a.askedAt - b.askedAt)
 
-      {task.checks !== null && (
-        <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Checks {task.checksOk ? '(passed)' : '(failed)'}
+  return (
+    <section>
+      <div className="mb-5">
+        <h1 className="text-xl font-semibold">Inbox</h1>
+        <p className="text-sm text-fg-faint">
+          {questions.length > 0 || attention.length > 0
+            ? 'Things that need a human.'
+            : 'Nothing needs you right now.'}
+        </p>
+      </div>
+
+      {questions.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
+            Questions ({questions.length})
           </h2>
           <ul className="space-y-2">
-            {task.checks.map((c) => (
-              <li
-                key={c.command}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3"
-              >
-                <p className="font-mono text-sm">
-                  <span className={c.exitCode === 0 ? 'text-emerald-400' : 'text-red-400'}>
-                    exit {c.exitCode}
-                  </span>{' '}
-                  {c.command}
-                </p>
-                {c.output !== '' && (
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-xs text-zinc-400">
-                    {c.output}
-                  </pre>
-                )}
-              </li>
-            ))}
+            {questions.map((q) => {
+              const task = state.tasks[q.taskId]
+              return (
+                <li
+                  key={q.id}
+                  className="question-card rounded-lg border border-amber-edge bg-amber-soft px-4 py-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <Link
+                        to="/tasks/$id"
+                        params={{ id: q.taskId }}
+                        className="block truncate text-xs text-fg-muted hover:text-fg hover:underline"
+                      >
+                        {task?.title ?? q.taskId} · {q.taskId}
+                      </Link>
+                      <p className="mt-0.5 font-medium">{q.question}</p>
+                    </div>
+                  </div>
+                  {selected !== null && (
+                    <AnswerBox repo={selected} taskId={q.taskId} question={q} />
+                  )}
+                </li>
+              )
+            })}
           </ul>
         </div>
       )}
+
+      {attention.length > 0 && (
+        <div>
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-ink">
+            Needs attention ({attention.length})
+          </h2>
+          <RunList
+            tasks={attention}
+            showReason
+            rowClass="attention-row"
+            {...(selected === null
+              ? {}
+              : {
+                  action: (task: TaskView) => (
+                    <CloseButtons repo={selected} taskId={task.id} state={task.state} />
+                  ),
+                })}
+          />
+        </div>
+      )}
+
+      {questions.length === 0 && attention.length === 0 && (
+        <EmptyState icon="check" title="All clear">
+          No open questions and no task waiting on a human.
+        </EmptyState>
+      )}
     </section>
+  )
+}
+
+type ActivityItem = {
+  key: string
+  ts: number
+  taskId: string | null
+  text: string
+  icon: IconName
+  tone: 'normal' | 'red' | 'amber' | 'green'
+}
+
+/** Fold the event log into a human-readable feed; agent.stream lines are skipped as noise. */
+function activityItems(state: DashboardState): ActivityItem[] {
+  const items: ActivityItem[] = []
+  for (const event of state.events) {
+    switch (event.type) {
+      case 'task.claimed':
+        items.push({
+          key: `c${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `claimed "${event.title}"`,
+          icon: 'runs',
+          tone: 'normal',
+        })
+        break
+      case 'claim.rejected':
+        items.push({
+          key: `r${event.seq}`,
+          ts: event.ts,
+          taskId: null,
+          text: `claim rejected: ${event.reason}`,
+          icon: 'close',
+          tone: 'red',
+        })
+        break
+      case 'task.state':
+        items.push({
+          key: `s${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `${event.from ?? '?'} → ${event.to}`,
+          icon: 'arrow',
+          tone: 'normal',
+        })
+        break
+      case 'task.reclaimed':
+        items.push({
+          key: `tr${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: 'reclaimed',
+          icon: 'refresh',
+          tone: 'normal',
+        })
+        break
+      case 'worktree.created':
+        items.push({
+          key: `w${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `worktree created (${event.branch})`,
+          icon: 'branch',
+          tone: 'normal',
+        })
+        break
+      case 'worktree.removed':
+        items.push({
+          key: `wr${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: 'worktree removed',
+          icon: 'branch',
+          tone: 'normal',
+        })
+        break
+      case 'chat.message':
+        items.push({
+          key: `m${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `chat: ${event.text}`,
+          icon: 'agent',
+          tone: 'normal',
+        })
+        break
+      case 'agent.started':
+        items.push({
+          key: `a${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `agent started (${event.harness}${event.model ? `, ${event.model}` : ''}, ${event.role})`,
+          icon: 'agent',
+          tone: 'normal',
+        })
+        break
+      case 'agent.exited':
+        items.push({
+          key: `x${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `agent exited (code ${event.exitCode})`,
+          icon: 'clock',
+          tone: event.exitCode === 0 ? 'green' : 'red',
+        })
+        break
+      case 'checks.finished':
+        items.push({
+          key: `k${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `checks ${event.ok ? 'passed' : 'failed'} (${event.results.length})`,
+          icon: 'check',
+          tone: event.ok ? 'green' : 'red',
+        })
+        break
+      case 'commit.created':
+        items.push({
+          key: `cm${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `commit ${event.sha.slice(0, 7)}`,
+          icon: 'branch',
+          tone: 'normal',
+        })
+        break
+      case 'pr.created':
+        items.push({
+          key: `p${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `PR #${event.number} opened`,
+          icon: 'external',
+          tone: 'green',
+        })
+        break
+      case 'question.asked':
+        items.push({
+          key: `q${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `asked: ${event.question}`,
+          icon: 'inbox',
+          tone: 'amber',
+        })
+        break
+      case 'question.answered':
+        items.push({
+          key: `qa${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `answered (${event.via}): ${event.answer}`,
+          icon: 'inbox',
+          tone: 'green',
+        })
+        break
+      case 'question.timedout':
+        items.push({
+          key: `qt${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: 'question timed out',
+          icon: 'clock',
+          tone: 'red',
+        })
+        break
+      case 'question.parked':
+        items.push({
+          key: `qp${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: 'question parked',
+          icon: 'inbox',
+          tone: 'amber',
+        })
+        break
+      case 'retry.scheduled':
+        items.push({
+          key: `y${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `retry #${event.attempt} in ${(event.delayMs / 1000).toFixed(0)}s`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
+      case 'notify.sent':
+        items.push({
+          key: `n${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `notified via ${event.channel}: ${event.title}`,
+          icon: 'activity',
+          tone: 'normal',
+        })
+        break
+      case 'error':
+        items.push({
+          key: `e${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `error: ${event.message}`,
+          icon: 'close',
+          tone: 'red',
+        })
+        break
+      case 'agent.stream':
+        break
+    }
+  }
+  return items.reverse().slice(0, 200)
+}
+
+const activityTone: Record<ActivityItem['tone'], string> = {
+  normal: 'text-fg-muted',
+  red: 'text-red-ink',
+  amber: 'text-amber-ink',
+  green: 'text-emerald-ink',
+}
+
+function ActivityView() {
+  const { state } = useDashboard()
+  const items = useMemo(() => activityItems(state), [state])
+  return (
+    <section>
+      <div className="mb-5">
+        <h1 className="text-xl font-semibold">Activity</h1>
+        <p className="text-sm text-fg-faint">Everything that happened across runs, newest first.</p>
+      </div>
+      {items.length === 0 ? (
+        <EmptyState icon="activity" title="No activity yet">
+          Claims, state changes, checks, commits and pull requests land here as runs progress.
+        </EmptyState>
+      ) : (
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+          {items.map((item) => {
+            const inner = (
+              <span className="flex min-w-0 flex-1 items-center gap-3">
+                <span className={`shrink-0 ${activityTone[item.tone]}`}>
+                  <Icon name={item.icon} size={16} />
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  {item.text}
+                  {item.taskId !== null && (
+                    <span className="text-fg-faint">{` · ${item.taskId}`}</span>
+                  )}
+                </span>
+                <span className="shrink-0 text-xs tabular-nums text-fg-faint">
+                  {fmtAgo(item.ts)}
+                </span>
+              </span>
+            )
+            return (
+              <li key={item.key} className="activity-item px-4 py-2.5 text-sm">
+                {item.taskId !== null ? (
+                  <Link
+                    to="/tasks/$id"
+                    params={{ id: item.taskId }}
+                    className="flex w-full items-center hover:bg-raised"
+                  >
+                    {inner}
+                  </Link>
+                ) : (
+                  inner
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+]
+
+function Appearance() {
+  const pref = useThemePref()
+  const theme = useTheme()
+
+  return (
+    <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+      <h2 className="mb-1 text-sm text-fg-muted">Theme</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Stored in this browser only.
+        {pref === 'system' ? ` System follows your OS appearance, currently ${theme}.` : ''}
+      </p>
+      <div className="inline-flex gap-1 rounded border border-line-strong p-1">
+        {THEME_OPTIONS.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={pref === option.value}
+            onClick={() => setThemePref(option.value)}
+            className={`rounded px-3 py-1 text-sm ${
+              pref === option.value
+                ? 'bg-raised text-fg-strong'
+                : 'text-fg-muted hover:bg-raised hover:text-fg'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -1903,14 +2746,15 @@ function SettingsView() {
   return (
     <section className="max-w-xl">
       <h1 className="text-xl font-semibold">Settings</h1>
+      <Appearance />
       {selected === null ? (
-        <p className="mt-2 text-zinc-500">no repository selected</p>
+        <p className="mt-6 text-fg-faint">no repository selected</p>
       ) : (
-        <form onSubmit={save} className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-          <label htmlFor="max-workers" className="mb-1 block text-sm text-zinc-400">
+        <form onSubmit={save} className="mt-6 rounded-lg border border-line bg-surface p-4">
+          <label htmlFor="max-workers" className="mb-1 block text-sm text-fg-muted">
             Concurrent workers
           </label>
-          <p className="mb-3 text-sm text-zinc-500">
+          <p className="mb-3 text-sm text-fg-faint">
             How many tasks run at once for {selected}. Applied live; in-flight runs are unaffected.
           </p>
           <div className="flex items-center gap-2">
@@ -1923,19 +2767,19 @@ function SettingsView() {
               value={value}
               disabled={!loaded}
               onChange={(e) => setValue(e.target.value)}
-              className="w-28 rounded border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm"
+              className="w-28 rounded border border-line-strong bg-sunken px-3 py-1.5 text-sm"
             />
             <button
               type="submit"
               disabled={busy || !loaded}
-              className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+              className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
             >
               Save
             </button>
           </div>
           {message !== null && (
             <p
-              className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}
+              className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}
             >
               {message.text}
             </p>
@@ -1947,11 +2791,25 @@ function SettingsView() {
 }
 
 const rootRoute = createRootRoute({ component: RootLayout })
-const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: QueueView })
+const indexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/',
+  component: OverviewView,
+})
 const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
   component: IssuesView,
+})
+const inboxRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/inbox',
+  component: InboxView,
+})
+const activityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/activity',
+  component: ActivityView,
 })
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -1972,6 +2830,8 @@ const taskRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   issuesRoute,
+  inboxRoute,
+  activityRoute,
   sessionsRoute,
   settingsRoute,
   taskRoute,

@@ -18,7 +18,6 @@ describe('Store', () => {
     const t = store.task('bd-1')
     expect(t?.state).toBe('claimed')
     expect(t?.title).toBe('Add SSE endpoint')
-    expect(t?.reviewRound).toBe(0)
   })
 
   test('sequence numbers are monotonic and returned', () => {
@@ -94,24 +93,6 @@ describe('Store', () => {
     const t = store.task('bd-1')
     expect(t?.worktree).toBe('/tmp/wt/amagi-bd-1-add-sse')
     expect(t?.branch).toBe('amagi/bd-1-add-sse')
-  })
-
-  test('entering review increments the round counter', () => {
-    claim()
-    for (const to of [
-      'worktree_ready',
-      'implementing',
-      'checks',
-      'committed',
-      'pr_open',
-      'reviewing',
-    ] as const) {
-      store.append('bd-1', { type: 'task.state', from: null, to })
-    }
-    expect(store.task('bd-1')?.reviewRound).toBe(1)
-    store.append('bd-1', { type: 'task.state', from: 'reviewing', to: 'fixing' })
-    store.append('bd-1', { type: 'task.state', from: 'fixing', to: 'reviewing' })
-    expect(store.task('bd-1')?.reviewRound).toBe(2)
   })
 
   test('task.state reason surfaces as statusReason and clears on the next transition', () => {
@@ -312,5 +293,21 @@ describe('Store', () => {
     expect(store.task('bd-1')?.statusReason).toBe(
       'recovered by stall watcher: no worker activity for 1h',
     )
+  })
+
+  test('recentEvents returns the newest events in order', () => {
+    claim()
+    for (const [from, to] of [
+      ['claimed', 'worktree_ready'],
+      ['worktree_ready', 'implementing'],
+    ] as const) {
+      store.append('bd-1', { type: 'task.state', from, to })
+    }
+    const recent = store.recentEvents('bd-1', 2)
+    expect(recent.map((e) => (e.type === 'task.state' ? e.to : e.type))).toEqual([
+      'worktree_ready',
+      'implementing',
+    ])
+    expect(store.recentEvents('bd-1', 0)).toEqual([])
   })
 })

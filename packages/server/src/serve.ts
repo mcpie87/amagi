@@ -147,6 +147,16 @@ function startRepoPollers(
           tracker: ws.tracker,
           timeoutMs: ws.config.loop.stallTimeoutSec * 1000,
           intervalMs: stallIntervalMs ?? ws.config.loop.stallWatchIntervalSec * 1000,
+          ...(ws.config.loop.doomEnabled
+            ? {
+                doom: {
+                  toolWindowMs: ws.config.loop.doomToolWindowSec * 1000,
+                  toolRepeat: ws.config.loop.doomToolRepeat,
+                  checkRounds: ws.config.loop.doomCheckRounds,
+                  diffWindowMs: ws.config.loop.doomDiffWindowSec * 1000,
+                },
+              }
+            : {}),
         }),
       })
     }
