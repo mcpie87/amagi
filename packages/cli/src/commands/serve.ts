@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import {
   addRegistryEntry,
+  errMsg,
   loadGlobalConfig,
   loadRegistry,
   makeHarness,
@@ -48,9 +49,7 @@ export const serveCommand = defineCommand({
           })
         }
       } catch (err) {
-        console.warn(
-          `runner for ${primary.key} unavailable: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        console.warn(`runner for ${primary.key} unavailable: ${errMsg(err)}`)
       }
     }
     const server = serve({

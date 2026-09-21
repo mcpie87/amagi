@@ -1,12 +1,6 @@
-export type AnswerOutcome = { kind: 'ok' } | { kind: 'error'; message: string }
+import { errorOf } from '@amagi/core'
 
-async function errorOf(res: Response): Promise<string> {
-  try {
-    return ((await res.json()) as { error?: string }).error ?? `HTTP ${res.status}`
-  } catch {
-    return `HTTP ${res.status}`
-  }
-}
+export type AnswerOutcome = { kind: 'ok' } | { kind: 'error'; message: string }
 
 /** The task token gates the answer endpoint; the task detail is the only channel that hands it out. */
 export async function fetchTaskToken(

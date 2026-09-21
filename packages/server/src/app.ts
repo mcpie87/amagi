@@ -1,7 +1,9 @@
 import {
+  BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
   classifyDifficulty,
+  errMsg,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -83,6 +85,11 @@ function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities
     : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
 }
 
+/** The beads tracker's issue browser and epic closer, or null for any other tracker. */
+function beadsTracker(ws: Workspace): BeadsTracker | null {
+  return ws.tracker instanceof BeadsTracker ? ws.tracker : null
+}
+
 /**
  * The agent carries AMAGI_TASK_TOKEN in its environment; a question is bound
  * to the task that spawned it, so one agent cannot answer for another.
@@ -105,7 +112,7 @@ async function notifyChannels(
     try {
       await notifier.notify(title, body)
     } catch (err) {
-      console.warn(`notify ${notifier.kind}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`notify ${notifier.kind}: ${errMsg(err)}`)
     }
     store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
   }
@@ -125,7 +132,7 @@ async function openQuestionGate(
   try {
     return (await tracker.openGate(taskId, question)).id
   } catch (err) {
-    console.warn(`openGate ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+    console.warn(`openGate ${taskId}: ${errMsg(err)}`)
     return null
   }
 }
@@ -138,7 +145,7 @@ async function resolveQuestionGate(
   try {
     await tracker.resolveGate({ id: gateRef, advisory: false })
   } catch (err) {
-    console.warn(`resolveGate ${gateRef}: ${err instanceof Error ? err.message : String(err)}`)
+    console.warn(`resolveGate ${gateRef}: ${errMsg(err)}`)
   }
 }
 
@@ -159,7 +166,7 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   try {
     ws = workspaces.get(repo)
   } catch (err) {
-    throw new RepoError(500, `repo ${repo}: ${err instanceof Error ? err.message : String(err)}`)
+    throw new RepoError(500, `repo ${repo}: ${errMsg(err)}`)
   }
   if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
   return ws
@@ -209,7 +216,7 @@ export function createApp({
               {
                 name: 'workspace',
                 ok: false,
-                detail: err instanceof Error ? err.message : String(err),
+                detail: errMsg(err),
               },
             ],
           })
@@ -224,7 +231,7 @@ export function createApp({
       try {
         entry = workspaces.add(path, key)
       } catch (err) {
-        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+        return c.json({ error: errMsg(err) }, 400)
       }
       const ready = await workspaces.diagnose(entry)
       return c.json({ ...entry, ready }, 201)
@@ -233,10 +240,11 @@ export function createApp({
     .get('/api/repos/:repo/issues/:id', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      if (ws.getIssue === undefined) {
+      const beads = beadsTracker(ws)
+      if (beads === null) {
         return c.json({ error: `issue detail is unavailable for ${repo}` }, 501)
       }
-      const issue = await ws.getIssue(id)
+      const issue = await beads.getIssue(id)
       if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
       return c.json(issue)
     })
@@ -259,7 +267,8 @@ export function createApp({
               }
             : body
           const created: TrackerTask = await ws.tracker.createTask(input)
-          const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
+          const beads = beadsTracker(ws)
+          const issue = beads === null ? null : await beads.getIssue(created.id)
           return c.json(issue ?? created, 201)
         } catch (err) {
           if (err instanceof UnsupportedCapabilityError) return c.json({ error: err.message }, 501)
@@ -299,10 +308,11 @@ export function createApp({
         if (body.dependencies !== undefined) {
           const depCap = capabilityError(ws.tracker, 'dependencies')
           if (depCap !== null) return c.json({ error: depCap }, 501)
-          if (ws.getIssue === undefined) {
+          const beads = beadsTracker(ws)
+          if (beads === null) {
             return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
           }
-          const current = (await ws.getIssue(id))?.dependencies.map((d) => d.id) ?? []
+          const current = (await beads.getIssue(id))?.dependencies.map((d) => d.id) ?? []
           input.dependencies = {
             add: body.dependencies.filter((d) => !current.includes(d)),
             remove: current.filter((d) => !body.dependencies?.includes(d)),
@@ -310,7 +320,8 @@ export function createApp({
         }
         try {
           const updated = await ws.tracker.updateTask(id, input)
-          const issue = ws.getIssue === undefined ? null : await ws.getIssue(updated.id)
+          const beads = beadsTracker(ws)
+          const issue = beads === null ? null : await beads.getIssue(updated.id)
           return c.json(issue ?? updated)
         } catch (err) {
           if (err instanceof UnsupportedCapabilityError) {
@@ -345,19 +356,21 @@ export function createApp({
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      if (ws.listIssues === undefined) {
+      const beads = beadsTracker(ws)
+      if (beads === null) {
         return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
       }
-      return c.json(await ws.listIssues())
+      return c.json(await beads.list())
     })
 
     .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      if (ws.eligibleEpics === undefined) {
+      const beads = beadsTracker(ws)
+      if (beads === null) {
         return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
       }
-      return c.json(await ws.eligibleEpics())
+      return c.json(await beads.eligibleEpics())
     })
 
     .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
@@ -389,10 +402,11 @@ export function createApp({
         const { repo } = c.req.valid('param')
         const { reason } = c.req.valid('json')
         const ws = resolveWorkspace(workspaces, repo)
-        if (ws.closeEligibleEpics === undefined) {
+        const beads = beadsTracker(ws)
+        if (beads === null) {
           return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
         }
-        return c.json(await ws.closeEligibleEpics(reason))
+        return c.json(await beads.closeEligibleEpics(reason))
       },
     )
 
@@ -437,7 +451,7 @@ export function createApp({
       try {
         await ws.tracker.release(id)
       } catch (err) {
-        console.warn(`release ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`release ${id}: ${errMsg(err)}`)
       }
       ws.store.append(id, { type: 'task.reclaimed' })
       return c.json({ task: ws.store.task(id) })
@@ -476,7 +490,7 @@ export function createApp({
           try {
             await runner.stop(id)
           } catch (err) {
-            console.warn(`stop on close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+            console.warn(`stop on close ${id}: ${errMsg(err)}`)
           }
         }
         const afterStop = ws.store.task(id)
@@ -497,15 +511,13 @@ export function createApp({
               branch: branch ?? null,
             })
           } catch (err) {
-            console.warn(
-              `worktree removal on close ${id}: ${err instanceof Error ? err.message : String(err)}`,
-            )
+            console.warn(`worktree removal on close ${id}: ${errMsg(err)}`)
           }
         }
         try {
           await ws.tracker.close(id, reason)
         } catch (err) {
-          console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          console.warn(`close ${id}: ${errMsg(err)}`)
         }
         return c.json({ task: ws.store.task(id) })
       },
@@ -537,7 +549,10 @@ export function createApp({
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      return c.json({ maxParallel: ws.config.loop.maxParallel })
+      return c.json({
+        maxParallel: ws.config.loop.maxParallel,
+        autoQueue: ws.config.loop.autoQueue,
+      })
     })
 
     .patch(
@@ -547,14 +562,27 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { maxParallel } = c.req.valid('json')
+        const { maxParallel, autoQueue } = c.req.valid('json')
         // Persist first so a restart keeps the value, then live-apply: the
         // cached workspace config and, when this repo owns the runner, its
-        // capacity. In-flight runs are untouched — capacity gates new launches.
-        writeConfig(ws.root, { loop: { maxParallel } })
-        ws.config.loop.maxParallel = maxParallel
-        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
-        return c.json({ maxParallel })
+        // capacity and automatic dispatch. In-flight runs are untouched, both
+        // gate and poll only affect new launches.
+        const patch: Record<string, unknown> = {}
+        if (maxParallel !== undefined) patch.maxParallel = maxParallel
+        if (autoQueue !== undefined) patch.autoQueue = autoQueue
+        writeConfig(ws.root, { loop: patch })
+        if (maxParallel !== undefined) {
+          ws.config.loop.maxParallel = maxParallel
+          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        }
+        if (autoQueue !== undefined) {
+          ws.config.loop.autoQueue = autoQueue
+          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+        }
+        return c.json({
+          maxParallel: ws.config.loop.maxParallel,
+          autoQueue: ws.config.loop.autoQueue,
+        })
       },
     )
 

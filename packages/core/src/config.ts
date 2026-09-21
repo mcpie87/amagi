@@ -142,6 +142,16 @@ export const Config = z.object({
       retryBaseMs: z.number().int().min(0).default(10_000),
       retryMaxMs: z.number().int().min(0).default(300_000),
       /**
+       * Automatic dispatch: while on, the runner polls for the next ready task
+       * and launches it whenever a slot is free, instead of waiting for Run.
+       */
+      autoQueue: z.boolean().default(false),
+      /**
+       * How long the auto-queue waits between polls when nothing is claimable,
+       * so an empty queue does not hammer the tracker.
+       */
+      autoQueueIdleSec: z.number().int().min(1).default(60),
+      /**
        * Hard ceiling on how long a task may run, in minutes, counted from
        * first claim and spanning every round and reclaim. 0 disables the
        * wall-clock budget (the historical unbounded behavior).

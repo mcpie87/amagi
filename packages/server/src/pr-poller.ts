@@ -1,4 +1,5 @@
-import { type PrDriver, reconcilePrs, type Store, type Tracker } from '@amagi/core'
+import { errMsg, type PrDriver, reconcilePrs, type Store, type Tracker } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type PrPollerOptions = {
   store: Store
@@ -28,24 +29,11 @@ export function startPrPoller({
   cwd,
   intervalMs = DEFAULT_INTERVAL_MS,
 }: PrPollerOptions): PrPoller {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
-
-  async function tick(): Promise<void> {
+  return startPoller(intervalMs, async () => {
     try {
       await reconcilePrs(store, forge, tracker, cwd)
     } catch (err) {
-      console.warn(`pr reconcile: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`pr reconcile: ${errMsg(err)}`)
     }
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
-  }
-
-  timer = setTimeout(() => void tick(), intervalMs)
-  return {
-    stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
-    },
-  }
+  })
 }

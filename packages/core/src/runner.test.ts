@@ -709,7 +709,14 @@ describe('Runner.runOnce', () => {
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
     ])
-    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      // "hit the turn limit" matches the transient/session-limit patterns and
+      // would retry into a fresh (empty) turn; this test is about which detail
+      // wins over the tool noise, so force immediate escalation.
+      config({ loop: { maxRetries: 0 } }),
+    ).runOnce()
 
     expect(result?.state).toBe('needs_human')
     expect(stateReason(TASK.id)).toContain('the build broke')
