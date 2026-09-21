@@ -4,12 +4,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from './config.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
-import type { AgentOutcome, Harness } from './drivers/types.ts'
+import type {
+  AgentOutcome,
+  CreateTrackerTask,
+  Harness,
+  Tracker,
+  TrackerCapabilities,
+  TrackerTask,
+} from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import {
-  classifyMention,
   listPrMentions,
   mentionsPath,
+  parseMentionKind,
   readHandledMentions,
   respondToMention,
   saveHandledMentions,
@@ -60,6 +67,29 @@ class FakeDriver implements PrDriver {
   }
 }
 
+/** Tracker stub recording createTask calls, for the add-a-task response. */
+function fakeTracker(create: boolean): Tracker & { created: CreateTrackerTask[] } {
+  const capabilities: TrackerCapabilities = { create, edit: false, dependencies: false }
+  const tracker = {
+    kind: 'fake',
+    capabilities,
+    created: [] as CreateTrackerTask[],
+    async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+      tracker.created.push(input)
+      return {
+        id: 'bd-new',
+        title: input.title,
+        description: input.description,
+        status: 'open',
+        priority: null,
+        type: null,
+        url: null,
+      }
+    },
+  } as unknown as Tracker & { created: CreateTrackerTask[] }
+  return tracker
+}
+
 beforeEach(() => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
@@ -72,16 +102,16 @@ afterEach(() => {
 
 const emptyEvents = async function* (): AsyncGenerator<never> {}
 
-function fakeHarness(
-  outcome: AgentOutcome = {
+function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
+  const outcome: AgentOutcome = {
     exitCode: 0,
     ok: true,
     sessionId: null,
     summary: 'done',
     usage: null,
     stderr: '',
-  },
-): Harness {
+    ...over,
+  }
   const process = {
     pid: -1,
     events: () => emptyEvents(),
@@ -104,23 +134,19 @@ const config = () =>
     checks: { commands: [] },
   })
 
-describe('classifyMention', () => {
-  test('fix requests', () => {
-    expect(classifyMention('this file should not be there, remove it')).toBe('fix')
-    expect(classifyMention('this logic is wrong')).toBe('fix')
-    expect(classifyMention('address the review comments')).toBe('fix')
-    expect(classifyMention('please fix the broken test')).toBe('fix')
+describe('parseMentionKind', () => {
+  test('recognises each category, case-insensitively', () => {
+    expect(parseMentionKind('fix-pr')).toBe('fix-pr')
+    expect(parseMentionKind('FIX-PR')).toBe('fix-pr')
+    expect(parseMentionKind('explain')).toBe('explain')
+    expect(parseMentionKind('add-a-task')).toBe('add-a-task')
+    expect(parseMentionKind('ambiguous')).toBe('ambiguous')
   })
 
-  test('explain requests', () => {
-    expect(classifyMention('why did you make these changes')).toBe('explain')
-    expect(classifyMention('why did you add X')).toBe('explain')
-    expect(classifyMention('please explain the rationale')).toBe('explain')
-  })
-
-  test('ambiguous when neither', () => {
-    expect(classifyMention('nice work!')).toBe('ambiguous')
-    expect(classifyMention('hello')).toBe('ambiguous')
+  test('falls back to ambiguous for anything unrecognised', () => {
+    expect(parseMentionKind('')).toBe('ambiguous')
+    expect(parseMentionKind('sure, go ahead')).toBe('ambiguous')
+    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('fix-pr')
   })
 })
 
@@ -164,7 +190,7 @@ describe('listPrMentions', () => {
 })
 
 describe('respondToMention', () => {
-  test('a fix mention runs the agent in a worktree and pushes to the PR head', async () => {
+  test('a fix-pr mention runs the agent in a worktree and pushes to the PR head', async () => {
     const { exec, calls } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
     const kind = await respondToMention({
@@ -175,10 +201,10 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       exec,
-      makeHarnessFn: () => fakeHarness(),
+      makeHarnessFn: () => fakeHarness({ summary: 'fix-pr' }),
     })
 
-    expect(kind).toBe('fix')
+    expect(kind).toBe('fix-pr')
     expect(calls).toContainEqual(['git', 'merge', 'origin/main'])
     expect(calls).toContainEqual([
       'git',
@@ -202,12 +228,50 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       exec,
-      makeHarnessFn: () => fakeHarness(),
+      makeHarnessFn: () => fakeHarness({ summary: 'explain' }),
     })
 
     expect(kind).toBe('explain')
     expect(driver.posted).toEqual(['Because the old parser dropped unicode.'])
     expect(existsSync(outPath)).toBe(false)
+  })
+
+  test('an add-a-task mention creates a tracker task and posts a confirmation', async () => {
+    const tracker = fakeTracker(true)
+    const driver = new FakeDriver()
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '4', user: 'bob', body: 'please track adding tests for this' },
+      config: config(),
+      driver,
+      tracker,
+      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+    })
+
+    expect(kind).toBe('add-a-task')
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]?.title).toContain('PR #7:')
+    expect(tracker.created[0]?.description).toContain('@bob')
+    expect(driver.posted).toEqual(['@bob Logged this as task bd-new.'])
+  })
+
+  test('an add-a-task mention without a task-capable tracker explains it cannot', async () => {
+    const driver = new FakeDriver()
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '4', user: 'bob', body: 'please track this' },
+      config: config(),
+      driver,
+      tracker: fakeTracker(false),
+      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+    })
+
+    expect(kind).toBe('add-a-task')
+    expect(driver.posted[0]).toContain("can't create issues")
   })
 
   test('an ambiguous mention asks for clarification and does not dispatch', async () => {
@@ -219,7 +283,7 @@ describe('respondToMention', () => {
       mention: { id: '3', user: 'bob', body: 'hmm, not sure about this' },
       config: config(),
       driver,
-      makeHarnessFn: () => fakeHarness(),
+      makeHarnessFn: () => fakeHarness({ summary: 'ambiguous' }),
     })
 
     expect(kind).toBe('ambiguous')
@@ -228,8 +292,7 @@ describe('respondToMention', () => {
     expect(driver.posted[0]).toContain('clarify')
   })
 
-  test('a failed agent throws so the mention is not marked handled', async () => {
-    const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
+  test('a failed classifier throws so the mention is not marked handled', async () => {
     const driver = new FakeDriver()
     await expect(
       respondToMention({
@@ -239,7 +302,6 @@ describe('respondToMention', () => {
         mention: { id: '1', user: 'bob', body: 'this logic is wrong' },
         config: config(),
         driver,
-        exec,
         makeHarnessFn: () =>
           fakeHarness({
             exitCode: 1,

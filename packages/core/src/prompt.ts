@@ -196,6 +196,35 @@ export function explainMentionSystemPrompt(): string {
   ].join('\n')
 }
 
+export type MentionClassifyContext = {
+  pr: { number: number; title: string; url: string }
+  mention: { user: string; body: string }
+}
+
+export function classifyMentionSystemPrompt(): string {
+  return [
+    'You are a classifier for comments on a pull request.',
+    'Do not use any tools. Do not modify any files.',
+    'Reply with exactly one token, nothing else.',
+  ].join('\n')
+}
+
+export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
+  return [
+    `A human (@${ctx.mention.user}) commented on PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    '',
+    ctx.mention.body.trim(),
+    '',
+    'Classify the comment into exactly one of:',
+    '- fix-pr — the human wants code in this PR changed',
+    '- explain — the human is asking why or how something was done',
+    '- add-a-task — the human wants a new task tracked in the issue tracker, not done in this PR',
+    '- ambiguous — the intent is unclear or none of the above',
+    '',
+    'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
+  ].join('\n')
+}
+
 export function explainMentionPrompt(ctx: ExplainMentionContext): string {
   return [
     `A human (@${ctx.mention.user}) asked about PR #${ctx.pr.number} "${ctx.pr.title}":`,
