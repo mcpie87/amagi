@@ -1,8 +1,24 @@
-import { type Config, HARDCODED_EFFORTS, HarnessConfig } from '@amagi/core'
+import { type Config, HARDCODED_EFFORTS, HarnessConfig, type StoredEvent } from '@amagi/core'
 
 const KINDS = ['claude', 'codex', 'opencode'] as const
 
 export type SelectOption<T> = { label: string; value: T }
+
+/** How many times each harness kind and model was actually run, from history. */
+export type UsageCounts = { harness: Record<string, number>; model: Record<string, number> }
+
+export function usageCounts(events: readonly StoredEvent[]): UsageCounts {
+  const harness: Record<string, number> = {}
+  const model: Record<string, number> = {}
+  for (const event of events) {
+    if (event.type !== 'agent.started') continue
+    harness[event.harness] = (harness[event.harness] ?? 0) + 1
+    if (event.model !== null) model[event.model] = (model[event.model] ?? 0) + 1
+  }
+  return { harness, model }
+}
+
+const emptyCounts = (): UsageCounts => ({ harness: {}, model: {} })
 
 export type Picker = {
   select<T>(title: string, options: readonly SelectOption<T>[]): Promise<T | null>
@@ -14,13 +30,23 @@ export type RunSelection = {
   interactive: boolean
 }
 
-/** Harness choices for the picker: named definitions, or the three known kinds. */
-export function harnessChoices(config: Config): SelectOption<Config['harness']['implement']>[] {
+/**
+ * Harness choices for the picker: named definitions, or the three known kinds.
+ * Most-used first, by the kind recorded in each run.
+ */
+export function harnessChoices(
+  config: Config,
+  counts: UsageCounts = emptyCounts(),
+): SelectOption<Config['harness']['implement']>[] {
+  const byUsage = (
+    a: SelectOption<Config['harness']['implement']>,
+    b: SelectOption<Config['harness']['implement']>,
+  ) => (counts.harness[b.value.kind] ?? 0) - (counts.harness[a.value.kind] ?? 0)
   const defs = Object.entries(config.harness.definitions)
   if (defs.length > 0) {
-    return defs.map(([name, cfg]) => ({ label: name, value: cfg }))
+    return defs.map(([name, cfg]) => ({ label: name, value: cfg })).sort(byUsage)
   }
-  return KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
+  return KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) })).sort(byUsage)
 }
 
 const withModel = (
@@ -45,6 +71,7 @@ export async function pickRunSelection(
   flags: { harness?: string; model?: string; effort?: string },
   picker: Picker | null,
   listModels: (cfg: Config['harness']['implement']) => Promise<string[]>,
+  counts: UsageCounts = emptyCounts(),
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
     const named = config.harness.definitions[flags.harness]
@@ -62,7 +89,7 @@ export async function pickRunSelection(
     }
   }
 
-  const chosen = await picker.select('Which harness?', harnessChoices(config))
+  const chosen = await picker.select('Which harness?', harnessChoices(config, counts))
   if (chosen === null) {
     return {
       harness: withEffort(withModel(config.harness.implement, flags.model), flags.effort),
@@ -81,7 +108,10 @@ export async function pickRunSelection(
   if (defaultModel !== undefined) {
     options.push({ label: `default (${defaultModel})`, value: defaultModel })
   }
-  for (const m of await listModels(chosen)) {
+  const listed = [...(await listModels(chosen))].sort(
+    (a, b) => (counts.model[b] ?? 0) - (counts.model[a] ?? 0),
+  )
+  for (const m of listed) {
     if (m !== defaultModel) options.push({ label: m, value: m })
   }
   options.push({ label: '(custom model)', value: '' })

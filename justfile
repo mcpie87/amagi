@@ -51,6 +51,10 @@ fresh-check:
 status:
     bun run packages/cli/src/index.ts status
 
+# Serve the API and dashboard (dev, watch mode)
+serve:
+    bun serve
+
 # Run the bot. Pin the harness/model/effort to skip the interactive picker:
 # `just run -- --harness claude --model <model>` or `just run --harness claude`.
 [arg('model', long='model', help='model to pass to the harness')]
