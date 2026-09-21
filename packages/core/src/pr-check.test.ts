@@ -8,6 +8,7 @@ import {
   listOpenPrs,
   type PrInfo,
   prepareConflictWorktree,
+  prMergeStatus,
   pushConflictFix,
 } from './pr-check.ts'
 
@@ -86,6 +87,24 @@ describe('listOpenPrs', () => {
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+  })
+})
+
+describe('prMergeStatus', () => {
+  test('retries while GitHub reports UNKNOWN, then returns the resolved state', async () => {
+    const calls: Call[] = []
+    let n = 0
+    const exec: Exec = async (cmd) => {
+      calls.push(cmd)
+      n++
+      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
+      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
+    }
+
+    const status = await prMergeStatus('/repo', 7, exec)
+
+    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
+    expect(calls).toHaveLength(2)
   })
 })
 
