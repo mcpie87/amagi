@@ -1,11 +1,9 @@
 import {
   CAPABILITY_WORDS,
   isTerminal,
-  makeHarness,
   type Notifier,
   type Question,
   type RegistryEntry,
-  Runner,
   type RunServiceApi,
   type Store,
   type Tracker,
@@ -283,6 +281,13 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       return c.json(await workspaces.diagnose(entry))
     })
 
+    .get('/api/repos/:repo/ready-queue', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      // The tracker orders the queue FCFS (bd ready --sort oldest).
+      return c.json(await ws.tracker.ready())
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -499,27 +504,6 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
         return c.json(ws.store.openQuestions(taskId))
       },
     )
-
-    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const runner = new Runner({
-        store: ws.store,
-        tracker: ws.tracker,
-        harness: makeHarness(ws.config.harness.implement),
-        config: ws.config,
-        repoRoot: ws.root,
-        repoName: ws.name,
-        ...(ws.forge === null ? {} : { forge: ws.forge }),
-      })
-      // A full agent run takes minutes, so the request returns immediately and
-      // the run reports through the repo's own event stream.
-      void runner.runOnce().catch((err) => {
-        const message = err instanceof Error ? err.message : String(err)
-        ws.store.append(null, { type: 'error', message, fatal: false })
-      })
-      return c.json({ repo, started: true }, 202)
-    })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 

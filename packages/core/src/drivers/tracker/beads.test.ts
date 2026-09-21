@@ -123,6 +123,7 @@ describe('BeadsTracker', () => {
       url: null,
     })
     expect(calls[0]).toContain('--json')
+    expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
   })
 
   test('an empty queue is an empty array, not an error', async () => {
@@ -139,6 +140,7 @@ describe('BeadsTracker', () => {
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
+    expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
   })
 
   test('epics, milestones and gates are never handed out as work', async () => {

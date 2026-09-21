@@ -1,4 +1,5 @@
 import { agentLogStore } from '@amagi/core/agent-log'
+import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { StoredEvent } from '@amagi/core/events'
 import type { RunnerStatus } from '@amagi/core/run-service'
 import { type DashboardState, initialDashboardState, reduceState } from '@amagi/core/view'
@@ -38,6 +39,9 @@ const ReposContext = createContext<DashboardValue>({
 })
 
 const StreamContext = createContext<DashboardState>(initialDashboardState())
+
+/** The repo's unclaimed ready queue, FCFS from the tracker. */
+const ReadyQueueContext = createContext<TrackerTask[]>([])
 
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'
 const ConnectionContext = createContext<ConnectionStatus>('connecting')
@@ -115,7 +119,28 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
 function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
+  const [readyQueue, setReadyQueue] = useState<TrackerTask[]>([])
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
+
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      fetch(`${apiBase}/api/repos/${repo}/ready-queue`)
+        .then((res) => (res.ok ? (res.json() as Promise<TrackerTask[]>) : []))
+        .then((tasks) => {
+          if (alive) setReadyQueue(tasks)
+        })
+        .catch(() => {
+          if (alive) setReadyQueue([])
+        })
+    }
+    load()
+    const timer = setInterval(load, 4000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [repo])
 
   useEffect(() => {
     const source = new EventSource(`${apiBase}/api/repos/${repo}/stream?sinceSeq=0`)
@@ -145,7 +170,9 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
 
   return (
     <ConnectionContext.Provider value={connection}>
-      <StreamContext.Provider value={state}>{children}</StreamContext.Provider>
+      <StreamContext.Provider value={state}>
+        <ReadyQueueContext.Provider value={readyQueue}>{children}</ReadyQueueContext.Provider>
+      </StreamContext.Provider>
     </ConnectionContext.Provider>
   )
 }
@@ -154,15 +181,18 @@ export function useDashboard(): DashboardValue & { state: DashboardState } {
   return { ...useContext(ReposContext), state: useContext(StreamContext) }
 }
 
+/** The repo's unclaimed ready queue, first-created first. */
+export function useReadyQueue(): TrackerTask[] {
+  return useContext(ReadyQueueContext)
+}
+
 export type RunnerApi = {
   status: RunnerStatus | null
-  start: (taskId?: string) => Promise<{ ok: true; taskId: string } | { ok: false; error?: string }>
   stop: (taskId: string) => Promise<{ ok: boolean; error?: string }>
 }
 
 const RunnerContext = createContext<RunnerApi>({
   status: null,
-  start: async () => ({ ok: false }),
   stop: async () => ({ ok: false }),
 })
 
@@ -184,27 +214,6 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(timer)
   }, [base])
 
-  const start = async (
-    taskId?: string,
-  ): Promise<{ ok: true; taskId: string } | { ok: false; error?: string }> => {
-    try {
-      const res = await fetch(`${base}/api/runs`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(taskId === undefined ? {} : { taskId }),
-      })
-      refresh()
-      if (res.ok) {
-        const body = (await res.json()) as { taskId?: string }
-        return { ok: true, taskId: body.taskId ?? '' }
-      }
-      const parsed = (await res.json().catch(() => null)) as { error?: string } | null
-      return { ok: false, error: parsed?.error ?? `HTTP ${res.status}` }
-    } catch {
-      return { ok: false, error: 'could not reach the amagi server' }
-    }
-  }
-
   const stop = async (taskId: string): Promise<{ ok: boolean; error?: string }> => {
     try {
       const res = await fetch(`${base}/api/runs/${taskId}/stop`, { method: 'POST' })
@@ -217,7 +226,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  return <RunnerContext.Provider value={{ status, start, stop }}>{children}</RunnerContext.Provider>
+  return <RunnerContext.Provider value={{ status, stop }}>{children}</RunnerContext.Provider>
 }
 
 export function useRunner(): RunnerApi {
