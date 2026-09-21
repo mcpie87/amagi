@@ -31,7 +31,7 @@ to the API at `http://127.0.0.1:7777`.
 
 The dashboard is the shared control room for the connected server. The header holds the repo selector, a runner status indicator (how many capacity slots are busy), and a button to register another repository. Four pages, plus a per-task detail:
 
-- **Queue** shows active runs with state badges, a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and a Workers panel: runner capacity, per-slot resource usage (RSS, CPU, process count), and any running background workers (`respond-to-mentions`, `check-prs`). A **Run next** button launches the next ready task.
+- **Queue** shows active runs with state badges, a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and a Workers panel: runner capacity, per-slot resource usage (RSS, CPU, process count), and any running background workers (`respond-to-mentions`, `check-prs`). An **Auto queue** toggle turns automatic dispatch on or off (when on, free slots are filled as tasks become claimable); a **Run next** button launches the next ready task manually.
 - **Tasks** browses the tracker's issues in Kanban or List view (the choice is remembered), with a status filter, pagination, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
 - **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
 - **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
@@ -175,6 +175,8 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
+| `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
+| `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |

@@ -22,6 +22,8 @@ export type RunnerStatus = {
   running: string[]
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
+  /** Whether automatic dispatch is on: ready tasks launch themselves on free slots. */
+  autoQueue: boolean
   /** Activity of background workers (e.g. the mention watcher), when any. */
   workers?: WorkerActivity[]
 }
@@ -51,6 +53,10 @@ export interface RunServiceApi {
   stop(taskId: string): Promise<StopResult>
   /** Live capacity change; only affects new launches, never in-flight runs. */
   setMaxParallel(n: number): void
+  /** Live automatic-dispatch toggle; a fresh launch loop starts or stops. */
+  setAutoQueue(enabled: boolean): void
+  /** Stops the automatic-dispatch loop, for server shutdown. */
+  dispose?(): void
 }
 
 export type RunServiceOptions = {
@@ -64,6 +70,12 @@ export type RunServiceOptions = {
   forge?: PrDriver
   /** Overrides config.loop.maxParallel, mainly for tests. */
   maxParallel?: number
+  /** Overrides config.loop.autoQueue, mainly for tests. */
+  autoQueue?: boolean
+  /** Overrides config.loop.autoQueueIdleSec, mainly for tests. */
+  autoQueueIdleMs?: number
+  /** How often to poll while a launch just succeeded (filling free slots). */
+  autoQueueActiveMs?: number
 }
 
 /**
@@ -77,9 +89,20 @@ export class RunService implements RunServiceApi {
   private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
+  private autoQueue: boolean
+  private readonly autoQueueIdleMs: number
+  /** While work is flowing (a launch just happened) poll quickly to fill free slots. */
+  private readonly autoQueueActiveMs: number
+  private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
+  private autoQueuePolling = false
+  private stopped = false
 
   constructor(private readonly opts: RunServiceOptions) {
     this.capacity = opts.maxParallel ?? opts.config.loop.maxParallel
+    this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
+    this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
+    this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
+    if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
   /**
@@ -89,6 +112,55 @@ export class RunService implements RunServiceApi {
    */
   setMaxParallel(n: number): void {
     this.capacity = Math.max(1, n)
+  }
+
+  /**
+   * Live automatic-dispatch toggle. Turning it on starts the poll loop (a poll
+   * is scheduled immediately, not after the first idle wait); turning it off
+   * cancels the pending poll. In-flight runs are untouched either way.
+   */
+  setAutoQueue(enabled: boolean): void {
+    this.autoQueue = enabled
+    if (enabled) {
+      this.scheduleAutoQueuePoll(0)
+    } else if (this.autoQueueTimer !== null) {
+      clearTimeout(this.autoQueueTimer)
+      this.autoQueueTimer = null
+    }
+  }
+
+  /** Stops the auto-queue loop; the runner stays usable for manual launch/stop. */
+  dispose(): void {
+    this.stopped = true
+    if (this.autoQueueTimer !== null) {
+      clearTimeout(this.autoQueueTimer)
+      this.autoQueueTimer = null
+    }
+  }
+
+  private scheduleAutoQueuePoll(ms: number): void {
+    if (this.stopped) return
+    if (this.autoQueueTimer !== null) clearTimeout(this.autoQueueTimer)
+    this.autoQueueTimer = setTimeout(() => void this.autoQueuePoll(), ms)
+  }
+
+  /**
+   * One auto-queue pass: claim and launch the next ready task when a slot is
+   * free. A claimed task means more free slots may exist, so the next poll is
+   * soon; an empty (or gated, or at-capacity) queue means nothing to do, so
+   * the poll backs off to the idle interval.
+   */
+  private async autoQueuePoll(): Promise<void> {
+    if (this.autoQueuePolling) return
+    this.autoQueuePolling = true
+    try {
+      if (!this.autoQueue || this.stopped) return
+      const result = await this.start()
+      const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
+      if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
+    } finally {
+      this.autoQueuePolling = false
+    }
   }
 
   async status(): Promise<RunnerStatus> {
@@ -107,6 +179,7 @@ export class RunService implements RunServiceApi {
       capacity: this.capacity,
       running,
       resources,
+      autoQueue: this.autoQueue,
     }
   }
 
