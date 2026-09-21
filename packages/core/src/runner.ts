@@ -270,6 +270,8 @@ export class Runner {
     if (first.stopped) return
     let sessionId = first.sessionId
     let summary = first.summary
+    let model = first.model
+    let effort = first.effort
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
@@ -277,6 +279,8 @@ export class Runner {
     if (parked === null) return
     sessionId = parked.sessionId
     summary = parked.summary ?? summary
+    model = parked.model ?? model
+    effort = parked.effort ?? effort
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
@@ -314,12 +318,16 @@ export class Runner {
       if (fix.stopped) return
       sessionId = fix.sessionId
       summary = fix.summary
+      model = fix.model
+      effort = fix.effort
       if (lease.isLost) throw new LeaseLostError(task.id)
 
       const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease)
       if (resumed === null) return
       sessionId = resumed.sessionId
       summary = resumed.summary ?? summary
+      model = resumed.model ?? model
+      effort = resumed.effort ?? effort
     }
 
     const committed = await this.commit(task, cwd)
@@ -333,7 +341,7 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch)
+    await this.openPullRequest(task, cwd, branch, model, effort)
     this.throwIfCancelled(task.id)
   }
 
@@ -342,7 +350,13 @@ export class Runner {
    * authenticated, remote gone) leaves the commit in place and escalates, so
    * the operator can push and open it by hand.
    */
-  private async openPullRequest(task: TrackerTask, cwd: string, branch: string): Promise<void> {
+  private async openPullRequest(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    model: string | null,
+    effort: string | null,
+  ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
@@ -361,7 +375,11 @@ export class Runner {
       base: config.repo.baseBranch,
       remote: config.forge.remote,
       title: prTitle(current),
-      body: formatPrBody(current, changes),
+      body: formatPrBody(current, changes, {
+        harness: this.deps.harness.kind,
+        model,
+        effort,
+      }),
       labels: amagiLabels(current.type),
     }
     try {
@@ -396,12 +414,19 @@ export class Runner {
     sessionId: string | null,
     cwd: string,
     lease: Lease,
-  ): Promise<{ sessionId: string | null; summary: string | null } | null> {
+  ): Promise<{
+    sessionId: string | null
+    summary: string | null
+    model: string | null
+    effort: string | null
+  } | null> {
     const { store, config } = this.deps
-    if (store.task(taskId)?.state !== 'awaiting_answer') return { sessionId, summary: null }
+    if (store.task(taskId)?.state !== 'awaiting_answer') {
+      return { sessionId, summary: null, model: null, effort: null }
+    }
 
     const question = store.unansweredQuestions(taskId)[0]
-    if (question === undefined) return { sessionId, summary: null }
+    if (question === undefined) return { sessionId, summary: null, model: null, effort: null }
     store.append(taskId, { type: 'question.parked', questionId: question.id })
 
     const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
@@ -431,7 +456,12 @@ export class Runner {
           lease,
         )
         if (resumed.stopped) return null
-        return { sessionId: resumed.sessionId, summary: resumed.summary }
+        return {
+          sessionId: resumed.sessionId,
+          summary: resumed.summary,
+          model: resumed.model,
+          effort: resumed.effort,
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
     }
@@ -449,6 +479,8 @@ export class Runner {
     ok: boolean
     detail: string | null
     summary: string | null
+    model: string | null
+    effort: string | null
   }> {
     const { store, harness } = this.deps
     const spawn = {
@@ -462,6 +494,8 @@ export class Runner {
     try {
       // The resolved model only exists once the harness reports it (claude's
       // init line), so the started event lands on the first stream event.
+      const model = proc.model ?? opts.model ?? null
+      const effort = proc.effort ?? null
       let started = false
       for await (const event of proc.events()) {
         if (!started) {
@@ -470,8 +504,8 @@ export class Runner {
             type: 'agent.started',
             role: 'implement',
             harness: harness.kind,
-            model: proc.model ?? opts.model ?? null,
-            effort: proc.effort ?? null,
+            model,
+            effort,
             cwd: opts.cwd,
             resumed: resumeFrom !== null,
           })
@@ -492,7 +526,14 @@ export class Runner {
         detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
         store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
       }
-      return { sessionId: outcome.sessionId, ok: outcome.ok, detail, summary: outcome.summary }
+      return {
+        sessionId: outcome.sessionId,
+        ok: outcome.ok,
+        detail,
+        summary: outcome.summary,
+        model,
+        effort,
+      }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
     }
@@ -510,22 +551,32 @@ export class Runner {
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
     lease: Lease,
-  ): Promise<{ sessionId: string | null; stopped: boolean; summary: string | null }> {
+  ): Promise<{
+    sessionId: string | null
+    stopped: boolean
+    summary: string | null
+    model: string | null
+    effort: string | null
+  }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
     let summary: string | null = null
+    let model: string | null = null
+    let effort: string | null = null
 
     for (let attempt = 1; ; attempt++) {
       const run = await this.runAgent(taskId, sessionId, opts)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
       summary = run.summary
-      if (run.ok) return { sessionId, stopped: false, summary }
+      model = run.model
+      effort = run.effort
+      if (run.ok) return { sessionId, stopped: false, summary, model, effort }
       if (lease.isLost) throw new LeaseLostError(taskId)
 
       if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
         this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
-        return { sessionId, stopped: true, summary }
+        return { sessionId, stopped: true, summary, model, effort }
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
       store.append(taskId, {
