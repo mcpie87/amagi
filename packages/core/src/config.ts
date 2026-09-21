@@ -38,6 +38,11 @@ export const HarnessConfig = z.object({
    * isolation, not a sandbox.
    */
   permissions: z.enum(['workspace-write', 'bypass']).default('workspace-write'),
+  /**
+   * Tool allowlist handed to the harness (claude) in place of the default.
+   * Leave unset to use the harness's own default set.
+   */
+  allowedTools: z.array(z.string()).optional(),
   extraArgs: z.array(z.string()).default([]),
 })
 
@@ -73,6 +78,8 @@ export const Config = z.object({
        */
       definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
+      review: HarnessConfig.prefault({ kind: 'codex' }),
+      triage: HarnessConfig.prefault({ kind: 'claude' }),
     })
     .prefault({}),
   loop: z
@@ -134,6 +141,16 @@ export const Config = z.object({
       maxRetries: z.number().int().min(0).default(3),
       retryBaseMs: z.number().int().min(0).default(10_000),
       retryMaxMs: z.number().int().min(0).default(300_000),
+      /**
+       * Automatic dispatch: while on, the runner polls for the next ready task
+       * and launches it whenever a slot is free, instead of waiting for Run.
+       */
+      autoQueue: z.boolean().default(false),
+      /**
+       * How long the auto-queue waits between polls when nothing is claimable,
+       * so an empty queue does not hammer the tracker.
+       */
+      autoQueueIdleSec: z.number().int().min(1).default(60),
       /**
        * Hard ceiling on how long a task may run, in minutes, counted from
        * first claim and spanning every round and reclaim. 0 disables the

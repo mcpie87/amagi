@@ -7,12 +7,14 @@ import {
   type Notifier,
   type Question,
   type RegistryEntry,
+  Runner,
   type RunServiceApi,
   removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
+  Triage,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
   type WorkerActivity,
@@ -182,6 +184,12 @@ export function createApp({
     }
     return chat
   }
+  // The legacy non-scoped stop route predates the repo registry; it targets the
+  // first registered workspace, which is the default repo for single-repo use.
+  const defaultStore = (): Store | null => {
+    const entry = workspaces.list()[0]
+    return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -348,6 +356,27 @@ export function createApp({
       return c.json(await ws.eligibleEpics())
     })
 
+    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
+      const store = defaultStore()
+      if (store === null) return c.json({ error: 'no repository registered' }, 409)
+      const { id } = c.req.valid('param')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (isTerminal(task.state)) {
+        return c.json({ error: `task ${id} is already in terminal state ${task.state}` }, 409)
+      }
+      // Park the run in `cancelled`; a live runner watches the store, kills
+      // the agent process and unwinds. A crashed runner leaves the task parked
+      // for the operator to reclaim via the restart flow.
+      store.append(id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'cancelled',
+        reason: 'operator interrupt',
+      })
+      return c.json({ task: store.task(id) })
+    })
+
     .post(
       '/api/repos/:repo/epics/close-eligible',
       valid('param', RepoParam),
@@ -504,7 +533,10 @@ export function createApp({
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      return c.json({ maxParallel: ws.config.loop.maxParallel })
+      return c.json({
+        maxParallel: ws.config.loop.maxParallel,
+        autoQueue: ws.config.loop.autoQueue,
+      })
     })
 
     .patch(
@@ -514,14 +546,27 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { maxParallel } = c.req.valid('json')
+        const { maxParallel, autoQueue } = c.req.valid('json')
         // Persist first so a restart keeps the value, then live-apply: the
         // cached workspace config and, when this repo owns the runner, its
-        // capacity. In-flight runs are untouched — capacity gates new launches.
-        writeConfig(ws.root, { loop: { maxParallel } })
-        ws.config.loop.maxParallel = maxParallel
-        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
-        return c.json({ maxParallel })
+        // capacity and automatic dispatch. In-flight runs are untouched, both
+        // gate and poll only affect new launches.
+        const patch: Record<string, unknown> = {}
+        if (maxParallel !== undefined) patch.maxParallel = maxParallel
+        if (autoQueue !== undefined) patch.autoQueue = autoQueue
+        writeConfig(ws.root, { loop: patch })
+        if (maxParallel !== undefined) {
+          ws.config.loop.maxParallel = maxParallel
+          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        }
+        if (autoQueue !== undefined) {
+          ws.config.loop.autoQueue = autoQueue
+          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+        }
+        return c.json({
+          maxParallel: ws.config.loop.maxParallel,
+          autoQueue: ws.config.loop.autoQueue,
+        })
       },
     )
 
@@ -680,6 +725,48 @@ export function createApp({
         return c.json(ws.store.openQuestions(taskId))
       },
     )
+
+    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const runner = new Runner({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.implement),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // A full agent run takes minutes, so the request returns immediately and
+      // the run reports through the repo's own event stream.
+      void runner.runOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
+
+    .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const triage = new Triage({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.triage),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // Triage may hand off to a long implementation run; the request returns
+      // immediately and every decision reports through the repo's event stream.
+      void triage.triageOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 
