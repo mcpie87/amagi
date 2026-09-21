@@ -38,6 +38,11 @@ export const HarnessConfig = z.object({
    * isolation, not a sandbox.
    */
   permissions: z.enum(['workspace-write', 'bypass']).default('workspace-write'),
+  /**
+   * Tool allowlist handed to the harness (claude) in place of the default.
+   * Leave unset to use the harness's own default set.
+   */
+  allowedTools: z.array(z.string()).optional(),
   extraArgs: z.array(z.string()).default([]),
 })
 
@@ -134,6 +139,19 @@ export const Config = z.object({
       maxRetries: z.number().int().min(0).default(3),
       retryBaseMs: z.number().int().min(0).default(10_000),
       retryMaxMs: z.number().int().min(0).default(300_000),
+      /**
+       * Hard ceiling on how long a task may run, in minutes, counted from
+       * first claim and spanning every round and reclaim. 0 disables the
+       * wall-clock budget (the historical unbounded behavior).
+       */
+      maxRunMinutes: z.number().int().min(0).default(0),
+      /**
+       * Hard ceiling on how much a task may spend, in USD, accumulated from
+       * usage cost across every round and reclaim. Harnesses that report no
+       * cost (codex) skip the budget rather than treating cost as zero. 0
+       * disables the cost budget.
+       */
+      maxCostUsd: z.number().min(0).default(0),
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
