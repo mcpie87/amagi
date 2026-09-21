@@ -101,7 +101,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `reviewing` | Review harness runs against the PR | `fixing`, `done` |
 | `fixing` | Implement harness addresses review findings | `awaiting_answer`, `checks`, `reviewing` |
 | `done` | Terminal: task complete | — |
-| `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
+| `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |

@@ -412,14 +412,34 @@ describe('Runner.runOnce', () => {
     )
   })
 
-  test('no_pr falls back to the canned reason when the agent left no summary', async () => {
-    const harness = new FakeHarness([{ outcome: { summary: null } }])
+  test('no_pr asks the agent why when it left no summary and uses that as the reason', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: null } },
+      { outcome: { summary: 'already handled by a sibling task; nothing to do here' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'already handled by a sibling task',
+    )
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('no changes')
+  })
+
+  test('no_pr falls back to the canned reason when there is no session to ask', async () => {
+    const harness = new FakeHarness([{ outcome: { summary: null, sessionId: null } }])
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
     expect(result?.state).toBe('no_pr')
     const stateEvent = store
       .events({ taskId: TASK.id, limit: 999 })
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
     expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
+    expect(harness.calls).toHaveLength(1)
   })
 
   test('a reclaimed task reuses the recorded worktree and branch', async () => {

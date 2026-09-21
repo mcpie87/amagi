@@ -70,6 +70,22 @@ export function answerPrompt(question: string, answer: string): string {
   ].join('\n')
 }
 
+/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
+export function whyNoChangesPrompt(task: TrackerTask): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    'The run ended with no changes in the worktree, so no pull request was opened.',
+    'Explain in a few sentences why no changes were made: was the task already done,',
+    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
+    'the reason no PR was opened, so be concrete.',
+    '',
+    'Do not modify any files; reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  return parts.join('\n')
+}
+
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
