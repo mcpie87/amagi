@@ -92,6 +92,44 @@ const gateListJson = (title: string) => `[
   }
 ]`
 
+/** Recorded from bd 1.3.0 (`bd epic close-eligible --dry-run --json`). */
+const CLOSE_ELIGIBLE_JSON = `[
+  {
+    "epic": {
+      "id": "tst-1",
+      "title": "M4: question channel",
+      "description": "desc",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "epic"
+    },
+    "total_children": 7,
+    "closed_children": 7,
+    "eligible_for_close": true
+  },
+  {
+    "epic": {
+      "id": "tst-2",
+      "title": "M6: review loop",
+      "description": "desc",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "epic"
+    },
+    "total_children": 5,
+    "closed_children": 0,
+    "eligible_for_close": false
+  }
+]`
+
+/** Recorded from bd 1.3.0 (`bd epic close-eligible --reason ... --json`). */
+const EPIC_CLOSE_JSON = `{
+  "closed": ["tst-1"],
+  "count": 1,
+  "reason": "All children completed",
+  "schema_version": 1
+}`
+
 type Call = readonly string[]
 
 function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
@@ -327,5 +365,36 @@ describe('BeadsTracker', () => {
         url: null,
       },
     ])
+  })
+
+  test('eligibleEpics previews only the eligible epics from the dry-run', async () => {
+    const { exec, calls } = fake((c) => (c.includes('epic') ? ok(CLOSE_ELIGIBLE_JSON) : undefined))
+    const epics = await new BeadsTracker({ cwd: '/repo', exec }).eligibleEpics()
+
+    expect(epics).toEqual([
+      {
+        id: 'tst-1',
+        title: 'M4: question channel',
+        status: 'open',
+        totalChildren: 7,
+        closedChildren: 7,
+      },
+    ])
+    expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'epic', 'close-eligible', '--dry-run'])
+    expect(calls[0]).toContain('--json')
+  })
+
+  test('closeEligibleEpics runs the close with the operator reason', async () => {
+    const { exec, calls } = fake((c) => (c.includes('epic') ? ok(EPIC_CLOSE_JSON) : undefined))
+    const result = await new BeadsTracker({ cwd: '/repo', exec }).closeEligibleEpics(
+      'All children completed',
+    )
+
+    expect(result).toEqual({ closed: ['tst-1'], reason: 'All children completed' })
+    const call = calls[0]
+    expect(call?.slice(0, 3)).toEqual(['bd', 'epic', 'close-eligible'])
+    expect(call).toContain('--reason')
+    expect(call).toContain('All children completed')
+    expect(call).toContain('--json')
   })
 })

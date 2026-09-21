@@ -75,6 +75,12 @@ export const CloseTaskBody = z.object({
 })
 export type CloseTaskBody = z.infer<typeof CloseTaskBody>
 
+/** Operator-supplied reason for closing eligible epics. */
+export const EpicCloseBody = z.object({
+  reason: z.string().trim().min(1).max(1000),
+})
+export type EpicCloseBody = z.infer<typeof EpicCloseBody>
+
 export const AnswerBody = z.object({
   answer: z.string().min(1),
   via: z.enum(['web', 'cli', 'gate']).default('web'),

@@ -40,6 +40,21 @@ export type BeadsOptions = {
   actor?: string
 }
 
+/** One epic from `bd epic close-eligible --dry-run`, the preview surface. */
+export type EpicCloseEligible = {
+  id: string
+  title: string
+  status: string
+  totalChildren: number
+  closedChildren: number
+}
+
+/** What `bd epic close-eligible` actually closed. */
+export type EpicCloseResult = {
+  closed: string[]
+  reason: string
+}
+
 /** bd grants a five minute lease on claim and expects heartbeats under that. */
 const LEASE_TTL_MS = 5 * 60_000
 
@@ -261,6 +276,36 @@ export class BeadsTracker implements Tracker {
 
   async resolveGate(ref: GateRef): Promise<void> {
     await this.bd(['gate', 'resolve', ref.id])
+  }
+
+  /** Preview: epics whose children are all complete (bd epic close-eligible --dry-run). */
+  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+    const out = await this.bd(['epic', 'close-eligible', '--dry-run', '--json'])
+    const parsed: unknown = JSON.parse(out)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((e): e is Record<string, unknown> => e !== null && typeof e === 'object')
+      .filter((e) => e.eligible_for_close === true)
+      .map((e) => {
+        const epic = (e.epic ?? {}) as Record<string, unknown>
+        return {
+          id: String(epic.id ?? ''),
+          title: String(epic.title ?? ''),
+          status: String(epic.status ?? ''),
+          totalChildren: Number(e.total_children ?? 0),
+          closedChildren: Number(e.closed_children ?? 0),
+        }
+      })
+  }
+
+  /** Close the eligible epics, recording the operator's reason (bd epic close-eligible --reason). */
+  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+    const out = await this.bd(['epic', 'close-eligible', '--reason', reason, '--json'])
+    const parsed = (JSON.parse(out) ?? {}) as { closed?: unknown; reason?: unknown }
+    return {
+      closed: Array.isArray(parsed.closed) ? parsed.closed.map(String) : [],
+      reason: String(parsed.reason ?? ''),
+    }
   }
 }
 
