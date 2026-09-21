@@ -14,5 +14,8 @@ kind = "beads"
 kind = "github"
 remote = "origin"
 
+# just fresh-check wipes node_modules and reinstalls strictly from bun.lock before
+# rebuilding the dashboard, so a stale node_modules can no longer mask an unresolved
+# import (e.g. the 'marked' failure) until the first dev run after merging.
 [checks]
-commands = ["just check"]
+commands = ["just check", "just fresh-check"]

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { childPids, killTree, processTree } from './process.ts'
+import { childPids, killTree, processTree, processTreeStats } from './process.ts'
 
 const alive = (pid: number): boolean => {
   try {
@@ -49,5 +49,19 @@ describe('process tree', () => {
     const proc = Bun.spawn(['true'], { stdout: 'ignore' })
     await proc.exited
     expect(killTree(proc.pid, { graceMs: 10 })).resolves.toBeDefined()
+  })
+
+  test('processTreeStats sums the whole tree, not just the root', async () => {
+    const proc = Bun.spawn(['sh', '-c', 'sh -c "sleep 30" & sleep 30'], { stdout: 'ignore' })
+    try {
+      await Bun.sleep(200)
+      const stats = await processTreeStats(proc.pid)
+      expect(stats.processes).toBeGreaterThanOrEqual(3)
+      // RSS and CPU time are real on linux (/proc); elsewhere they read as zero.
+      expect(stats.rssBytes).toBeGreaterThanOrEqual(0)
+      expect(stats.cpuMs).toBeGreaterThanOrEqual(0)
+    } finally {
+      await killTree(proc.pid, { graceMs: 50 })
+    }
   })
 })

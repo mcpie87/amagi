@@ -10,6 +10,8 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
+  difficulty?: string | null
 }
 
 /** Opaque handle to whatever the tracker uses to block an issue on a human. */
@@ -25,13 +27,69 @@ export type Question = {
   options: readonly string[]
 }
 
+/**
+ * Which write operations a tracker can perform. The task board hides nothing;
+ * an operation a tracker cannot do surfaces as an explicit 501 rather than a
+ * silent no-op, so the control room knows exactly what a tracker supports.
+ */
+export type TrackerCapabilities = {
+  /** Creating new issues. */
+  create: boolean
+  /** Editing issue fields: title, description, acceptance criteria, priority, labels. */
+  edit: boolean
+  /** Adding and removing dependencies between issues. */
+  dependencies: boolean
+}
+
+export type CreateTrackerTask = {
+  title: string
+  description: string
+  acceptanceCriteria: string | null
+  priority: number | null
+  labels: string[]
+  /** Issue ids this task depends on (blocked by). */
+  dependencies: string[]
+  /** Difficulty level stamped at creation; trackers that cannot store it ignore it. */
+  difficulty?: string | null
+}
+
+export type UpdateTrackerTask = Partial<{
+  title: string
+  description: string
+  acceptanceCriteria: string | null
+  priority: number | null
+  labels: string[]
+  dependencies: { add: string[]; remove: string[] }
+}>
+
+export const CAPABILITY_WORDS: Record<keyof TrackerCapabilities, string> = {
+  create: 'creating issues',
+  edit: 'editing issues',
+  dependencies: 'managing dependencies',
+}
+
+export class UnsupportedCapabilityError extends Error {
+  constructor(
+    readonly capability: keyof TrackerCapabilities,
+    kind: string,
+  ) {
+    super(`${kind} tracker does not support ${CAPABILITY_WORDS[capability]}`)
+    this.name = 'UnsupportedCapabilityError'
+  }
+}
+
 export interface Tracker {
   readonly kind: string
+  readonly capabilities: TrackerCapabilities
 
   ready(limit?: number): Promise<TrackerTask[]>
   /** Atomically take the next ready task, or null when the queue is empty. */
   claim(id?: string): Promise<TrackerTask | null>
   get(id: string): Promise<TrackerTask | null>
+  /** Create an issue, throwing UnsupportedCapabilityError when the tracker cannot. */
+  createTask(input: CreateTrackerTask): Promise<TrackerTask>
+  /** Update an issue, throwing UnsupportedCapabilityError when the tracker cannot. */
+  updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask>
 
   /**
    * Refresh the claim lease. Returns false once the lease is gone, which is
@@ -69,6 +127,7 @@ export type AgentStartOptions = {
 export type AgentUsage = {
   inputTokens: number
   outputTokens: number
+  cachedTokens: number
   costUsd: number | null
 }
 
@@ -99,4 +158,6 @@ export interface Harness {
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess
   /** Models the harness can run, listed the way the harness lists them. */
   listModels(): Promise<string[]>
+  /** Reasoning-effort levels the harness can run (for `model`, when the harness scopes them), or [] when it cannot say. */
+  listEfforts(model?: string): Promise<string[]>
 }
