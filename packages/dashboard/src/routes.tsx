@@ -36,7 +36,8 @@ import {
 import { AgentLogView } from './AgentLogView.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { RunnerProvider, useConnection, useDashboard, useRunner } from './store.tsx'
-import { Icon, type IconName } from './ui.tsx'
+import { setThemePref, type ThemePref, useTheme, useThemePref } from './theme.ts'
+import { EmptyState, Icon, type IconName } from './ui.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
@@ -53,7 +54,7 @@ function ConnectionStatus() {
       ? 'bg-emerald-500'
       : connection === 'reconnecting'
         ? 'bg-amber-500'
-        : 'bg-zinc-500'
+        : 'bg-fg-faint'
   return (
     <span className="connection-status" title="live connection to the amagi server">
       <span className={`connection-dot ${tone}`} />
@@ -167,11 +168,11 @@ function CommandPalette() {
         type="button"
         aria-label="Search workspace"
         onClick={open}
-        className="inline-flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+        className="inline-flex items-center gap-2 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted hover:border-line-strong hover:text-fg"
       >
         <Icon name="search" size={15} />
         <span className="hidden sm:inline">Search workspace</span>
-        <kbd className="hidden rounded border border-zinc-700 px-1 font-mono text-[10px] sm:inline">
+        <kbd className="hidden rounded border border-line-strong px-1 font-mono text-[10px] sm:inline">
           ⌘K
         </kbd>
       </button>
@@ -225,6 +226,68 @@ function CommandPalette() {
   )
 }
 
+type Dependency = {
+  id: string
+  title: string
+  /** Tracker status of the blocker: open/in_progress/blocked/closed. */
+  status: string
+  /** Human-only blockers carry the `human` label and need an operator, not an agent. */
+  labels: string[]
+}
+
+type Issue = {
+  id: string
+  title: string
+  description: string
+  acceptanceCriteria: string | null
+  status: 'open' | 'in_progress' | 'blocked' | 'closed'
+  priority: number | null
+  type: string | null
+  assignee: string | null
+  labels: string[]
+  parent: string | null
+  dependencies: Dependency[]
+}
+
+const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
+
+const columnHeader: Record<Issue['status'], string> = {
+  open: 'Open',
+  in_progress: 'In progress',
+  blocked: 'Blocked',
+  closed: 'Closed',
+}
+
+const columnDot: Record<Issue['status'], string> = {
+  open: 'bg-fg-faint',
+  in_progress: 'bg-blue-500',
+  blocked: 'bg-red-500',
+  closed: 'bg-emerald-500',
+}
+
+/** Shared pill shape; the tone supplies the tint, text and ring. */
+const PILL = 'inline-block shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset'
+
+const stateBadge: Record<TaskState, string> = {
+  claimed: 'bg-neutral-soft text-fg ring-neutral-edge',
+  worktree_ready: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  implementing: 'bg-blue-soft text-blue-ink ring-blue-edge',
+  awaiting_answer: 'bg-amber-soft text-amber-ink ring-amber-edge',
+  checks: 'bg-violet-soft text-violet-ink ring-violet-edge',
+  committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
+  retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
+  pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
+  no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
+  needs_human: 'bg-red-soft text-red-ink ring-red-edge',
+  abandoned: 'bg-neutral-soft text-fg-faint ring-neutral-edge',
+  cancelled: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
+}
+
+function Badge({ state }: { state: TaskState }) {
+  return <span className={`${PILL} ${stateBadge[state]}`}>{state}</span>
+}
+
 const NAV_ITEMS: {
   to: '/' | '/issues' | '/inbox' | '/activity' | '/sessions' | '/settings'
   label: string
@@ -246,7 +309,7 @@ function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => 
           <Link to="/" onClick={onNavigate} className="text-lg font-semibold tracking-tight">
             amagi
           </Link>
-          <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-400">
+          <span className="rounded bg-raised px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted">
             control room
           </span>
         </div>
@@ -306,7 +369,7 @@ function RootLayout() {
           <Sidebar navOpen={navOpen} onNavigate={() => setNavOpen(false)} />
         </div>
         <div className="workspace" inert={navOpen}>
-          <header className="border-b border-zinc-800 px-4 py-3 sm:px-6">
+          <header className="app-header border-b border-line px-4 py-3 sm:px-6">
             <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
               <button
                 ref={openButtonRef}
@@ -334,19 +397,15 @@ function RootLayout() {
 }
 
 function IssueBadge({ issue }: { issue: Issue }) {
-  const color =
+  const tone =
     issue.status === 'closed'
-      ? 'bg-emerald-600'
+      ? 'bg-emerald-soft text-emerald-ink ring-emerald-edge'
       : issue.status === 'blocked'
-        ? 'bg-red-600'
+        ? 'bg-red-soft text-red-ink ring-red-edge'
         : issue.status === 'in_progress'
-          ? 'bg-blue-600'
-          : 'bg-zinc-600'
-  return (
-    <span className={`rounded px-2 py-0.5 text-xs font-medium text-white ${color}`}>
-      {issue.status}
-    </span>
-  )
+          ? 'bg-blue-soft text-blue-ink ring-blue-edge'
+          : 'bg-neutral-soft text-fg ring-neutral-edge'
+  return <span className={`${PILL} ${tone}`}>{issue.status}</span>
 }
 
 type IssuesViewMode = 'kanban' | 'list'
@@ -415,14 +474,15 @@ function IssueFormModal({
     }
   }
 
-  const input = 'w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm text-zinc-100'
-  const label = 'mb-1 block text-sm text-zinc-400'
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <form
         onSubmit={submit}
-        className="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-900 p-4"
+        className="w-full max-w-lg rounded-lg border border-line-strong bg-surface p-4"
       >
         <h2 className="mb-3 text-lg font-semibold">
           {mode === 'create' ? 'New task' : `Edit ${initial?.id ?? ''}`}
@@ -508,88 +568,25 @@ function IssueFormModal({
             <p className={label}>The task waits on these issues before it can run.</p>
           </div>
         </div>
-        {error !== null && <p className="mt-3 text-sm text-red-400">{error}</p>}
+        {error !== null && <p className="mt-3 text-sm text-red-ink">{error}</p>}
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+            className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={busy || title.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
           >
             {mode === 'create' ? 'Create task' : 'Save changes'}
           </button>
         </div>
       </form>
     </div>
-  )
-}
-
-type Issue = {
-  id: string
-  title: string
-  description: string
-  status: 'open' | 'in_progress' | 'blocked' | 'closed'
-  priority: number | null
-  type: string | null
-  assignee: string | null
-  labels: string[]
-  parent: string | null
-  acceptanceCriteria: string | null
-  dependencies: Dependency[]
-}
-
-type Dependency = {
-  id: string
-  title: string
-  status: string
-  labels: string[]
-}
-
-const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
-
-const columnHeader: Record<Issue['status'], string> = {
-  open: 'Open',
-  in_progress: 'In progress',
-  blocked: 'Blocked',
-  closed: 'Closed',
-}
-
-const columnColor: Record<Issue['status'], string> = {
-  open: 'bg-zinc-600',
-  in_progress: 'bg-blue-600',
-  blocked: 'bg-red-600',
-  closed: 'bg-emerald-600',
-}
-
-const stateBadge: Record<TaskState, string> = {
-  claimed: 'bg-zinc-500',
-  worktree_ready: 'bg-sky-600',
-  implementing: 'bg-blue-600',
-  awaiting_answer: 'bg-amber-500',
-  checks: 'bg-violet-600',
-  committed: 'bg-cyan-600',
-  retrying: 'bg-orange-500',
-  pr_open: 'bg-sky-600',
-  done: 'bg-emerald-600',
-  no_pr: 'bg-zinc-600',
-  needs_human: 'bg-red-600',
-  abandoned: 'bg-zinc-700',
-  cancelled: 'bg-zinc-600',
-}
-
-function Badge({ state }: { state: TaskState }) {
-  return (
-    <span
-      className={`inline-block rounded px-2 py-0.5 text-xs font-medium text-white ${stateBadge[state]}`}
-    >
-      {state}
-    </span>
   )
 }
 
@@ -655,7 +652,7 @@ function IssuesView() {
         <button
           type="button"
           onClick={() => setSelectedIssue(null)}
-          className="text-sm text-sky-400 hover:underline"
+          className="text-sm text-sky-ink hover:underline"
         >
           &larr; tasks
         </button>
@@ -665,16 +662,16 @@ function IssuesView() {
           <button
             type="button"
             onClick={() => setForm({ mode: 'edit', issue: selectedIssue })}
-            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+            className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
           >
             Edit
           </button>
         </div>
-        <p className="mt-1 text-sm text-zinc-500">
+        <p className="mt-1 text-sm text-fg-faint">
           {selectedIssue.id}
           {selectedIssue.parent ? ` · child of ${selectedIssue.parent}` : ''}
         </p>
-        <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+        <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
           <DetailRow
             label="priority"
             value={selectedIssue.priority === null ? null : `P${selectedIssue.priority}`}
@@ -685,19 +682,19 @@ function IssuesView() {
         </dl>
         <Blockers issue={selectedIssue} />
         <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Description
           </h2>
-          <p className="whitespace-pre-wrap text-zinc-300">
+          <p className="whitespace-pre-wrap text-fg">
             {selectedIssue.description || 'No description.'}
           </p>
         </div>
         {selectedIssue.acceptanceCriteria !== null && (
           <div className="mt-6">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
               Acceptance criteria
             </h2>
-            <p className="whitespace-pre-wrap text-zinc-300">{selectedIssue.acceptanceCriteria}</p>
+            <p className="whitespace-pre-wrap text-fg">{selectedIssue.acceptanceCriteria}</p>
           </div>
         )}
         {form !== null && (
@@ -721,21 +718,21 @@ function IssuesView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search tasks…"
-            className="w-52 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-600 focus:outline-none"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
           />
-          <span className="text-sm text-zinc-500">
+          <span className="text-sm text-fg-faint">
             {searched.length} {searched.length === 1 ? 'task' : 'tasks'}
             {status !== 'all' && ` · ${filtered.length} shown`}
           </span>
-          <div className="flex rounded-lg border border-zinc-700 p-0.5">
+          <div className="flex rounded-lg border border-line-strong p-0.5">
             <button
               type="button"
               aria-label="Board view"
               onClick={() => setMode('kanban')}
               className={`rounded px-2 py-1 text-sm ${
                 view === 'kanban'
-                  ? 'bg-zinc-700 text-zinc-100'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'bg-raised-strong text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
               }`}
             >
               Board
@@ -745,7 +742,7 @@ function IssuesView() {
               aria-label="List view"
               onClick={() => setMode('list')}
               className={`rounded px-2 py-1 text-sm ${
-                view === 'list' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'
+                view === 'list' ? 'bg-raised-strong text-fg-strong' : 'text-fg-muted hover:text-fg'
               }`}
             >
               List
@@ -754,7 +751,7 @@ function IssuesView() {
           <select
             value={status}
             onChange={(event) => setStatus(event.target.value as typeof status)}
-            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm"
+            className="rounded border border-line-strong bg-surface px-2 py-1 text-sm"
           >
             <option value="all">All statuses</option>
             <option value="open">Open</option>
@@ -765,14 +762,14 @@ function IssuesView() {
           <button
             type="button"
             onClick={() => setForm({ mode: 'create' })}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
           >
             New task
           </button>
         </div>
       </div>
       {error !== null ? (
-        <p className="text-red-400">{error}</p>
+        <p className="text-red-ink">{error}</p>
       ) : view === 'kanban' ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {ISSUE_STATES.map((state) => {
@@ -781,15 +778,18 @@ function IssuesView() {
             return (
               <div
                 key={state}
-                className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
+                className="flex min-w-0 flex-col rounded-lg border border-line bg-surface"
               >
-                <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
-                  <span
-                    className={`truncate rounded px-2 py-0.5 text-xs font-medium text-white ${columnColor[state]}`}
-                  >
-                    {columnHeader[state]}
+                <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${columnDot[state]}`} />
+                    <span className="truncate text-xs font-medium uppercase tracking-wide text-fg">
+                      {columnHeader[state]}
+                    </span>
                   </span>
-                  <span className="text-xs text-zinc-500">{columnIssues.length}</span>
+                  <span className="rounded bg-raised px-1.5 text-xs tabular-nums text-fg-muted">
+                    {columnIssues.length}
+                  </span>
                 </div>
                 <ul className="flex flex-col gap-2 p-2">
                   {columnIssues.map((issue) => (
@@ -797,13 +797,13 @@ function IssuesView() {
                       <button
                         type="button"
                         onClick={() => setSelectedIssue(issue)}
-                        className="issue-card w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-left hover:bg-zinc-800"
+                        className="issue-card w-full rounded border border-line bg-sunken px-3 py-2 text-left hover:bg-raised"
                       >
-                        <span className="block text-xs text-zinc-500">{issue.id}</span>
+                        <span className="block text-xs text-fg-faint">{issue.id}</span>
                         <span className="mt-0.5 block break-words font-medium leading-snug">
                           {issue.title}
                         </span>
-                        <span className="mt-1 block text-xs text-zinc-500">
+                        <span className="mt-1 block text-xs text-fg-faint">
                           {[issue.priority === null ? null : `P${issue.priority}`, issue.type]
                             .filter(Boolean)
                             .join(' · ') || '\u00a0'}
@@ -812,7 +812,7 @@ function IssuesView() {
                     </li>
                   ))}
                   {columnIssues.length === 0 && (
-                    <li className="px-1 py-2 text-xs text-zinc-600">No tasks.</li>
+                    <li className="px-1 py-2 text-xs text-fg-dim">No tasks.</li>
                   )}
                 </ul>
               </div>
@@ -820,18 +820,18 @@ function IssuesView() {
           })}
         </div>
       ) : (
-        <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {searched.map((issue) => (
             <li key={issue.id}>
               <button
                 type="button"
                 onClick={() => setSelectedIssue(issue)}
-                className="issue-list-row flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800"
+                className="issue-list-row flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
               >
                 <IssueBadge issue={issue} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{issue.title}</span>
-                  <span className="block truncate text-xs text-zinc-500">
+                  <span className="block truncate text-xs text-fg-faint">
                     {issue.id}
                     {issue.priority === null ? '' : ` · P${issue.priority}`}
                     {issue.type === null ? '' : ` · ${issue.type}`}
@@ -841,7 +841,7 @@ function IssuesView() {
             </li>
           ))}
           {searched.length === 0 && (
-            <li className="px-4 py-6 text-center text-sm text-zinc-500">
+            <li className="px-4 py-6 text-center text-sm text-fg-faint">
               No tasks match "{search}".
             </li>
           )}
@@ -874,12 +874,12 @@ function RunButton() {
 
   return (
     <div className="flex items-center gap-2">
-      {message !== null && <span className="text-sm text-zinc-400">{message}</span>}
+      {message !== null && <span className="text-sm text-fg-muted">{message}</span>}
       <button
         type="button"
         disabled={busy}
         onClick={() => void run()}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
         Run next
       </button>
@@ -895,7 +895,7 @@ function LastLogLine({ taskId }: { taskId: string }) {
   )
   const line = agentLogStore.get(taskId).at(-1)
   if (line === undefined || line.text === '') return null
-  return <p className="mt-2 truncate font-mono text-xs text-zinc-400">{line.text}</p>
+  return <p className="mt-2 truncate font-mono text-xs text-fg-muted">{line.text}</p>
 }
 
 function WorkerSlot({
@@ -909,7 +909,7 @@ function WorkerSlot({
 }) {
   if (taskId === null) {
     return (
-      <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/40 px-4 py-2 text-sm text-zinc-600">
+      <div className="rounded-lg border border-dashed border-line bg-surface/40 px-4 py-2 text-sm text-fg-dim">
         free slot
       </div>
     )
@@ -917,22 +917,20 @@ function WorkerSlot({
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
   return (
-    <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3">
+    <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
-          busy
-        </span>
+        <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
           className="flex min-w-0 items-baseline gap-x-3 hover:underline"
         >
           <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
-          <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+          <span className="text-xs text-fg-faint">{task?.id ?? taskId}</span>
         </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
         <span>model: {agent?.model ?? 'unknown'}</span>
         {resource !== undefined && (
@@ -975,11 +973,11 @@ function WorkersPanel() {
   )
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
         Workers ({running.length}/{status.capacity})
       </h2>
-      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs text-zinc-400">
-        <span className="font-medium text-zinc-200">{status.name}</span>
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-4 py-2 text-xs text-fg-muted">
+        <span className="font-medium text-fg">{status.name}</span>
         <span>rss: {fmtBytes(total.rssBytes)}</span>
         <span>cpu: {fmtCpu(total.cpuMs)}</span>
         <span>procs: {total.processes}</span>
@@ -999,12 +997,10 @@ function WorkersPanel() {
           {status.workers.map((w) => (
             <div
               key={w.name}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2 text-xs text-zinc-400"
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-xs text-fg-muted"
             >
-              <span className="shrink-0 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white">
-                {w.name}
-              </span>
-              <span className="font-medium text-zinc-200">{w.repo}</span>
+              <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>{w.name}</span>
+              <span className="font-medium text-fg">{w.repo}</span>
               <span>last run: {fmtLastRun(w.lastRunAt)}</span>
               {w.error === null ? (
                 w.detail !== null && w.detail !== undefined ? (
@@ -1015,7 +1011,7 @@ function WorkersPanel() {
                   </span>
                 )
               ) : (
-                <span className="text-red-400">error: {w.error}</span>
+                <span className="text-red-ink">error: {w.error}</span>
               )}
             </div>
           ))}
@@ -1025,19 +1021,18 @@ function WorkersPanel() {
   )
 }
 
+const metricTone = {
+  red: { box: 'border-red-edge bg-red-soft', value: 'text-red-ink' },
+  amber: { box: 'border-amber-edge bg-amber-soft', value: 'text-amber-ink' },
+  none: { box: 'border-line bg-surface', value: 'text-fg-strong' },
+} as const
+
 function Metric({ label, value, tone }: { label: string; value: string; tone?: 'red' | 'amber' }) {
+  const t = metricTone[tone ?? 'none']
   return (
-    <div
-      className={`metric rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 ${
-        tone === 'red' ? 'border-red-900/60' : tone === 'amber' ? 'border-amber-800/60' : ''
-      }`}
-    >
-      <div className="text-xs text-zinc-500">{label}</div>
-      <div
-        className={`mt-1 text-2xl font-semibold tabular-nums ${tone !== undefined ? 'text-zinc-100' : ''}`}
-      >
-        {value}
-      </div>
+    <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-fg-faint">{label}</div>
+      <div className={`mt-1 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
     </div>
   )
 }
@@ -1063,7 +1058,7 @@ function OverviewView() {
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Overview</h1>
-          <p className="text-sm text-zinc-500">Live runs, capacity and anything that needs you.</p>
+          <p className="text-sm text-fg-faint">Live runs, capacity and anything that needs you.</p>
         </div>
         <div className="flex items-center gap-3">
           <input
@@ -1071,7 +1066,7 @@ function OverviewView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search runs…"
-            className="w-52 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-600 focus:outline-none"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
           />
           <RunButton />
         </div>
@@ -1096,7 +1091,7 @@ function OverviewView() {
 
       {attention.length > 0 && (
         <section className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-ink">
             Needs attention ({attention.length})
           </h2>
           <RunList
@@ -1109,17 +1104,19 @@ function OverviewView() {
       )}
 
       <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
           Runs ({visible.length})
         </h2>
-        <Link to="/activity" className="text-sm text-sky-400 hover:underline">
+        <Link to="/activity" className="text-sm text-sky-ink hover:underline">
           activity feed &rarr;
         </Link>
       </div>
       {visible.length === 0 ? (
-        <p className="text-zinc-500">
-          {q === '' ? 'No active runs.' : 'No runs match that search.'}
-        </p>
+        <EmptyState icon="runs" title={q === '' ? 'No active runs' : 'No matching runs'}>
+          {q === ''
+            ? 'Claim the next ready issue with Run next, and it will show up here.'
+            : `Nothing in the queue matches "${search}".`}
+        </EmptyState>
       ) : (
         <RunList tasks={visible} showReason={false} />
       )}
@@ -1139,20 +1136,20 @@ function RunList({
   rowClass?: string
 }) {
   return (
-    <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+    <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
       {tasks.map((task) => (
         <li key={task.id} className={`${rowClass} flex items-center`}>
           <Link
             to="/tasks/$id"
             params={{ id: task.id }}
-            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-raised"
           >
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
               <span className="block truncate font-medium">{task.title}</span>
-              <span className="block truncate text-xs text-zinc-500">{task.id}</span>
+              <span className="block truncate text-xs text-fg-faint">{task.id}</span>
               {showReason && task.statusReason !== null && (
-                <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
+                <span className="block truncate text-xs text-fg-muted">{task.statusReason}</span>
               )}
             </span>
           </Link>
@@ -1167,7 +1164,7 @@ function DetailRow({ label, value }: { label: string; value: string | ReactNode 
   if (value === null) return null
   return (
     <div className="flex gap-2 py-1">
-      <dt className="w-28 shrink-0 text-zinc-500">{label}</dt>
+      <dt className="w-28 shrink-0 text-fg-faint">{label}</dt>
       <dd className="min-w-0 break-all">{value}</dd>
     </div>
   )
@@ -1184,27 +1181,29 @@ function Blockers({ issue }: { issue: Issue }) {
     <div>
       <h3
         className={`mb-1 text-xs font-semibold uppercase tracking-wide ${
-          tone === 'red' ? 'text-red-300' : 'text-amber-300'
+          tone === 'red' ? 'text-red-ink' : 'text-amber-ink'
         }`}
       >
         {title} ({items.length})
       </h3>
       <ul
         className={`rounded-lg border px-3 py-1 ${
-          tone === 'red' ? 'border-red-900/60 bg-red-950/20' : 'border-amber-800 bg-amber-950/20'
+          tone === 'red' ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
         }`}
       >
         {items.map((d) => (
           <li key={d.id} className="flex items-center gap-2 py-1 text-sm">
             <span
               className={`rounded px-1.5 py-0.5 text-xs ${
-                tone === 'red' ? 'bg-red-900/60 text-red-200' : 'bg-amber-900/60 text-amber-200'
+                tone === 'red'
+                  ? 'bg-red-soft-hover text-red-ink'
+                  : 'bg-amber-soft-hover text-amber-ink'
               }`}
             >
               {d.status}
             </span>
-            <span className="shrink-0 text-zinc-500">{d.id}</span>
-            <span className="min-w-0 truncate text-zinc-200">{d.title}</span>
+            <span className="shrink-0 text-fg-faint">{d.id}</span>
+            <span className="min-w-0 truncate text-fg">{d.title}</span>
           </li>
         ))}
       </ul>
@@ -1213,10 +1212,10 @@ function Blockers({ issue }: { issue: Issue }) {
 
   return (
     <div className="mt-6">
-      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-red-400">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-red-ink">
         Blocked by
       </h2>
-      <p className="mb-2 text-sm text-zinc-500">
+      <p className="mb-2 text-sm text-fg-faint">
         This task cannot run until every blocker is resolved.
       </p>
       <div className="space-y-3">
@@ -1250,7 +1249,7 @@ function PrLink({ url }: { url: string }) {
       href={url}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-1.5 text-sky-400 hover:underline"
+      className="inline-flex items-center gap-1.5 text-sky-ink hover:underline"
     >
       {isGithub ? <GithubIcon className="h-4 w-4" /> : <ForgejoIcon className="h-4 w-4" />}
       {url}
@@ -1305,11 +1304,11 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
   }
 
   if (token === null) {
-    return <p className="mt-2 text-sm text-zinc-500">answer box unavailable</p>
+    return <p className="mt-2 text-sm text-fg-faint">answer box unavailable</p>
   }
 
   if (submitted) {
-    return <p className="mt-2 text-sm text-emerald-400">answered</p>
+    return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   return (
@@ -1322,7 +1321,7 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
               type="button"
               disabled={busy}
               onClick={() => void send(option)}
-              className="rounded border border-amber-700 bg-amber-900/40 px-3 py-1 text-sm hover:bg-amber-800 disabled:opacity-50"
+              className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm hover:bg-amber-soft-hover disabled:opacity-50"
             >
               {option}
             </button>
@@ -1334,17 +1333,17 @@ function AnswerBox({ taskId, question }: { taskId: string; question: QuestionVie
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="answer"
-          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm"
+          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm"
         />
         <button
           type="submit"
           disabled={busy || text.trim() === ''}
-          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-zinc-950 disabled:opacity-50"
+          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           Answer
         </button>
       </form>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1383,11 +1382,11 @@ function ReclaimButton({
         type="button"
         disabled={busy}
         onClick={() => void reclaim()}
-        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Reclaim
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1439,13 +1438,13 @@ function CloseButton({
         onClick={() => void close()}
         className={
           target === 'done'
-            ? 'rounded border border-green-800 bg-green-950/40 px-3 py-1 text-sm text-green-300 hover:bg-green-900 disabled:opacity-50'
-            : 'rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50'
+            ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
+            : 'rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50'
         }
       >
         {target === 'done' ? 'Mark done' : 'Close'}
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1502,11 +1501,11 @@ function RetryButton({
         type="button"
         disabled={busy}
         onClick={() => void retry()}
-        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Retry
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1574,18 +1573,18 @@ function RequeueButton({
         type="button"
         disabled={busy}
         onClick={() => void requeue()}
-        className="rounded border border-amber-700 bg-amber-950/40 px-3 py-1 text-sm text-amber-300 hover:bg-amber-900 disabled:opacity-50"
+        className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
       >
         Requeue
       </button>
       <p
-        className="mt-1 text-right text-xs text-zinc-500"
+        className="mt-1 text-right text-xs text-fg-faint"
         title="whether the runner can pick up a requeued task"
       >
         runner: {availability}
       </p>
       {result !== null && (
-        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
           {result.text}
         </p>
       )}
@@ -1714,18 +1713,18 @@ function TaskIssueDetails({ issueId }: { issueId: string }) {
       <button
         type="button"
         onClick={toggle}
-        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
       >
         {open ? 'hide issue details' : 'show issue details'}
       </button>
       {open &&
         (error !== null ? (
-          <p className="mt-3 text-sm text-red-400">{error}</p>
+          <p className="mt-3 text-sm text-red-ink">{error}</p>
         ) : issue === null ? (
-          <p className="mt-3 text-sm text-zinc-500">loading issue...</p>
+          <p className="mt-3 text-sm text-fg-faint">loading issue...</p>
         ) : (
           <div className="mt-3">
-            <dl className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+            <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
                 value={issue.priority === null ? null : `P${issue.priority}`}
@@ -1737,19 +1736,19 @@ function TaskIssueDetails({ issueId }: { issueId: string }) {
             </dl>
             <Blockers issue={issue} />
             <div className="mt-6">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
                 Description
               </h2>
-              <p className="whitespace-pre-wrap text-zinc-300">
+              <p className="whitespace-pre-wrap text-fg">
                 {issue.description || 'No description.'}
               </p>
             </div>
             {issue.acceptanceCriteria !== null && (
               <div className="mt-6">
-                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
                   Acceptance criteria
                 </h2>
-                <p className="whitespace-pre-wrap text-zinc-300">{issue.acceptanceCriteria}</p>
+                <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
               </div>
             )}
           </div>
@@ -1767,12 +1766,12 @@ function SummaryPanel({ task }: { task: TaskView }) {
   return (
     <div
       className={`mt-6 rounded-lg border px-4 py-3 ${
-        needsHuman ? 'border-red-700 bg-red-950/40' : 'border-amber-700 bg-amber-950/40'
+        needsHuman ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
       }`}
     >
       <h2
         className={`text-sm font-semibold uppercase tracking-wide ${
-          needsHuman ? 'text-red-300' : 'text-amber-300'
+          needsHuman ? 'text-red-ink' : 'text-amber-ink'
         }`}
       >
         {needsHuman ? 'Needs human attention' : 'Summary'}
@@ -1818,24 +1817,24 @@ function ChatPanel({ taskId }: { taskId: string }) {
   }
 
   return (
-    <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+    <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
         Chat with worker
       </h2>
       <div
         ref={scrollRef}
-        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3"
+        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-line bg-sunken p-3"
       >
         {messages.length === 0 && (
-          <p className="text-sm text-zinc-500">Ask the worker about why there is no PR.</p>
+          <p className="text-sm text-fg-faint">Ask the worker about why there is no PR.</p>
         )}
         {messages.map((m) => (
           <div
             key={m.id}
             className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
               m.role === 'user'
-                ? 'ml-auto bg-sky-600 text-zinc-950'
-                : 'mr-auto border border-zinc-700 bg-zinc-800 text-zinc-200'
+                ? 'ml-auto bg-sky-600 text-on-solid'
+                : 'mr-auto border border-line-strong bg-raised text-fg'
             }`}
           >
             {m.role === 'user'
@@ -1852,17 +1851,17 @@ function ChatPanel({ taskId }: { taskId: string }) {
           onChange={(e) => setText(e.target.value)}
           disabled={responding}
           placeholder={responding ? 'worker is responding...' : 'ask the worker'}
-          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm disabled:opacity-50"
+          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
         />
         <button
           type="submit"
           disabled={responding || text.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
         >
           Send
         </button>
       </form>
-      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
 }
@@ -1892,10 +1891,10 @@ function TaskDetailView() {
   if (!task) {
     return (
       <section>
-        <Link to="/" className="text-sm text-sky-400 hover:underline">
+        <Link to="/" className="text-sm text-sky-ink hover:underline">
           &larr; overview
         </Link>
-        <p className="mt-4 text-zinc-500">No events yet for {id}.</p>
+        <p className="mt-4 text-fg-faint">No events yet for {id}.</p>
       </section>
     )
   }
@@ -1909,7 +1908,7 @@ function TaskDetailView() {
 
   return (
     <section>
-      <Link to="/" className="text-sm text-sky-400 hover:underline">
+      <Link to="/" className="text-sm text-sky-ink hover:underline">
         &larr; overview
       </Link>
       <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -1921,7 +1920,7 @@ function TaskDetailView() {
         <CloseButtons taskId={task.id} state={task.state} />
         <StopButton taskId={task.id} />
       </div>
-      <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
+      <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
 
       <SummaryPanel task={task} />
 
@@ -1930,7 +1929,7 @@ function TaskDetailView() {
         task.sessionId !== null &&
         task.worktree !== null && <ChatPanel taskId={task.id} />}
 
-      <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+      <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow
           label="agent"
@@ -1956,7 +1955,7 @@ function TaskDetailView() {
 
       <div className="mt-6">
         {tabs.length > 1 && (
-          <div className="detail-tabs mb-3 flex gap-1 border-b border-zinc-800">
+          <div className="detail-tabs mb-3 flex gap-1 border-b border-line">
             {tabs.map((t) => (
               <button
                 key={t.key}
@@ -1964,8 +1963,8 @@ function TaskDetailView() {
                 onClick={() => setTab(t.key)}
                 className={`rounded-t px-3 py-1.5 text-sm ${
                   tab === t.key
-                    ? 'border-b-2 border-sky-500 text-zinc-100'
-                    : 'text-zinc-400 hover:text-zinc-200'
+                    ? 'border-b-2 border-sky-500 text-fg-strong'
+                    : 'text-fg-muted hover:text-fg'
                 }`}
               >
                 {t.label}
@@ -1979,16 +1978,16 @@ function TaskDetailView() {
             {task.checks.map((c) => (
               <li
                 key={c.command}
-                className="check-result rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3"
+                className="check-result rounded-lg border border-line bg-surface px-4 py-3"
               >
                 <p className="font-mono text-sm">
-                  <span className={c.exitCode === 0 ? 'text-emerald-400' : 'text-red-400'}>
+                  <span className={c.exitCode === 0 ? 'text-emerald-ink' : 'text-red-ink'}>
                     exit {c.exitCode}
                   </span>{' '}
                   {c.command}
                 </p>
                 {c.output !== '' && (
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-xs text-zinc-400">
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-sunken p-2 font-mono text-xs text-fg-muted">
                     {c.output}
                   </pre>
                 )}
@@ -2000,14 +1999,14 @@ function TaskDetailView() {
 
       {questions.length > 0 && (
         <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Questions
           </h2>
           <ul className="space-y-2">
             {questions.map((q) => (
               <li
                 key={q.id}
-                className="rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3"
+                className="rounded-lg border border-amber-edge bg-amber-soft px-4 py-3"
               >
                 <p className="font-medium">{q.question}</p>
                 <AnswerBox taskId={id} question={q} />
@@ -2031,7 +2030,7 @@ function InboxView() {
     <section>
       <div className="mb-5">
         <h1 className="text-xl font-semibold">Inbox</h1>
-        <p className="text-sm text-zinc-500">
+        <p className="text-sm text-fg-faint">
           {questions.length > 0 || attention.length > 0
             ? 'Things that need a human.'
             : 'Nothing needs you right now.'}
@@ -2040,7 +2039,7 @@ function InboxView() {
 
       {questions.length > 0 && (
         <div className="mb-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
             Questions ({questions.length})
           </h2>
           <ul className="space-y-2">
@@ -2049,14 +2048,14 @@ function InboxView() {
               return (
                 <li
                   key={q.id}
-                  className="question-card rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3"
+                  className="question-card rounded-lg border border-amber-edge bg-amber-soft px-4 py-3"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <Link
                         to="/tasks/$id"
                         params={{ id: q.taskId }}
-                        className="block truncate text-xs text-zinc-400 hover:text-zinc-200 hover:underline"
+                        className="block truncate text-xs text-fg-muted hover:text-fg hover:underline"
                       >
                         {task?.title ?? q.taskId} · {q.taskId}
                       </Link>
@@ -2073,7 +2072,7 @@ function InboxView() {
 
       {attention.length > 0 && (
         <div>
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-ink">
             Needs attention ({attention.length})
           </h2>
           <RunList
@@ -2086,7 +2085,9 @@ function InboxView() {
       )}
 
       {questions.length === 0 && attention.length === 0 && (
-        <p className="text-zinc-500">All clear.</p>
+        <EmptyState icon="check" title="All clear">
+          No open questions and no task waiting on a human.
+        </EmptyState>
       )}
     </section>
   )
@@ -2304,10 +2305,10 @@ function activityItems(state: DashboardState): ActivityItem[] {
 }
 
 const activityTone: Record<ActivityItem['tone'], string> = {
-  normal: 'text-zinc-400',
-  red: 'text-red-400',
-  amber: 'text-amber-400',
-  green: 'text-emerald-400',
+  normal: 'text-fg-muted',
+  red: 'text-red-ink',
+  amber: 'text-amber-ink',
+  green: 'text-emerald-ink',
 }
 
 function ActivityView() {
@@ -2317,12 +2318,14 @@ function ActivityView() {
     <section>
       <div className="mb-5">
         <h1 className="text-xl font-semibold">Activity</h1>
-        <p className="text-sm text-zinc-500">Everything that happened across runs, newest first.</p>
+        <p className="text-sm text-fg-faint">Everything that happened across runs, newest first.</p>
       </div>
       {items.length === 0 ? (
-        <p className="text-zinc-500">No activity yet.</p>
+        <EmptyState icon="activity" title="No activity yet">
+          Claims, state changes, checks, commits and pull requests land here as runs progress.
+        </EmptyState>
       ) : (
-        <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {items.map((item) => {
             const inner = (
               <span className="flex min-w-0 flex-1 items-center gap-3">
@@ -2332,10 +2335,10 @@ function ActivityView() {
                 <span className="min-w-0 flex-1 truncate">
                   {item.text}
                   {item.taskId !== null && (
-                    <span className="text-zinc-500">{` · ${item.taskId}`}</span>
+                    <span className="text-fg-faint">{` · ${item.taskId}`}</span>
                   )}
                 </span>
-                <span className="shrink-0 text-xs tabular-nums text-zinc-500">
+                <span className="shrink-0 text-xs tabular-nums text-fg-faint">
                   {fmtAgo(item.ts)}
                 </span>
               </span>
@@ -2346,7 +2349,7 @@ function ActivityView() {
                   <Link
                     to="/tasks/$id"
                     params={{ id: item.taskId }}
-                    className="flex w-full items-center hover:bg-zinc-800"
+                    className="flex w-full items-center hover:bg-raised"
                   >
                     {inner}
                   </Link>
@@ -2359,6 +2362,44 @@ function ActivityView() {
         </ul>
       )}
     </section>
+  )
+}
+
+const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+]
+
+function Appearance() {
+  const pref = useThemePref()
+  const theme = useTheme()
+
+  return (
+    <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+      <h2 className="mb-1 text-sm text-fg-muted">Theme</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Stored in this browser only.
+        {pref === 'system' ? ` System follows your OS appearance, currently ${theme}.` : ''}
+      </p>
+      <div className="inline-flex gap-1 rounded border border-line-strong p-1">
+        {THEME_OPTIONS.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={pref === option.value}
+            onClick={() => setThemePref(option.value)}
+            className={`rounded px-3 py-1 text-sm ${
+              pref === option.value
+                ? 'bg-raised text-fg-strong'
+                : 'text-fg-muted hover:bg-raised hover:text-fg'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -2415,11 +2456,12 @@ function SettingsView() {
   return (
     <section className="max-w-xl">
       <h1 className="text-xl font-semibold">Settings</h1>
-      <form onSubmit={save} className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-        <label htmlFor="max-workers" className="mb-1 block text-sm text-zinc-400">
+      <Appearance />
+      <form onSubmit={save} className="mt-6 rounded-lg border border-line bg-surface p-4">
+        <label htmlFor="max-workers" className="mb-1 block text-sm text-fg-muted">
           Concurrent workers
         </label>
-        <p className="mb-3 text-sm text-zinc-500">
+        <p className="mb-3 text-sm text-fg-faint">
           How many tasks run at once. Applied live; in-flight runs are unaffected.
         </p>
         <div className="flex items-center gap-2">
@@ -2432,19 +2474,19 @@ function SettingsView() {
             value={value}
             disabled={!loaded}
             onChange={(e) => setValue(e.target.value)}
-            className="w-28 rounded border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm"
+            className="w-28 rounded border border-line-strong bg-sunken px-3 py-1.5 text-sm"
           />
           <button
             type="submit"
             disabled={busy || !loaded}
-            className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
           >
             Save
           </button>
         </div>
         {message !== null && (
           <p
-            className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}
+            className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}
           >
             {message.text}
           </p>
