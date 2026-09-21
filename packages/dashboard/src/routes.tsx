@@ -1,7 +1,9 @@
+import { agentLogStore } from '@amagi/core/agent-log'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import {
   activeTasks,
   currentAgentFor,
+  type DashboardState,
   openQuestionsFor,
   type QuestionView,
   type TaskView,
@@ -16,7 +18,7 @@ import {
   useParams,
 } from '@tanstack/react-router'
 import type { FormEvent, ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
 
@@ -758,6 +760,83 @@ function RunButton() {
   )
 }
 
+/** The tail of one task's ring buffer, live from the rAF-batched log store. */
+function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
+  const key = `${repo}/${taskId}`
+  useSyncExternalStore(
+    (listener) => agentLogStore.subscribe(key, listener),
+    () => agentLogStore.get(key).version,
+  )
+  const line = agentLogStore.get(key).at(-1)
+  if (line === undefined || line.text === '') return null
+  return <p className="mt-2 truncate font-mono text-xs text-zinc-400">{line.text}</p>
+}
+
+function WorkerSlot({
+  taskId,
+  state,
+  selected,
+}: {
+  taskId: string | null
+  state: DashboardState
+  selected: string | null
+}) {
+  if (taskId === null) {
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/40 px-4 py-2 text-sm text-zinc-600">
+        free slot
+      </div>
+    )
+  }
+  const task = state.tasks[taskId]
+  const agent = currentAgentFor(state, taskId)
+  return (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
+          busy
+        </span>
+        <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+        <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        {task !== undefined && <Badge state={task.state} />}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+        <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
+        <span>model: {agent?.model ?? 'unknown'}</span>
+      </div>
+      {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
+    </div>
+  )
+}
+
+/**
+ * One row per runner slot from /api/runner, so busy agents and free capacity
+ * are both visible at a glance. Busy slots draw their identity and activity
+ * from the SSE projection plus the live agent log ring buffer.
+ */
+function WorkersPanel() {
+  const { status } = useRunner()
+  const { state, selected } = useDashboard()
+  if (status === null) return null
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        Workers ({status.running.length}/{status.capacity})
+      </h2>
+      <div className="space-y-2">
+        {Array.from({ length: status.capacity }, (_, i) => (
+          <WorkerSlot
+            key={i}
+            taskId={status.running[i] ?? null}
+            state={state}
+            selected={selected}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function QueueView() {
   const { state, selected } = useDashboard()
   const queue = activeTasks(state)
@@ -792,6 +871,7 @@ function QueueView() {
         <h1 className="text-xl font-semibold">Queue</h1>
         {selected !== null && <RunButton />}
       </div>
+      <WorkersPanel />
       {attention.length > 0 && (
         <div className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
