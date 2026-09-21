@@ -45,7 +45,6 @@ export function AgentLogView({ taskId }: { taskId: string }) {
   useEffect(() => {
     if (!stickToBottom.current || buffer.length === 0) return
     rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })
-    // biome-ignore lint/correctness/useExhaustiveDependencies: re-run per flush, tracked via buffer.version
   }, [buffer.version, buffer.length, rowVirtualizer])
 
   const handleScroll = () => {
@@ -66,9 +65,7 @@ export function AgentLogView({ taskId }: { taskId: string }) {
         onScroll={handleScroll}
         className="h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 font-mono text-xs leading-[18px]"
       >
-        <div
-          style={{ height: rowVirtualizer.getTotalSize(), width: '100%', position: 'relative' }}
-        >
+        <div style={{ height: rowVirtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
           {rowVirtualizer.getVirtualItems().map((item) => {
             const line = buffer.at(item.index)
             if (!line) return null

@@ -17,5 +17,10 @@ typecheck:
 test:
     bun test
 
+fresh-check:
+    rm -rf node_modules packages/*/node_modules
+    bun install --frozen-lockfile
+    bun run --cwd packages/dashboard build
+
 status:
     bun run packages/cli/src/index.ts status
