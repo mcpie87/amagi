@@ -27,6 +27,7 @@ type RawTask = {
   pr_url: string | null
   pr_number: number | null
   review_round: number
+  status_reason: string | null
   last_error: string | null
   retry_count: number
   last_commit_sha: string | null
@@ -60,6 +61,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
   prUrl: r.pr_url,
   prNumber: r.pr_number,
   reviewRound: r.review_round,
+  statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
   lastCommit:
@@ -98,6 +100,7 @@ const TASK_COLUMNS: Column<ProjectedTask>[] = [
   { col: 'pr_url', from: (t) => t.prUrl },
   { col: 'pr_number', from: (t) => t.prNumber },
   { col: 'review_round', from: (t) => t.reviewRound },
+  { col: 'status_reason', from: (t) => t.statusReason },
   { col: 'last_error', from: (t) => t.lastError },
   { col: 'retry_count', from: (t) => t.retryCount },
   { col: 'created_at', from: (t) => t.createdAt },
