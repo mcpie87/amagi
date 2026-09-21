@@ -210,9 +210,9 @@ const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = 
     maxParallel,
   })
 
-const waitFor = async (fn: () => boolean, timeoutMs = 2000): Promise<void> => {
+const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
   const started = Date.now()
-  while (!fn()) {
+  while (!(await fn())) {
     if (Date.now() - started > timeoutMs) throw new Error('waitFor timed out')
     await new Promise((r) => setTimeout(r, 10))
   }
@@ -239,9 +239,15 @@ afterEach(() => {
 })
 
 describe('RunService', () => {
-  test('status reports availability and capacity', () => {
+  test('status reports availability and capacity', async () => {
     const service = makeService(new FakeTracker(), new FakeHarness(), 2)
-    expect(service.status()).toEqual({ available: true, capacity: 2, running: [] })
+    expect(await service.status()).toEqual({
+      name: 'demo',
+      available: true,
+      capacity: 2,
+      running: [],
+      resources: {},
+    })
   })
 
   test('start launches the next ready task and it completes', async () => {
@@ -253,7 +259,7 @@ describe('RunService', () => {
     expect(res).toEqual({ ok: true, taskId: TASK.id })
 
     await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    await waitFor(() => service.status().running.length === 0)
+    await waitFor(async () => (await service.status()).running.length === 0)
   })
 
   test('start launches a specific ready task', async () => {
@@ -319,6 +325,6 @@ describe('RunService', () => {
     expect(tracker.released).toEqual([TASK.id])
     expect(store.task(TASK.id)?.worktree).not.toBeNull()
     expect(store.task(TASK.id)?.branch).not.toBeNull()
-    await waitFor(() => service.status().running.length === 0)
+    await waitFor(async () => (await service.status()).running.length === 0)
   })
 })

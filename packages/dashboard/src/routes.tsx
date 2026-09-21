@@ -1,5 +1,6 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import type { RunnerResource } from '@amagi/core/run-service'
 import {
   activeTasks,
   currentAgentFor,
@@ -778,10 +779,12 @@ function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
 
 function WorkerSlot({
   taskId,
+  resource,
   state,
   selected,
 }: {
   taskId: string | null
+  resource?: RunnerResource | undefined
   state: DashboardState
   selected: string | null
 }) {
@@ -807,6 +810,13 @@ function WorkerSlot({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
         <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
         <span>model: {agent?.model ?? 'unknown'}</span>
+        {resource !== undefined && (
+          <>
+            <span>rss: {fmtBytes(resource.rssBytes)}</span>
+            <span>cpu: {fmtCpu(resource.cpuMs)}</span>
+            <span>procs: {resource.processes}</span>
+          </>
+        )}
       </div>
       {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
     </div>
@@ -816,22 +826,45 @@ function WorkerSlot({
 /**
  * One row per runner slot from /api/runner, so busy agents and free capacity
  * are both visible at a glance. Busy slots draw their identity and activity
- * from the SSE projection plus the live agent log ring buffer.
+ * from the SSE projection plus the live agent log ring buffer. The summary
+ * strip sums RSS/CPU/process count over the live agent trees so the operator
+ * can see which runner is eating the machine.
  */
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
   if (status === null) return null
+  const running = status.running
+  const total = running.reduce(
+    (acc, id) => {
+      const r = status.resources[id]
+      return r === undefined
+        ? acc
+        : {
+            processes: acc.processes + r.processes,
+            rssBytes: acc.rssBytes + r.rssBytes,
+            cpuMs: acc.cpuMs + r.cpuMs,
+          }
+    },
+    { processes: 0, rssBytes: 0, cpuMs: 0 },
+  )
   return (
     <section className="mb-6">
       <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-        Workers ({status.running.length}/{status.capacity})
+        Workers ({running.length}/{status.capacity})
       </h2>
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs text-zinc-400">
+        <span className="font-medium text-zinc-200">{status.name}</span>
+        <span>rss: {fmtBytes(total.rssBytes)}</span>
+        <span>cpu: {fmtCpu(total.cpuMs)}</span>
+        <span>procs: {total.processes}</span>
+      </div>
       <div className="space-y-2">
         {Array.from({ length: status.capacity }, (_, i) => (
           <WorkerSlot
             key={i}
-            taskId={status.running[i] ?? null}
+            taskId={running[i] ?? null}
+            resource={running[i] === undefined ? undefined : status.resources[running[i]]}
             state={state}
             selected={selected}
           />
@@ -1213,6 +1246,23 @@ type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = n
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`
+}
+
+function fmtCpu(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s'
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
 function lineFor(event: AgentStreamEvent): string {
