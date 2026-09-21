@@ -103,7 +103,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
-| `abandoned` | Terminal: task withdrawn | — |
+| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
@@ -129,6 +129,13 @@ memory (`rssBytes`), CPU time (`cpuMs`), and process count (`processes`), keyed
 by task id under `resources` plus the repo `name` the runner is bound to. The
 dashboard's Workers section shows these numbers as a per-runner summary strip
 and per busy slot, so the operator can see which runner is eating the machine.
+
+Beyond stopping, the task detail page offers **instant close** (`POST
+/api/repos/:repo/tasks/:id/close`): it retires any in-flight or parked task by
+killing the worker if the runner owns it, deleting the task's worktree and
+branch, closing the tracker ticket, and parking the task in the terminal
+`abandoned` state. It is the operator's way to kill an in-flight task outright —
+unlike stop, which preserves the worktree for the reclaim path.
 
 Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi

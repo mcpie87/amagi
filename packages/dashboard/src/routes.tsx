@@ -1122,10 +1122,15 @@ function ReclaimButton({
   )
 }
 
+/** A task the operator can still retire: in flight, parked, or stopped. */
+function closable(state: TaskState): boolean {
+  return !isTerminal(state) || state === 'needs_human' || state === 'no_pr' || state === 'cancelled'
+}
+
 function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (state !== 'needs_human' && state !== 'no_pr') return null
+  if (!closable(state)) return null
 
   const close = async () => {
     const reason = window.prompt('Reason for closing this task')

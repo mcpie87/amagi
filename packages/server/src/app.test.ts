@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdirSync } from 'node:fs'
 import type {
   BeadsIssue,
   CreateTrackerTask,
@@ -553,16 +554,73 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     },
   )
 
+  test('instantly closes an in-flight task, stopping the worker and deleting the worktree', async () => {
+    const stopped: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: ['bd-1'],
+          resources: {},
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async (id) => {
+          stopped.push(id)
+          // Mirror the real stop: a live run parks in cancelled before close.
+          store.append(id, { type: 'task.state', from: 'implementing', to: 'cancelled' })
+          return { ok: true, taskId: id }
+        },
+      },
+    })
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt/bd-1', branch: 'amagi/bd-1-x' })
+    // The fake workspace root does not exist; give git a valid cwd to run in.
+    const root = ws.workspaces.get('repo1')?.root
+    if (root) mkdirSync(root, { recursive: true })
+
+    const res = await close('bd-1', 'kill it')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(stopped).toEqual(['bd-1'])
+    expect(body.task.state).toBe('abandoned')
+    // The recorded worktree is dropped from the projection.
+    expect(body.task.worktree).toBeNull()
+    expect(body.task.branch).toBeNull()
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
+  test('closing an in-flight task does not require the runner service', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await close('bd-1', 'kill it')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
   test('404s on an unknown task', async () => {
     const res = await close('nope', 'x')
     expect(res.status).toBe(404)
   })
 
-  test('409s when the task is not needs_human or no_pr', async () => {
+  test('409s when the task is already settled', async () => {
     claim('bd-1')
-    const res = await close('bd-1', 'x')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'done' })
+    const res = await close('bd-1', 'no longer wanted')
     expect(res.status).toBe(409)
-    expect(tracker.closed).toHaveLength(0)
+
+    store.append('bd-2', {
+      type: 'task.claimed',
+      title: 'withdrawn',
+      tracker: 'beads',
+    })
+    store.append('bd-2', { type: 'task.state', from: null, to: 'abandoned' })
+    expect((await close('bd-2', 'already gone')).status).toBe(409)
   })
 
   test('rejects a missing or blank reason', async () => {

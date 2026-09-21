@@ -58,9 +58,13 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   if (from === to) return false
-  // Terminal states are absorbing except the operator settling a parked task
-  // (needs_human/no_pr) as abandoned; every other exit stays illegal.
-  if (isTerminal(from)) return FORWARD[from].includes(to)
+  // A parked or stopped task is retired by the operator's close action: a
+  // stopped run parks as cancelled (worktree preserved), and instant close
+  // then abandons it and deletes the worktree.
+  if (to === 'abandoned' && (from === 'needs_human' || from === 'no_pr' || from === 'cancelled')) {
+    return true
+  }
+  if (isTerminal(from)) return false
   if (isTerminal(to)) return true
   return FORWARD[from].includes(to)
 }
