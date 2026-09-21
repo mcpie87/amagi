@@ -9,12 +9,15 @@ import type {
   AgentOutcome,
   AgentProcess,
   AgentStartOptions,
+  CreateTrackerTask,
   GateRef,
   Harness,
   Question,
   Tracker,
+  TrackerCapabilities,
   TrackerStatus,
   TrackerTask,
+  UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
@@ -35,8 +38,11 @@ const TASK: TrackerTask = {
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
   readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   heartbeats = 0
   leaseAlive = true
+  /** Returned by get() in place of the null default, to simulate a re-read. */
+  freshTask: TrackerTask | null = null
 
   constructor(private queue: TrackerTask[] = []) {}
 
@@ -47,7 +53,13 @@ class FakeTracker implements Tracker {
     return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
-    return null
+    return this.freshTask
+  }
+  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
+  }
+  async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
   }
   async heartbeat(): Promise<boolean> {
     this.heartbeats++
@@ -85,6 +97,9 @@ class FakeHarness implements Harness {
   }
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.run(sessionId, opts)
+  }
+  async listModels(): Promise<string[]> {
+    return []
   }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
@@ -154,6 +169,9 @@ class BlockingHarness implements Harness {
 
   resume(): AgentProcess {
     throw new Error('no resume expected in the cancel test')
+  }
+  async listModels(): Promise<string[]> {
+    return []
   }
 }
 
@@ -319,6 +337,16 @@ describe('Runner.runOnce', () => {
     expect(created?.type === 'pr.created' && created.url).toBe('https://example.com/demo/pull/7')
   })
 
+  test('builds the PR body from a re-fetched task description', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = { ...TASK, description: 'Write hello.txt\n\n### How to use\n\nRun `hello`' }
+    const pr = new FakePr()
+    await makeRunner(tracker, new FakeHarness([writesAFile]), config(), pr).runOnce()
+
+    expect(pr.calls[0]?.body).toContain('### 🚀 How to use')
+    expect(pr.calls[0]?.body).toContain('Run `hello`')
+  })
+
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')
@@ -349,10 +377,14 @@ describe('Runner.runOnce', () => {
     expect(mainLog).toContain('init')
   })
 
-  test('an agent that changes nothing is escalated, not silently committed', async () => {
+  test('an agent that changes nothing lands in no_pr, not silently committed', async () => {
     const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([{}])).runOnce()
-    expect(result?.state).toBe('needs_human')
+    expect(result?.state).toBe('no_pr')
     expect(types(TASK.id)).not.toContain('commit.created')
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
   })
 
   test('a reclaimed task reuses the recorded worktree and branch', async () => {

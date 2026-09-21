@@ -64,3 +64,27 @@ export type AwaitQuery = z.infer<typeof AwaitQuery>
 
 export const ApiError = z.object({ error: z.string() })
 export type ApiError = z.infer<typeof ApiError>
+
+export const IssueIdParam = z.object({ id: z.string().min(1) })
+
+export const IssueCreateBody = z.object({
+  title: z.string().trim().min(1).max(500),
+  description: z.string().default(''),
+  acceptanceCriteria: z.string().nullable().default(null),
+  priority: z.number().int().min(0).max(4).nullable().default(null),
+  labels: z.array(z.string()).default([]),
+  /** Issue ids the new task is blocked by. */
+  dependencies: z.array(z.string()).default([]),
+})
+export type IssueCreateBody = z.infer<typeof IssueCreateBody>
+
+export const IssueUpdateBody = z.object({
+  title: z.string().trim().min(1).max(500).optional(),
+  description: z.string().optional(),
+  acceptanceCriteria: z.string().nullable().optional(),
+  priority: z.number().int().min(0).max(4).nullable().optional(),
+  labels: z.array(z.string()).optional(),
+  /** Full desired set of blocker ids; the server diffs against the current set. */
+  dependencies: z.array(z.string()).optional(),
+})
+export type IssueUpdateBody = z.infer<typeof IssueUpdateBody>

@@ -9,12 +9,15 @@ import type {
   AgentOutcome,
   AgentProcess,
   AgentStartOptions,
+  CreateTrackerTask,
   GateRef,
   Harness,
   Question,
   Tracker,
+  TrackerCapabilities,
   TrackerStatus,
   TrackerTask,
+  UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
@@ -37,6 +40,7 @@ const TASK2: TrackerTask = { ...TASK, id: 'bd-c3d4', title: 'Add a second file' 
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
   readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
   readonly released: string[] = []
 
   constructor(private readonly queue: TrackerTask[] = []) {}
@@ -50,6 +54,28 @@ class FakeTracker implements Tracker {
   }
   async get(): Promise<TrackerTask | null> {
     return null
+  }
+  async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+    return {
+      id: 'bd-new',
+      title: input.title,
+      description: input.description,
+      status: 'open',
+      priority: input.priority,
+      type: null,
+      url: null,
+    }
+  }
+  async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
+    return {
+      id,
+      title: input.title ?? 'updated',
+      description: '',
+      status: 'open',
+      priority: null,
+      type: null,
+      url: null,
+    }
   }
   async heartbeat(): Promise<boolean> {
     return true
@@ -99,6 +125,9 @@ class FakeHarness implements Harness {
   resume(): AgentProcess {
     throw new Error('no resume in run-service tests')
   }
+  async listModels(): Promise<string[]> {
+    return []
+  }
 }
 
 class BlockingHarness implements Harness {
@@ -133,6 +162,9 @@ class BlockingHarness implements Harness {
   }
   resume(): AgentProcess {
     throw new Error('no resume in run-service tests')
+  }
+  async listModels(): Promise<string[]> {
+    return []
   }
 }
 

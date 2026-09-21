@@ -42,7 +42,12 @@ export const serveCommand = defineCommand({
       forgeCwd: root,
       tracker,
       runner,
-      ...(tracker instanceof BeadsTracker ? { listIssues: () => tracker.list() } : {}),
+      ...(tracker instanceof BeadsTracker
+        ? {
+            listIssues: () => tracker.list(),
+            getIssue: (id: string) => tracker.getIssue(id),
+          }
+        : {}),
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     console.log(dim('ctrl-c to stop'))

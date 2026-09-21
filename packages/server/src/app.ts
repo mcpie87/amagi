@@ -1,11 +1,16 @@
 import {
   type BeadsIssue,
+  CAPABILITY_WORDS,
   isTerminal,
   type Notifier,
   type Question,
   type RunServiceApi,
   type Store,
   type Tracker,
+  type TrackerCapabilities,
+  type TrackerTask,
+  UnsupportedCapabilityError,
+  type UpdateTrackerTask,
 } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
@@ -16,6 +21,9 @@ import {
   AskBody,
   AwaitQuery,
   EventQuery,
+  IssueCreateBody,
+  IssueIdParam,
+  IssueUpdateBody,
   QuestionQuery,
   RunBody,
   StreamQuery,
@@ -37,6 +45,8 @@ export type ServerDeps = {
   listIssues?: () => Promise<BeadsIssue[]>
   /** When present, the launch/stop runner endpoints are live. */
   runner?: RunServiceApi
+  /** Rich issue detail, including dependency blockers, when the tracker has it. */
+  getIssue?: (id: string) => Promise<BeadsIssue | null>
 }
 
 /**
@@ -50,6 +60,13 @@ const valid = <T extends z.ZodType, Target extends keyof ValidationTargets>(
   zValidator(target, schema, (result, c) => {
     if (!result.success) return c.json({ error: z.prettifyError(result.error) }, 400)
   })
+
+/** The 501 reason for an operation the tracker cannot do, or null when it can. */
+function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities): string | null {
+  return tracker.capabilities[capability]
+    ? null
+    : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
+}
 
 /**
  * The agent carries AMAGI_TASK_TOKEN in its environment; a question is bound
@@ -110,7 +127,14 @@ async function resolveQuestionGate(
   }
 }
 
-export function createApp({ store, notify = [], tracker, listIssues, runner }: ServerDeps) {
+export function createApp({
+  store,
+  notify = [],
+  tracker,
+  listIssues,
+  runner,
+  getIssue,
+}: ServerDeps) {
   return new Hono()
     .get('/api/health', (c) => c.json({ ok: true }))
 
@@ -118,6 +142,77 @@ export function createApp({ store, notify = [], tracker, listIssues, runner }: S
       if (listIssues === undefined) return c.json({ error: 'issue browser is unavailable' }, 501)
       return c.json(await listIssues())
     })
+
+    .get('/api/issues/:id', valid('param', IssueIdParam), async (c) => {
+      const { id } = c.req.valid('param')
+      if (getIssue === undefined) return c.json({ error: 'issue detail is unavailable' }, 501)
+      const issue = await getIssue(id)
+      if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
+      return c.json(issue)
+    })
+
+    .post('/api/issues', valid('json', IssueCreateBody), async (c) => {
+      if (tracker === undefined) return c.json({ error: 'no tracker is configured' }, 501)
+      const cap = capabilityError(tracker, 'create')
+      if (cap !== null) return c.json({ error: cap }, 501)
+      try {
+        const created: TrackerTask = await tracker.createTask(c.req.valid('json'))
+        const issue = getIssue === undefined ? null : await getIssue(created.id)
+        return c.json(issue ?? created, 201)
+      } catch (err) {
+        if (err instanceof UnsupportedCapabilityError) return c.json({ error: err.message }, 501)
+        throw err
+      }
+    })
+
+    .patch(
+      '/api/issues/:id',
+      valid('param', IssueIdParam),
+      valid('json', IssueUpdateBody),
+      async (c) => {
+        const { id } = c.req.valid('param')
+        if (tracker === undefined) return c.json({ error: 'no tracker is configured' }, 501)
+        const body = c.req.valid('json')
+        const input: UpdateTrackerTask = {
+          ...(body.title === undefined ? {} : { title: body.title }),
+          ...(body.description === undefined ? {} : { description: body.description }),
+          ...(body.acceptanceCriteria === undefined
+            ? {}
+            : { acceptanceCriteria: body.acceptanceCriteria }),
+          ...(body.priority === undefined ? {} : { priority: body.priority }),
+          ...(body.labels === undefined ? {} : { labels: body.labels }),
+        }
+        // Only the operation actually requested is gated, so a dependency-only
+        // edit reports the dependency gap rather than a generic edit gap.
+        if (Object.keys(input).length > 0) {
+          const editCap = capabilityError(tracker, 'edit')
+          if (editCap !== null) return c.json({ error: editCap }, 501)
+        }
+        // The board edits dependencies as a full set; the tracker wants a diff.
+        if (body.dependencies !== undefined) {
+          const depCap = capabilityError(tracker, 'dependencies')
+          if (depCap !== null) return c.json({ error: depCap }, 501)
+          if (getIssue === undefined) {
+            return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
+          }
+          const current = (await getIssue(id))?.dependencies.map((d) => d.id) ?? []
+          input.dependencies = {
+            add: body.dependencies.filter((d) => !current.includes(d)),
+            remove: current.filter((d) => !body.dependencies?.includes(d)),
+          }
+        }
+        try {
+          const updated = await tracker.updateTask(id, input)
+          const issue = getIssue === undefined ? null : await getIssue(updated.id)
+          return c.json(issue ?? updated)
+        } catch (err) {
+          if (err instanceof UnsupportedCapabilityError) {
+            return c.json({ error: err.message }, 501)
+          }
+          throw err
+        }
+      },
+    )
 
     .get('/api/tasks', valid('query', TaskListQuery), (c) => {
       const { state, limit } = c.req.valid('query')

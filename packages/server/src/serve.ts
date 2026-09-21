@@ -10,6 +10,7 @@ export type ServeOptions = {
   port: number
   tracker?: Tracker
   listIssues?: () => Promise<BeadsIssue[]>
+  getIssue?: (id: string) => Promise<BeadsIssue | null>
   gatePollIntervalMs?: number
   /**
    * When present, park tasks at pr_open are reconciled against the remote PR
@@ -56,12 +57,14 @@ export function serve({
   staticDir,
   listIssues,
   runner,
+  getIssue,
 }: ServeOptions) {
   const app = createApp({
     store,
     ...(tracker === undefined ? {} : { tracker }),
     ...(listIssues === undefined ? {} : { listIssues }),
     ...(runner === undefined ? {} : { runner }),
+    ...(getIssue === undefined ? {} : { getIssue }),
   })
   const poller =
     tracker === undefined

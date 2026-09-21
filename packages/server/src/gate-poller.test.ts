@@ -1,13 +1,16 @@
 import { afterEach, expect, test } from 'bun:test'
 import {
+  type CreateTrackerTask,
   type GateRef,
   openDatabase,
   type Question,
   type QuestionRow,
   Store,
   type Tracker,
+  type TrackerCapabilities,
   type TrackerStatus,
   type TrackerTask,
+  type UpdateTrackerTask,
 } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
@@ -15,6 +18,7 @@ import { startGatePoller } from './gate-poller.ts'
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
   readonly leaseTtlMs = 300_000
+  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   private resolved = new Set<string>()
 
   setResolved(id: string): void {
@@ -29,6 +33,12 @@ class FakeTracker implements Tracker {
   }
   async get(): Promise<TrackerTask | null> {
     return null
+  }
+  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
+  }
+  async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
+    throw new Error('unsupported')
   }
   async heartbeat(): Promise<boolean> {
     return true

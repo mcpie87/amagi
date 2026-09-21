@@ -5,6 +5,8 @@ import { type DashboardState, initialDashboardState, reduceState } from '@amagi/
 import { createContext, type ReactNode, useContext, useEffect, useReducer, useState } from 'react'
 
 const DashboardContext = createContext<DashboardState>(initialDashboardState())
+type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'
+const ConnectionContext = createContext<ConnectionStatus>('connecting')
 
 /**
  * One EventSource carries the whole store. The server replays from
@@ -14,16 +16,19 @@ const DashboardContext = createContext<DashboardState>(initialDashboardState())
  */
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
+  const [connection, setConnection] = useState<ConnectionStatus>('connecting')
 
   useEffect(() => {
     const base = (import.meta.env.VITE_API_BASE ?? '') as string
     const source = new EventSource(`${base}/api/stream?sinceSeq=0`)
+    source.addEventListener('open', () => setConnection('connected'))
+    source.addEventListener('error', () => setConnection('reconnecting'))
     source.addEventListener('message', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data) as StoredEvent
         // agent.stream is the hot path: hundreds of lines/sec of assistant
         // text and tool output. It bypasses the reducer entirely so it never
-        // costs a setState per line; the agentLogStore ring buffer owns it
+        // costs a setState per line; the ring buffer in agentLog.ts owns it
         // and batches renders on requestAnimationFrame instead.
         if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
           agentLogStore.append(parsed.taskId, parsed.role, parsed.ts, parsed.event)
@@ -37,7 +42,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => source.close()
   }, [])
 
-  return <DashboardContext.Provider value={state}>{children}</DashboardContext.Provider>
+  return (
+    <ConnectionContext.Provider value={connection}>
+      <DashboardContext.Provider value={state}>{children}</DashboardContext.Provider>
+    </ConnectionContext.Provider>
+  )
 }
 
 export function useDashboard(): DashboardState {
@@ -112,4 +121,8 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
 
 export function useRunner(): RunnerApi {
   return useContext(RunnerContext)
+}
+
+export function useConnection(): ConnectionStatus {
+  return useContext(ConnectionContext)
 }
