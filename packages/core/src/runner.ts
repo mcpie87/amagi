@@ -19,6 +19,7 @@ import {
   implementSystemPrompt,
   prTitle,
   reclaimPrompt,
+  whyNoChangesPrompt,
 } from './prompt.ts'
 import { backoffDelayMs, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
@@ -332,12 +333,30 @@ export class Runner {
 
     const committed = await this.commit(task, cwd)
     if (!committed) {
-      const reason =
-        summary !== null && summary.trim() !== ''
-          ? summary
-          : 'the agent produced no changes; the task may already be done or need no PR — ' +
-            'verify and close it explicitly, it will not be closed automatically'
-      this.transition(task.id, 'no_pr', reason)
+      let reason = summary?.trim() !== '' ? summary : null
+      if (reason === null && sessionId !== null) {
+        this.transition(task.id, 'implementing')
+        const why = await this.runAgentWithRetry(
+          task.id,
+          sessionId,
+          {
+            cwd,
+            prompt: whyNoChangesPrompt(task),
+            permissions: config.harness.implement.permissions,
+            extraArgs: config.harness.implement.extraArgs,
+          },
+          lease,
+        )
+        if (why.stopped) return
+        reason = why.summary?.trim() !== '' ? why.summary : null
+      }
+      this.transition(
+        task.id,
+        'no_pr',
+        reason ??
+          'the agent produced no changes; the task may already be done or need no PR — ' +
+            'verify and close it explicitly, it will not be closed automatically',
+      )
       return
     }
     this.transition(task.id, 'committed')
