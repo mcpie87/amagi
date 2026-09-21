@@ -1,6 +1,7 @@
 import {
   type Config,
   type Exec,
+  errMsg,
   isAgentMention,
   listOpenPrs,
   type MentionWatchState,
@@ -39,8 +40,6 @@ export type MentionWatcher = {
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
-
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /**
  * Continuously scans open PRs for comments and reviews mentioning the agent

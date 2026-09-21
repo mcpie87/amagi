@@ -1,6 +1,7 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
+import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
   isTerminal,
@@ -8,6 +9,7 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
+import { fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -944,7 +946,7 @@ function IssuesView() {
           current === null ? null : (items.find((i) => i.id === current.id) ?? null),
         )
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setError(errMsg(err)))
   }, [selected, refresh])
 
   useEffect(() => {
@@ -2316,10 +2318,6 @@ function StopButton({ taskId }: { taskId: string }) {
 
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
 
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-}
-
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -2412,7 +2410,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
           return res.json() as Promise<Issue>
         })
         .then(setIssue)
-        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => setError(errMsg(err)))
     }
   }
 

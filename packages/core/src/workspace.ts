@@ -2,6 +2,7 @@ import { type Config, loadConfig } from './config.ts'
 import { diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { Tracker } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import { makeTracker } from './factory.ts'
 import { dbPathForRepo, registryPath as defaultRegistryPath } from './paths.ts'
 import {
@@ -75,9 +76,7 @@ export class Workspaces {
       forge = makePrDriver(config.forge.kind)
     } catch (err) {
       console.warn(
-        `workspace ${entry.key}: forge driver ${config.forge.kind} unavailable: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `workspace ${entry.key}: forge driver ${config.forge.kind} unavailable: ${errMsg(err)}`,
       )
       forge = null
     }
