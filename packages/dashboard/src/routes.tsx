@@ -1828,6 +1828,11 @@ function CloseButton({
         type="button"
         disabled={busy}
         onClick={() => void close()}
+        title={
+          target === 'done'
+            ? 'marks the task done when the work already existed elsewhere'
+            : 'closes the task as abandoned'
+        }
         className={
           target === 'done'
             ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
@@ -1895,6 +1900,7 @@ function RetryButton({
         type="button"
         disabled={busy}
         onClick={() => void retry()}
+        title="re-claims the tracker ticket and immediately restarts the run now"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Retry
@@ -1969,6 +1975,7 @@ function RequeueButton({
         type="button"
         disabled={busy}
         onClick={() => void requeue()}
+        title="releases the tracker claim and puts the task back in the queue; it waits for a free runner slot instead of launching immediately"
         className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
       >
         Requeue
