@@ -325,6 +325,13 @@ export function createApp({
       return c.json(await workspaces.diagnose(entry))
     })
 
+    .get('/api/repos/:repo/ready-queue', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      // The tracker orders the queue FCFS (bd ready --sort oldest).
+      return c.json(await ws.tracker.ready())
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)

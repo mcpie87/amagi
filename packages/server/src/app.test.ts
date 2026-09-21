@@ -429,6 +429,24 @@ describe('issue mutations', () => {
   })
 })
 
+describe('GET /api/repos/:repo/ready-queue', () => {
+  test('returns the tracker-ready queue in its given order', async () => {
+    const tracker = new FakeIssueTracker()
+    const a = tracker.seed({ id: 'bd-old', title: 'oldest' })
+    const b = tracker.seed({ id: 'bd-new', title: 'newest' })
+    app = issueApp(tracker)
+    const res = await app.request('/api/repos/repo1/ready-queue')
+    expect(res.status).toBe(200)
+    expect((await res.json()) as TrackerTask[]).toEqual([a, b])
+  })
+
+  test('404s on an unknown repository', async () => {
+    app = issueApp(new FakeIssueTracker())
+    const res = await app.request('/api/repos/nope/ready-queue')
+    expect(res.status).toBe(404)
+  })
+})
+
 class FakeEpicTracker extends FakeGateTracker {
   readonly eligible = new Map<string, EpicCloseEligible>()
   readonly closedReasons: { id: string; reason: string }[] = []
@@ -690,6 +708,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           available: true,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -908,6 +927,7 @@ describe('runner endpoints', () => {
       available: true,
       capacity: 1,
       running: [],
+      startedAt: {},
       resources: {},
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -937,6 +957,7 @@ describe('runner endpoints', () => {
           available: false,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
         }),
       }),
@@ -948,6 +969,7 @@ describe('runner endpoints', () => {
       available: false,
       capacity: 1,
       running: ['bd-1'],
+      startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
     })
   })
@@ -963,8 +985,10 @@ describe('runner endpoints', () => {
           lastRunAt: 1720000000000,
           ok: true,
           error: null,
-          prsScanned: 2,
-          mentionsResponded: 1,
+          counters: [
+            { label: 'scanned', value: 2 },
+            { label: 'responded', value: 1 },
+          ],
         },
       ],
     })
@@ -978,8 +1002,10 @@ describe('runner endpoints', () => {
         lastRunAt: 1720000000000,
         ok: true,
         error: null,
-        prsScanned: 2,
-        mentionsResponded: 1,
+        counters: [
+          { label: 'scanned', value: 2 },
+          { label: 'responded', value: 1 },
+        ],
       },
     ])
   })
@@ -1107,6 +1133,7 @@ describe('repo settings endpoints', () => {
           available: true,
           capacity: 1,
           running: [],
+          startedAt: {},
           resources: {},
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),

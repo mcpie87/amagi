@@ -150,6 +150,9 @@ export class BeadsTracker implements Tracker {
       '--json',
       '--limit',
       String(limit),
+      // FCFS: bd defaults to priority ordering; oldest is first-created first.
+      '--sort',
+      'oldest',
       '--exclude-type',
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
@@ -182,6 +185,9 @@ export class BeadsTracker implements Tracker {
       'ready',
       '--claim',
       '--json',
+      // FCFS: claim the oldest ready task, same ordering as ready().
+      '--sort',
+      'oldest',
       '--exclude-type',
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
