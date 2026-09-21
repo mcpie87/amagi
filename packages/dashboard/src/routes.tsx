@@ -846,14 +846,14 @@ function QueueView() {
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[]) => (
+  const taskList = (tasks: TaskView[], showReason: boolean, closable = false) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
-        <li key={task.id}>
+        <li key={task.id} className="flex items-center">
           <Link
             to="/tasks/$id"
             params={{ id: task.id }}
-            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-zinc-800"
           >
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
@@ -862,8 +862,14 @@ function QueueView() {
                 {task.id}
                 {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
               </span>
+              {showReason && task.statusReason !== null && (
+                <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
+              )}
             </span>
           </Link>
+          {closable && selected !== null && (
+            <CloseButton repo={selected} taskId={task.id} state={task.state} />
+          )}
         </li>
       ))}
     </ul>
@@ -881,10 +887,14 @@ function QueueView() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention)}
+          {taskList(attention, true, true)}
         </div>
       )}
-      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
+      {queue.length === 0 ? (
+        <p className="text-zinc-500">No active tasks.</p>
+      ) : (
+        taskList(queue, false)
+      )}
     </section>
   )
 }
@@ -1071,6 +1081,97 @@ function ReclaimButton({
   )
 }
 
+function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'needs_human' && state !== 'no_pr') return null
+
+  const close = async () => {
+    const reason = window.prompt('Reason for closing this task')
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+function RetryButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const { start } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
+
+  const retry = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Reclaim only releases the tracker claim; actually restart the run.
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void retry()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Retry
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -1141,6 +1242,19 @@ function AgentLog({ events }: { events: AgentStreamEvent[] }) {
   )
 }
 
+const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+
+/** Why a task stopped, in plain language, when the operator actually needs it. */
+function SummaryPanel({ task }: { task: TaskView }) {
+  if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
+  return (
+    <div className="mt-6 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-300">Summary</h2>
+      <p className="mt-1 text-zinc-200">{task.statusReason}</p>
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
@@ -1193,9 +1307,20 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && <CloseButton repo={selected} taskId={task.id} state={task.state} />}
+        {selected !== null && (
+          <RetryButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
+
+      <SummaryPanel task={task} />
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />

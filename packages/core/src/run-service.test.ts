@@ -128,6 +128,9 @@ class FakeHarness implements Harness {
   async listModels(): Promise<string[]> {
     return []
   }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
 }
 
 class BlockingHarness implements Harness {
@@ -164,6 +167,9 @@ class BlockingHarness implements Harness {
     throw new Error('no resume in run-service tests')
   }
   async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
     return []
   }
 }

@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../../events.ts'
-import { HARDCODED_MODELS } from '../../models.ts'
+import { HARDCODED_EFFORTS, HARDCODED_MODELS } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
 import { renderToolResult, spawnAgent } from './spawn.ts'
 
@@ -239,6 +239,10 @@ export class CodexHarness implements Harness {
 
   async listModels(): Promise<string[]> {
     return [...HARDCODED_MODELS.codex]
+  }
+
+  async listEfforts(): Promise<string[]> {
+    return [...HARDCODED_EFFORTS.codex]
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
