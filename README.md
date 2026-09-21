@@ -29,17 +29,15 @@ to the API at `http://127.0.0.1:7777`.
 
 ### Dashboard
 
-The dashboard is the shared control room for the connected server:
+The dashboard is the shared control room for the connected server. The header holds the repo selector, a runner status indicator (how many capacity slots are busy), and a button to register another repository. Four pages, plus a per-task detail:
 
-- **Overview** brings active runs, open pull requests, questions, and recent activity together.
-- **Runs** searches and filters running, completed, and attention-needed work. Each run has live agent output with follow/pause, check results, a timeline, and workspace context.
-- **Task board** browses tracker tasks with search, status filters, and a saved board/list preference.
-- **Inbox** collects agent questions and stopped runs. Answer questions directly to resume waiting agents.
-- **Activity** shows a searchable timeline of run milestones and decisions.
+- **Queue** shows active runs with state badges, a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and a Workers panel: runner capacity, per-slot resource usage (RSS, CPU, process count), and any running background workers (`respond-to-mentions`, `check-prs`). A **Run next** button launches the next ready task.
+- **Tasks** browses the tracker's issues in Kanban or List view (the choice is remembered), with a status filter, pagination, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
+- **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
+- **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
+- **Task detail** (linked from Queue and Tasks) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place. Its actions cover reclaim, retry, stop, and instant close.
 
-Use Ctrl+K or Cmd+K to find a page or run. Connection status shows when the event stream is reconnecting and displayed data may be stale. On small screens, navigation opens from the menu button.
-
-Starting and stopping runs, editing tracker tasks, and registering multiple repositories still require backend support. The dashboard currently operates on the repository connected to its server.
+Starting and stopping runs, editing tracker tasks, and registering repositories are all live from the dashboard; the event stream is scoped to the selected repo.
 
 ## Usage
 

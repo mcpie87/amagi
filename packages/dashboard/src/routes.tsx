@@ -1435,46 +1435,6 @@ function fmtLastRun(epochMs: number): string {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
-function lineFor(event: AgentStreamEvent): string {
-  const ev = event.event
-  switch (ev.kind) {
-    case 'text':
-    case 'reasoning':
-      return ev.text
-    case 'tool_use':
-      return `[tool] ${ev.name}`
-    case 'tool_result':
-      return `[${ev.ok ? 'ok' : 'FAIL'}] ${ev.name}`
-    case 'usage':
-      return `[usage] in=${ev.inputTokens} out=${ev.outputTokens}`
-    case 'result':
-      return `[result] ${ev.summary ?? (ev.ok ? 'ok' : 'failed')}`
-    case 'error':
-      return `[error] ${ev.message}`
-  }
-}
-
-/** Plain recent log. The virtualization task (am-b2z.4) replaces this. */
-function AgentLog({ events }: { events: AgentStreamEvent[] }) {
-  const ref = useRef<HTMLDivElement>(null)
-  // no deps on purpose: tail the log after every render, not just on mount
-  useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight
-  })
-  return (
-    <div
-      ref={ref}
-      className="max-h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs text-zinc-300"
-    >
-      {events.map((e) => (
-        <div key={e.seq} className="whitespace-pre-wrap break-words">
-          {lineFor(e)}
-        </div>
-      ))}
-    </div>
-  )
-}
-
 const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
 
 const escapeHtml = (s: string) =>
@@ -1692,12 +1652,9 @@ function TaskDetailView() {
   const { state, selected } = useDashboard()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
-  // ponytail: last 500 rendered, the virtualization task (am-b2z.4) removes the cap
-  const agentEvents = state.events
-    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
-    .slice(-500)
   const currentAgent = currentAgentFor(state, id)
-  const usageEvents = agentEvents
+  const usageEvents = state.events
+    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
   const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
@@ -1799,15 +1756,6 @@ function TaskDetailView() {
               </li>
             ))}
           </ul>
-        </div>
-      )}
-
-      {agentEvents.length > 0 && (
-        <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Agent output
-          </h2>
-          <AgentLog events={agentEvents} />
         </div>
       )}
 
