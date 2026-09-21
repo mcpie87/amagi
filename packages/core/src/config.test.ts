@@ -50,6 +50,8 @@ describe('loadConfig', () => {
     expect(config.loop.doomToolRepeat).toBe(20)
     expect(config.loop.doomCheckRounds).toBe(3)
     expect(config.loop.doomDiffWindowSec).toBe(1800)
+    expect(config.loop.maxRunMinutes).toBe(0)
+    expect(config.loop.maxCostUsd).toBe(0)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {
@@ -152,6 +154,13 @@ describe('loadConfig', () => {
     expect(config.loop.doomToolRepeat).toBe(5)
     expect(config.loop.doomCheckRounds).toBe(2)
     expect(config.loop.doomDiffWindowSec).toBe(120)
+  })
+
+  test('per-task budget keys are overridable', () => {
+    writeRepo('[loop]\nmaxRunMinutes = 90\nmaxCostUsd = 4.5\n')
+    const config = loadConfig(repo).config
+    expect(config.loop.maxRunMinutes).toBe(90)
+    expect(config.loop.maxCostUsd).toBe(4.5)
   })
 })
 
