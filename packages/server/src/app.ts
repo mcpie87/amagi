@@ -7,12 +7,14 @@ import {
   type Notifier,
   type Question,
   type RegistryEntry,
+  Runner,
   type RunServiceApi,
   removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
+  Triage,
   UnsupportedCapabilityError,
   type UpdateTrackerTask,
   type WorkerActivity,
@@ -707,6 +709,48 @@ export function createApp({
         return c.json(ws.store.openQuestions(taskId))
       },
     )
+
+    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const runner = new Runner({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.implement),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // A full agent run takes minutes, so the request returns immediately and
+      // the run reports through the repo's own event stream.
+      void runner.runOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
+
+    .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const triage = new Triage({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: makeHarness(ws.config.harness.triage),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: ws.name,
+        ...(ws.forge === null ? {} : { forge: ws.forge }),
+      })
+      // Triage may hand off to a long implementation run; the request returns
+      // immediately and every decision reports through the repo's event stream.
+      void triage.triageOnce().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        ws.store.append(null, { type: 'error', message, fatal: false })
+      })
+      return c.json({ repo, started: true }, 202)
+    })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 

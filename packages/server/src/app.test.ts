@@ -204,6 +204,7 @@ class FakeIssueTracker implements Tracker {
       labels: [],
       parent: null,
       dependencies: [],
+      childCount: 0,
       ...partial,
     }
     this.issues.set(issue.id, issue)
@@ -1502,6 +1503,46 @@ describe('POST /api/repos (onboarding)', () => {
       body: JSON.stringify({ path: '/nonexistent-path-xyz' }),
     })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /api/repos/:repo/run', () => {
+  test('starts a run in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/run', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker has nothing ready, so the run ends without events
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
+  })
+})
+
+describe('POST /api/repos/:repo/triage', () => {
+  test('starts a triage pass in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/triage', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker is not triage-capable, so the pass ends without a claim
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/triage', { method: 'POST' })).status).toBe(404)
   })
 })
 

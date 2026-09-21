@@ -50,6 +50,7 @@ bun run packages/cli/src/index.ts <command>
 | Command | Description |
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
+| `triage` | Pick an unclaimed task the runner skips (epics, milestones, blocked, orphaned) and decide what to do with it: implement, decompose, close, ask the operator, or skip with a recorded reason. `--harness`, `--model` and `--effort` pin the decision harness (defaults to `harness.triage`) |
 | `continue <task-id>` | Resume a task in its recorded worktree. `--harness`/`--model` restart it with a different harness or model |
 | `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
@@ -139,6 +140,31 @@ Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
 run`) relies on the tracker's atomic claim to avoid double-claiming.
 
+## The triage worker
+
+The runner only claims the next ready task, so everything not directly
+claimable is invisible to it: epics and milestones sit open, finished
+containers stay open, blocked and orphaned tasks go untouched. The **triage
+worker** (`packages/core/src/triage.ts`, `amagi triage`) is a separate decision
+role that picks one unclaimed task a worker is not currently holding and asks a
+harness to decide what to do with it:
+
+- **implement**: the task is concrete ready work: claim it and hand it to the
+  implementation runner (the triage role never writes code itself).
+- **decompose**: the task is a container (epic/milestone) with no concrete
+  children: break it into implementable subtasks under it.
+- **close**: all children are done, or the work is already satisfied.
+- **ask**: genuinely ambiguous: post a question on the task (surfaced in the
+  dashboard inbox) and park it; once the operator answers, the next pass acts
+  on that answer.
+- **skip**: not for amagi to do: record the reason as a comment on the task.
+
+Every decision is recorded as a `triage.decision` event in the store. Leaf
+tasks are triaged once; a decomposed container is re-triaged only once all its
+children have closed, so a finished epic gets closed instead of re-decomposed.
+`amagi serve` also exposes `POST /api/repos/:repo/triage` to trigger a pass for
+a repo through the dashboard.
+
 A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
 runs inside `amagi serve`. Every worker process records a liveness heartbeat
 in the store while it drives a task; a worker that dies or hangs leaves its
@@ -194,6 +220,16 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
+| `harness.review.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"codex"` | Harness that reviews the PR. Reserved for the review loop (see [state machine](#the-task-state-machine)); not invoked by the runner yet. |
+| `harness.review.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
+| `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
+| `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
+| `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
+| `harness.triage.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that decides what to do with unclaimed tasks the runner skips. It reads task context and reports a structured decision; it never touches the repository. |
+| `harness.triage.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
+| `harness.triage.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
+| `harness.triage.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
+| `harness.triage.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
 | `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |

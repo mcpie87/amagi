@@ -78,6 +78,8 @@ export const Config = z.object({
        */
       definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
+      review: HarnessConfig.prefault({ kind: 'codex' }),
+      triage: HarnessConfig.prefault({ kind: 'claude' }),
     })
     .prefault({}),
   loop: z
