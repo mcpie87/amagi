@@ -428,15 +428,38 @@ describe('POST /api/tasks/:id/reclaim', () => {
     expect(res.status).toBe(404)
   })
 
-  test('409s when the task has no worktree to resume', async () => {
+  test('restarts a task with no recorded worktree, letting the runner start fresh', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
     claim('bd-1')
     const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
-    expect(res.status).toBe(409)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('claimed')
+    expect(body.task.worktree).toBeNull()
+    expect(tracker.released).toEqual(['bd-1'])
   })
 
-  test('409s when the task already reached a terminal state', async () => {
+  test('restarts a run that stopped needing attention, keeping its recorded worktree', async () => {
+    const tracker = new FakeGateTracker()
+    app = createApp({ store, tracker })
     stuckTask('bd-1')
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'needs_human' })
+    const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('claimed')
+    expect(body.task.worktree).toBe('/tmp/wt/bd-1')
+    expect(body.task.branch).toBe('amagi/bd-1-x')
+  })
+
+  test('409s when the task is done and cannot come back', async () => {
+    stuckTask('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'checks' })
+    store.append('bd-1', { type: 'task.state', from: 'checks', to: 'committed' })
+    store.append('bd-1', { type: 'task.state', from: 'committed', to: 'pr_open' })
+    store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'reviewing' })
+    store.append('bd-1', { type: 'task.state', from: 'reviewing', to: 'done' })
     const res = await app.request('/api/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(409)
   })

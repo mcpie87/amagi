@@ -1,7 +1,6 @@
 import {
   type BeadsIssue,
   CAPABILITY_WORDS,
-  isTerminal,
   type Notifier,
   type Question,
   type Store,
@@ -220,10 +219,11 @@ export function createApp({ store, notify = [], tracker, listIssues, getIssue }:
       const { id } = c.req.valid('param')
       const task = store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      if (task.worktree === null || task.branch === null) {
-        return c.json({ error: `task ${id} has no worktree to resume` }, 409)
-      }
-      if (isTerminal(task.state)) {
+      // A completed or abandoned run cannot come back: the tracker issue is
+      // closed and the runner will never claim it again. Everything else is
+      // restartable — the runner resumes the recorded worktree when present
+      // and starts from a fresh worktree otherwise.
+      if (task.state === 'done' || task.state === 'abandoned') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as

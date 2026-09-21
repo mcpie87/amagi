@@ -403,6 +403,25 @@ p {
   flex-shrink: 0;
   flex-wrap: wrap;
 }
+.restart-run {
+  position: relative;
+}
+.restart-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: 280px;
+  background: #fff;
+  color: #b3261e;
+  border: 1px solid #f1b0ab;
+  border-radius: 5px;
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+}
 .button {
   min-height: 38px;
   border-radius: 5px;

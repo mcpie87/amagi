@@ -25,6 +25,14 @@ test: build-dashboard
 build-dashboard:
     bun run --filter @amagi/dashboard build
 
+# Clean-room install strictly from the lockfile, then build the dashboard.
+# Catches a dep added to package.json without a bun.lock update, or an import
+# that only resolves because a stale node_modules happens to have the package.
+fresh-check:
+    rm -rf node_modules packages/*/node_modules
+    bun install --frozen-lockfile
+    bun run --filter @amagi/dashboard build
+
 status:
     bun run packages/cli/src/index.ts status
 

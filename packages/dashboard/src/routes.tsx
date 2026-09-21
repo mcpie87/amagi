@@ -1,4 +1,4 @@
-import { isTerminal, type StoredEvent } from '@amagi/core/events'
+import { isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import {
   activeTasks,
   currentAgentFor,
@@ -1475,6 +1475,55 @@ function PrLink({ url, number }: { url: string; number: number | null }) {
   )
 }
 
+/**
+ * Lets the operator restart/continue a run. The server releases the tracker
+ * claim and the runner resumes the recorded worktree when one exists, or
+ * starts from a fresh worktree otherwise. Done and abandoned runs have no path
+ * back, so the button is hidden for them.
+ */
+function RestartRunButton({ taskId, state }: { taskId: string; state: TaskState }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state === 'done' || state === 'abandoned') return null
+
+  const restart = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${encodeURIComponent(taskId)}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="restart-run">
+      <button
+        type="button"
+        className="button secondary"
+        disabled={busy}
+        onClick={() => void restart()}
+      >
+        <Icon name="refresh" size={15} />
+        {busy ? 'Restarting…' : 'Restart run'}
+      </button>
+      {error !== null && (
+        <p className="restart-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const state = useDashboard()
@@ -1516,6 +1565,7 @@ function TaskDetailView() {
       >
         <Badge state={task.state} />
         {task.prUrl && <PrLink url={task.prUrl} number={task.prNumber} />}
+        <RestartRunButton taskId={task.id} state={task.state} />
       </PageHeading>
       <ol className="run-pipeline" aria-label="Run progress">
         {phases.map((item, index) => (
