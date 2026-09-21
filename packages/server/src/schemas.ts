@@ -93,9 +93,14 @@ export const ChatBody = z.object({
 })
 export type ChatBody = z.infer<typeof ChatBody>
 
-export const SettingsBody = z.object({
-  maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
-})
+export const SettingsBody = z
+  .object({
+    maxParallel: z.number().int().min(1).max(MAX_PARALLEL).optional(),
+    autoQueue: z.boolean().optional(),
+  })
+  .refine((body) => body.maxParallel !== undefined || body.autoQueue !== undefined, {
+    message: 'provide at least one of maxParallel or autoQueue',
+  })
 export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */

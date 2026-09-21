@@ -745,6 +745,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           running: ['bd-1'],
           startedAt: { 'bd-1': 1720000000000 },
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async (id) => {
@@ -754,6 +755,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           return { ok: true, taskId: id }
         },
         setMaxParallel: () => {},
+        setAutoQueue: () => {},
       },
     })
     claim('bd-1')
@@ -964,10 +966,12 @@ describe('runner endpoints', () => {
       running: [],
       startedAt: {},
       resources: {},
+      autoQueue: false,
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
     setMaxParallel: () => {},
+    setAutoQueue: () => {},
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -994,6 +998,7 @@ describe('runner endpoints', () => {
           running: ['bd-1'],
           startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+          autoQueue: false,
         }),
       }),
     })
@@ -1006,6 +1011,7 @@ describe('runner endpoints', () => {
       running: ['bd-1'],
       startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+      autoQueue: false,
     })
   })
 
@@ -1133,29 +1139,66 @@ describe('repo settings endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET returns the current worker count', async () => {
+  test('GET returns the current worker count and auto-queue state', async () => {
     const res = await app.request('/api/repos/repo1/settings')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 1 })
+    expect(await res.json()).toEqual({ maxParallel: 1, autoQueue: false })
   })
 
   test('PATCH persists, updates the workspace config, and is re-readable', async () => {
     const res = await patch('repo1', '{"maxParallel":4}')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 4 })
+    expect(await res.json()).toEqual({ maxParallel: 4, autoQueue: false })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       maxParallel: 4,
+      autoQueue: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
   })
 
-  test('PATCH rejects worker counts outside the range', async () => {
+  test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
+    const applied: boolean[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          resources: {},
+          startedAt: {},
+          autoQueue: true,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: () => {},
+        setAutoQueue: (enabled) => applied.push(enabled),
+      },
+      runnerRepo: 'repo1',
+    })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(applied).toEqual([true])
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
+      maxParallel: 1,
+      autoQueue: true,
+    })
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+    // the toggle only reaches the runner bound to this repo
+    expect((await patch('repo2', '{"autoQueue":false}')).status).toBe(200)
+    expect(applied).toEqual([true])
+  })
+
+  test('PATCH rejects worker counts outside the range and an empty body', async () => {
     for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
       const res = await patch('repo1', JSON.stringify({ maxParallel }))
       expect(res.status).toBe(400)
     }
+    expect((await patch('repo1', '{}')).status).toBe(400)
   })
 
   test('PATCH live-applies the runner only for the repo it serves', async () => {
@@ -1170,10 +1213,12 @@ describe('repo settings endpoints', () => {
           running: [],
           startedAt: {},
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         setMaxParallel: (n) => applied.push(n),
+        setAutoQueue: () => {},
       },
       runnerRepo: 'repo1',
     })

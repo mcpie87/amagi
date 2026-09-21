@@ -533,7 +533,10 @@ export function createApp({
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      return c.json({ maxParallel: ws.config.loop.maxParallel })
+      return c.json({
+        maxParallel: ws.config.loop.maxParallel,
+        autoQueue: ws.config.loop.autoQueue,
+      })
     })
 
     .patch(
@@ -543,14 +546,27 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { maxParallel } = c.req.valid('json')
+        const { maxParallel, autoQueue } = c.req.valid('json')
         // Persist first so a restart keeps the value, then live-apply: the
         // cached workspace config and, when this repo owns the runner, its
-        // capacity. In-flight runs are untouched — capacity gates new launches.
-        writeConfig(ws.root, { loop: { maxParallel } })
-        ws.config.loop.maxParallel = maxParallel
-        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
-        return c.json({ maxParallel })
+        // capacity and automatic dispatch. In-flight runs are untouched, both
+        // gate and poll only affect new launches.
+        const patch: Record<string, unknown> = {}
+        if (maxParallel !== undefined) patch.maxParallel = maxParallel
+        if (autoQueue !== undefined) patch.autoQueue = autoQueue
+        writeConfig(ws.root, { loop: patch })
+        if (maxParallel !== undefined) {
+          ws.config.loop.maxParallel = maxParallel
+          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        }
+        if (autoQueue !== undefined) {
+          ws.config.loop.autoQueue = autoQueue
+          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+        }
+        return c.json({
+          maxParallel: ws.config.loop.maxParallel,
+          autoQueue: ws.config.loop.autoQueue,
+        })
       },
     )
 
