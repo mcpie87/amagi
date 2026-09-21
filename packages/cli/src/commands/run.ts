@@ -20,6 +20,11 @@ const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
   return listModelsCached(harness.kind, () => harness.listModels())
 }
 
+const listEffortsFor = async (cfg: Parameters<typeof makeHarness>[0], model?: string) => {
+  const harness = makeHarness(cfg)
+  return harness.listEfforts(model)
+}
+
 export const runCommand = defineCommand({
   meta: { name: 'run', description: 'Claim the next ready task and work it in its own worktree' },
   args: {
@@ -29,26 +34,33 @@ export const runCommand = defineCommand({
       description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
+    effort: {
+      type: 'string',
+      description: 'Reasoning effort to pass to the harness (e.g. low/medium/high for codex)',
+    },
   },
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
     const { key, store } = currentRepo()
 
-    const flags = { harness: args.harness, model: args.model }
+    const flags = { harness: args.harness, model: args.model, effort: args.effort }
 
     const selection = await pickRunSelection(
       config,
       flags,
       interactive() ? picker : null,
       listModelsFor,
+      listEffortsFor,
       usageFromEvents(store.events()),
     )
 
     const implement = selection.harness
     if (selection.interactive) {
       console.log(
-        dim(`harness: ${implement.kind}${implement.model ? ` (model ${implement.model})` : ''}`),
+        dim(
+          `harness: ${implement.kind}${implement.model ? ` (model ${implement.model})` : ''}${implement.effort ? ` (effort ${implement.effort})` : ''}`,
+        ),
       )
     }
 

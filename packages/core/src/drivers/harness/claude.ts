@@ -172,6 +172,10 @@ export class ClaudeHarness implements Harness {
     return parseModelLines(result.stdout)
   }
 
+  async listEfforts(): Promise<string[]> {
+    return ['low', 'medium', 'high', 'xhigh']
+  }
+
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.spawn(this.argv(opts, sessionId), opts)
   }
