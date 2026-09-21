@@ -1,6 +1,6 @@
 import { agentLogStore } from '@amagi/core/agent-log'
-import { MAX_PARALLEL } from '@amagi/core/config'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
   activeTasks,
