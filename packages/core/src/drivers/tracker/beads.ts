@@ -128,7 +128,9 @@ export class BeadsTracker implements Tracker {
   }
 
   async list(limit = 200): Promise<BeadsIssue[]> {
-    return parseIssues(await this.bd(['list', '--json', '--limit', String(limit)])).map(toIssue)
+    return parseIssues(await this.bd(['list', '--all', '--json', '--limit', String(limit)])).map(
+      toIssue,
+    )
   }
 
   async getIssue(id: string): Promise<BeadsIssue | null> {

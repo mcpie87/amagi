@@ -6,6 +6,7 @@ import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { modelFooter } from './footer.ts'
 import { cacheHome } from './paths.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
@@ -163,6 +164,12 @@ function startImplementHarness(
   })
 }
 
+/** Provenance footer for a canned reply, from the configured implement harness. */
+function configuredFooter(config: Config): string {
+  const { kind, model, effort } = config.harness.implement
+  return modelFooter(kind, model ?? null, effort ?? null)
+}
+
 /** Worktree on the PR head with base merged in, shared with conflict resolution. */
 async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
   return prepareConflictWorktree({
@@ -251,7 +258,9 @@ async function respondToExplain(
     const explanation = readFileSync(outPath, 'utf8').trim()
     if (explanation === '') throw new Error('agent produced no explanation')
     p.phase('posting comment')
-    await opts.driver.postComment(opts.root, opts.pr.number, explanation)
+    const { kind, model, effort } = opts.config.harness.implement
+    const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
+    await opts.driver.postComment(opts.root, opts.pr.number, `${explanation}${footer}`)
   } finally {
     rmSync(outPath, { force: true })
   }
@@ -263,7 +272,11 @@ async function askClarification(opts: RespondToMentionOptions, p: Progress): Pro
     `@${opts.mention.user} I'm not sure what you'd like me to do with your comment.`,
     'Do you want me to change the code (fix something), are you asking me to explain the changes, or should I log it as a new task? Please clarify.',
   ].join('\n\n')
-  await opts.driver.postComment(opts.root, opts.pr.number, question)
+  await opts.driver.postComment(
+    opts.root,
+    opts.pr.number,
+    `${question}${configuredFooter(opts.config)}`,
+  )
 }
 
 /** Lets the LLM decide the response path, rather than assuming a fixed one. */
@@ -299,7 +312,7 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     await opts.driver.postComment(
       opts.root,
       opts.pr.number,
-      `@${opts.mention.user} I'd log this as a task, but the configured tracker (${tracker?.kind ?? 'none'}) can't create issues.`,
+      `@${opts.mention.user} I'd log this as a task, but the configured tracker (${tracker?.kind ?? 'none'}) can't create issues.${configuredFooter(opts.config)}`,
     )
     return
   }
@@ -319,7 +332,7 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
   await opts.driver.postComment(
     opts.root,
     opts.pr.number,
-    `@${opts.mention.user} Logged this as ${where}.`,
+    `@${opts.mention.user} Logged this as ${where}.${configuredFooter(opts.config)}`,
   )
 }
 

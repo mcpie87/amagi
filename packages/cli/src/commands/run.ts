@@ -11,18 +11,12 @@ import {
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
-import { usageFromEvents } from '../picker-usage.ts'
 import { currentRepo } from '../repo.ts'
 import { pickRunSelection } from '../select-run.ts'
 
 const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
   return listModelsCached(harness.kind, () => harness.listModels())
-}
-
-const listEffortsFor = async (cfg: Parameters<typeof makeHarness>[0], model?: string) => {
-  const harness = makeHarness(cfg)
-  return harness.listEfforts(model)
 }
 
 export const runCommand = defineCommand({
@@ -34,10 +28,7 @@ export const runCommand = defineCommand({
       description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
-    effort: {
-      type: 'string',
-      description: 'Reasoning effort to pass to the harness (e.g. low/medium/high for codex)',
-    },
+    effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },
   },
   async run({ args }) {
     const root = repoRoot()
@@ -51,16 +42,16 @@ export const runCommand = defineCommand({
       flags,
       interactive() ? picker : null,
       listModelsFor,
-      listEffortsFor,
-      usageFromEvents(store.events()),
     )
 
     const implement = selection.harness
     if (selection.interactive) {
+      const bits = [
+        implement.model ? `model ${implement.model}` : null,
+        implement.effort ? `effort ${implement.effort}` : null,
+      ].filter(Boolean)
       console.log(
-        dim(
-          `harness: ${implement.kind}${implement.model ? ` (model ${implement.model})` : ''}${implement.effort ? ` (effort ${implement.effort})` : ''}`,
-        ),
+        dim(`harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`),
       )
     }
 
