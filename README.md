@@ -49,7 +49,7 @@ bun run packages/cli/src/index.ts <command>
 
 | Command | Description |
 | --- | --- |
-| `run` | Claim the next ready task and work it in its own worktree. `--harness <name>` and `--model <name>` pin the harness and model; without them, a TTY run prompts for both (see [Harness and model selection](#harness-and-model-selection)) |
+| `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -211,12 +211,12 @@ permissions = "bypass"
 
 ### Harness and model selection
 
-`amagi run` can pick the harness and model at dispatch time, either from flags or an interactive picker. When neither `--harness` nor `--model` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined) and then a model. Model lists are fetched the way each harness lists them (`claude model list`, `codex models`, `opencode models`) and cached under `$XDG_CACHE_HOME/amagi/models/` for 24h, so the prompt is fast and still offers the last known models offline. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model` override.
+`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort — each from what the harness says is available. Model lists are fetched the way each harness lists them (`claude model list`, `codex debug models`, `opencode models`) and cached under `$XDG_CACHE_HOME/amagi/models/` for 24h, so the prompt is fast and still offers the last known models offline. Codex's catalog also carries each model's supported reasoning levels, so its effort prompt offers exactly those. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
 
 ```bash
 amagi run                      # interactive picker
-amagi run --harness opencode   # pin the harness, pick the model
-amagi run --harness fast --model local/deepseek-ai/DeepSeek-V4-Flash-0731
+amagi run --harness opencode   # pin the harness, pick the model and effort
+amagi run --harness codex --model gpt-5.6-sol --effort high
 ```
 
 Define the choices the picker offers per repo:

@@ -1,8 +1,82 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
-import { parseModelLines } from '../../models.ts'
+import { cacheHome } from '../../paths.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
 import { renderToolResult, spawnAgent } from './spawn.ts'
+
+type CodexModel = { slug: string; efforts: string[] }
+
+/**
+ * Parses `codex debug models` (the raw model catalog as JSON). Only
+ * `list`-visibility entries are offered to the picker; each carries the
+ * reasoning levels that model actually supports.
+ */
+export function parseCodexCatalog(stdout: string): CodexModel[] {
+  try {
+    const raw = JSON.parse(stdout) as { models?: unknown }
+    if (!Array.isArray(raw.models)) return []
+    const out: CodexModel[] = []
+    for (const m of raw.models) {
+      if (typeof m !== 'object' || m === null) continue
+      const rec = m as Record<string, unknown>
+      if (rec.visibility !== 'list' || typeof rec.slug !== 'string') continue
+      const efforts = Array.isArray(rec.supported_reasoning_levels)
+        ? [
+            ...new Set(
+              rec.supported_reasoning_levels.flatMap((l) => {
+                if (typeof l !== 'object' || l === null) return []
+                const effort = (l as { effort?: unknown }).effort
+                return typeof effort === 'string' ? [effort] : []
+              }),
+            ),
+          ]
+        : []
+      out.push({ slug: rec.slug, efforts })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+const CATALOG_TTL_MS = 24 * 60 * 60 * 1000
+
+type CatalogEntry = { cachedAt: number; models: CodexModel[] }
+
+/**
+ * Runs `codex debug models` once per day and caches the parsed catalog, so
+ * the model and effort pickers stay fast and work offline: a fresh cache
+ * wins and a failed listing falls back to whatever is cached.
+ */
+async function listCatalog(bin: string): Promise<CodexModel[]> {
+  const file = join(cacheHome(), 'amagi', 'models', 'codex-catalog.json')
+  const read = (): CatalogEntry | null => {
+    if (!existsSync(file)) return null
+    try {
+      return JSON.parse(readFileSync(file, 'utf8')) as CatalogEntry
+    } catch {
+      return null
+    }
+  }
+  const cached = read()
+  if (cached !== null && Date.now() - cached.cachedAt < CATALOG_TTL_MS) return cached.models
+
+  const cmd = [bin, 'debug', 'models']
+  try {
+    const result = await exec(cmd)
+    if (result.exitCode !== 0) throw new CommandError(cmd, result)
+    const models = parseCodexCatalog(result.stdout)
+    if (models.length > 0) {
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ cachedAt: Date.now(), models }))
+    }
+    return models
+  } catch {
+    return cached?.models ?? []
+  }
+}
 
 type FileChange = { path: string; kind: string }
 
@@ -239,10 +313,14 @@ export class CodexHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    const cmd = [this.bin, 'models']
-    const result = await exec(cmd)
-    if (result.exitCode !== 0) throw new CommandError(cmd, result)
-    return parseModelLines(result.stdout)
+    return (await listCatalog(this.bin)).map((m) => m.slug)
+  }
+
+  /** The reasoning levels the picked model supports, or the union across the catalog. */
+  async listEfforts(model?: string): Promise<string[]> {
+    const catalog = await listCatalog(this.bin)
+    const entry = model === undefined ? undefined : catalog.find((m) => m.slug === model)
+    return entry?.efforts ?? [...new Set(catalog.flatMap((m) => m.efforts))]
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
@@ -265,6 +343,8 @@ export class CodexHarness implements Harness {
     // codex has no `--append-system-prompt`; `developer_instructions` is the
     // config key that injects extra instructions as a separate message.
     if (opts.systemPrompt) argv.push('-c', `developer_instructions=${opts.systemPrompt}`)
+    // `model_reasoning_effort` is the config key codex reads for reasoning effort.
+    if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')

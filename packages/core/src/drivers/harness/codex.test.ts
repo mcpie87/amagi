@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
-import { CodexHarness, CodexTranslator } from './codex.ts'
+import { CodexHarness, CodexTranslator, parseCodexCatalog } from './codex.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'codex-stream.jsonl')
 
@@ -118,6 +118,33 @@ describe('CodexTranslator against a recorded transcript', () => {
   })
 })
 
+describe('parseCodexCatalog', () => {
+  const catalog = JSON.stringify({
+    models: [
+      {
+        slug: 'gpt-5.6-sol',
+        visibility: 'list',
+        supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }, { effort: 'high' }],
+      },
+      { slug: 'gpt-reserve', visibility: 'hide', supported_reasoning_levels: [{ effort: 'low' }] },
+      { slug: 'gpt-5.5', visibility: 'list' },
+      { slug: 42, visibility: 'list' },
+    ],
+  })
+
+  test('extracts listed model slugs with their de-duplicated efforts', () => {
+    expect(parseCodexCatalog(catalog)).toEqual([
+      { slug: 'gpt-5.6-sol', efforts: ['low', 'high'] },
+      { slug: 'gpt-5.5', efforts: [] },
+    ])
+  })
+
+  test('returns [] on garbage or a missing models array', () => {
+    expect(parseCodexCatalog('not json')).toEqual([])
+    expect(parseCodexCatalog('{"other": []}')).toEqual([])
+  })
+})
+
 describe('CodexHarness argv', () => {
   const base = { cwd: '/wt', prompt: 'do the thing' }
 
@@ -158,6 +185,11 @@ describe('CodexHarness argv', () => {
     )
     expect(argv[argv.indexOf('--model') + 1]).toBe('gpt-5.1-codex')
     expect(argv[argv.indexOf('-c') + 1]).toBe('developer_instructions=be terse')
+  })
+
+  test('effort is forwarded as a model_reasoning_effort config override', () => {
+    const argv = new CodexHarness().argv({ ...base, effort: 'high' }, null)
+    expect(argv).toContain('model_reasoning_effort=high')
   })
 
   test('extraArgs land before the trailing prompt', () => {

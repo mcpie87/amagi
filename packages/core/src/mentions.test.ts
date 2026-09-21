@@ -126,6 +126,7 @@ function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
     start: () => process,
     resume: () => process,
     listModels: async () => [],
+    listEfforts: async () => [],
   }
 }
 
@@ -359,6 +360,7 @@ describe('respondToMention', () => {
         start: () => proc,
         resume: () => proc,
         listModels: async () => [],
+        listEfforts: async () => [],
       }),
       onProgress: (p) => progress.push(p),
     })
