@@ -20,8 +20,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
-    '- Do not pipe check output through head/tail; show the relevant lines in your',
-    '  reply so the failure is not cut off.',
+    '- Never pipe check or lint output through head/tail: it aborts the tool',
+    '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
     '- If your changes add a user-facing feature (new CLI command or flag, new config',
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
@@ -72,22 +72,6 @@ export function answerPrompt(question: string, answer: string): string {
     '',
     'Apply the answer and finish the task, then stop.',
   ].join('\n')
-}
-
-/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
-export function whyNoChangesPrompt(task: TrackerTask): string {
-  const parts = [
-    `Task ${task.id}: ${task.title}`,
-    '',
-    'The run ended with no changes in the worktree, so no pull request was opened.',
-    'Explain in a few sentences why no changes were made: was the task already done,',
-    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
-    'the reason no PR was opened, so be concrete.',
-    '',
-    'Do not modify any files; reply with the explanation only.',
-  ]
-  if (task.description.trim() !== '') parts.push('', task.description.trim())
-  return parts.join('\n')
 }
 
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
@@ -260,4 +244,20 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     '',
     'Write the explanation to the file and stop.',
   ].join('\n')
+}
+
+/** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
+export function whyNoChangesPrompt(task: TrackerTask): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    'The run ended with no changes in the worktree, so no pull request was opened.',
+    'Explain in a few sentences why no changes were made: was the task already done,',
+    'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
+    'the reason no PR was opened, so be concrete.',
+    '',
+    'Do not modify any files; reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  return parts.join('\n')
 }
