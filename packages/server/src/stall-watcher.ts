@@ -30,8 +30,6 @@ export const STALLED_STATES: readonly TaskState[] = [
   'checks',
   'retrying',
   'committed',
-  'reviewing',
-  'fixing',
 ]
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))

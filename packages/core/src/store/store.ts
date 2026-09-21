@@ -26,7 +26,6 @@ type RawTask = {
   session_id: string | null
   pr_url: string | null
   pr_number: number | null
-  review_round: number
   status_reason: string | null
   last_error: string | null
   retry_count: number
@@ -61,7 +60,6 @@ const toTask = (r: RawTask): ProjectedTask => ({
   sessionId: r.session_id,
   prUrl: r.pr_url,
   prNumber: r.pr_number,
-  reviewRound: r.review_round,
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
@@ -103,7 +101,6 @@ const taskRow = (t: ProjectedTask): Row => ({
   session_id: t.sessionId,
   pr_url: t.prUrl,
   pr_number: t.prNumber,
-  review_round: t.reviewRound,
   status_reason: t.statusReason,
   last_error: t.lastError,
   retry_count: t.retryCount,

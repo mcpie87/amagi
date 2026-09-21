@@ -105,8 +105,6 @@ const stateBadge: Record<TaskState, string> = {
   committed: 'bg-cyan-600',
   retrying: 'bg-orange-500',
   pr_open: 'bg-sky-600',
-  reviewing: 'bg-purple-600',
-  fixing: 'bg-blue-600',
   done: 'bg-emerald-600',
   no_pr: 'bg-zinc-600',
   needs_human: 'bg-red-600',
@@ -1032,10 +1030,7 @@ function QueueView() {
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
               <span className="block truncate font-medium">{task.title}</span>
-              <span className="block truncate text-xs text-zinc-500">
-                {task.id}
-                {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
-              </span>
+              <span className="block truncate text-xs text-zinc-500">{task.id}</span>
               {showReason && task.statusReason !== null && (
                 <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
               )}
@@ -1827,9 +1822,6 @@ function TaskDetailView() {
       <div className="mt-3 flex items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
-        {task.reviewRound > 0 && (
-          <span className="text-sm text-zinc-400">review round {task.reviewRound}</span>
-        )}
         {selected !== null && (
           <ReclaimButton
             repo={selected}

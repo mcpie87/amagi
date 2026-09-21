@@ -86,16 +86,16 @@ describe('sessionsFromEvents', () => {
     expect(sessions.map((s) => s.harness)).toEqual(['codex', 'codex'])
   })
 
-  test('review runs fold into their own session', () => {
+  test('runs of another role fold into their own session', () => {
     const events = [
       start(1, 'am-1', 1000, { role: 'implement' }),
       exit(2, 'am-1', 2000),
-      start(3, 'am-1', 3000, { role: 'review', harness: 'codex', model: 'gpt-5.1-codex' }),
-      exit(4, 'am-1', 4000, { role: 'review', sessionId: 'sess-review' }),
+      start(3, 'am-1', 3000, { role: 'chat', harness: 'claude', model: null }),
+      exit(4, 'am-1', 4000, { role: 'chat', sessionId: 'sess-chat' }),
     ]
     const sessions = sessionsFromEvents(events)
-    expect(sessions.map((s) => s.role)).toEqual(['implement', 'review'])
-    expect(sessions[1]?.sessionId).toBe('sess-review')
+    expect(sessions.map((s) => s.role)).toEqual(['implement', 'chat'])
+    expect(sessions[1]?.sessionId).toBe('sess-chat')
   })
 
   test('usage outside an open session is ignored', () => {

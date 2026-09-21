@@ -57,13 +57,11 @@ export const Config = z.object({
        */
       definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
-      review: HarnessConfig.prefault({ kind: 'codex' }),
     })
     .prefault({}),
   loop: z
     .object({
       maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
-      maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
       /**

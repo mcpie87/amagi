@@ -38,7 +38,6 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
-    expect(config.harness.review.kind).toBe('codex')
     expect(config.loop.maxParallel).toBe(1)
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
