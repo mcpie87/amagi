@@ -59,6 +59,11 @@ describe('state machine', () => {
     expect(canTransition('no_pr', 'abandoned')).toBe(true)
   })
 
+  test('a parked task whose work was already satisfied can be marked done', () => {
+    expect(canTransition('needs_human', 'done')).toBe(true)
+    expect(canTransition('no_pr', 'done')).toBe(true)
+  })
+
   test('a stopped run can be retired by instant close', () => {
     expect(canTransition('cancelled', 'abandoned')).toBe(true)
   })

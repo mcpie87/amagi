@@ -70,6 +70,8 @@ export const TaskIdParam = z.object({ id: z.string().min(1) })
 /** Operator-supplied reason for closing a needs_human/no_pr task. */
 export const CloseTaskBody = z.object({
   reason: z.string().trim().min(1).max(1000),
+  /** Retire a parked no_pr/needs_human task as done instead of abandoned. */
+  to: z.enum(['done', 'abandoned']).default('abandoned'),
 })
 export type CloseTaskBody = z.infer<typeof CloseTaskBody>
 

@@ -351,7 +351,7 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       valid('json', CloseTaskBody),
       async (c) => {
         const { repo, id } = c.req.valid('param')
-        const { reason } = c.req.valid('json')
+        const { reason, to } = c.req.valid('json')
         const ws = resolveWorkspace(workspaces, repo)
         const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
@@ -364,6 +364,11 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
           task.state !== 'cancelled'
         ) {
           return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
+        }
+        // Only a parked no_pr/needs_human task can be marked done: the agent
+        // left no changes because the work was already satisfied.
+        if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
+          return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
         }
         // Shut the worker down first: stop() kills the owned agent process and
         // parks a live run in cancelled, releasing the tracker claim, so the
@@ -380,7 +385,7 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
         ws.store.append(id, {
           type: 'task.state',
           from: afterStop?.state ?? task.state,
-          to: 'abandoned',
+          to,
           reason,
         })
         // Best effort like reconcile: the store is authoritative, so a git or

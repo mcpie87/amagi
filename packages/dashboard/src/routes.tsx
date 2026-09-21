@@ -932,7 +932,7 @@ function QueueView() {
             true,
             selected === null
               ? undefined
-              : (task) => <CloseButton repo={selected} taskId={task.id} state={task.state} />,
+              : (task) => <CloseButtons repo={selected} taskId={task.id} state={task.state} />,
           )}
         </div>
       )}
@@ -1132,13 +1132,25 @@ function closable(state: TaskState): boolean {
   return !isTerminal(state) || state === 'needs_human' || state === 'no_pr' || state === 'cancelled'
 }
 
-function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+function CloseButton({
+  repo,
+  taskId,
+  state,
+  target,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  target: 'abandoned' | 'done'
+}) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (!closable(state)) return null
+  if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
   const close = async () => {
-    const reason = window.prompt('Reason for closing this task')
+    const reason = window.prompt(
+      target === 'done' ? 'Reason for marking this task done' : 'Reason for closing this task',
+    )
     if (reason === null || reason.trim() === '') return
     setBusy(true)
     setError(null)
@@ -1146,7 +1158,7 @@ function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; st
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim() }),
+        body: JSON.stringify({ reason: reason.trim(), to: target }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
     } catch {
@@ -1157,16 +1169,31 @@ function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; st
   }
 
   return (
-    <div className="ml-auto">
+    <div>
       <button
         type="button"
         disabled={busy}
         onClick={() => void close()}
-        className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+        className={
+          target === 'done'
+            ? 'rounded border border-green-800 bg-green-950/40 px-3 py-1 text-sm text-green-300 hover:bg-green-900 disabled:opacity-50'
+            : 'rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50'
+        }
       >
-        Close
+        {target === 'done' ? 'Mark done' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+/** The two operator retire actions: close as abandoned, or mark done when the work already existed. */
+function CloseButtons({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  if (!closable(state)) return null
+  return (
+    <div className="ml-auto flex gap-2">
+      <CloseButton repo={repo} taskId={taskId} state={state} target="done" />
+      <CloseButton repo={repo} taskId={taskId} state={state} target="abandoned" />
     </div>
   )
 }
@@ -1401,7 +1428,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && <CloseButton repo={selected} taskId={task.id} state={task.state} />}
+        {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
