@@ -2,6 +2,9 @@ import {
   CAPABILITY_WORDS,
   ChatService,
   classifyDifficulty,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  HarnessKind,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -495,6 +498,34 @@ export function createApp({
       return c.json({ ...status, workers: workers() })
     })
 
+    .get('/api/runner/options', (c) => {
+      if (runner === undefined || runnerRepo === undefined) {
+        return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
+      }
+      const ws = resolveWorkspace(workspaces, runnerRepo)
+      const defs = Object.entries(ws.config.harness.definitions)
+      const harnesses = defs.map(([name, cfg]) => ({
+        name,
+        kind: cfg.kind,
+        ...(cfg.model === undefined ? {} : { model: cfg.model }),
+        ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+      }))
+      const current = ws.config.harness.implement
+      return c.json({
+        harnesses:
+          harnesses.length > 0
+            ? harnesses
+            : HarnessKind.options.map((kind) => ({ name: kind, kind })),
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+        default: {
+          kind: current.kind,
+          ...(current.model === undefined ? {} : { model: current.model }),
+          ...(current.effort === undefined ? {} : { effort: current.effort }),
+        },
+      })
+    })
+
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -521,8 +552,13 @@ export function createApp({
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { taskId } = c.req.valid('json')
-      const result = await runner.start(taskId)
+      const { taskId, harness, model, effort } = c.req.valid('json')
+      const opts = {
+        ...(harness === undefined ? {} : { harness }),
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+      }
+      const result = await runner.start(taskId, opts)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })

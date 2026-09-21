@@ -59,9 +59,17 @@ export const AskBody = z.object({
 })
 export type AskBody = z.infer<typeof AskBody>
 
-/** Empty body (or `{}`) launches the next ready task. */
+/**
+ * Empty body (or `{}`) launches the next ready task with the configured
+ * defaults. `harness` is a harness.definitions name or a kind
+ * (claude/codex/opencode); `model` and `effort` override the chosen harness.
+ * An omitted field falls back to config.harness.implement.
+ */
 export const RunBody = z.object({
   taskId: z.string().min(1).optional(),
+  harness: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  effort: z.string().min(1).optional(),
 })
 export type RunBody = z.infer<typeof RunBody>
 

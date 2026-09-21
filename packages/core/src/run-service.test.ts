@@ -322,6 +322,106 @@ describe('RunService', () => {
     })
   })
 
+  test('start rejects an unknown harness name', async () => {
+    const service = makeService(new FakeTracker([TASK]), new FakeHarness())
+    const res = await service.start(undefined, { harness: 'nope' })
+    expect(res).toEqual({
+      ok: false,
+      status: 409,
+      error: 'unknown harness "nope"; use a harness.definitions name or claude/codex/opencode',
+    })
+  })
+
+  test('start applies harness/model/effort overrides to the launched run', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config(),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, {
+      harness: 'codex',
+      model: 'gpt-5.6-luna',
+      effort: 'high',
+    })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual(
+      expect.objectContaining({ kind: 'codex', model: 'gpt-5.6-luna', effort: 'high' }),
+    )
+  })
+
+  test('start resolves a named harness definition for the harness override', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config({
+        harness: {
+          definitions: { fast: { kind: 'claude', model: 'claude-haiku-4-5', effort: 'low' } },
+        },
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, { harness: 'fast' })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual(
+      expect.objectContaining({ kind: 'claude', model: 'claude-haiku-4-5', effort: 'low' }),
+    )
+  })
+
+  test('start gates a claimed task on the override model, not the configured default', async () => {
+    const hard = { ...TASK, difficulty: 'high' }
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([hard]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config({
+        harness: { implement: { kind: 'claude', model: 'claude-sonnet-5' } },
+        difficulty: {
+          enabled: true,
+          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-5': 'smart' },
+          requiredTier: { high: 'smart' },
+        },
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const weak = await service.start(hard.id, { model: 'claude-haiku-4-5' })
+    expect(weak).toEqual({
+      ok: false,
+      status: 409,
+      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
+    })
+    expect(captured).toBeNull()
+    const ok = await service.start(hard.id, { model: 'claude-sonnet-5' })
+    expect(ok).toEqual({ ok: true, taskId: hard.id })
+    await waitFor(() => store.task(hard.id)?.state === 'pr_open')
+    expect(captured).toEqual(expect.objectContaining({ model: 'claude-sonnet-5' }))
+  })
+
   test('start refuses a task the tracker does not see as ready', async () => {
     const service = makeService(new FakeTracker([]), new FakeHarness())
     const res = await service.start('bd-x')
