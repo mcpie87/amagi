@@ -1,35 +1,66 @@
 import {
   isTerminal,
+  listModelsCached,
   loadConfig,
   makeHarness,
   makeTracker,
   Runner,
   repoName,
   repoRoot,
-  Store,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, yellow } from '../format.ts'
+import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
+import { interactive, picker } from '../picker.ts'
+import { currentRepo } from '../repo.ts'
+import { pickRunSelection, usageCounts } from '../select-run.ts'
 
-function printBlock(text: string): void {
-  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
+const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
+  const harness = makeHarness(cfg)
+  return listModelsCached(harness.kind, () => harness.listModels())
 }
 
 export const runCommand = defineCommand({
   meta: { name: 'run', description: 'Claim the next ready task and work it in its own worktree' },
   args: {
     once: { type: 'boolean', description: 'Work a single task and exit', default: true },
+    harness: {
+      type: 'string',
+      description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
+    },
+    model: { type: 'string', description: 'Model to pass to the harness' },
+    effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },
   },
-  async run() {
+  async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const store = new Store()
+    const { key, store } = currentRepo()
+
+    const flags = { harness: args.harness, model: args.model, effort: args.effort }
+
+    const selection = await pickRunSelection(
+      config,
+      flags,
+      interactive() ? picker : null,
+      listModelsFor,
+      usageCounts(store.events()),
+    )
+
+    const implement = selection.harness
+    if (selection.interactive) {
+      const bits = [
+        implement.model ? `model ${implement.model}` : null,
+        implement.effort ? `effort ${implement.effort}` : null,
+      ].filter(Boolean)
+      console.log(
+        dim(`harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`),
+      )
+    }
 
     const runner = new Runner({
       store,
       tracker: makeTracker(config, root),
-      harness: makeHarness(config.harness.implement),
-      config,
+      harness: makeHarness(implement),
+      config: { ...config, harness: { ...config.harness, implement } },
       repoRoot: root,
       repoName: repoName(root),
     })
@@ -41,12 +72,20 @@ export const runCommand = defineCommand({
           const details = [
             event.priority === null || event.priority === undefined ? null : `P${event.priority}`,
             event.taskType,
+            event.difficulty,
           ].filter(Boolean)
           if (details.length > 0) console.log(dim(`  ${details.join('  ')}`))
           if (event.url) console.log(dim(`  ${event.url}`))
           if (event.description?.trim()) printBlock(event.description)
           break
         }
+        case 'claim.rejected':
+          console.log(
+            yellow(
+              `  skipped ${event.title}${event.difficulty ? ` (${event.difficulty})` : ''}: ${event.reason}`,
+            ),
+          )
+          break
         case 'task.state':
           console.log(dim(`  -> ${event.to}${event.reason ? `: ${event.reason}` : ''}`))
           break
@@ -72,6 +111,12 @@ export const runCommand = defineCommand({
           }
           if (event.results.length === 0) console.log(dim('  checks: none configured'))
           break
+        case 'question.asked': {
+          console.log(`\n${bold(red('  AWAITING YOUR ANSWER'))}`)
+          printBlock(yellow(event.question))
+          if (event.options.length > 0) printBlock(dim(`options: ${event.options.join(' | ')}`))
+          break
+        }
         case 'pr.created':
           console.log(green(`  pull request: ${event.url}`))
           break
@@ -82,7 +127,7 @@ export const runCommand = defineCommand({
     })
 
     try {
-      console.log(dim('claiming next ready task...'))
+      console.log(dim(`claiming next ready task in ${key}...`))
       const result = await runner.runOnce()
       if (result === null) {
         console.log(dim('nothing ready to work on'))
@@ -90,9 +135,10 @@ export const runCommand = defineCommand({
       }
 
       const { task, state } = result
-      const paint = state === 'needs_human' ? red : isTerminal(state) ? green : yellow
+      const needsHuman = state === 'needs_human' || state === 'no_pr'
+      const paint = needsHuman ? red : isTerminal(state) ? green : yellow
       console.log(`\n${bold(task.id)}  ${paint(state)}  ${task.title}`)
-      if (state === 'needs_human') process.exitCode = 1
+      if (needsHuman) process.exitCode = 1
     } finally {
       unsubscribe()
       store.close()

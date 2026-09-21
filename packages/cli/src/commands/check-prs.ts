@@ -1,5 +1,6 @@
 import {
   type Config,
+  harnessStartOpts,
   isConflicting,
   listOpenPrs,
   loadConfig,
@@ -14,16 +15,22 @@ import {
   resolveConflictSystemPrompt,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, table, yellow } from '../format.ts'
-
-function printBlock(text: string): void {
-  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
-}
+import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
 
 function mergeLabel(p: PrInfo, baseBranch: string): string {
   if (isConflicting(p, baseBranch)) return 'CONFLICT'
   if (p.mergeable === 'UNKNOWN' || p.mergeStateStatus === 'UNKNOWN') return 'UNKNOWN'
   return 'CLEAN'
+}
+
+/** gh pr list reports UNKNOWN until GitHub computes mergeability; resolve per-PR. */
+async function resolveMergeStatuses(root: string, prs: PrInfo[]): Promise<PrInfo[]> {
+  return Promise.all(
+    prs.map(async (p) => {
+      if (p.mergeable !== 'UNKNOWN' && p.mergeStateStatus !== 'UNKNOWN') return p
+      return { ...p, ...(await prMergeStatus(root, p.number)) }
+    }),
+  )
 }
 
 async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<void> {
@@ -36,6 +43,7 @@ async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<voi
       worktreeRoot: config.repo.worktreeRoot,
       baseBranch: config.repo.baseBranch,
       pr,
+      persona: config.repo.persona,
     })
     console.log(dim(`  worktree: ${wt.path}`))
 
@@ -62,14 +70,7 @@ async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<voi
       cwd: wt.path,
       prompt: resolveConflictPrompt(ctx),
       systemPrompt: resolveConflictSystemPrompt(ctx),
-      ...(config.harness.implement.model === undefined
-        ? {}
-        : { model: config.harness.implement.model }),
-      ...(config.harness.implement.effort === undefined
-        ? {}
-        : { effort: config.harness.implement.effort }),
-      permissions: config.harness.implement.permissions,
-      extraArgs: config.harness.implement.extraArgs,
+      ...harnessStartOpts(config.harness.implement),
     })
     console.log(dim(`  agent: ${harness.kind} (${wt.branch})`))
 
@@ -140,8 +141,9 @@ export const checkPrsCommand = defineCommand({
     }
 
     const base = config.repo.baseBranch
+    const resolved = await resolveMergeStatuses(root, prs)
     const header = ['PR', 'MERGE', 'BASE', 'HEAD', 'TITLE']
-    const rows = prs.map((p) => [
+    const rows = resolved.map((p) => [
       `#${p.number}`,
       mergeLabel(p, base),
       p.baseRefName,
@@ -156,7 +158,7 @@ export const checkPrsCommand = defineCommand({
       }),
     )
 
-    const conflicts = prs.filter((p) => isConflicting(p, base))
+    const conflicts = resolved.filter((p) => isConflicting(p, base))
     if (conflicts.length === 0) {
       console.log(dim('\nno merge conflicts'))
       return

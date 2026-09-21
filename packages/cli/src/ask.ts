@@ -2,6 +2,7 @@ export type AskOutcome = { kind: 'answered'; answer: string } | { kind: 'no_answ
 
 export type AskOptions = {
   baseUrl: string
+  repo: string
   taskId: string
   token: string
   question: string
@@ -24,8 +25,9 @@ async function errorOf(res: Response): Promise<string> {
 
 export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
   const headers = { 'content-type': 'application/json', 'X-Amagi-Token': opts.token }
+  const base = `${opts.baseUrl}/api/repos/${opts.repo}/tasks/${opts.taskId}`
 
-  const asked = await fetch(`${opts.baseUrl}/api/tasks/${opts.taskId}/questions`, {
+  const asked = await fetch(`${base}/questions`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ question: opts.question, options: opts.options }),
@@ -34,7 +36,7 @@ export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
   const question = ((await asked.json()) as { question: { id: string } }).question
 
   const awaited = await fetch(
-    `${opts.baseUrl}/api/tasks/${opts.taskId}/questions/${question.id}/await?deadlineMs=${opts.deadlineMs}`,
+    `${base}/questions/${question.id}/await?deadlineMs=${opts.deadlineMs}`,
     { headers },
   )
   if (!awaited.ok) throw new Error(`amagi ask: ${await errorOf(awaited)}`)
