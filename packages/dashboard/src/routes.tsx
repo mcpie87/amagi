@@ -1,6 +1,13 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
-import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
+import type { TrackerTask } from '@amagi/core/drivers/types'
+import {
+  type AgentEvent,
+  isTerminal,
+  type MergeStatus,
+  type StoredEvent,
+  type TaskState,
+} from '@amagi/core/events'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -35,7 +42,14 @@ import {
 } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { SessionsView } from './SessionsView.tsx'
-import { type RepoInfo, RunnerProvider, useConnection, useDashboard, useRunner } from './store.tsx'
+import {
+  type RepoInfo,
+  RunnerProvider,
+  useConnection,
+  useDashboard,
+  useReadyQueue,
+  useRunner,
+} from './store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from './theme.ts'
 import { EmptyState, Icon, type IconName } from './ui.tsx'
 
@@ -297,6 +311,22 @@ function Badge({ state }: { state: TaskState }) {
   return <span className={`${PILL} ${stateBadge[state]}`}>{state}</span>
 }
 
+const mergeTone: Record<MergeStatus, string> = {
+  mergeable: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
+  conflicted: 'bg-red-soft text-red-ink ring-red-edge',
+  unknown: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
+}
+
+const mergeLabel: Record<MergeStatus, string> = {
+  mergeable: 'mergeable',
+  conflicted: 'merge conflict',
+  unknown: 'merge status unknown',
+}
+
+function PrStatusChip({ status }: { status: MergeStatus }) {
+  return <span className={`${PILL} ${mergeTone[status]}`}>{mergeLabel[status]}</span>
+}
+
 function readyOk(repo: RepoInfo): boolean {
   return repo.ready.every((d) => d.ok)
 }
@@ -360,11 +390,12 @@ function AddRepoForm() {
 }
 
 const NAV_ITEMS: {
-  to: '/' | '/issues' | '/inbox' | '/activity' | '/sessions' | '/settings'
+  to: '/' | '/board' | '/issues' | '/inbox' | '/activity' | '/sessions' | '/settings'
   label: string
   icon: IconName
 }[] = [
   { to: '/', label: 'Overview', icon: 'overview' },
+  { to: '/board', label: 'Board', icon: 'board' },
   { to: '/issues', label: 'Tasks', icon: 'tasks' },
   { to: '/inbox', label: 'Inbox', icon: 'inbox' },
   { to: '/activity', label: 'Activity', icon: 'activity' },
@@ -1128,11 +1159,16 @@ function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
 
 function WorkerSlot({
   taskId,
+  startedAt,
+  now,
   resource,
   state,
   selected,
 }: {
   taskId: string | null
+  startedAt: number | undefined
+  /** Wall-clock snapshot, advanced by one shared 1s interval in WorkersPanel. */
+  now: number
   resource?: RunnerResource | undefined
   state: DashboardState
   selected: string | null
@@ -1149,6 +1185,11 @@ function WorkerSlot({
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {startedAt !== undefined && (
+          <span className="shrink-0 font-mono tabular-nums text-sm text-fg">
+            {fmtElapsed(now - startedAt)}
+          </span>
+        )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
         <Link
           to="/tasks/$id"
@@ -1246,6 +1287,11 @@ function AutoQueueToggle() {
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
   if (status === null) return null
   const running = status.running
   const total = running.reduce(
@@ -1280,6 +1326,8 @@ function WorkersPanel() {
           <WorkerSlot
             key={i}
             taskId={running[i] ?? null}
+            startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
+            now={now}
             resource={running[i] === undefined ? undefined : status.resources[running[i]]}
             state={state}
             selected={selected}
@@ -1300,9 +1348,7 @@ function WorkersPanel() {
                 w.detail !== null && w.detail !== undefined ? (
                   <span>{w.detail}</span>
                 ) : (
-                  <span>
-                    scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
-                  </span>
+                  <span>{w.counters.map((c) => `${c.label} ${c.value}`).join(' · ')}</span>
                 )
               ) : (
                 <span className="text-red-ink">error: {w.error}</span>
@@ -1311,6 +1357,140 @@ function WorkersPanel() {
           ))}
         </div>
       )}
+    </section>
+  )
+}
+
+/**
+ * The dashboard board: ready work plus every recorded task, grouped by where
+ * it sits in the run loop so the state of the whole repo is visible at a
+ * glance instead of a flat list. The ready column is the tracker's unclaimed
+ * FCFS queue (bd ready --sort oldest), everything else comes from the live
+ * event projection.
+ */
+type KanbanColumn = {
+  key: string
+  title: string
+  accent: string
+  /** null = the tracker's ready queue; otherwise the projected states it groups. */
+  states: readonly TaskState[] | null
+}
+
+const KANBAN_COLUMNS: KanbanColumn[] = [
+  { key: 'ready', title: 'Ready', accent: 'bg-zinc-600', states: null },
+  {
+    key: 'implementing',
+    title: 'In progress',
+    accent: 'bg-blue-600',
+    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks', 'retrying'],
+  },
+  {
+    key: 'needs_human',
+    title: 'Needs human',
+    accent: 'bg-red-600',
+    states: ['needs_human', 'abandoned', 'cancelled'],
+  },
+  { key: 'no_pr', title: 'No PR', accent: 'bg-amber-600', states: ['no_pr'] },
+  { key: 'committed', title: 'Committed', accent: 'bg-cyan-600', states: ['committed'] },
+  { key: 'pr_open', title: 'PR open', accent: 'bg-sky-600', states: ['pr_open'] },
+  { key: 'done', title: 'Done', accent: 'bg-emerald-600', states: ['done'] },
+]
+
+/** One waiting task from the tracker's FCFS ready queue. */
+function ReadyCard({ task }: { task: TrackerTask }) {
+  return (
+    <div className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2">
+      <span className="block text-xs text-zinc-500">{task.id}</span>
+      <span className="mt-0.5 block break-words font-medium leading-snug">{task.title}</span>
+      <span className="mt-1 block text-xs text-zinc-500">
+        {[task.priority === null ? null : `P${task.priority}`, task.type]
+          .filter(Boolean)
+          .join(' · ') || '\u00a0'}
+      </span>
+    </div>
+  )
+}
+
+function QueueView() {
+  const { state } = useDashboard()
+  const readyQueue = useReadyQueue()
+  const allTasks = Object.values(state.tasks)
+
+  return (
+    <section>
+      <h1 className="mb-4 text-xl font-semibold">Queue</h1>
+      <WorkersPanel />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+        {KANBAN_COLUMNS.map((column) => {
+          const states = column.states
+          const tasks =
+            states === null
+              ? readyQueue
+              : allTasks
+                  .filter((t) => (states as readonly TaskState[]).includes(t.state))
+                  .sort((a, b) => b.updatedAt - a.updatedAt)
+          return (
+            <div
+              key={column.key}
+              className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
+            >
+              <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
+                <span
+                  className={`truncate rounded px-2 py-0.5 text-xs font-medium text-white ${column.accent}`}
+                >
+                  {column.title}
+                </span>
+                <span className="text-xs text-zinc-500">{tasks.length}</span>
+              </div>
+              <ul className="flex flex-col gap-2 p-2">
+                {column.states === null
+                  ? (tasks as TrackerTask[]).map((task) => (
+                      <li key={task.id}>
+                        <ReadyCard task={task} />
+                      </li>
+                    ))
+                  : (tasks as TaskView[]).map((task) => (
+                      <li key={task.id}>
+                        <Link
+                          to="/tasks/$id"
+                          params={{ id: task.id }}
+                          className="block rounded border border-zinc-800 bg-zinc-950 px-3 py-2 hover:bg-zinc-800"
+                        >
+                          <span className="flex items-center gap-1">
+                            <Badge state={task.state} />
+                            <span className="text-xs text-zinc-500">{task.id}</span>
+                          </span>
+                          <span className="mt-1 block break-words font-medium leading-snug">
+                            {task.title}
+                          </span>
+                          {task.statusReason !== null &&
+                            (column.key === 'needs_human' || column.key === 'no_pr') && (
+                              <span className="mt-1 block truncate text-xs text-zinc-400">
+                                {task.statusReason}
+                              </span>
+                            )}
+                          {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
+                            <span
+                              className={`mt-1 block truncate text-xs ${
+                                task.prMergeStatus === 'conflicted'
+                                  ? 'text-red-400'
+                                  : 'text-emerald-400'
+                              }`}
+                            >
+                              PR {mergeLabel[task.prMergeStatus]}
+                            </span>
+                          )}
+                        </Link>
+                      </li>
+                    ))}
+                {tasks.length === 0 && (
+                  <li className="px-1 py-2 text-xs text-zinc-600">Nothing here.</li>
+                )}
+              </ul>
+            </div>
+          )
+        })}
+      </div>
     </section>
   )
 }
@@ -1492,18 +1672,24 @@ function Blockers({ issue }: { issue: Issue }) {
         }`}
       >
         {items.map((d) => (
-          <li key={d.id} className="flex items-center gap-2 py-1 text-sm">
-            <span
-              className={`rounded px-1.5 py-0.5 text-xs ${
-                tone === 'red'
-                  ? 'bg-red-soft-hover text-red-ink'
-                  : 'bg-amber-soft-hover text-amber-ink'
-              }`}
+          <li key={d.id}>
+            <Link
+              to="/tasks/$id"
+              params={{ id: d.id }}
+              className="flex items-center gap-2 py-1 text-sm hover:underline"
             >
-              {d.status}
-            </span>
-            <span className="shrink-0 text-fg-faint">{d.id}</span>
-            <span className="min-w-0 truncate text-fg">{d.title}</span>
+              <span
+                className={`rounded px-1.5 py-0.5 text-xs ${
+                  tone === 'red'
+                    ? 'bg-red-soft-hover text-red-ink'
+                    : 'bg-amber-soft-hover text-amber-ink'
+                }`}
+              >
+                {d.status}
+              </span>
+              <span className="shrink-0 text-fg-faint">{d.id}</span>
+              <span className="min-w-0 truncate text-fg">{d.title}</span>
+            </Link>
           </li>
         ))}
       </ul>
@@ -1620,6 +1806,10 @@ function AnswerBox({
 
   if (submitted) {
     return <p className="mt-2 text-sm text-emerald-ink">answered</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-400">answered</p>
   }
 
   return (
@@ -1751,6 +1941,11 @@ function CloseButton({
         type="button"
         disabled={busy}
         onClick={() => void close()}
+        title={
+          target === 'done'
+            ? 'marks the task done when the work already existed elsewhere'
+            : 'closes the task as abandoned'
+        }
         className={
           target === 'done'
             ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
@@ -1818,6 +2013,7 @@ function RetryButton({
         type="button"
         disabled={busy}
         onClick={() => void retry()}
+        title="re-claims the tracker ticket and immediately restarts the run now"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Retry
@@ -1892,6 +2088,7 @@ function RequeueButton({
         type="button"
         disabled={busy}
         onClick={() => void requeue()}
+        title="releases the tracker claim and puts the task back in the queue; it waits for a free runner slot instead of launching immediately"
         className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
       >
         Requeue
@@ -1956,6 +2153,16 @@ function fmtBytes(n: number): string {
 function fmtCpu(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0s'
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Compact fixed-width elapsed time, e.g. 0:42, 12:07, 2:41:33. */
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const two = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${two(m)}:${two(sec)}` : `${m}:${two(sec)}`
 }
 
 /** Compact "x ago" for a worker's last-run stamp; empty before the first tick. */
@@ -2281,7 +2488,17 @@ function TaskDetailView() {
         <DetailRow label="usage" value={usage} />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
-        <DetailRow label="PR" value={task.prUrl === null ? null : <PrLink url={task.prUrl} />} />
+        <DetailRow
+          label="PR"
+          value={
+            task.prUrl === null ? null : (
+              <span className="flex items-center gap-2">
+                <PrLink url={task.prUrl} />
+                {task.prMergeStatus !== null && <PrStatusChip status={task.prMergeStatus} />}
+              </span>
+            )
+          }
+        />
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"
@@ -2857,6 +3074,11 @@ const indexRoute = createRoute({
   path: '/',
   component: OverviewView,
 })
+const boardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/board',
+  component: QueueView,
+})
 const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
@@ -2890,6 +3112,7 @@ const taskRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  boardRoute,
   issuesRoute,
   inboxRoute,
   activityRoute,

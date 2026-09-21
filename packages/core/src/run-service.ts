@@ -20,6 +20,8 @@ export type RunnerStatus = {
   available: boolean
   capacity: number
   running: string[]
+  /** Epoch ms at launch per running task, keyed by task id, for live elapsed-time display. */
+  startedAt: Record<string, number>
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
   /** Whether automatic dispatch is on: ready tasks launch themselves on free slots. */
@@ -37,11 +39,14 @@ export type WorkerActivity = {
   lastRunAt: number
   ok: boolean
   error: string | null
-  prsScanned: number
-  mentionsResponded: number
-  /** Human summary of the last tick for workers without PR/mention counters. */
+  /** Counters reported by the worker, rendered as label/value pairs in the dashboard. */
+  counters: WorkerCounter[]
+  /** Human summary of the last tick for workers without counters. */
   detail?: string | null
 }
+
+/** One named counter a worker reports (e.g. scanned, responded, resolved). */
+export type WorkerCounter = { label: string; value: number }
 
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }
@@ -86,7 +91,10 @@ export type RunServiceOptions = {
  */
 export class RunService implements RunServiceApi {
   private capacity: number
-  private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
+  private readonly runs = new Map<
+    string,
+    { runner: Runner; startedAt: number; done: Promise<RunOnceResult> }
+  >()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
   private autoQueue: boolean
@@ -165,6 +173,7 @@ export class RunService implements RunServiceApi {
 
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
+    const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
     await Promise.all(
       running.map(async (id) => {
@@ -173,11 +182,13 @@ export class RunService implements RunServiceApi {
         resources[id] = await processTreeStats(pid)
       }),
     )
+    for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
       available: running.length < this.capacity,
       capacity: this.capacity,
       running,
+      startedAt,
       resources,
       autoQueue: this.autoQueue,
     }
@@ -256,6 +267,6 @@ export class RunService implements RunServiceApi {
       ...(forge === undefined ? {} : { forge }),
     })
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
-    this.runs.set(task.id, { runner, done })
+    this.runs.set(task.id, { runner, startedAt: Date.now(), done })
   }
 }

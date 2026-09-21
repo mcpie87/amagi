@@ -149,6 +149,15 @@ resumes where the dead one left off. Only in-progress states are watched;
 `pr_open` is excluded, since there the PR is out for human review and no
 worker runs the task.
 
+A per-repo **PR conflict watcher** (`loop.prCheckIntervalSec`, default 5
+minutes) is the same idea as the mention watcher but for the `check-prs` flow:
+each interval it lists open PRs, and any that conflict with `repo.baseBranch`
+get a resolution agent dispatched on the same code path the `check-prs` CLI
+uses. Ticks are sequential, and a PR is only attempted once per head SHA (the
+attempted head is kept on disk), so an unresolvable conflict is not retried
+until its head changes. Both watchers appear in the dashboard Workers section
+with their own last-run stamp and counters.
+
 The stall watcher's inactivity signal only sees a dead worker, not a stuck
 one. A **doom-loop guard** (`loop.doomEnabled`, default on) runs on the same
 tick and scans the agent event stream of every task with a live worker for
@@ -186,6 +195,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
+| `loop.prCheckIntervalSec` | integer >= 1 | `300` | How often the PR conflict watcher scans open PRs and dispatches a resolution agent per one conflicting with `repo.baseBranch`. Each PR is only attempted once per head SHA, so the default 5 minutes stays inside GitHub REST rate limits. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.doomEnabled` | boolean | `true` | Doom-loop guard: the stall watcher also scans tasks with a live worker for busy-but-not-progressing agents and stops the run. Set false to disable. |

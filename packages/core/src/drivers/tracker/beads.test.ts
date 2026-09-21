@@ -183,6 +183,7 @@ describe('BeadsTracker', () => {
       url: null,
     })
     expect(calls[0]).toContain('--json')
+    expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
   })
 
   test('surfaces the difficulty level stored in metadata', async () => {
@@ -205,6 +206,7 @@ describe('BeadsTracker', () => {
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
+    expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
   })
 
   test('claim falls back to a by-id claim when ready --claim skips a pre-assigned issue', async () => {

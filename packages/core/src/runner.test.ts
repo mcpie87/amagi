@@ -195,6 +195,10 @@ class FakePr implements PrDriver {
     return 'open'
   }
 
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
+
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
@@ -448,6 +452,28 @@ describe('Runner.runOnce', () => {
     expect(harness.calls).toHaveLength(1)
   })
 
+  test('an agent that already committed its own work lands in pr_open, not no_pr', async () => {
+    const harness = new FakeHarness([
+      {
+        effect: (cwd) => {
+          writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+          Bun.spawnSync(['git', 'add', '-A'], { cwd })
+          expect(Bun.spawnSync(['git', 'commit', '-q', '-m', 'agent work'], { cwd }).exitCode).toBe(
+            0,
+          )
+        },
+        events: [{ kind: 'text', text: 'wrote and committed hello.txt' }],
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('commit.created')
+    const worktree = store.task(TASK.id)?.worktree ?? ''
+    const log = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: worktree })
+    expect(log).toContain('agent work')
+  })
+
   test('a reclaimed task reuses the recorded worktree and branch', async () => {
     const wtPath = join(wtRoot, 'resume-worktree')
     const branch = 'amagi/bd-a1b2-add-a-greeting-file'
@@ -588,7 +614,7 @@ describe('Runner.runOnce', () => {
         events: [
           { kind: 'text', text: 'working on it' },
           { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
-          { kind: 'result', ok: false, summary: 'hit the turn limit' },
+          { kind: 'result', ok: false, summary: 'the build broke' },
         ],
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
@@ -596,7 +622,7 @@ describe('Runner.runOnce', () => {
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(result?.state).toBe('needs_human')
-    expect(stateReason(TASK.id)).toContain('hit the turn limit')
+    expect(stateReason(TASK.id)).toContain('the build broke')
   })
 
   test('a failed agent falls back to the failing tool output when there is no result or text', async () => {
@@ -734,6 +760,71 @@ describe('Runner.runOnce', () => {
 
     expect(result?.state).toBe('needs_human')
     expect(store.task(TASK.id)?.lastError).toBeTruthy()
+  })
+
+  test('a task that exceeds maxRunMinutes escalates to needs_human with the figures', async () => {
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    store.db
+      .query('update tasks set created_at = ? where id = ?')
+      .run(Date.now() - 61 * 60_000, TASK.id)
+
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxRunMinutes: 60 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(0)
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('budget exhausted')
+    expect(reason).toContain('max run time of 1h exceeded')
+    expect(store.task(TASK.id)?.lastError).toContain('max run time of 1h exceeded')
+  })
+
+  test('a task that exceeds maxCostUsd escalates mid-run with the figures', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'usage', inputTokens: 100, outputTokens: 100, costUsd: 3 },
+          { kind: 'usage', inputTokens: 100, outputTokens: 100, costUsd: 3 },
+          { kind: 'text', text: 'wrote hello.txt' },
+        ],
+        effect: (cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'),
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxCostUsd: 5 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(1)
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('budget exhausted')
+    expect(reason).toContain('max cost of $5.00 exceeded after $6.00')
+  })
+
+  test('a cost budget is skipped when the harness reports no cost', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'usage', inputTokens: 100, outputTokens: 100 },
+          { kind: 'text', text: 'wrote hello.txt' },
+        ],
+        effect: (cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'),
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxCostUsd: 0.01 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(1)
   })
 
   test('parks on an unanswered question and resumes the session with the answer', async () => {

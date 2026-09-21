@@ -43,7 +43,7 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
   readonly released: string[] = []
 
-  constructor(private readonly queue: TrackerTask[] = []) {}
+  constructor(private queue: TrackerTask[] = []) {}
 
   async ready(): Promise<TrackerTask[]> {
     return this.queue
@@ -182,6 +182,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
@@ -254,6 +257,7 @@ describe('RunService', () => {
       available: true,
       capacity: 2,
       running: [],
+      startedAt: {},
       resources: {},
       autoQueue: false,
     })
