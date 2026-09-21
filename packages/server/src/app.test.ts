@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdirSync } from 'node:fs'
 import type {
   BeadsIssue,
   CreateTrackerTask,
@@ -32,7 +33,7 @@ class FakeGateTracker implements Tracker {
   readonly opened: Question[] = []
   readonly resolved: string[] = []
   readonly released: string[] = []
-  readonly closed: { id: string; reason?: string }[] = []
+  readonly closed: { id: string; reason: string | undefined }[] = []
   releaseError: Error | null = null
 
   async ready(): Promise<TrackerTask[]> {
@@ -60,7 +61,7 @@ class FakeGateTracker implements Tracker {
     if (this.releaseError !== null) throw this.releaseError
   }
   async close(id: string, reason?: string): Promise<void> {
-    this.closed.push({ id, ...(reason === undefined ? {} : { reason }) })
+    this.closed.push({ id, reason })
   }
   async openGate(_id: string, question: Question): Promise<GateRef> {
     this.opened.push(question)
@@ -522,43 +523,125 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     claim(id)
     store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
     store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
-    store.append(id, { type: 'task.state', from: 'implementing', to: state })
+    store.append(id, { type: 'task.state', from: 'implementing', to: state, reason: 'parked' })
   }
-  const close = (id: string, reason?: string) =>
+  const close = (id: string, reason: string) =>
     app.request(`/api/repos/repo1/tasks/${id}/close`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...(reason === undefined ? {} : { reason }) }),
+      body: JSON.stringify({ reason }),
     })
 
-  test.each(['needs_human', 'no_pr'] as const)(
-    'abandons a %s task, records the reason, and closes the tracker issue',
+  test('abandons a needs_human task with the reason and closes it on the tracker', async () => {
+    parked('bd-1', 'needs_human')
+    const res = await close('bd-1', 'operator says done')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('abandoned')
+    expect(body.task.statusReason).toBe('operator says done')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'operator says done' }])
+  })
+
+  test.each(['no_pr', 'needs_human'] as const)(
+    'abandons a %s task recording the reason',
     async (state) => {
       parked('bd-1', state)
-      const res = await close('bd-1', 'no longer wanted')
+      const res = await close('bd-1', 'not needed')
       expect(res.status).toBe(200)
       const body = (await res.json()) as { task: TaskRow }
       expect(body.task.state).toBe('abandoned')
-      expect(body.task.statusReason).toBe('no longer wanted')
-      expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'no longer wanted' }])
+      expect(body.task.statusReason).toBe('not needed')
     },
   )
 
-  test('404s on an unknown task', async () => {
-    expect((await close('nope', 'gone')).status).toBe(404)
+  test('instantly closes an in-flight task, stopping the worker and deleting the worktree', async () => {
+    const stopped: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: () => ({ available: true, capacity: 1, running: ['bd-1'] }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async (id) => {
+          stopped.push(id)
+          // Mirror the real stop: a live run parks in cancelled before close.
+          store.append(id, { type: 'task.state', from: 'implementing', to: 'cancelled' })
+          return { ok: true, taskId: id }
+        },
+      },
+    })
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt/bd-1', branch: 'amagi/bd-1-x' })
+    // The fake workspace root does not exist; give git a valid cwd to run in.
+    const root = ws.workspaces.get('repo1')?.root
+    if (root) mkdirSync(root, { recursive: true })
+
+    const res = await close('bd-1', 'kill it')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(stopped).toEqual(['bd-1'])
+    expect(body.task.state).toBe('abandoned')
+    // The recorded worktree is dropped from the projection.
+    expect(body.task.worktree).toBeNull()
+    expect(body.task.branch).toBeNull()
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
   })
 
-  test('409s when the task is not parked for attention', async () => {
+  test('closing an in-flight task does not require the runner service', async () => {
     claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await close('bd-1', 'kill it')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await close('nope', 'x')
+    expect(res.status).toBe(404)
+  })
+
+  test('409s when the task is already settled', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'done' })
     const res = await close('bd-1', 'no longer wanted')
     expect(res.status).toBe(409)
+
+    store.append('bd-2', {
+      type: 'task.claimed',
+      title: 'withdrawn',
+      tracker: 'beads',
+    })
+    store.append('bd-2', { type: 'task.state', from: null, to: 'abandoned' })
+    expect((await close('bd-2', 'already gone')).status).toBe(409)
   })
 
-  test('rejects a missing or empty reason', async () => {
+  test('rejects a missing or blank reason', async () => {
     parked('bd-1', 'needs_human')
-    expect((await close('bd-1')).status).toBe(400)
-    expect((await close('bd-1', '   ')).status).toBe(400)
-    expect(tracker.closed).toEqual([])
+    const missing = await app.request('/api/repos/repo1/tasks/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(missing.status).toBe(400)
+    expect(tracker.closed).toHaveLength(0)
+
+    const blank = await close('bd-1', '   ')
+    expect(blank.status).toBe(400)
+    expect(tracker.closed).toHaveLength(0)
+  })
+
+  test('a tracker failure still records the abandonment', async () => {
+    tracker.close = async () => {
+      throw new Error('bd down')
+    }
+    parked('bd-1', 'no_pr')
+    const res = await close('bd-1', 'wont run')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('abandoned')
+    expect(body.task.statusReason).toBe('wont run')
   })
 })
 

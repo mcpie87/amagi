@@ -7,6 +7,7 @@ import {
   type RegistryEntry,
   Runner,
   type RunServiceApi,
+  removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
@@ -25,7 +26,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
-  CloseBody,
+  CloseTaskBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -343,21 +344,57 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
     .post(
       '/api/repos/:repo/tasks/:id/close',
       valid('param', RepoTaskIdParam),
-      valid('json', CloseBody),
+      valid('json', CloseTaskBody),
       async (c) => {
         const { repo, id } = c.req.valid('param')
         const { reason } = c.req.valid('json')
         const ws = resolveWorkspace(workspaces, repo)
         const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        // Only a parked needs-attention task can be retired this way; a live
-        // or already-settled task must not be yanked out of its run.
-        if (task.state !== 'needs_human' && task.state !== 'no_pr') {
+        // Instant close retires any in-flight or parked task; only a task
+        // already settled (done/abandoned) has nothing left to close.
+        if (
+          isTerminal(task.state) &&
+          task.state !== 'needs_human' &&
+          task.state !== 'no_pr' &&
+          task.state !== 'cancelled'
+        ) {
           return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
         }
-        ws.store.append(id, { type: 'task.state', from: task.state, to: 'abandoned', reason })
-        // Best effort like reconcile: the store is authoritative, so a tracker
-        // hiccup logs the failure instead of losing the operator's close.
+        // Shut the worker down first: stop() kills the owned agent process and
+        // parks a live run in cancelled, releasing the tracker claim, so the
+        // close below retires it without racing the run. A task not running on
+        // this server's runner (CLI run, another server) is simply not stopped.
+        if (runner !== undefined) {
+          try {
+            await runner.stop(id)
+          } catch (err) {
+            console.warn(`stop on close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        const afterStop = ws.store.task(id)
+        ws.store.append(id, {
+          type: 'task.state',
+          from: afterStop?.state ?? task.state,
+          to: 'abandoned',
+          reason,
+        })
+        // Best effort like reconcile: the store is authoritative, so a git or
+        // tracker hiccup logs the failure instead of losing the operator's close.
+        if (afterStop !== null && afterStop.worktree !== null) {
+          const { worktree, branch } = afterStop
+          try {
+            await removeWorktree(ws.store, id, {
+              repoRoot: ws.root,
+              path: worktree,
+              branch: branch ?? null,
+            })
+          } catch (err) {
+            console.warn(
+              `worktree removal on close ${id}: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        }
         try {
           await ws.tracker.close(id, reason)
         } catch (err) {

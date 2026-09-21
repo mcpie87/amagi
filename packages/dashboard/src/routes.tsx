@@ -846,7 +846,11 @@ function QueueView() {
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[], showReason: boolean, closable = false) => (
+  const taskList = (
+    tasks: TaskView[],
+    showReason: boolean,
+    action?: (task: TaskView) => ReactNode,
+  ) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
         <li key={task.id} className="flex items-center">
@@ -867,9 +871,7 @@ function QueueView() {
               )}
             </span>
           </Link>
-          {closable && selected !== null && (
-            <CloseButton repo={selected} taskId={task.id} state={task.state} />
-          )}
+          {action?.(task)}
         </li>
       ))}
     </ul>
@@ -887,7 +889,13 @@ function QueueView() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention, true, true)}
+          {taskList(
+            attention,
+            true,
+            selected === null
+              ? undefined
+              : (task) => <CloseButton repo={selected} taskId={task.id} state={task.state} />,
+          )}
         </div>
       )}
       {queue.length === 0 ? (
@@ -1081,10 +1089,15 @@ function ReclaimButton({
   )
 }
 
+/** A task the operator can still retire: in flight, parked, or stopped. */
+function closable(state: TaskState): boolean {
+  return !isTerminal(state) || state === 'needs_human' || state === 'no_pr' || state === 'cancelled'
+}
+
 function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (state !== 'needs_human' && state !== 'no_pr') return null
+  if (!closable(state)) return null
 
   const close = async () => {
     const reason = window.prompt('Reason for closing this task')
@@ -1307,7 +1320,6 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && <CloseButton repo={selected} taskId={task.id} state={task.state} />}
         {selected !== null && (
           <RetryButton
             repo={selected}
@@ -1316,6 +1328,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && <CloseButton repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
