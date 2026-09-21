@@ -11,18 +11,21 @@ describe('HARDCODED_MODELS', () => {
     expect(HARDCODED_MODELS.opencode).toBeUndefined()
   })
 
-  test('claude lists its /model aliases', () => {
+  test('claude lists its exact model IDs, not bare aliases', () => {
     expect(HARDCODED_MODELS.claude).toEqual([
-      'default',
-      'sonnet',
-      'opus',
-      'haiku',
-      'fable',
-      'best',
-      'sonnet[1m]',
-      'opus[1m]',
-      'fable[1m]',
-      'opusplan',
+      'claude-fable-5-1',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-haiku-4-5',
+    ])
+  })
+
+  test('codex lists the current gpt family', () => {
+    expect(HARDCODED_MODELS.codex).toEqual([
+      'gpt-6-astra',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
     ])
   })
 })

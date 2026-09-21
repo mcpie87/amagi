@@ -151,7 +151,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
-| `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"opus"`. |
+| `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"claude-opus-5"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
@@ -218,7 +218,7 @@ permissions = "bypass"
 
 ### Harness and model selection
 
-`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort — each from what the harness says is available. Model lists are fetched the way each harness lists them (`claude model list`, `codex debug models`, `opencode models`) and cached under `$XDG_CACHE_HOME/amagi/models/` for 24h, so the prompt is fast and still offers the last known models offline. Codex's catalog also carries each model's supported reasoning levels, so its effort prompt offers exactly those. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
+`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
 
 ```bash
 amagi run                      # interactive picker
@@ -236,7 +236,7 @@ permissions = "bypass"
 
 [harness.definitions.careful]
 kind = "claude"
-model = "opus"
+model = "claude-opus-5"
 ```
 
 ## Packages
