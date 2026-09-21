@@ -1,5 +1,14 @@
 import { exec as defaultExec, type Exec, execOk } from '../../exec.ts'
-import type { GateRef, Question, Tracker, TrackerStatus, TrackerTask } from '../types.ts'
+import type {
+  CreateTrackerTask,
+  GateRef,
+  Question,
+  Tracker,
+  TrackerCapabilities,
+  TrackerStatus,
+  TrackerTask,
+  UpdateTrackerTask,
+} from '../types.ts'
 
 type BdIssue = {
   id: string
@@ -12,6 +21,7 @@ type BdIssue = {
   assignee?: string
   labels?: string[]
   parent?: string
+  dependencies?: BdIssue[]
 }
 
 export type BeadsIssue = TrackerTask & {
@@ -19,6 +29,8 @@ export type BeadsIssue = TrackerTask & {
   assignee: string | null
   labels: string[]
   parent: string | null
+  /** Issues this one is blocked by, when the tracker reports them (bd show does). */
+  dependencies: TrackerTask[]
 }
 
 export type BeadsOptions = {
@@ -66,6 +78,7 @@ function toIssue(issue: BdIssue): BeadsIssue {
     assignee: issue.assignee ?? null,
     labels: issue.labels ?? [],
     parent: issue.parent ?? null,
+    dependencies: (issue.dependencies ?? []).map(toTask),
   }
 }
 
@@ -80,6 +93,7 @@ function parseIssues(stdout: string): BdIssue[] {
 export class BeadsTracker implements Tracker {
   readonly kind = 'beads'
   readonly leaseTtlMs = LEASE_TTL_MS
+  readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
 
   private readonly cwd: string
   private readonly exec: Exec
@@ -117,6 +131,11 @@ export class BeadsTracker implements Tracker {
     return parseIssues(await this.bd(['list', '--json', '--limit', String(limit)])).map(toIssue)
   }
 
+  async getIssue(id: string): Promise<BeadsIssue | null> {
+    const issues = parseIssues(await this.bd(['show', id, '--json']))
+    return issues.length > 0 && issues[0] ? toIssue(issues[0]) : null
+  }
+
   async claim(id?: string): Promise<TrackerTask | null> {
     if (id !== undefined) {
       await this.bd(['update', id, '--status', 'in_progress'])
@@ -139,6 +158,45 @@ export class BeadsTracker implements Tracker {
     const out = await this.bd(['show', id, '--json'])
     const issues = parseIssues(out)
     return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
+  }
+
+  async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+    const args = [
+      'create',
+      '--title',
+      input.title,
+      '--json',
+      ...(input.description === '' ? [] : ['--description', input.description]),
+      ...(input.acceptanceCriteria === null ? [] : ['--acceptance', input.acceptanceCriteria]),
+      ...(input.priority === null ? [] : ['--priority', `P${input.priority}`]),
+      ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
+      ...(input.dependencies.length === 0 ? [] : ['--deps', input.dependencies.join(',')]),
+    ]
+    const issues = parseIssues(await this.bd(args))
+    const created = issues[0]
+    if (created === undefined) throw new Error('bd create returned no issue')
+    return toTask(created)
+  }
+
+  async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
+    const update: string[] = []
+    if (input.title !== undefined) update.push('--title', input.title)
+    if (input.description !== undefined) update.push('--description', input.description)
+    if (input.acceptanceCriteria !== undefined) {
+      update.push('--acceptance', input.acceptanceCriteria ?? '')
+    }
+    if (input.priority !== undefined && input.priority !== null) {
+      update.push('--priority', `P${input.priority}`)
+    }
+    if (input.labels !== undefined) update.push('--set-labels', input.labels.join(','))
+    if (update.length > 0) await this.bd(['update', id, ...update])
+    if (input.dependencies !== undefined) {
+      for (const dep of input.dependencies.add) await this.bd(['dep', 'add', id, dep])
+      for (const dep of input.dependencies.remove) await this.bd(['dep', 'remove', id, dep])
+    }
+    const updated = await this.get(id)
+    if (updated === null) throw new Error(`bd: issue ${id} disappeared after update`)
+    return updated
   }
 
   async heartbeat(id: string): Promise<boolean> {

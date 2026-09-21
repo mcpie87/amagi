@@ -94,6 +94,7 @@ function fakeHarness(
     kind: 'fake',
     start: () => process,
     resume: () => process,
+    listModels: async () => [],
   }
 }
 

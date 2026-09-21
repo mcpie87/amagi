@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { gitTokenConfig } from './drivers/pr.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
-import { branchExists } from './worktree.ts'
+import { applyPersona, branchExists } from './worktree.ts'
 
 export type PrInfo = {
   number: number
@@ -43,6 +43,8 @@ export type PrepareConflictWorktreeOptions = {
   worktreeRoot: string
   baseBranch: string
   pr: PrInfo
+  /** Git persona name; the matching ~/.config/git/personas/<name>.gitconfig is included. */
+  persona?: string | null
   exec?: Exec
 }
 
@@ -80,6 +82,10 @@ export async function prepareConflictWorktree(
       ? ['git', 'worktree', 'add', path, branch]
       : ['git', 'worktree', 'add', '-b', branch, path, `origin/${opts.pr.headRefName}`]
     await execOk(run, args, { cwd: opts.repoRoot })
+  }
+
+  if (opts.persona) {
+    await applyPersona(run, path, opts.persona)
   }
 
   const merge = await run(['git', 'merge', `origin/${opts.baseBranch}`], { cwd: path })

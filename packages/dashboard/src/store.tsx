@@ -38,6 +38,9 @@ const ReposContext = createContext<DashboardValue>({
 
 const StreamContext = createContext<DashboardState>(initialDashboardState())
 
+type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'
+const ConnectionContext = createContext<ConnectionStatus>('connecting')
+
 function readStored(): string | null {
   try {
     return localStorage.getItem('amagi:repo')
@@ -111,14 +114,19 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
 function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
+  const [connection, setConnection] = useState<ConnectionStatus>('connecting')
 
   useEffect(() => {
     const source = new EventSource(`${apiBase}/api/repos/${repo}/stream?sinceSeq=0`)
+    source.addEventListener('open', () => setConnection('connected'))
+    source.addEventListener('error', () => setConnection('reconnecting'))
     source.addEventListener('message', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data) as StoredEvent
-        // agent.stream is the hot path: it bypasses the reducer entirely, and
-        // the agentLogStore ring buffer owns it, batching renders per frame.
+        // agent.stream is the hot path: hundreds of lines/sec of assistant
+        // text and tool output. It bypasses the reducer entirely so it never
+        // costs a setState per line; the ring buffer in agentLog.ts owns it
+        // and batches renders on requestAnimationFrame instead.
         if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
           agentLogStore.append(`${repo}/${parsed.taskId}`, parsed.role, parsed.ts, parsed.event)
         } else {
@@ -131,9 +139,17 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
     return () => source.close()
   }, [repo])
 
-  return <StreamContext.Provider value={state}>{children}</StreamContext.Provider>
+  return (
+    <ConnectionContext.Provider value={connection}>
+      <StreamContext.Provider value={state}>{children}</StreamContext.Provider>
+    </ConnectionContext.Provider>
+  )
 }
 
 export function useDashboard(): DashboardValue & { state: DashboardState } {
   return { ...useContext(ReposContext), state: useContext(StreamContext) }
+}
+
+export function useConnection(): ConnectionStatus {
+  return useContext(ConnectionContext)
 }

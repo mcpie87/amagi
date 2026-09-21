@@ -1,7 +1,7 @@
 import { type Config, loadConfig } from './config.ts'
 import { diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
-import { type BeadsIssue, BeadsTracker } from './drivers/tracker/beads.ts'
+import type { BeadsIssue } from './drivers/tracker/beads.ts'
 import type { Tracker } from './drivers/types.ts'
 import { makeTracker } from './factory.ts'
 import { dbPathForRepo, registryPath as defaultRegistryPath } from './paths.ts'
@@ -30,6 +30,8 @@ export type Workspace = {
   /** Null when the configured forge driver is not implemented yet (forgejo). */
   forge: PrDriver | null
   listIssues?: () => Promise<BeadsIssue[]>
+  /** Rich issue detail, including dependency blockers, when the tracker has it. */
+  getIssue?: (id: string) => Promise<BeadsIssue | null>
 }
 
 export type WorkspacesOptions = {
@@ -83,7 +85,19 @@ export class Workspaces {
       )
       forge = null
     }
-    const listIssues = tracker instanceof BeadsTracker ? () => tracker.list() : undefined
+    // The issue browser is a duck-typed capability: the beads tracker (and
+    // fakes that mimic it) expose list/getIssue, other trackers leave the
+    // workspace without them so the API answers 501 for that repo.
+    const hasIssueBrowser = (
+      t: Tracker,
+    ): t is Tracker & {
+      list(limit?: number): Promise<BeadsIssue[]>
+      getIssue(id: string): Promise<BeadsIssue | null>
+    } =>
+      typeof (t as { list?: unknown }).list === 'function' &&
+      typeof (t as { getIssue?: unknown }).getIssue === 'function'
+    const listIssues = hasIssueBrowser(tracker) ? () => tracker.list() : undefined
+    const getIssue = hasIssueBrowser(tracker) ? (id: string) => tracker.getIssue(id) : undefined
     return {
       key: entry.key,
       name: entry.name,
@@ -93,6 +107,7 @@ export class Workspaces {
       tracker,
       forge,
       ...(listIssues === undefined ? {} : { listIssues }),
+      ...(getIssue === undefined ? {} : { getIssue }),
     }
   }
 

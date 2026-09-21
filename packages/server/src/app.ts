@@ -1,4 +1,5 @@
 import {
+  CAPABILITY_WORDS,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -7,6 +8,10 @@ import {
   Runner,
   type Store,
   type Tracker,
+  type TrackerCapabilities,
+  type TrackerTask,
+  UnsupportedCapabilityError,
+  type UpdateTrackerTask,
   type Workspace,
   type Workspaces,
 } from '@amagi/core'
@@ -20,6 +25,8 @@ import {
   AskBody,
   AwaitQuery,
   EventQuery,
+  IssueCreateBody,
+  IssueUpdateBody,
   QuestionQuery,
   RepoParam,
   RepoQuestionParam,
@@ -46,6 +53,13 @@ const valid = <T extends z.ZodType, Target extends keyof ValidationTargets>(
   zValidator(target, schema, (result, c) => {
     if (!result.success) return c.json({ error: z.prettifyError(result.error) }, 400)
   })
+
+/** The 501 reason for an operation the tracker cannot do, or null when it can. */
+function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities): string | null {
+  return tracker.capabilities[capability]
+    ? null
+    : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
+}
 
 /**
  * The agent carries AMAGI_TASK_TOKEN in its environment; a question is bound
@@ -169,6 +183,86 @@ export function createApp({ workspaces, notify = [] }: ServerDeps) {
       const ready = await workspaces.diagnose(entry)
       return c.json({ ...entry, ready }, 201)
     })
+
+    .get('/api/repos/:repo/issues/:id', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.getIssue === undefined) {
+        return c.json({ error: `issue detail is unavailable for ${repo}` }, 501)
+      }
+      const issue = await ws.getIssue(id)
+      if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
+      return c.json(issue)
+    })
+
+    .post(
+      '/api/repos/:repo/issues',
+      valid('param', RepoParam),
+      valid('json', IssueCreateBody),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const cap = capabilityError(ws.tracker, 'create')
+        if (cap !== null) return c.json({ error: cap }, 501)
+        try {
+          const created: TrackerTask = await ws.tracker.createTask(c.req.valid('json'))
+          const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
+          return c.json(issue ?? created, 201)
+        } catch (err) {
+          if (err instanceof UnsupportedCapabilityError) return c.json({ error: err.message }, 501)
+          throw err
+        }
+      },
+    )
+
+    .patch(
+      '/api/repos/:repo/issues/:id',
+      valid('param', RepoTaskIdParam),
+      valid('json', IssueUpdateBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const body = c.req.valid('json')
+        const input: UpdateTrackerTask = {
+          ...(body.title === undefined ? {} : { title: body.title }),
+          ...(body.description === undefined ? {} : { description: body.description }),
+          ...(body.acceptanceCriteria === undefined
+            ? {}
+            : { acceptanceCriteria: body.acceptanceCriteria }),
+          ...(body.priority === undefined ? {} : { priority: body.priority }),
+          ...(body.labels === undefined ? {} : { labels: body.labels }),
+        }
+        // Only the operation actually requested is gated, so a dependency-only
+        // edit reports the dependency gap rather than a generic edit gap.
+        if (Object.keys(input).length > 0) {
+          const editCap = capabilityError(ws.tracker, 'edit')
+          if (editCap !== null) return c.json({ error: editCap }, 501)
+        }
+        // The board edits dependencies as a full set; the tracker wants a diff.
+        if (body.dependencies !== undefined) {
+          const depCap = capabilityError(ws.tracker, 'dependencies')
+          if (depCap !== null) return c.json({ error: depCap }, 501)
+          if (ws.getIssue === undefined) {
+            return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
+          }
+          const current = (await ws.getIssue(id))?.dependencies.map((d) => d.id) ?? []
+          input.dependencies = {
+            add: body.dependencies.filter((d) => !current.includes(d)),
+            remove: current.filter((d) => !body.dependencies?.includes(d)),
+          }
+        }
+        try {
+          const updated = await ws.tracker.updateTask(id, input)
+          const issue = ws.getIssue === undefined ? null : await ws.getIssue(updated.id)
+          return c.json(issue ?? updated)
+        } catch (err) {
+          if (err instanceof UnsupportedCapabilityError) {
+            return c.json({ error: err.message }, 501)
+          }
+          throw err
+        }
+      },
+    )
 
     .delete('/api/repos/:repo', valid('param', RepoParam), (c) => {
       if (!workspaces.remove(c.req.valid('param').repo)) {

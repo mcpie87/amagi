@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
-import { prTitle } from './prompt.ts'
+import { implementSystemPrompt, prTitle } from './prompt.ts'
 
 const task = (title: string): TrackerTask => ({
   id: 'am-544',
@@ -25,5 +25,14 @@ describe('prTitle', () => {
 
   test('drops a milestone-style prefix', () => {
     expect(prTitle(task('M5: forge drivers'))).toBe('am-544: forge drivers')
+  })
+})
+
+describe('implementSystemPrompt', () => {
+  test('tells the agent to document how to use new user-facing features', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('user-facing feature')
+    expect(prompt).toContain('### How to use')
+    expect(prompt).toContain('description in the issue tracker')
   })
 })

@@ -100,6 +100,7 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
     worktreeRoot: opts.config.repo.worktreeRoot,
     baseBranch: opts.config.repo.baseBranch,
     pr: opts.pr,
+    persona: opts.config.repo.persona,
     exec: run,
   })
 }

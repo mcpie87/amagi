@@ -22,6 +22,11 @@ import { type RepoInfo, useDashboard } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
+type Dependency = {
+  id: string
+  title: string
+}
+
 type Issue = {
   id: string
   title: string
@@ -33,6 +38,7 @@ type Issue = {
   assignee: string | null
   labels: string[]
   parent: string | null
+  dependencies: Dependency[]
 }
 
 const PAGE_SIZE = 10
@@ -65,6 +71,7 @@ const stateBadge: Record<TaskState, string> = {
   reviewing: 'bg-purple-600',
   fixing: 'bg-blue-600',
   done: 'bg-emerald-600',
+  no_pr: 'bg-zinc-600',
   needs_human: 'bg-red-600',
   abandoned: 'bg-zinc-700',
 }
@@ -232,6 +239,189 @@ function IssueBadge({ issue }: { issue: Issue }) {
 
 type IssuesViewMode = 'kanban' | 'list'
 
+function IssueFormModal({
+  repo,
+  mode,
+  initial,
+  onClose,
+  onSaved,
+}: {
+  repo: string
+  mode: 'create' | 'edit'
+  initial: Issue | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [title, setTitle] = useState(initial?.title ?? '')
+  const [description, setDescription] = useState(initial?.description ?? '')
+  const [acceptance, setAcceptance] = useState(initial?.acceptanceCriteria ?? '')
+  const [priority, setPriority] = useState(
+    initial?.priority === undefined || initial?.priority === null ? '' : String(initial.priority),
+  )
+  const [labels, setLabels] = useState((initial?.labels ?? []).join(', '))
+  const [dependencies, setDependencies] = useState(
+    (initial?.dependencies ?? []).map((d) => d.id).join(', '),
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (busy || title.trim() === '') return
+    setBusy(true)
+    setError(null)
+    const payload = {
+      title: title.trim(),
+      description,
+      acceptanceCriteria: acceptance.trim() === '' ? null : acceptance,
+      priority: priority === '' ? null : Number(priority),
+      labels: labels
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s !== ''),
+      dependencies: dependencies
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s !== ''),
+    }
+    try {
+      const url =
+        mode === 'create'
+          ? `${apiBase}/api/repos/${repo}/issues`
+          : `${apiBase}/api/repos/${repo}/issues/${initial?.id}`
+      const res = await fetch(url, {
+        method: mode === 'create' ? 'POST' : 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      onSaved()
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const input = 'w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm text-zinc-100'
+  const label = 'mb-1 block text-sm text-zinc-400'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-900 p-4"
+      >
+        <h2 className="mb-3 text-lg font-semibold">
+          {mode === 'create' ? 'New task' : `Edit ${initial?.id ?? ''}`}
+        </h2>
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="issue-title">
+              Title
+            </label>
+            <input
+              id="issue-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className={input}
+            />
+          </div>
+          <div>
+            <label className={label} htmlFor="issue-description">
+              Description
+            </label>
+            <textarea
+              id="issue-description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={4}
+              className={input}
+            />
+          </div>
+          <div>
+            <label className={label} htmlFor="issue-acceptance">
+              Acceptance criteria
+            </label>
+            <textarea
+              id="issue-acceptance"
+              value={acceptance}
+              onChange={(e) => setAcceptance(e.target.value)}
+              rows={3}
+              className={input}
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className={label} htmlFor="issue-priority">
+                Priority
+              </label>
+              <select
+                id="issue-priority"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+                className={input}
+              >
+                <option value="">None</option>
+                <option value="0">P0</option>
+                <option value="1">P1</option>
+                <option value="2">P2</option>
+                <option value="3">P3</option>
+                <option value="4">P4</option>
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="issue-labels">
+                Labels (comma separated)
+              </label>
+              <input
+                id="issue-labels"
+                value={labels}
+                onChange={(e) => setLabels(e.target.value)}
+                className={input}
+              />
+            </div>
+          </div>
+          <div>
+            <label className={label} htmlFor="issue-dependencies">
+              Blocked by issue ids (comma separated)
+            </label>
+            <input
+              id="issue-dependencies"
+              value={dependencies}
+              onChange={(e) => setDependencies(e.target.value)}
+              className={input}
+              placeholder="am-abc, am-123"
+            />
+            <p className={label}>The task waits on these issues before it can run.</p>
+          </div>
+        </div>
+        {error !== null && <p className="mt-3 text-sm text-red-400">{error}</p>}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy || title.trim() === ''}
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+          >
+            {mode === 'create' ? 'Create task' : 'Save changes'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 function IssuesView() {
   const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
@@ -239,6 +429,9 @@ function IssuesView() {
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
   const [page, setPage] = useState(0)
+  const [form, setForm] = useState<{ mode: 'create' } | { mode: 'edit'; issue: Issue } | null>(null)
+  const [refresh, setRefresh] = useState(0)
+  const repoRef = useRef(selected)
   const [view, setView] = useState<IssuesViewMode>(() => {
     try {
       return localStorage.getItem('issues:view') === 'list' ? 'list' : 'kanban'
@@ -259,17 +452,30 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
-    setIssues([])
+    if (repoRef.current !== selected) {
+      repoRef.current = selected
+      setIssues([])
+      setSelectedIssue(null)
+    }
     setError(null)
-    setSelectedIssue(null)
     fetch(`${apiBase}/api/repos/${selected}/issues`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
         return res.json() as Promise<Issue[]>
       })
-      .then(setIssues)
+      .then((items) => {
+        setIssues(items)
+        setSelectedIssue((current) =>
+          current === null ? null : (items.find((i) => i.id === current.id) ?? null),
+        )
+      })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-  }, [selected])
+  }, [selected, refresh])
+
+  const saved = () => {
+    setForm(null)
+    setRefresh((value) => value + 1)
+  }
 
   const filtered = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
@@ -289,6 +495,15 @@ function IssuesView() {
         <div className="mt-3 flex items-center gap-3">
           <h1 className="text-xl font-semibold">{selectedIssue.title}</h1>
           <IssueBadge issue={selectedIssue} />
+          {selected !== null && (
+            <button
+              type="button"
+              onClick={() => setForm({ mode: 'edit', issue: selectedIssue })}
+              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+            >
+              Edit
+            </button>
+          )}
         </div>
         <p className="mt-1 text-sm text-zinc-500">
           {selectedIssue.id}
@@ -318,6 +533,15 @@ function IssuesView() {
             </h2>
             <p className="whitespace-pre-wrap text-zinc-300">{selectedIssue.acceptanceCriteria}</p>
           </div>
+        )}
+        {selected !== null && form !== null && (
+          <IssueFormModal
+            repo={selected}
+            mode={form.mode}
+            initial={form.mode === 'edit' ? form.issue : null}
+            onClose={() => setForm(null)}
+            onSaved={saved}
+          />
         )}
       </section>
     )
@@ -367,6 +591,15 @@ function IssuesView() {
             <option value="blocked">Blocked</option>
             <option value="closed">Closed</option>
           </select>
+          {selected !== null && (
+            <button
+              type="button"
+              onClick={() => setForm({ mode: 'create' })}
+              className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500"
+            >
+              New task
+            </button>
+          )}
         </div>
       </div>
       {error !== null ? (
@@ -464,6 +697,15 @@ function IssuesView() {
             </div>
           )}
         </>
+      )}
+      {selected !== null && form !== null && (
+        <IssueFormModal
+          repo={selected}
+          mode={form.mode}
+          initial={form.mode === 'edit' ? form.issue : null}
+          onClose={() => setForm(null)}
+          onSaved={saved}
+        />
       )}
     </section>
   )

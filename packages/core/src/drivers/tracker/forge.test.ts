@@ -125,6 +125,24 @@ describe('GithubTracker', () => {
     const tracker = new GithubTracker({ cwd: '/repo', exec })
     expect(await tracker.gateResolved({ id: '3#q-9', advisory: true })).toBe(false)
   })
+
+  test('writes are surfaced as unsupported, never silently dropped', async () => {
+    const tracker = new GithubTracker({ cwd: '/repo', exec: fake(() => ok('')).exec })
+    expect(tracker.capabilities).toEqual({ create: false, edit: false, dependencies: false })
+    await expect(
+      tracker.createTask({
+        title: 'x',
+        description: '',
+        acceptanceCriteria: null,
+        priority: null,
+        labels: [],
+        dependencies: [],
+      }),
+    ).rejects.toThrow(/does not support creating issues/)
+    await expect(tracker.updateTask('3', { title: 'x' })).rejects.toThrow(
+      /does not support editing issues/,
+    )
+  })
 })
 
 describe('ForgejoTracker', () => {
