@@ -820,6 +820,38 @@ describe('runner endpoints', () => {
     })
   })
 
+  test('GET /api/runner merges background worker activity when present', async () => {
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner(),
+      workers: () => [
+        {
+          repo: 'repo1',
+          name: 'mention-watcher',
+          lastRunAt: 1720000000000,
+          ok: true,
+          error: null,
+          prsScanned: 2,
+          mentionsResponded: 1,
+        },
+      ],
+    })
+    const res = await app.request('/api/runner')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { workers?: unknown }
+    expect(body.workers).toEqual([
+      {
+        repo: 'repo1',
+        name: 'mention-watcher',
+        lastRunAt: 1720000000000,
+        ok: true,
+        error: null,
+        prsScanned: 2,
+        mentionsResponded: 1,
+      },
+    ])
+  })
+
   test('runner endpoints are 501 without a runner service', async () => {
     expect((await app.request('/api/runner')).status).toBe(501)
     expect((await post('/api/runs', '{}')).status).toBe(501)

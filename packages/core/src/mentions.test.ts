@@ -14,13 +14,17 @@ import type {
 } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import {
+  isAgentMention,
   listPrMentions,
   type MentionProgress,
   mentionsPath,
+  mentionWatchPath,
   parseMentionKind,
   readHandledMentions,
+  readMentionWatch,
   respondToMention,
   saveHandledMentions,
+  saveMentionWatch,
 } from './mentions.ts'
 import type { PrInfo } from './pr-check.ts'
 
@@ -47,6 +51,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
+  updatedAt: '2026-09-21T10:00:00Z',
   ...over,
 })
 
@@ -171,6 +176,36 @@ describe('handled mentions', () => {
 
   test('mentionsPath lives under the amagi cache', () => {
     expect(mentionsPath('amagi')).toContain('amagi/mentions/amagi.json')
+  })
+
+  test('mention watch state roundtrips through a json file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-mentions-'))
+    try {
+      const path = join(dir, 'watch.json')
+      expect(readMentionWatch(path)).toEqual({})
+      saveMentionWatch(path, { 7: { updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 3 } })
+      expect(readMentionWatch(path)).toEqual({
+        7: { updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 3 },
+      })
+      expect(mentionWatchPath('amagi')).toContain('amagi/mentions/amagi.watch.json')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('isAgentMention', () => {
+  test('matches the handle case-insensitively, ignores the agent itself and non-mentions', () => {
+    expect(isAgentMention({ id: '1', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru')).toBe(
+      true,
+    )
+    expect(
+      isAgentMention({ id: '2', user: 'alice', body: 'why, @Chise-Maru?' }, 'chise-maru'),
+    ).toBe(true)
+    expect(
+      isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru'),
+    ).toBe(false)
+    expect(isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru')).toBe(false)
   })
 })
 
