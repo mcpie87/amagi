@@ -1,6 +1,5 @@
 import type { AgentEvent } from '../../events.ts'
-import { CommandError, exec } from '../../exec.ts'
-import { parseModelLines } from '../../models.ts'
+import { HARDCODED_MODELS } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
 import { renderToolResult, spawnAgent } from './spawn.ts'
 
@@ -239,10 +238,7 @@ export class CodexHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    const cmd = [this.bin, 'models']
-    const result = await exec(cmd)
-    if (result.exitCode !== 0) throw new CommandError(cmd, result)
-    return parseModelLines(result.stdout)
+    return [...HARDCODED_MODELS.codex]
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
@@ -265,6 +261,7 @@ export class CodexHarness implements Harness {
     // codex has no `--append-system-prompt`; `developer_instructions` is the
     // config key that injects extra instructions as a separate message.
     if (opts.systemPrompt) argv.push('-c', `developer_instructions=${opts.systemPrompt}`)
+    if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')

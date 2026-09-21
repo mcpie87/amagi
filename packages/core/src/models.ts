@@ -2,6 +2,51 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { cacheHome } from './paths.ts'
 
+/**
+ * Curated model options per harness kind, owned by amagi rather than scraped
+ * from each CLI's own listing. A new model ships by editing this table, not by
+ * parsing `claude model list` or `~/.codex/config.toml`. Only claude and codex
+ * are hardcoded; opencode keeps listing its own models.
+ */
+type HarnessModelTable = Partial<Record<string, readonly string[]>> & {
+  claude: readonly string[]
+  codex: readonly string[]
+}
+
+export const HARDCODED_MODELS: HarnessModelTable = {
+  claude: [
+    'default',
+    'sonnet',
+    'opus',
+    'haiku',
+    'fable',
+    'best',
+    'sonnet[1m]',
+    'opus[1m]',
+    'fable[1m]',
+    'opusplan',
+  ],
+  codex: [
+    'gpt-6-astra',
+    'gpt-5.1-codex',
+    'gpt-5-codex',
+    'gpt-5.1-mini',
+    'gpt-5-mini',
+    'gpt-5-nano',
+  ],
+}
+
+/**
+ * Discrete reasoning-effort levels each harness accepts, keyed by kind. These
+ * feed the interactive effort prompt in pickRunSelection; a harness with no
+ * entry gets no prompt. Levels match what each CLI accepts: claude's effort
+ * levels and codex's `model_reasoning_effort` values.
+ */
+export const HARDCODED_EFFORTS: HarnessModelTable = {
+  claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+  codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+}
+
 /** A model name as harnesses print it: provider-qualified or bare, no spaces. */
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._+\-/]*$/
 
