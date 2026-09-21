@@ -5,6 +5,9 @@ install:
 
 check: lint typecheck build test
 
+# Quality gate used by the task orchestrator; runs the full project check.
+fresh-check: check
+
 lint:
     bun x biome check .
 

@@ -223,7 +223,7 @@ export function createApp({ store, notify = [], tracker, listIssues, getIssue }:
       if (task.worktree === null || task.branch === null) {
         return c.json({ error: `task ${id} has no worktree to resume` }, 409)
       }
-      if (isTerminal(task.state)) {
+      if (isTerminal(task.state) && task.state !== 'cancelled') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
@@ -236,6 +236,25 @@ export function createApp({ store, notify = [], tracker, listIssues, getIssue }:
         }
       }
       store.append(id, { type: 'task.reclaimed' })
+      return c.json({ task: store.task(id) })
+    })
+
+    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
+      const { id } = c.req.valid('param')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (isTerminal(task.state)) {
+        return c.json({ error: `task ${id} is already in terminal state ${task.state}` }, 409)
+      }
+      // Park the run in `cancelled`; a live runner watches the store, kills
+      // the agent process and unwinds. A crashed runner leaves the task parked
+      // for the operator to reclaim via the restart flow.
+      store.append(id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'cancelled',
+        reason: 'operator interrupt',
+      })
       return c.json({ task: store.task(id) })
     })
 

@@ -106,4 +106,15 @@ describe('cleanTerminalWorktrees', () => {
 
     expect(await cleanTerminalWorktrees(store, { repoRoot: repo })).toEqual([])
   })
+
+  test('a cancelled task keeps its worktree for resume', async () => {
+    const cancelled = await makeWorktree('bd-stopped', 'WIP thing')
+    recordTask('bd-stopped', cancelled, 'cancelled')
+
+    const plans = await cleanTerminalWorktrees(store, { repoRoot: repo })
+
+    expect(plans).toEqual([])
+    expect(existsSync(cancelled.path)).toBe(true)
+    expect(store.task('bd-stopped')?.worktree).toBe(cancelled.path)
+  })
 })

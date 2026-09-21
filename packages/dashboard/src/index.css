@@ -772,6 +772,10 @@ time {
   color: #828577;
   background: #efefe9;
 }
+.state-cancelled {
+  color: #9a6b53;
+  background: #f6ece5;
+}
 .panel-footnote {
   padding: 12px 20px;
   display: flex;

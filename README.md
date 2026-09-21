@@ -50,6 +50,8 @@ bun run packages/cli/src/index.ts <command>
 | Command | Description |
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree. `--harness <name>` and `--model <name>` pin the harness and model; without them, a TTY run prompts for both (see [Harness and model selection](#harness-and-model-selection)) |
+| `continue <task-id>` | Resume a task in its recorded worktree. `--harness`/`--model` restart it with a different harness or model |
+| `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -84,6 +86,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn | — |
+| `cancelled` | Terminal: the operator interrupted the run (`amagi stop`). The worktree is kept so the task can be resumed with `amagi continue` | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
@@ -190,6 +193,23 @@ permissions = "bypass"
 kind = "claude"
 model = "opus"
 ```
+
+### Interrupting and restarting a task
+
+A task that hangs (the harness process stops producing output, the machine
+froze, the runner died) is not stranded: interrupt it, then start it again in
+the same worktree, optionally with a different harness or model.
+
+```bash
+amagi stop bd-1234        # park the run in `cancelled`; a live runner kills its agent process
+amagi continue bd-1234    # resume in the recorded worktree with the configured harness
+amagi continue bd-1234 --harness opencode --model local/...   # same worktree, different harness/model
+```
+
+`amagi continue` re-claims the task and drives it in the worktree and branch
+already recorded for it, so no work is lost. The same stop/restart flow is
+available over the API (`POST /api/tasks/:id/stop` and
+`POST /api/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 

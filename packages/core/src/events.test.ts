@@ -41,10 +41,19 @@ describe('state machine', () => {
     }
   })
 
+  test('an operator interrupt may cancel any non-terminal state', () => {
+    for (const s of TASK_STATES) {
+      if (isTerminal(s)) continue
+      expect(canTransition(s, 'cancelled')).toBe(true)
+    }
+  })
+
   test('terminal states are absorbing', () => {
     expect(canTransition('done', 'implementing')).toBe(false)
     expect(canTransition('needs_human', 'implementing')).toBe(false)
     expect(canTransition('abandoned', 'claimed')).toBe(false)
+    expect(canTransition('cancelled', 'implementing')).toBe(false)
+    expect(isTerminal('cancelled')).toBe(true)
   })
 
   test('skipping stages is rejected', () => {

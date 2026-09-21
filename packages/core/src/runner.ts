@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import type { Config } from './config.ts'
 import {
   amagiLabels,
@@ -7,7 +8,7 @@ import {
   type PrDriver,
 } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
-import type { CheckResult, TaskState } from './events.ts'
+import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { changesSinceBase, formatPrBody } from './pr-body.ts'
 import {
@@ -88,14 +89,20 @@ class Lease {
 
 export class Runner {
   private readonly exec: Exec
+  /** Set once the store flips the task to `cancelled`; guards the unwind. */
+  private cancelled = false
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
   }
 
-  /** Claims one ready task and drives it as far as the current milestone goes. */
-  async runOnce(): Promise<RunOnceResult> {
-    const task = await this.deps.tracker.claim()
+  /**
+   * Claims the next ready task (or the given one, for `amagi continue`) and
+   * drives it as far as the current milestone goes.
+   */
+  async runOnce(taskId?: string): Promise<RunOnceResult> {
+    const task =
+      taskId === undefined ? await this.deps.tracker.claim() : await this.deps.tracker.claim(taskId)
     if (task === null) return null
 
     const { store } = this.deps
@@ -113,8 +120,14 @@ export class Runner {
       await this.drive(task)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      store.append(task.id, { type: 'error', message, fatal: true })
-      this.transition(task.id, 'needs_human', message)
+      // A cancellation is deliberate: park the task where it is instead of
+      // escalating it, so the operator can resume it afterwards.
+      if (this.cancelled) {
+        store.append(task.id, { type: 'error', message: 'run cancelled', fatal: false })
+      } else {
+        store.append(task.id, { type: 'error', message, fatal: true })
+        this.transition(task.id, 'needs_human', message)
+      }
     }
 
     const row = store.task(task.id)
@@ -125,6 +138,9 @@ export class Runner {
   private transition(taskId: string, to: TaskState, reason?: string): void {
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
+    // A terminal state (done, cancelled, ...) is settled; the operator drives
+    // its next move (e.g. reclaim) explicitly.
+    if (from !== null && isTerminal(from)) return
     this.deps.store.append(taskId, {
       type: 'task.state',
       from,
@@ -133,17 +149,29 @@ export class Runner {
     })
   }
 
+  /** Whether the operator interrupted the run via the store's `cancelled` state. */
+  private isCancelled(taskId: string): boolean {
+    return this.cancelled || this.deps.store.task(taskId)?.state === 'cancelled'
+  }
+
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
     // A reclaimed task already has its worktree and branch recorded in the
     // store; reuse them instead of creating a fresh worktree.
     const recorded = store.task(task.id)
-    const resume = recorded !== null && recorded.worktree !== null && recorded.branch !== null
+    const recordedWorktree =
+      recorded !== null && recorded.worktree !== null && recorded.branch !== null
+        ? { path: recorded.worktree, branch: recorded.branch }
+        : null
+    // Reuse only what still exists on disk: a reboot that cleared the worktree
+    // root must fall back to a fresh worktree, not run the agent in a dir that
+    // is gone.
+    const resume = recordedWorktree !== null && existsSync(recordedWorktree.path)
 
     let worktree: WorktreeSpec
-    if (recorded !== null && recorded.worktree !== null && recorded.branch !== null) {
-      worktree = { path: recorded.worktree, branch: recorded.branch }
+    if (recordedWorktree !== null && resume) {
+      worktree = recordedWorktree
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
       // https; without one, fall back to the local base branch so the ssh key
@@ -166,12 +194,12 @@ export class Runner {
         persona: config.repo.persona,
         exec: this.exec,
       })
+      store.append(task.id, {
+        type: 'worktree.created',
+        path: worktree.path,
+        branch: worktree.branch,
+      })
     }
-    store.append(task.id, {
-      type: 'worktree.created',
-      path: worktree.path,
-      branch: worktree.branch,
-    })
     this.transition(task.id, 'worktree_ready')
 
     const lease = new Lease(this.deps.tracker, task.id, () => {})
@@ -222,6 +250,7 @@ export class Runner {
     sessionId = parked
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
+      if (this.isCancelled(task.id)) return
       this.transition(task.id, 'checks')
       const results = await this.runChecks(cwd)
       const ok = results.every((r) => r.exitCode === 0)
@@ -262,6 +291,7 @@ export class Runner {
       sessionId = resumed
     }
 
+    if (this.isCancelled(task.id)) return
     const committed = await this.commit(task, cwd)
     if (!committed) {
       this.transition(
@@ -344,6 +374,7 @@ export class Runner {
     const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
     while (Date.now() < deadline) {
       if (lease.isLost) throw new LeaseLostError(taskId)
+      if (this.isCancelled(taskId)) return null
       const q = store.question(question.id)
       if (q !== null && q.answer !== null) {
         this.transition(taskId, 'implementing')
@@ -389,6 +420,16 @@ export class Runner {
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
 
+    // The store is the shared interrupt channel: `amagi stop` or the API parks
+    // the task in `cancelled`, and this poll kills the agent process so a hung
+    // harness is stopped without reaching into the runner process.
+    const cancelWatch = setInterval(() => {
+      if (store.task(taskId)?.state !== 'cancelled') return
+      this.cancelled = true
+      clearInterval(cancelWatch)
+      void proc.kill()
+    }, 500)
+
     // The resolved model only exists once the harness reports it (claude's
     // init line), so the started event lands on the first stream event.
     let started = false
@@ -408,6 +449,8 @@ export class Runner {
       store.append(taskId, { type: 'agent.stream', role: 'implement', event })
     }
 
+    clearInterval(cancelWatch)
+
     const outcome = await proc.done
     store.append(taskId, {
       type: 'agent.exited',
@@ -417,7 +460,7 @@ export class Runner {
     })
 
     let detail: string | null = null
-    if (!outcome.ok) {
+    if (!outcome.ok && !this.isCancelled(taskId)) {
       detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
       store.append(taskId, { type: 'error', message: `agent failed: ${detail}`, fatal: false })
     }
@@ -443,6 +486,7 @@ export class Runner {
     for (let attempt = 1; ; attempt++) {
       const run = await this.runAgent(taskId, sessionId, opts)
       sessionId = run.sessionId
+      if (this.isCancelled(taskId)) return { sessionId, stopped: true }
       if (run.ok) return { sessionId, stopped: false }
       if (lease.isLost) throw new LeaseLostError(taskId)
 
@@ -459,8 +503,13 @@ export class Runner {
         detail: run.detail ?? '',
       })
       this.transition(taskId, 'retrying')
-      await Bun.sleep(delayMs)
-      if (lease.isLost) throw new LeaseLostError(taskId)
+      // Polled so a stop interrupts the backoff instead of waiting it out.
+      const deadline = Date.now() + delayMs
+      while (Date.now() < deadline) {
+        if (this.isCancelled(taskId)) return { sessionId, stopped: true }
+        if (lease.isLost) throw new LeaseLostError(taskId)
+        await Bun.sleep(Math.min(100, deadline - Date.now()))
+      }
       this.transition(taskId, 'implementing')
     }
   }
