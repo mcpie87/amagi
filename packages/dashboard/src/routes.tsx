@@ -1357,6 +1357,89 @@ function Markdown({ text }: { text: string }) {
   )
 }
 
+/**
+ * The tracker's full issue metadata behind a task - description, acceptance
+ * criteria, priority, type, assignee, labels, parent, dependencies - fetched
+ * on first expand and kept for the session.
+ */
+function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
+  const [open, setOpen] = useState(false)
+  const [issue, setIssue] = useState<Issue | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = () => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    setOpen(true)
+    if (issue === null && error === null) {
+      fetch(`${apiBase}/api/repos/${repo}/issues/${issueId}`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+          return res.json() as Promise<Issue>
+        })
+        .then(setIssue)
+        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+    }
+  }
+
+  return (
+    <div className="mt-6">
+      <button
+        type="button"
+        onClick={toggle}
+        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-sm hover:bg-zinc-800"
+      >
+        {open ? 'hide issue details' : 'show issue details'}
+      </button>
+      {open &&
+        (error !== null ? (
+          <p className="mt-3 text-sm text-red-400">{error}</p>
+        ) : issue === null ? (
+          <p className="mt-3 text-sm text-zinc-500">loading issue...</p>
+        ) : (
+          <div className="mt-3">
+            <dl className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+              <DetailRow
+                label="priority"
+                value={issue.priority === null ? null : `P${issue.priority}`}
+              />
+              <DetailRow label="type" value={issue.type} />
+              <DetailRow label="assignee" value={issue.assignee} />
+              <DetailRow label="labels" value={issue.labels.join(', ') || null} />
+              <DetailRow label="parent" value={issue.parent} />
+              <DetailRow
+                label="blocked by"
+                value={
+                  issue.dependencies.length === 0
+                    ? null
+                    : issue.dependencies.map((d) => d.title).join(', ')
+                }
+              />
+            </dl>
+            <div className="mt-6">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                Description
+              </h2>
+              <p className="whitespace-pre-wrap text-zinc-300">
+                {issue.description || 'No description.'}
+              </p>
+            </div>
+            {issue.acceptanceCriteria !== null && (
+              <div className="mt-6">
+                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                  Acceptance criteria
+                </h2>
+                <p className="whitespace-pre-wrap text-zinc-300">{issue.acceptanceCriteria}</p>
+              </div>
+            )}
+          </div>
+        ))}
+    </div>
+  )
+}
+
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
   if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
@@ -1456,6 +1539,8 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
       {selected !== null && <AgentLogView repo={selected} taskId={id} />}
 
