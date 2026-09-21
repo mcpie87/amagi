@@ -623,6 +623,77 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/repos/:repo/tasks/:id/retry', () => {
+  let tracker: FakeGateTracker
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const deferred = (id: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 60_000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    store.append(id, { type: 'task.state', from: 'implementing', to: 'retrying' })
+  }
+
+  test('wakes a deferred retry on the runner and reports the task id', async () => {
+    const retried: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: ['bd-1'],
+          resources: {},
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: () => {},
+        retryNow: async (id) => {
+          retried.push(id)
+          return { ok: true, taskId: id }
+        },
+      },
+    })
+    deferred('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(retried).toEqual(['bd-1'])
+  })
+
+  test('409s when the task is not deferring a retry', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/repos/repo1/tasks/nope/retry', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('is 501 without a runner service', async () => {
+    deferred('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
+    expect(res.status).toBe(501)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/close', () => {
   let tracker: FakeGateTracker
 
@@ -717,6 +788,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           return { ok: true, taskId: id }
         },
         setMaxParallel: () => {},
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
     })
     claim('bd-1')
@@ -745,6 +817,49 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     expect(res.status).toBe(200)
     expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
+  test('abandons a deferred retry, stopping the backoff and retiring the task', async () => {
+    const stopped: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: ['bd-1'],
+          resources: {},
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async (id) => {
+          stopped.push(id)
+          // Mirror the real stop: a sleeping backoff parks in cancelled.
+          store.append(id, { type: 'task.state', from: 'retrying', to: 'cancelled' })
+          return { ok: true, taskId: id }
+        },
+        setMaxParallel: () => {},
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+      },
+    })
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 60_000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'retrying' })
+
+    const res = await close('bd-1', 'give up on it')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(stopped).toEqual(['bd-1'])
+    expect(body.task.state).toBe('abandoned')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'give up on it' }])
   })
 
   test('404s on an unknown task', async () => {
@@ -930,6 +1045,7 @@ describe('runner endpoints', () => {
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
     setMaxParallel: () => {},
+    retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -1129,6 +1245,7 @@ describe('repo settings endpoints', () => {
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         setMaxParallel: (n) => applied.push(n),
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
       runnerRepo: 'repo1',
     })

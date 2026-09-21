@@ -29,6 +29,7 @@ type RawTask = {
   status_reason: string | null
   last_error: string | null
   retry_count: number
+  retry_at: number | null
   last_commit_sha: string | null
   last_commit_subject: string | null
   checks: string | null
@@ -63,6 +64,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
+  retryAt: r.retry_at,
   lastCommit:
     r.last_commit_sha === null
       ? null
@@ -104,6 +106,7 @@ const taskRow = (t: ProjectedTask): Row => ({
   status_reason: t.statusReason,
   last_error: t.lastError,
   retry_count: t.retryCount,
+  retry_at: t.retryAt,
   created_at: t.createdAt,
   updated_at: t.updatedAt,
   last_commit_sha: t.lastCommit?.sha ?? null,
