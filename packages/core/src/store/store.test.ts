@@ -114,6 +114,22 @@ describe('Store', () => {
     expect(store.task('bd-1')?.reviewRound).toBe(2)
   })
 
+  test('task.state reason surfaces as statusReason and clears on the next transition', () => {
+    claim()
+    expect(store.task('bd-1')?.statusReason).toBeNull()
+    store.append('bd-1', {
+      type: 'task.state',
+      from: null,
+      to: 'needs_human',
+      reason: 'project checks still failing',
+    })
+    expect(store.task('bd-1')?.statusReason).toBe('project checks still failing')
+    store.append('bd-1', { type: 'task.reclaimed' })
+    expect(store.task('bd-1')?.statusReason).toBeNull()
+    store.append('bd-1', { type: 'task.state', from: null, to: 'worktree_ready' })
+    expect(store.task('bd-1')?.statusReason).toBeNull()
+  })
+
   test('questions open then close', () => {
     claim()
     store.append('bd-1', {
