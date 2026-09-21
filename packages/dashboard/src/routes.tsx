@@ -4,6 +4,8 @@ import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
   activeTasks,
+  chatInFlight,
+  chatTurns,
   currentAgentFor,
   type DashboardState,
   openQuestionsFor,
@@ -21,7 +23,7 @@ import {
 } from '@tanstack/react-router'
 import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
@@ -1601,6 +1603,91 @@ function SummaryPanel({ task }: { task: TaskView }) {
   )
 }
 
+/**
+ * Operator/worker chat on a parked no_pr task. Each message resumes the task's
+ * recorded session in its worktree; the answer streams in through the repo
+ * event stream, so this component only renders what chatTurns folds from it.
+ */
+function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
+  const { state } = useDashboard()
+  const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
+  const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Tail the conversation after every render, like the agent log.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  })
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault()
+    const message = text.trim()
+    if (message === '' || responding) return
+    setError(null)
+    setText('')
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        Chat with worker
+      </h2>
+      <div
+        ref={scrollRef}
+        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3"
+      >
+        {messages.length === 0 && (
+          <p className="text-sm text-zinc-500">Ask the worker about why there is no PR.</p>
+        )}
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
+              m.role === 'user'
+                ? 'ml-auto bg-sky-600 text-zinc-950'
+                : 'mr-auto border border-zinc-700 bg-zinc-800 text-zinc-200'
+            }`}
+          >
+            {m.role === 'user'
+              ? m.text
+              : m.pending
+                ? `${m.text === '' ? 'worker is responding' : m.text}...`
+                : m.text}
+          </div>
+        ))}
+      </div>
+      <form onSubmit={send} className="flex gap-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          disabled={responding}
+          placeholder={responding ? 'worker is responding...' : 'ask the worker'}
+          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-1 text-sm disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={responding || text.trim() === ''}
+          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+        >
+          Send
+        </button>
+      </form>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
@@ -1667,6 +1754,12 @@ function TaskDetailView() {
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
 
       <SummaryPanel task={task} />
+
+      {selected !== null &&
+        task.state === 'no_pr' &&
+        task.statusReason !== null &&
+        task.sessionId !== null &&
+        task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />

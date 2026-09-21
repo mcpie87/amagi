@@ -1,5 +1,6 @@
 export * from './agent-log.ts'
 export * from './async-queue.ts'
+export * from './chat.ts'
 export * from './clean.ts'
 export * from './config.ts'
 export * from './diagnose.ts'
