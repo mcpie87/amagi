@@ -197,6 +197,42 @@ test('a conflicting PR that stops conflicting drops out of the state file', asyn
   expect(stateFile()['7']).toBeUndefined()
 })
 
+test('fetches every open PR head each tick when a head moved', async () => {
+  let started = 0
+  const calls: string[][] = []
+  const exec: Exec = async (cmd) => {
+    calls.push(cmd as string[])
+    if (cmd.includes('ls-remote')) {
+      return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
+    }
+    if (cmd.includes('gh') && cmd.includes('list')) {
+      return { exitCode: 0, stdout: JSON.stringify([pr()]), stderr: '' }
+    }
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd.includes('view')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+        stderr: '',
+      }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  start(exec, () => fakeHarness(() => started++))
+
+  await Bun.sleep(60)
+  const fetches = calls.filter((c) => c[0] === 'git' && c[1] === 'fetch')
+  expect(fetches).toContainEqual([
+    'git',
+    'fetch',
+    '--prune',
+    'origin',
+    '+refs/pull/*/head:refs/remotes/origin/pr/*',
+  ])
+  expect(started).toBeGreaterThanOrEqual(1)
+})
+
 test('a tick that fails to list PRs reports the error and keeps the previous stamp', async () => {
   const failing: Exec = async () => ({ exitCode: 1, stdout: '', stderr: 'gh: not logged in' })
   const w = start(failing, () => fakeHarness(() => {}))

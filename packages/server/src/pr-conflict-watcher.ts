@@ -2,6 +2,7 @@ import {
   type Config,
   conflictWatchPath,
   type Exec,
+  fetchPullHeads,
   isConflicting,
   listOpenPrs,
   type makeHarness,
@@ -56,6 +57,8 @@ export function startPrConflictWatcher({
   let scanned = 0
   let conflicting = 0
   let resolved = 0
+  /** Last seen PR head SHAs, so the per-tick fetch is skipped when none moved. */
+  let lastPullHeads: Record<string, string> = {}
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -73,6 +76,12 @@ export function startPrConflictWatcher({
   async function tick(): Promise<void> {
     const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
     try {
+      const heads = await fetchPullHeads({
+        repoRoot: root,
+        lastHeads: lastPullHeads,
+        ...(exec === undefined ? {} : { exec }),
+      })
+      lastPullHeads = heads.heads
       const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
       scanned = prs.length
       const statePath = conflictWatchPath(repoName)
