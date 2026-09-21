@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Exec, ExecResult } from '../../exec.ts'
 import { CLAIM_LABEL, ForgejoTracker, GithubTracker } from './forge.ts'
 
@@ -72,6 +75,20 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
 }
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
+
+const savedState = process.env.XDG_STATE_HOME
+let stateHome: string
+
+beforeEach(() => {
+  stateHome = mkdtempSync(join(tmpdir(), 'amagi-forge-tracker-'))
+  process.env.XDG_STATE_HOME = stateHome
+})
+
+afterEach(() => {
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = savedState
+  rmSync(stateHome, { recursive: true, force: true })
+})
 
 describe('GithubTracker', () => {
   test('parses open issues and skips claimed ones', async () => {

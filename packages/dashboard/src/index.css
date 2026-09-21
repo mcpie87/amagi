@@ -1,17 +1,290 @@
 @import "tailwindcss";
 
+/* The zinc scale the Tailwind utilities across the app already assume; the
+   shell mirrors it here so plain CSS blocks cannot drift from them. */
+:root {
+  color-scheme: dark;
+  --app-bg: #0e0e11;
+  --sidebar-bg: #09090b;
+  --sunken: #09090b;
+  --surface: #18181b;
+  --surface-hover: #27272a;
+  --line: #27272a;
+  --line-strong: #3f3f46;
+  --fg: #e4e4e7;
+  --fg-muted: #a1a1aa;
+  --fg-faint: #71717a;
+  --accent: #0ea5e9;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: #075985;
+  color: #f0f9ff;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: var(--line-strong);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+  background-clip: content-box;
+}
+
+/* One focus treatment for every control, instead of the per-input mix of
+   none, a border tint, and the browser default. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+button:not(:disabled) {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--fg-faint);
+}
+
 .connection-status {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: #5f7157;
-  font-size: 10px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+}
+.connection-dot.bg-emerald-500 {
+  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
+  animation: connection-pulse 2s infinite;
+}
+@keyframes connection-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 5px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+.runner-status {
+  color: var(--fg-muted);
+  font-size: 11px;
   white-space: nowrap;
 }
 
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--app-bg) 85%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  width: 232px;
+  flex-shrink: 0;
+  height: 100vh;
+  border-right: 1px solid var(--line);
+  background: var(--sidebar-bg);
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 2px 0;
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font-size: 14px;
+}
+.nav-link:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+.nav-link.is-active {
+  color: #fafafa;
+  background: var(--surface-hover);
+  font-weight: 500;
+}
+
+.workspace {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-menu-button {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: #d4d4d8;
+}
+.mobile-menu-button:hover {
+  background: var(--surface-hover);
+}
+
+@media (max-width: 767px) {
+  .mobile-menu-button {
+    display: inline-flex;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 60;
+    transform: translateX(-100%);
+    visibility: hidden;
+    /* visibility flips immediately on open (so it can take focus at once) but
+       stays visible through the slide-out on close, which needs the delay */
+    transition:
+      transform 0.2s ease,
+      visibility 0s linear 0.2s;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    transition:
+      transform 0.2s ease,
+      visibility 0s;
+  }
+}
+
+.command-palette {
+  width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--fg);
+  padding: 0;
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+}
+.command-palette::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+.command-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-muted);
+}
+.command-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-size: 15px;
+}
+.command-empty {
+  padding: 22px 16px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.command-results {
+  list-style: none;
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 6px;
+}
+.command-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 14px;
+  text-align: left;
+}
+.command-result.is-active {
+  background: var(--surface-hover);
+}
+.command-hint {
+  display: block;
+  margin-top: 1px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.command-arrow {
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.command-footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
 @media (max-width: 500px) {
-  .connection-status {
-    font-size: 9px;
+  .connection-status,
+  .runner-status {
+    font-size: 10px;
   }
 }
 
@@ -20,76 +293,120 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 43px 25px;
+  padding: 44px 24px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 50%, transparent);
 }
 .empty-icon {
   display: grid;
   place-items: center;
-  width: 47px;
-  height: 47px;
-  border: 1px solid #e2e8d9;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--line);
   border-radius: 13px;
-  background: #f5f7f0;
-  color: #8c9a7c;
+  background: var(--surface);
+  color: var(--fg-faint);
   margin-bottom: 14px;
 }
 .empty-state h3 {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  color: #4e5943;
+  color: var(--fg);
 }
 .empty-state p {
-  font-size: 11px;
-  line-height: 1.8;
-  color: #8a917e;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg-muted);
   max-width: 340px;
-  margin-top: 7px;
+  margin-top: 6px;
 }
 
+/* Matches the sibling Reclaim/Retry/Requeue buttons; without the explicit
+   border-width the Tailwind reset would collapse this to a borderless box. */
 .stop-button {
-  border-color: #e0c3b4;
-  color: #a0522f;
-  background: #fdf3ee;
+  padding: 4px 12px;
+  border: 1px solid #991b1b;
+  border-radius: 4px;
+  background: rgba(69, 10, 10, 0.4);
+  color: #fca5a5;
+  font-size: 14px;
+}
+.stop-button:hover:not(:disabled) {
+  background: #7f1d1d;
+  color: #fee2e2;
+}
+.stop-button:disabled {
+  opacity: 0.5;
 }
 .run-button-error {
-  margin: 6px 0 0;
-  color: #b26447;
-  font-size: 10px;
+  margin: 4px 0 0;
+  color: #f87171;
+  font-size: 12px;
 }
 
 .agent-log-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 17px;
-  font-size: 10px;
-  background: #263027;
-  color: #a8b99a;
+  gap: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--fg-muted);
 }
 .agent-log-last {
   margin-left: 12px;
-  color: #d5e2c8;
+  color: #d4d4d8;
 }
 .agent-log-header button {
-  background: #394837;
-  color: #d5e2c8;
-  border: 1px solid #52644b;
-  padding: 4px 7px;
-  border-radius: 3px;
-  font-size: 9px;
+  background: var(--surface-hover);
+  color: #d4d4d8;
+  border: 1px solid var(--line-strong);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.agent-log-header button:hover {
+  background: var(--line-strong);
+  color: #fafafa;
 }
 .agent-log-scroll {
   height: 460px;
   overflow: auto;
-  background: #202821;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
+  border: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  background: var(--sunken);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
   line-height: 18px;
+}
+
+/* Hover affordance for the rows and cards that are whole click targets. */
+.metric,
+.issue-card,
+.check-result {
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+.issue-card:hover {
+  border-color: var(--line-strong);
+}
+.run-row:hover,
+.attention-row:hover,
+.activity-item:hover,
+.issue-list-row:hover {
+  background: color-mix(in srgb, var(--surface-hover) 45%, transparent);
 }
 
 .summary-markdown {
   font-size: 13px;
-  color: #e4e4e7;
+  color: var(--fg);
   line-height: 1.6;
 }
 .summary-markdown > :first-child {
@@ -161,7 +478,7 @@
   margin: 8px 0;
   padding-left: 10px;
   border-left: 2px solid #b45309;
-  color: #a1a1aa;
+  color: var(--fg-muted);
 }
 .summary-markdown hr {
   margin: 10px 0;

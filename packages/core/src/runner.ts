@@ -1,12 +1,7 @@
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
-import {
-  amagiLabels,
-  type CreatePrOptions,
-  gitTokenConfig,
-  makePrDriver,
-  type PrDriver,
-} from './drivers/pr.ts'
+import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -231,12 +226,20 @@ export class Runner {
 
     let worktree: WorktreeSpec
     if (resume) {
-      worktree = { path: recorded.worktree!, branch: recorded.branch! }
+      worktree = {
+        path: recorded.worktree as string,
+        branch: recorded.branch as string,
+      }
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
-      // https; without one, fall back to the local base branch so the ssh key
-      // never prompts during an unattended run.
-      const tokenCfg = config.forge.kind === 'github' ? gitTokenConfig() : []
+      // https; without one, fall back to the local base branch so git never
+      // prompts during an unattended run.
+      const tokenCfg = await gitTokenConfig(
+        this.exec,
+        this.deps.repoRoot,
+        config.forge.remote,
+        forgeToken(config.forge.kind),
+      )
       if (tokenCfg.length > 0) {
         await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
           cwd: this.deps.repoRoot,
@@ -435,7 +438,7 @@ export class Runner {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const hint = /auth|login|token|not logged/i.test(message)
-        ? ' (gh needs auth: set GH_TOKEN in .env or run gh auth login)'
+        ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
         type: 'error',
