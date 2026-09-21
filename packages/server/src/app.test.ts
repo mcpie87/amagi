@@ -3,6 +3,8 @@ import { mkdirSync } from 'node:fs'
 import type {
   BeadsIssue,
   CreateTrackerTask,
+  EpicCloseEligible,
+  EpicCloseResult,
   GateRef,
   Question,
   QuestionRow,
@@ -415,6 +417,91 @@ describe('issue mutations', () => {
     app = issueApp(tracker)
     const res = await app.request('/api/repos/repo1/issues/nope')
     expect(res.status).toBe(404)
+  })
+})
+
+class FakeEpicTracker extends FakeGateTracker {
+  readonly eligible = new Map<string, EpicCloseEligible>()
+  readonly closedReasons: { id: string; reason: string }[] = []
+  private epicSeq = 0
+
+  seedEligible(partial: Partial<EpicCloseEligible>): EpicCloseEligible {
+    const epic: EpicCloseEligible = {
+      id: `bd-${this.epicSeq++}`,
+      title: 'Eligible epic',
+      status: 'open',
+      totalChildren: 7,
+      closedChildren: 7,
+      ...partial,
+    }
+    this.eligible.set(epic.id, epic)
+    return epic
+  }
+
+  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+    return [...this.eligible.values()]
+  }
+
+  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+    const closed = [...this.eligible.keys()]
+    this.eligible.clear()
+    this.closedReasons.push({ id: closed.join(','), reason })
+    return { closed, reason }
+  }
+}
+
+describe('epic close-eligible endpoints', () => {
+  const post = (reason: string) =>
+    app.request('/api/repos/repo1/epics/close-eligible', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+
+  test('GET reports when epic closure is unavailable (non-beads tracker)', async () => {
+    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/epics/close-eligible')
+    expect(res.status).toBe(501)
+  })
+
+  test('GET previews the eligible epics', async () => {
+    const tracker = new FakeEpicTracker()
+    tracker.seedEligible({ id: 'bd-1', title: 'M4', totalChildren: 7, closedChildren: 7 })
+    tracker.seedEligible({ id: 'bd-2', title: 'M6', totalChildren: 5, closedChildren: 2 })
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/epics/close-eligible')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as EpicCloseEligible[]
+    expect(body.map((e) => e.id)).toEqual(['bd-1', 'bd-2'])
+    expect(body[0]).toMatchObject({ title: 'M4', totalChildren: 7, closedChildren: 7 })
+  })
+
+  test('POST closes with the reason and reports the closed epics', async () => {
+    const tracker = new FakeEpicTracker()
+    tracker.seedEligible({ id: 'bd-1' })
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await post('All children completed')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as EpicCloseResult
+    expect(body).toEqual({ closed: ['bd-1'], reason: 'All children completed' })
+    expect(tracker.closedReasons).toEqual([{ id: 'bd-1', reason: 'All children completed' }])
+  })
+
+  test('POST rejects a blank reason', async () => {
+    const tracker = new FakeEpicTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await post('   ')).status).toBe(400)
+    expect(tracker.closedReasons).toHaveLength(0)
+  })
+
+  test('POST is 501 on a tracker without epic closure', async () => {
+    ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await post('x')).status).toBe(501)
   })
 })
 

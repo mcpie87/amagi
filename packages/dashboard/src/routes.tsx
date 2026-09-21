@@ -62,6 +62,15 @@ type Issue = {
   dependencies: Dependency[]
 }
 
+/** One epic from /api/repos/:repo/epics/close-eligible (bd epic close-eligible --dry-run). */
+type EligibleEpic = {
+  id: string
+  title: string
+  status: string
+  totalChildren: number
+  closedChildren: number
+}
+
 const PAGE_SIZE = 10
 
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
@@ -453,9 +462,58 @@ function IssueFormModal({
   )
 }
 
+/** The operator's call to close a finished epic; the worker never decides this. */
+function CloseEpicButton({
+  repo,
+  epic,
+  onClosed,
+}: {
+  repo: string
+  epic: EligibleEpic
+  onClosed: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const close = async () => {
+    const reason = window.prompt(`Reason for closing ${epic.title}`)
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/epics/close-eligible`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else onClosed()
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-emerald-500 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function IssuesView() {
   const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
+  const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
@@ -501,6 +559,19 @@ function IssuesView() {
         )
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+  }, [selected, refresh])
+
+  useEffect(() => {
+    if (selected === null) return
+    fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+        return res.json() as Promise<EligibleEpic[]>
+      })
+      .then(setEligibleEpics)
+      // An unavailable or unreachable tracker means no epic surface, not a
+      // broken tasks view: the issue fetch above reports connectivity.
+      .catch(() => setEligibleEpics([]))
   }, [selected, refresh])
 
   const saved = () => {
@@ -633,6 +704,26 @@ function IssuesView() {
           )}
         </div>
       </div>
+      {selected !== null && eligibleEpics.length > 0 && (
+        <section className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-emerald-400">
+            Eligible epics ({eligibleEpics.length})
+          </h2>
+          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
+            {eligibleEpics.map((epic) => (
+              <li key={epic.id} className="flex items-center gap-3 px-4 py-3">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{epic.title}</span>
+                  <span className="block truncate text-xs text-zinc-500">
+                    {epic.id} · {epic.closedChildren}/{epic.totalChildren} children done
+                  </span>
+                </span>
+                <CloseEpicButton repo={selected} epic={epic} onClosed={saved} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {error !== null ? (
         <p className="text-red-400">{error}</p>
       ) : view === 'kanban' ? (

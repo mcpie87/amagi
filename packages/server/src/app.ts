@@ -28,6 +28,7 @@ import {
   AskBody,
   AwaitQuery,
   CloseTaskBody,
+  EpicCloseBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -297,6 +298,30 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo }: Serve
       }
       return c.json(await ws.listIssues())
     })
+
+    .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.eligibleEpics === undefined) {
+        return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
+      }
+      return c.json(await ws.eligibleEpics())
+    })
+
+    .post(
+      '/api/repos/:repo/epics/close-eligible',
+      valid('param', RepoParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (ws.closeEligibleEpics === undefined) {
+          return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
+        }
+        return c.json(await ws.closeEligibleEpics(reason))
+      },
+    )
 
     .get(
       '/api/repos/:repo/tasks',
