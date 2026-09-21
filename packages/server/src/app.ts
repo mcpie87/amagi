@@ -25,6 +25,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  CloseTaskBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -338,6 +339,36 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       ws.store.append(id, { type: 'task.reclaimed' })
       return c.json({ task: ws.store.task(id) })
     })
+
+    .post(
+      '/api/repos/:repo/tasks/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', CloseTaskBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        if (task.state !== 'needs_human' && task.state !== 'no_pr') {
+          return c.json(
+            {
+              error: `task ${id} is in state ${task.state}; only needs_human/no_pr tasks can be closed`,
+            },
+            409,
+          )
+        }
+        // The state lands before the tracker call so the dashboard updates even
+        // if the tracker is unreachable; the close is best effort like reconcile.
+        ws.store.append(id, { type: 'task.state', from: task.state, to: 'abandoned', reason })
+        try {
+          await ws.tracker.close(id, reason)
+        } catch (err) {
+          console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        return c.json({ task: ws.store.task(id) })
+      },
+    )
 
     .get('/api/runner', (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)

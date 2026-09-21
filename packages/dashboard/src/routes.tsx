@@ -846,14 +846,18 @@ function QueueView() {
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[], showReason: boolean) => (
+  const taskList = (
+    tasks: TaskView[],
+    showReason: boolean,
+    action?: (task: TaskView) => ReactNode,
+  ) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
-        <li key={task.id}>
+        <li key={task.id} className="flex items-center">
           <Link
             to="/tasks/$id"
             params={{ id: task.id }}
-            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-zinc-800"
           >
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
@@ -867,6 +871,7 @@ function QueueView() {
               )}
             </span>
           </Link>
+          {action?.(task)}
         </li>
       ))}
     </ul>
@@ -884,7 +889,13 @@ function QueueView() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention, true)}
+          {taskList(
+            attention,
+            true,
+            selected === null
+              ? undefined
+              : (task) => <CloseButton repo={selected} taskId={task.id} state={task.state} />,
+          )}
         </div>
       )}
       {queue.length === 0 ? (
@@ -1130,6 +1141,47 @@ function RetryButton({
   )
 }
 
+function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'needs_human' && state !== 'no_pr') return null
+
+  const close = async () => {
+    const reason = window.prompt(`Why is ${taskId} done? (closes the tracker issue)`)
+    if (reason === null) return
+    const trimmed = reason.trim()
+    if (trimmed === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: trimmed }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -1273,6 +1325,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && <CloseButton repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
