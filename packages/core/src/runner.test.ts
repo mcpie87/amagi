@@ -292,6 +292,11 @@ describe('Runner.runOnce', () => {
 
     const log = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: row?.worktree ?? '' })
     expect(log).toContain('Add a greeting file')
+    const body = await execOk(exec, ['git', 'log', '-1', '--format=%b'], {
+      cwd: row?.worktree ?? '',
+    })
+    expect(body).toContain('Changes:')
+    expect(body).toContain('- `hello.txt` +1 -0')
     const mainLog = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: repo })
     expect(mainLog).toContain('init')
   })

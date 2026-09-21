@@ -1,5 +1,7 @@
 default: check
 
+fresh-check: check
+
 install:
     bun install
 

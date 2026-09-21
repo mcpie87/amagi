@@ -1,5 +1,6 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { CheckResult } from './events.ts'
+import type { PrChange } from './pr-body.ts'
 
 export type PromptContext = {
   task: TrackerTask
@@ -60,8 +61,18 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
   )
 }
 
-export function commitMessage(task: TrackerTask): string {
-  return `${task.title}\n\nTask: ${task.id}\n`
+export function commitMessage(task: TrackerTask, changes: readonly PrChange[] = []): string {
+  const lines = [task.title, '', `Task: ${task.id}`]
+  if (changes.length > 0) {
+    lines.push('', 'Changes:')
+    for (const change of changes) {
+      const stat = Number.isFinite(change.additions)
+        ? `+${change.additions} -${change.deletions}`
+        : 'binary'
+      lines.push(`- \`${change.path}\` ${stat}`)
+    }
+  }
+  return `${lines.join('\n')}\n`
 }
 
 export type ConflictPromptContext = {
