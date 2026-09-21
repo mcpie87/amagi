@@ -283,6 +283,15 @@ const EPIC_CLOSE_REASONS = [
   '__other',
 ]
 
+/** Preset reasons offered when marking a task done; '__other' falls back to free text. */
+const TASK_DONE_REASONS = [
+  'completed',
+  'already done elsewhere',
+  'duplicate / superseded',
+  'out of scope',
+  '__other',
+]
+
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
 const columnHeader: Record<Issue['status'], string> = {
@@ -2003,22 +2012,22 @@ function CloseButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(TASK_DONE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
   if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
-  const close = async () => {
-    const reason = window.prompt(
-      target === 'done' ? 'Reason for marking this task done' : 'Reason for closing this task',
-    )
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim(), to: target }),
+        body: JSON.stringify({ reason: finalReason, to: target }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setOpen(false)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2026,12 +2035,33 @@ function CloseButton({
     }
   }
 
+  const onMarkDone = () => {
+    setOpen(true)
+  }
+
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div>
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => {
+          if (target === 'done') onMarkDone()
+          else {
+            const reason = window.prompt(`Reason for closing ${taskId}`)
+            if (reason === null || reason.trim() === '') return
+            void close(reason.trim())
+          }
+        }}
         title={
           target === 'done'
             ? 'marks the task done when the work already existed elsewhere'
@@ -2046,6 +2076,67 @@ function CloseButton({
         {target === 'done' ? 'Mark done' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {target === 'done' && open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Mark done {taskId}</h2>
+            <div className="space-y-3">
+              <div>
+                <label className={label} htmlFor="task-done-reason">
+                  Reason for marking this task done
+                </label>
+                <select
+                  id="task-done-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {TASK_DONE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="task-done-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="task-done-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Mark done
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
