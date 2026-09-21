@@ -1559,18 +1559,24 @@ function Blockers({ issue }: { issue: Issue }) {
         }`}
       >
         {items.map((d) => (
-          <li key={d.id} className="flex items-center gap-2 py-1 text-sm">
-            <span
-              className={`rounded px-1.5 py-0.5 text-xs ${
-                tone === 'red'
-                  ? 'bg-red-soft-hover text-red-ink'
-                  : 'bg-amber-soft-hover text-amber-ink'
-              }`}
+          <li key={d.id}>
+            <Link
+              to="/tasks/$id"
+              params={{ id: d.id }}
+              className="flex items-center gap-2 py-1 text-sm hover:underline"
             >
-              {d.status}
-            </span>
-            <span className="shrink-0 text-fg-faint">{d.id}</span>
-            <span className="min-w-0 truncate text-fg">{d.title}</span>
+              <span
+                className={`rounded px-1.5 py-0.5 text-xs ${
+                  tone === 'red'
+                    ? 'bg-red-soft-hover text-red-ink'
+                    : 'bg-amber-soft-hover text-amber-ink'
+                }`}
+              >
+                {d.status}
+              </span>
+              <span className="shrink-0 text-fg-faint">{d.id}</span>
+              <span className="min-w-0 truncate text-fg">{d.title}</span>
+            </Link>
           </li>
         ))}
       </ul>
