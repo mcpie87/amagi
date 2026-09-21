@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { loadConfig, makePrDriver, repoRoot, Store } from '@amagi/core'
+import { loadConfig, makePrDriver, NotImplementedDriverError, repoRoot, Store } from '@amagi/core'
 import { serve } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
@@ -13,13 +13,19 @@ export const serveCommand = defineCommand({
     const root = repoRoot()
     const { config } = loadConfig(root)
     const store = new Store()
+    let forge: ReturnType<typeof makePrDriver> | null = null
+    try {
+      forge = makePrDriver(config.forge.kind)
+    } catch (err) {
+      if (!(err instanceof NotImplementedDriverError)) throw err
+      console.warn(`forge "${config.forge.kind}" not implemented, pr reconcile disabled`)
+    }
     const server = serve({
       store,
       host: config.server.host,
       port: config.server.port,
       staticDir: join(root, 'packages', 'dashboard', 'dist'),
-      forge: makePrDriver(config.forge.kind),
-      forgeCwd: root,
+      ...(forge === null ? {} : { forge, forgeCwd: root }),
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     console.log(dim('ctrl-c to stop'))
