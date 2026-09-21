@@ -980,8 +980,10 @@ describe('runner endpoints', () => {
           lastRunAt: 1720000000000,
           ok: true,
           error: null,
-          prsScanned: 2,
-          mentionsResponded: 1,
+          counters: [
+            { label: 'scanned', value: 2 },
+            { label: 'responded', value: 1 },
+          ],
         },
       ],
     })
@@ -995,8 +997,10 @@ describe('runner endpoints', () => {
         lastRunAt: 1720000000000,
         ok: true,
         error: null,
-        prsScanned: 2,
-        mentionsResponded: 1,
+        counters: [
+          { label: 'scanned', value: 2 },
+          { label: 'responded', value: 1 },
+        ],
       },
     ])
   })

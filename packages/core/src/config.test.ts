@@ -41,6 +41,8 @@ describe('loadConfig', () => {
     expect(config.loop.maxParallel).toBe(1)
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
+    expect(config.loop.mentionWatchIntervalSec).toBe(300)
+    expect(config.loop.prCheckIntervalSec).toBe(300)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
     expect(config.loop.doomEnabled).toBe(true)
@@ -133,6 +135,11 @@ describe('loadConfig', () => {
     const config = loadConfig(repo).config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
     expect(config.loop.stallTimeoutSec).toBe(7200)
+  })
+
+  test('pr check interval is overridable', () => {
+    writeRepo('[loop]\nprCheckIntervalSec = 120\n')
+    expect(loadConfig(repo).config.loop.prCheckIntervalSec).toBe(120)
   })
 
   test('doom guard keys are overridable and can be disabled', () => {
