@@ -52,6 +52,17 @@ function splitDescription(description: string): { summary: string; howToUse: str
   return { summary, howToUse: howToUse === '' ? null : howToUse }
 }
 
+/** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
+const FILE_REF = /[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}/g
+
+/** Wraps file names and paths in backticks, leaving existing code spans alone. */
+export function backtickFileRefs(text: string): string {
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]+`)/g)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
+    .join('')
+}
+
 /** Provenance of the model run that produced the PR, for the body footer. */
 export type PrBodyMeta = {
   harness: string
@@ -66,7 +77,7 @@ export function formatPrBody(
 ): string {
   const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
   const { summary, howToUse } = splitDescription(task.description)
-  if (summary !== '') lines.push('', '### 📝 Summary', '', summary)
+  if (summary !== '') lines.push('', '### 📝 Summary', '', backtickFileRefs(summary))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
