@@ -4,7 +4,7 @@ import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
 import { parseModelLines } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 /**
  * Enough to implement a task and call `amagi ask`, without handing over the
@@ -41,21 +41,7 @@ type ClaudeMessage = {
   total_cost_usd?: number
   model?: string
   message?: { model?: string; content?: ContentBlock[] }
-  usage?: { input_tokens?: number; output_tokens?: number }
-}
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number }
 }
 
 /**
@@ -129,12 +115,14 @@ export class ClaudeTranslator {
       this.usage = {
         inputTokens: msg.usage.input_tokens ?? 0,
         outputTokens: msg.usage.output_tokens ?? 0,
+        cachedTokens: msg.usage.cache_read_input_tokens ?? 0,
         costUsd: msg.total_cost_usd ?? null,
       }
       events.push({
         kind: 'usage',
         inputTokens: this.usage.inputTokens,
         outputTokens: this.usage.outputTokens,
+        ...(this.usage.cachedTokens === 0 ? {} : { cachedTokens: this.usage.cachedTokens }),
         ...(this.usage.costUsd === null ? {} : { costUsd: this.usage.costUsd }),
       })
     }

@@ -1,7 +1,9 @@
+import { agentLogStore } from '@amagi/core/agent-log'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import {
   activeTasks,
   currentAgentFor,
+  type DashboardState,
   openQuestionsFor,
   type QuestionView,
   type TaskView,
@@ -16,8 +18,9 @@ import {
   useParams,
 } from '@tanstack/react-router'
 import type { FormEvent, ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
+import { SessionsView } from './SessionsView.tsx'
 import { type RepoInfo, RunnerProvider, useDashboard, useRunner } from './store.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
@@ -184,6 +187,9 @@ function RootLayout() {
                   </Link>
                   <Link to="/issues" activeProps={{ className: 'text-zinc-100' }}>
                     Tasks
+                  </Link>
+                  <Link to="/sessions" activeProps={{ className: 'text-zinc-100' }}>
+                    Sessions
                   </Link>
                 </nav>
                 <div className="ml-auto flex items-center gap-2">
@@ -758,12 +764,89 @@ function RunButton() {
   )
 }
 
+/** The tail of one task's ring buffer, live from the rAF-batched log store. */
+function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
+  const key = `${repo}/${taskId}`
+  useSyncExternalStore(
+    (listener) => agentLogStore.subscribe(key, listener),
+    () => agentLogStore.get(key).version,
+  )
+  const line = agentLogStore.get(key).at(-1)
+  if (line === undefined || line.text === '') return null
+  return <p className="mt-2 truncate font-mono text-xs text-zinc-400">{line.text}</p>
+}
+
+function WorkerSlot({
+  taskId,
+  state,
+  selected,
+}: {
+  taskId: string | null
+  state: DashboardState
+  selected: string | null
+}) {
+  if (taskId === null) {
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/40 px-4 py-2 text-sm text-zinc-600">
+        free slot
+      </div>
+    )
+  }
+  const task = state.tasks[taskId]
+  const agent = currentAgentFor(state, taskId)
+  return (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
+          busy
+        </span>
+        <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+        <span className="text-xs text-zinc-500">{task?.id ?? taskId}</span>
+        {task !== undefined && <Badge state={task.state} />}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+        <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
+        <span>model: {agent?.model ?? 'unknown'}</span>
+      </div>
+      {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
+    </div>
+  )
+}
+
+/**
+ * One row per runner slot from /api/runner, so busy agents and free capacity
+ * are both visible at a glance. Busy slots draw their identity and activity
+ * from the SSE projection plus the live agent log ring buffer.
+ */
+function WorkersPanel() {
+  const { status } = useRunner()
+  const { state, selected } = useDashboard()
+  if (status === null) return null
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+        Workers ({status.running.length}/{status.capacity})
+      </h2>
+      <div className="space-y-2">
+        {Array.from({ length: status.capacity }, (_, i) => (
+          <WorkerSlot
+            key={i}
+            taskId={status.running[i] ?? null}
+            state={state}
+            selected={selected}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function QueueView() {
   const { state, selected } = useDashboard()
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[]) => (
+  const taskList = (tasks: TaskView[], showReason: boolean) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
         <li key={task.id}>
@@ -779,6 +862,9 @@ function QueueView() {
                 {task.id}
                 {task.reviewRound > 0 ? ` · review round ${task.reviewRound}` : ''}
               </span>
+              {showReason && task.statusReason !== null && (
+                <span className="block truncate text-xs text-zinc-400">{task.statusReason}</span>
+              )}
             </span>
           </Link>
         </li>
@@ -792,15 +878,20 @@ function QueueView() {
         <h1 className="text-xl font-semibold">Queue</h1>
         {selected !== null && <RunButton />}
       </div>
+      <WorkersPanel />
       {attention.length > 0 && (
         <div className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention)}
+          {taskList(attention, true)}
         </div>
       )}
-      {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
+      {queue.length === 0 ? (
+        <p className="text-zinc-500">No active tasks.</p>
+      ) : (
+        taskList(queue, false)
+      )}
     </section>
   )
 }
@@ -987,6 +1078,51 @@ function ReclaimButton({
   )
 }
 
+function RetryButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
+
+  const retry = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void retry()}
+        className="rounded border border-red-800 bg-red-950/40 px-3 py-1 text-sm text-red-300 hover:bg-red-900 disabled:opacity-50"
+      >
+        Retry
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -1057,6 +1193,19 @@ function AgentLog({ events }: { events: AgentStreamEvent[] }) {
   )
 }
 
+const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+
+/** Why a task stopped, in plain language, when the operator actually needs it. */
+function SummaryPanel({ task }: { task: TaskView }) {
+  if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
+  return (
+    <div className="mt-6 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-300">Summary</h2>
+      <p className="mt-1 text-zinc-200">{task.statusReason}</p>
+    </div>
+  )
+}
+
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
@@ -1109,9 +1258,19 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && (
+          <RetryButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>
+
+      <SummaryPanel task={task} />
 
       <dl className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
@@ -1203,11 +1362,16 @@ const issuesRoute = createRoute({
   path: '/issues',
   component: IssuesView,
 })
+const sessionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/sessions',
+  component: SessionsView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, taskRoute])
+const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, sessionsRoute, taskRoute])
 export const router = createRouter({ routeTree })

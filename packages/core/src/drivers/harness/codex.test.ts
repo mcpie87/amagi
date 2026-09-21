@@ -53,12 +53,13 @@ describe('CodexTranslator against a recorded transcript', () => {
     expect(result).toEqual({ kind: 'tool_result', name: 'command_execution', ok: true, output: '' })
   })
 
-  test('usage has no cost figure, unlike claude', async () => {
+  test('usage has no cost figure, unlike claude, but carries cached input tokens', async () => {
     const { events, translator } = await replay()
     expect(events.find((e) => e.kind === 'usage')).toEqual({
       kind: 'usage',
       inputTokens: 28644,
       outputTokens: 83,
+      cachedTokens: 26240,
     })
     expect(translator.usage?.costUsd).toBeNull()
   })

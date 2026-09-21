@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
-import { changesSinceBase, formatPrBody } from './pr-body.ts'
+import { backtickCodeRefs, changesSinceBase, formatPrBody } from './pr-body.ts'
 
 type Call = readonly string[]
 
@@ -58,6 +58,39 @@ describe('changesSinceBase', () => {
   })
 })
 
+describe('backtickCodeRefs', () => {
+  test('wraps file paths and file names in backticks', () => {
+    expect(backtickCodeRefs('Write hello.txt, edit src/app.ts and packages/core/pr-body.ts')).toBe(
+      'Write `hello.txt`, edit `src/app.ts` and `packages/core/pr-body.ts`',
+    )
+  })
+
+  test('wraps identifiers in backticks', () => {
+    expect(
+      backtickCodeRefs('set in_progress via Runner.drive, call formatPrBody and close am-9h4'),
+    ).toBe('set `in_progress` via `Runner.drive`, call `formatPrBody` and close `am-9h4`')
+  })
+
+  test('wraps commands, flags and issue references in backticks', () => {
+    expect(backtickCodeRefs('Run with --dry-run, see PR #30\n$ bun test')).toBe(
+      'Run with `--dry-run`, see PR `#30`\n$ `bun test`',
+    )
+  })
+
+  test('leaves existing backticks and fenced blocks untouched', () => {
+    const text = 'Run `bun run dev`\n```\ngit status\n```\nthen in_progress'
+    expect(backtickCodeRefs(text)).toBe(
+      'Run `bun run dev`\n```\ngit status\n```\nthen `in_progress`',
+    )
+  })
+
+  test('leaves plain English prose alone', () => {
+    expect(backtickCodeRefs('The summary section is now readable and consistent.')).toBe(
+      'The summary section is now readable and consistent.',
+    )
+  })
+})
+
 describe('formatPrBody', () => {
   test('renders the title, task, description and changes in markdown with emojis', () => {
     const body = formatPrBody(TASK, [
@@ -68,7 +101,7 @@ describe('formatPrBody', () => {
     expect(body).toContain('## ✨ Add a greeting file')
     expect(body).toContain('**Task:** `am-1`')
     expect(body).toContain('### 📝 Summary')
-    expect(body).toContain('Write hello.txt')
+    expect(body).toContain('Write `hello.txt`')
     expect(body).toContain('### 🛠️ What changed')
     expect(body).toContain('- `hello.txt` +1 -0')
     expect(body).toContain('- `image.png` binary')
@@ -87,7 +120,7 @@ describe('formatPrBody', () => {
     )
 
     expect(body).toContain('### 📝 Summary')
-    expect(body).toContain('Write hello.txt')
+    expect(body).toContain('Write `hello.txt`')
     expect(body).toContain('### 🚀 How to use')
     expect(body).toContain('Run `hello` to greet')
   })
@@ -95,7 +128,7 @@ describe('formatPrBody', () => {
   test('treats a description without a how-to-use heading as a plain summary', () => {
     const body = formatPrBody({ ...TASK, description: 'Write hello.txt' }, [])
     expect(body).toContain('### 📝 Summary')
-    expect(body).toContain('Write hello.txt')
+    expect(body).toContain('Write `hello.txt`')
     expect(body).not.toContain('How to use')
   })
 })

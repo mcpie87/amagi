@@ -9,6 +9,7 @@ import {
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { harnessStartOpts } from './factory.ts'
 import { changesSinceBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
@@ -70,16 +71,13 @@ class Lease {
   constructor(
     private readonly tracker: Tracker,
     private readonly taskId: string,
-    private readonly onLost: () => void,
   ) {}
 
   start(): void {
     const period = Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
     this.timer = setInterval(() => {
       void this.tracker.heartbeat(this.taskId).then((alive) => {
-        if (alive || this.lost) return
-        this.lost = true
-        this.onLost()
+        if (!alive) this.lost = true
       })
     }, period)
   }
@@ -199,8 +197,8 @@ export class Runner {
     const resume = recorded !== null && recorded.worktree !== null && recorded.branch !== null
 
     let worktree: WorktreeSpec
-    if (recorded !== null && recorded.worktree !== null && recorded.branch !== null) {
-      worktree = { path: recorded.worktree, branch: recorded.branch }
+    if (resume) {
+      worktree = { path: recorded.worktree!, branch: recorded.branch! }
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
       // https; without one, fall back to the local base branch so the ssh key
@@ -232,7 +230,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, task.id, () => {})
+    const lease = new Lease(this.deps.tracker, task.id)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, resume)
@@ -260,14 +258,7 @@ export class Runner {
         cwd,
         prompt: resume ? reclaimPrompt(promptCtx) : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
-        ...(config.harness.implement.model === undefined
-          ? {}
-          : { model: config.harness.implement.model }),
-        ...(config.harness.implement.effort === undefined
-          ? {}
-          : { effort: config.harness.implement.effort }),
-        permissions: config.harness.implement.permissions,
-        extraArgs: config.harness.implement.extraArgs,
+        ...harnessStartOpts(config.harness.implement),
       },
       lease,
     )

@@ -1,4 +1,5 @@
 import { type Config, HarnessConfig } from '@amagi/core'
+import { byUsage, type Usage } from './picker-usage.ts'
 
 const KINDS = ['claude', 'codex', 'opencode'] as const
 
@@ -15,12 +16,16 @@ export type RunSelection = {
 }
 
 /** Harness choices for the picker: named definitions, or the three known kinds. */
-export function harnessChoices(config: Config): SelectOption<Config['harness']['implement']>[] {
+export function harnessChoices(
+  config: Config,
+  usage: Usage = {},
+): SelectOption<Config['harness']['implement']>[] {
   const defs = Object.entries(config.harness.definitions)
-  if (defs.length > 0) {
-    return defs.map(([name, cfg]) => ({ label: name, value: cfg }))
-  }
-  return KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
+  const base =
+    defs.length > 0
+      ? defs.map(([name, cfg]) => ({ label: name, value: cfg }))
+      : KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
+  return [...base].sort((a, b) => (usage[b.value.kind] ?? 0) - (usage[a.value.kind] ?? 0))
 }
 
 const withModel = (
@@ -40,13 +45,14 @@ async function pickOne(
   customLabel: string,
   value: string | undefined,
   options: readonly string[],
+  usage: Usage = {},
 ): Promise<string | undefined> {
   const list: SelectOption<string | null>[] = []
   if (value !== undefined) list.push({ label: `default (${value})`, value })
   for (const o of options) if (o !== value) list.push({ label: o, value: o })
   list.push({ label: customLabel, value: '' })
 
-  const picked = await picker.select(title, list)
+  const picked = await picker.select(title, byUsage(usage, list))
   if (picked === null) return value
   if (picked === '') return (await picker.input(`${title}: `)) ?? value
   return picked
@@ -56,7 +62,9 @@ async function pickOne(
  * Resolves the harness, model and effort for a run. `--harness`/`--model`/
  * `--effort` win and never prompt; without flags a null picker (no TTY) falls
  * back to the config defaults; with a picker the operator chooses harness,
- * then model and effort from the harness's own lists.
+ * then model and effort from the harness's own lists. `usage` ranks the
+ * harness and model options by how often each was used in past runs, so the
+ * most common ones sit on top.
  */
 export async function pickRunSelection(
   config: Config,
@@ -64,6 +72,7 @@ export async function pickRunSelection(
   picker: Picker | null,
   listModels: (cfg: Config['harness']['implement']) => Promise<string[]>,
   listEfforts: (cfg: Config['harness']['implement'], model?: string) => Promise<string[]>,
+  usage: Usage = {},
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
     const named = config.harness.definitions[flags.harness]
@@ -81,7 +90,7 @@ export async function pickRunSelection(
     }
   }
 
-  const chosen = await picker.select('Which harness?', harnessChoices(config))
+  const chosen = await picker.select('Which harness?', harnessChoices(config, usage))
   if (chosen === null) {
     return {
       harness: withEffort(withModel(config.harness.implement, flags.model), flags.effort),
@@ -102,6 +111,7 @@ export async function pickRunSelection(
     '(custom model)',
     defaultModel,
     await listModels(chosen),
+    usage,
   )
 
   const picked = withModel(chosen, model)

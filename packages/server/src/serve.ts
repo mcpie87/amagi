@@ -80,6 +80,7 @@ function startRepoPollers(
             : startPrPoller({
                 store: ws.store,
                 forge: ws.forge,
+                tracker: ws.tracker,
                 cwd: ws.root,
                 ...(prIntervalMs === undefined ? {} : { intervalMs: prIntervalMs }),
               }),

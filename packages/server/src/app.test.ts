@@ -464,9 +464,9 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     expect(res.status).toBe(409)
   })
 
-  test('409s when the task already reached a terminal state', async () => {
+  test('409s when the task reached a terminal state that cannot be retried', async () => {
     stuckTask('bd-1')
-    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'needs_human' })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'done' })
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(409)
   })
@@ -485,6 +485,24 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     expect(body.task.worktree).toBe('/tmp/wt/bd-1')
     expect(tracker.released).toEqual(['bd-1'])
   })
+
+  test.each(['needs_human', 'no_pr'] as const)(
+    'retries a %s task so its preserved worktree can be resumed',
+    async (state) => {
+      const tracker = new FakeGateTracker()
+      ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+      store = ws.store('repo1')
+      app = createApp({ workspaces: ws.workspaces })
+      stuckTask('bd-1')
+      store.append('bd-1', { type: 'task.state', from: 'implementing', to: state })
+      const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: TaskRow }
+      expect(body.task.state).toBe('claimed')
+      expect(body.task.worktree).toBe('/tmp/wt/bd-1')
+      expect(tracker.released).toEqual(['bd-1'])
+    },
+  )
 })
 
 describe('runner endpoints', () => {

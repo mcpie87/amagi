@@ -4,7 +4,7 @@ import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
 import { cacheHome } from '../../paths.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
-import { spawnAgent } from './spawn.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type CodexModel = { slug: string; efforts: string[] }
 
@@ -109,26 +109,13 @@ type CodexMessage = {
   usage?: {
     input_tokens?: number
     output_tokens?: number
+    cached_input_tokens?: number
   }
   error?: { message: string }
   message?: string
 }
 
 type ItemPhase = 'started' | 'updated' | 'completed'
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
-}
 
 /**
  * Turns codex's `exec --json` dialect (the `ThreadEvent`/`ThreadItem` shapes
@@ -281,6 +268,7 @@ export class CodexTranslator {
       this.usage = {
         inputTokens: msg.usage.input_tokens ?? 0,
         outputTokens: msg.usage.output_tokens ?? 0,
+        cachedTokens: msg.usage.cached_input_tokens ?? 0,
         // Codex's usage payload carries no dollar figure, unlike claude's.
         costUsd: null,
       }
@@ -288,6 +276,7 @@ export class CodexTranslator {
         kind: 'usage',
         inputTokens: this.usage.inputTokens,
         outputTokens: this.usage.outputTokens,
+        ...(this.usage.cachedTokens === 0 ? {} : { cachedTokens: this.usage.cachedTokens }),
       })
     }
     events.push({

@@ -6,7 +6,8 @@ import { cleanTerminalWorktrees } from './clean.ts'
 import { exec, execOk } from './exec.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
-import { createWorktree, listWorktrees, type WorktreeSpec } from './worktree.ts'
+import { listWorktrees } from './test-util.ts'
+import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 let repo: string
 let wtRoot: string

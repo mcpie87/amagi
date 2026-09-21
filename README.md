@@ -53,7 +53,7 @@ bun run packages/cli/src/index.ts <command>
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
-| `respond-to-mentions` | Watch open PRs for @agent mentions and respond: fix, explain, or ask for clarification |
+| `respond-to-mentions` | Watch open PRs for @agent mentions; the LLM classifies each one and responds by fixing, explaining, logging a task, or asking for clarification |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
 | `repos` | List registered repositories and their readiness diagnostics |

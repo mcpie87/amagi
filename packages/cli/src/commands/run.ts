@@ -9,14 +9,11 @@ import {
   repoRoot,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, yellow } from '../format.ts'
+import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
+import { usageFromEvents } from '../picker-usage.ts'
 import { currentRepo } from '../repo.ts'
 import { pickRunSelection } from '../select-run.ts'
-
-function printBlock(text: string): void {
-  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
-}
 
 const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
@@ -55,6 +52,7 @@ export const runCommand = defineCommand({
       interactive() ? picker : null,
       listModelsFor,
       listEffortsFor,
+      usageFromEvents(store.events()),
     )
 
     const implement = selection.harness
@@ -113,6 +111,12 @@ export const runCommand = defineCommand({
           }
           if (event.results.length === 0) console.log(dim('  checks: none configured'))
           break
+        case 'question.asked': {
+          console.log(`\n${bold(red('  AWAITING YOUR ANSWER'))}`)
+          printBlock(yellow(event.question))
+          if (event.options.length > 0) printBlock(dim(`options: ${event.options.join(' | ')}`))
+          break
+        }
         case 'pr.created':
           console.log(green(`  pull request: ${event.url}`))
           break
