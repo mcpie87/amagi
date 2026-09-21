@@ -233,6 +233,12 @@ const states = (taskId: string): (string | null | undefined)[] =>
     .filter((e) => e.type === 'task.state')
     .map((e) => (e as Extract<StoredEvent, { type: 'task.state' }>).to)
 
+const stateReason = (taskId: string): string =>
+  store
+    .events({ taskId, limit: 999 })
+    .filter((e): e is Extract<StoredEvent, { type: 'task.state' }> => e.type === 'task.state')
+    .at(-1)?.reason ?? ''
+
 beforeEach(async () => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
@@ -556,6 +562,68 @@ describe('Runner.runOnce', () => {
     expect(errors.some((e) => e.type === 'error' && e.message.includes('model unavailable'))).toBe(
       true,
     )
+  })
+
+  test('a failed agent with no stderr or summary mines the last assistant text as the reason', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'text', text: 'I cannot finish: the registry is unreachable' },
+          { kind: 'tool_result', name: 'Bash', ok: true, output: 'ok' },
+        ],
+        outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('registry is unreachable')
+    expect(reason).not.toContain('exit 1')
+  })
+
+  test('a failed agent prefers the harness result message over stream noise', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'text', text: 'working on it' },
+          { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
+          { kind: 'result', ok: false, summary: 'fatal client error' },
+        ],
+        outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('fatal client error')
+  })
+
+  test('a failed agent falls back to the failing tool output when there is no result or text', async () => {
+    const harness = new FakeHarness([
+      {
+        events: [
+          { kind: 'tool_result', name: 'Bash', ok: false, output: 'command not found: lint' },
+        ],
+        outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('command not found: lint')
+  })
+
+  test('a failed agent with nothing mined names the phase and points at the log', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 7, summary: null, stderr: '' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('implement phase failed (exit 7)')
+    expect(reason).toContain('task log')
   })
 
   test('a transient failure backs off and retries, then commits', async () => {
