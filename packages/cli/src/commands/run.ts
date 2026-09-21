@@ -16,9 +16,6 @@ import { pickRunSelection, type RunSelection, usageCounts } from '../select-run.
 
 const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
-  // claude/codex come from the curated models.json (instant, offline), so a
-  // disk cache can only serve stale names; only opencode scrapes its CLI.
-  if (harness.kind !== 'opencode') return harness.listModels()
   return listModelsCached(harness.kind, () => harness.listModels())
 }
 
