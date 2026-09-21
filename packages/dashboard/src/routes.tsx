@@ -985,9 +985,13 @@ function WorkersPanel() {
               <span className="font-medium text-zinc-200">{w.repo}</span>
               <span>last run: {fmtLastRun(w.lastRunAt)}</span>
               {w.error === null ? (
-                <span>
-                  scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
-                </span>
+                w.detail !== null && w.detail !== undefined ? (
+                  <span>{w.detail}</span>
+                ) : (
+                  <span>
+                    scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
+                  </span>
+                )
               ) : (
                 <span className="text-red-400">error: {w.error}</span>
               )}

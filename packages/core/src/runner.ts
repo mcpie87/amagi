@@ -45,6 +45,14 @@ export type RunOnceResult = {
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
 
+/**
+ * Worker heartbeat cadence into the store, well under the default 1h stall
+ * threshold so a live runner never looks stalled. Kept separate from the
+ * tracker lease cadence: forge/github grant a 6h lease, which would make the
+ * lease tick far too slow to serve as the stall watcher's activity signal.
+ */
+const WORKER_HEARTBEAT_MS = 60_000
+
 class LeaseLostError extends Error {
   constructor(taskId: string) {
     super(`task ${taskId}: claim lease was reclaimed, stopping before another worker collides`)
@@ -67,10 +75,12 @@ export class RunCancelledError extends Error {
  */
 class Lease {
   private timer: ReturnType<typeof setInterval> | null = null
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private lost = false
 
   constructor(
     private readonly tracker: Tracker,
+    private readonly store: Store,
     private readonly taskId: string,
   ) {}
 
@@ -81,11 +91,16 @@ class Lease {
         if (!alive) this.lost = true
       })
     }, period)
+    this.heartbeatTimer = setInterval(() => {
+      this.store.heartbeat(this.taskId)
+    }, WORKER_HEARTBEAT_MS)
   }
 
   stop(): void {
     if (this.timer !== null) clearInterval(this.timer)
     this.timer = null
+    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = null
   }
 
   get isLost(): boolean {
@@ -236,7 +251,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, task.id)
+    const lease = new Lease(this.deps.tracker, this.deps.store, task.id)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, resume)
