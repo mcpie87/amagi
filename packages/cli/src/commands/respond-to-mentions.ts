@@ -2,6 +2,7 @@ import {
   listOpenPrs,
   listPrMentions,
   loadConfig,
+  type MentionProgress,
   makePrDriver,
   makeTracker,
   mentionsPath,
@@ -19,7 +20,8 @@ import { bold, dim, green, red } from '../format.ts'
 export const respondToMentionsCommand = defineCommand({
   meta: {
     name: 'respond-to-mentions',
-    description: 'Watch open PRs for @agent mentions and respond (fix, explain, or ask)',
+    description:
+      'Watch open PRs for @agent mentions and have the LLM decide the response (fix, explain, add a task, or ask)',
   },
   args: {
     'dry-run': {
@@ -35,6 +37,7 @@ export const respondToMentionsCommand = defineCommand({
     const driver = makePrDriver(config.forge.kind)
     const tracker = makeTracker(config, root)
     const handle = config.forge.agentHandle
+    const tty = process.stdout.isTTY
 
     let prs: PrInfo[]
     try {
@@ -56,6 +59,27 @@ export const respondToMentionsCommand = defineCommand({
     const handled = readHandledMentions(path)
     let total = 0
 
+    const fmtDur = (ms: number): string => {
+      const s = Math.floor(ms / 1000)
+      return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+    }
+    const fmtTokens = (n: number): string =>
+      n >= 1_000_000
+        ? `${(n / 1_000_000).toFixed(1)}M`
+        : n >= 1000
+          ? `${Math.round(n / 1000)}k`
+          : String(n)
+    const progressLine = (p: MentionProgress): string => {
+      const parts = [p.phase]
+      if (p.tool) parts.push(p.tool)
+      parts.push(`${fmtDur(p.phaseMs)} / ${fmtDur(p.totalMs)}`)
+      if (p.usage) {
+        parts.push(`${fmtTokens(p.usage.inputTokens)} in / ${fmtTokens(p.usage.outputTokens)} out`)
+        if (p.usage.costUsd !== null) parts.push(`$${p.usage.costUsd.toFixed(3)}`)
+      }
+      return `  ${dim(parts.join('  '))}`
+    }
+
     for (const pr of prs) {
       let mentions: PrComment[]
       try {
@@ -76,6 +100,18 @@ export const respondToMentionsCommand = defineCommand({
         total++
         console.log(`  @${mention.user}: ${mention.body.trim().replace(/\s+/g, ' ').slice(0, 120)}`)
         if (args['dry-run']) continue
+        let lastNonTty = ''
+        const render = (p: MentionProgress) => {
+          const line = progressLine(p)
+          if (tty) process.stdout.write(`\r\x1b[K${line}`)
+          else if (line !== lastNonTty) {
+            lastNonTty = line
+            console.log(line)
+          }
+        }
+        const clearLine = () => {
+          if (tty) process.stdout.write('\r\x1b[K')
+        }
         try {
           const kind = await respondToMention({
             root,
@@ -85,11 +121,14 @@ export const respondToMentionsCommand = defineCommand({
             config,
             driver,
             tracker,
+            onProgress: render,
           })
+          clearLine()
           handled.add(mention.id)
           saveHandledMentions(path, handled)
           console.log(green(`  responded (${kind})`))
         } catch (err) {
+          clearLine()
           console.log(red(`  failed: ${err instanceof Error ? err.message : String(err)}`))
         }
       }
