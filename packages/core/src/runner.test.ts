@@ -101,6 +101,9 @@ class FakeHarness implements Harness {
   async listModels(): Promise<string[]> {
     return []
   }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
     this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
@@ -171,6 +174,9 @@ class BlockingHarness implements Harness {
     throw new Error('no resume expected in the cancel test')
   }
   async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
     return []
   }
 }

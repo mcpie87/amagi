@@ -152,6 +152,11 @@ export class OpencodeHarness implements Harness {
     return parseModelLines(result.stdout)
   }
 
+  // opencode's `--variant` is provider-specific, so there is no universal list.
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.spawn(this.argv(opts, sessionId), opts)
   }
