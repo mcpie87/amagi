@@ -7,7 +7,6 @@ import {
   type Notifier,
   type Question,
   type RegistryEntry,
-  Runner,
   type RunServiceApi,
   removeWorktree,
   type Store,
@@ -183,6 +182,12 @@ export function createApp({
     }
     return chat
   }
+  // The legacy non-scoped stop route predates the repo registry; it targets the
+  // first registered workspace, which is the default repo for single-repo use.
+  const defaultStore = (): Store | null => {
+    const entry = workspaces.list()[0]
+    return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -324,6 +329,13 @@ export function createApp({
       return c.json(await workspaces.diagnose(entry))
     })
 
+    .get('/api/repos/:repo/ready-queue', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      // The tracker orders the queue FCFS (bd ready --sort oldest).
+      return c.json(await ws.tracker.ready())
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -340,6 +352,27 @@ export function createApp({
         return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
       }
       return c.json(await ws.eligibleEpics())
+    })
+
+    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
+      const store = defaultStore()
+      if (store === null) return c.json({ error: 'no repository registered' }, 409)
+      const { id } = c.req.valid('param')
+      const task = store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (isTerminal(task.state)) {
+        return c.json({ error: `task ${id} is already in terminal state ${task.state}` }, 409)
+      }
+      // Park the run in `cancelled`; a live runner watches the store, kills
+      // the agent process and unwinds. A crashed runner leaves the task parked
+      // for the operator to reclaim via the restart flow.
+      store.append(id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'cancelled',
+        reason: 'operator interrupt',
+      })
+      return c.json({ task: store.task(id) })
     })
 
     .post(
@@ -674,27 +707,6 @@ export function createApp({
         return c.json(ws.store.openQuestions(taskId))
       },
     )
-
-    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const runner = new Runner({
-        store: ws.store,
-        tracker: ws.tracker,
-        harness: makeHarness(ws.config.harness.implement),
-        config: ws.config,
-        repoRoot: ws.root,
-        repoName: ws.name,
-        ...(ws.forge === null ? {} : { forge: ws.forge }),
-      })
-      // A full agent run takes minutes, so the request returns immediately and
-      // the run reports through the repo's own event stream.
-      void runner.runOnce().catch((err) => {
-        const message = err instanceof Error ? err.message : String(err)
-        ws.store.append(null, { type: 'error', message, fatal: false })
-      })
-      return c.json({ repo, started: true }, 202)
-    })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 

@@ -1,5 +1,5 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite'
-import type { CheckResult, EventBody, StoredEvent, TaskState } from '../events.ts'
+import type { CheckResult, EventBody, MergeStatus, StoredEvent, TaskState } from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -26,6 +26,7 @@ type RawTask = {
   session_id: string | null
   pr_url: string | null
   pr_number: number | null
+  pr_merge_status: string | null
   status_reason: string | null
   last_error: string | null
   retry_count: number
@@ -60,6 +61,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
   sessionId: r.session_id,
   prUrl: r.pr_url,
   prNumber: r.pr_number,
+  prMergeStatus: r.pr_merge_status as MergeStatus | null,
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
@@ -101,6 +103,7 @@ const taskRow = (t: ProjectedTask): Row => ({
   session_id: t.sessionId,
   pr_url: t.prUrl,
   pr_number: t.prNumber,
+  pr_merge_status: t.prMergeStatus,
   status_reason: t.statusReason,
   last_error: t.lastError,
   retry_count: t.retryCount,
