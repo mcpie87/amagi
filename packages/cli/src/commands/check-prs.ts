@@ -1,5 +1,6 @@
 import {
   type Config,
+  harnessStartOpts,
   isConflicting,
   listOpenPrs,
   loadConfig,
@@ -14,11 +15,7 @@ import {
   resolveConflictSystemPrompt,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, table, yellow } from '../format.ts'
-
-function printBlock(text: string): void {
-  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
-}
+import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
 
 function mergeLabel(p: PrInfo, baseBranch: string): string {
   if (isConflicting(p, baseBranch)) return 'CONFLICT'
@@ -36,6 +33,7 @@ async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<voi
       worktreeRoot: config.repo.worktreeRoot,
       baseBranch: config.repo.baseBranch,
       pr,
+      persona: config.repo.persona,
     })
     console.log(dim(`  worktree: ${wt.path}`))
 
@@ -62,14 +60,7 @@ async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<voi
       cwd: wt.path,
       prompt: resolveConflictPrompt(ctx),
       systemPrompt: resolveConflictSystemPrompt(ctx),
-      ...(config.harness.implement.model === undefined
-        ? {}
-        : { model: config.harness.implement.model }),
-      ...(config.harness.implement.effort === undefined
-        ? {}
-        : { effort: config.harness.implement.effort }),
-      permissions: config.harness.implement.permissions,
-      extraArgs: config.harness.implement.extraArgs,
+      ...harnessStartOpts(config.harness.implement),
     })
     console.log(dim(`  agent: ${harness.kind} (${wt.branch})`))
 

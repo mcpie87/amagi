@@ -1,16 +1,23 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
-import { openDatabase, Store, type StoredEvent } from '@amagi/core'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import type { Store, StoredEvent } from '@amagi/core'
 import { type AppType, createApp } from './app.ts'
+import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
-let store: Store
+let ws: TestWorkspaces
+let store: import('@amagi/core').Store
 let app: AppType
 
 const claim = (id: string) =>
   store.append(id, { type: 'task.claimed', title: `work on ${id}`, tracker: 'beads' })
 
 beforeEach(() => {
-  store = new Store(openDatabase(':memory:'))
-  app = createApp({ store })
+  ws = testWorkspaces(['repo1'])
+  store = ws.store('repo1')
+  app = createApp({ workspaces: ws.workspaces })
+})
+
+afterEach(() => {
+  ws.cleanup()
 })
 
 type Frame = { id: string | undefined; event: StoredEvent }
@@ -58,10 +65,10 @@ const noise = (i: number) =>
 /** Lets the stream callback run between an append and the next assertion. */
 const settle = () => new Promise((r) => setTimeout(r, 10))
 
-describe('GET /api/stream', () => {
+describe('GET /api/repos/repo1/stream', () => {
   test('replays the backlog and then pushes live events', async () => {
     claim('bd-1')
-    const stream = sse(await app.request('/api/stream'))
+    const stream = sse(await app.request('/api/repos/repo1/stream'))
 
     const [replayed] = await stream.take(1)
     expect(replayed?.event.type).toBe('task.claimed')
@@ -83,7 +90,9 @@ describe('GET /api/stream', () => {
     })
 
     const stream = sse(
-      await app.request('/api/stream', { headers: { 'Last-Event-ID': String(first.seq) } }),
+      await app.request('/api/repos/repo1/stream', {
+        headers: { 'Last-Event-ID': String(first.seq) },
+      }),
     )
     const live = store.append('bd-1', {
       type: 'task.state',
@@ -106,7 +115,7 @@ describe('GET /api/stream', () => {
     })
 
     const stream = sse(
-      await app.request('/api/stream?sinceSeq=0', {
+      await app.request('/api/repos/repo1/stream?sinceSeq=0', {
         headers: { 'Last-Event-ID': String(first.seq) },
       }),
     )
@@ -119,7 +128,7 @@ describe('GET /api/stream', () => {
   test('scopes both the replay and the live feed to one task', async () => {
     claim('bd-1')
     claim('bd-2')
-    const stream = sse(await app.request('/api/stream?taskId=bd-2'))
+    const stream = sse(await app.request('/api/repos/repo1/stream?taskId=bd-2'))
 
     const [replayed] = await stream.take(1)
     expect(replayed?.event.taskId).toBe('bd-2')
@@ -137,7 +146,7 @@ describe('GET /api/stream', () => {
     claim('bd-1')
     for (let i = 0; i < 600; i++) noise(i)
 
-    const stream = sse(await app.request('/api/stream'))
+    const stream = sse(await app.request('/api/repos/repo1/stream'))
     const frames = await stream.take(601)
     expect(frames.map((f) => f.event.seq)).toEqual(Array.from({ length: 601 }, (_, i) => i + 1))
 
@@ -166,7 +175,7 @@ describe('GET /api/stream', () => {
       return page
     }) as Store['events']
 
-    const stream = sse(await app.request('/api/stream'))
+    const stream = sse(await app.request('/api/repos/repo1/stream'))
     const frames = await stream.take(602)
     expect(frames.map((f) => f.event.seq)).toEqual(Array.from({ length: 602 }, (_, i) => i + 1))
 
@@ -181,7 +190,7 @@ describe('GET /api/stream', () => {
 
   test('releases the subscription when the client hangs up', async () => {
     claim('bd-1')
-    const stream = sse(await app.request('/api/stream'))
+    const stream = sse(await app.request('/api/repos/repo1/stream'))
     await stream.take(1)
     expect(store.listenerCount).toBe(1)
 
@@ -191,7 +200,7 @@ describe('GET /api/stream', () => {
   })
 
   test('rejects a malformed sinceSeq', async () => {
-    const res = await app.request('/api/stream?sinceSeq=-1')
+    const res = await app.request('/api/repos/repo1/stream?sinceSeq=-1')
     expect(res.status).toBe(400)
   })
 })
