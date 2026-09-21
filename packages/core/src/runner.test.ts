@@ -341,7 +341,7 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.title).toBe('bd-a1b2: Add a greeting file')
     expect(pr.calls[0]?.body).toContain('## ✨ Add a greeting file')
     expect(pr.calls[0]?.body).toContain('**Task:** `bd-a1b2`')
-    expect(pr.calls[0]?.body).toContain('Write `hello.txt`')
+    expect(pr.calls[0]?.body).toContain('Write hello.txt')
     expect(pr.calls[0]?.body).toContain('- `hello.txt` +1 -0')
     expect(pr.calls[0]?.base).toBe('main')
     expect(pr.calls[0]?.branch).toContain('amagi/')
