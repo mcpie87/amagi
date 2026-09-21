@@ -19,6 +19,7 @@ import {
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import { AgentLogView } from './AgentLogView.tsx'
 import { useConnection, useDashboard } from './store.tsx'
+import { currentTheme, setTheme, type Theme } from './theme.ts'
 import {
   Badge,
   EmptyState,
@@ -45,6 +46,7 @@ const navigation = [
   { to: '/issues', label: 'Task board', icon: 'board' },
   { to: '/inbox', label: 'Inbox', icon: 'inbox' },
   { to: '/activity', label: 'Activity', icon: 'activity' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
 ] as const
 
 function RootLayout() {
@@ -1397,6 +1399,55 @@ function TaskDetailView() {
   )
 }
 
+function SettingsView() {
+  const [theme, setLocalTheme] = useState<Theme>(() => currentTheme())
+  const changeTheme = (next: Theme) => {
+    setLocalTheme(next)
+    setTheme(next)
+  }
+  return (
+    <>
+      <PageHeading
+        eyebrow="PREFERENCES"
+        title="Make it yours."
+        description="Client-side settings, saved in this browser."
+      />
+      <section className="panel settings-panel">
+        <div className="panel-heading">
+          <h2>
+            <Icon name="settings" size={15} />
+            Appearance
+          </h2>
+        </div>
+        <div className="settings-row">
+          <div>
+            <h3>Theme</h3>
+            <p>Choose light or dark. The first visit follows your operating system preference.</p>
+          </div>
+          <fieldset className="view-switch" aria-label="Theme">
+            <button
+              type="button"
+              aria-pressed={theme === 'light'}
+              onClick={() => changeTheme('light')}
+            >
+              <Icon name="sun" size={16} />
+              Light
+            </button>
+            <button
+              type="button"
+              aria-pressed={theme === 'dark'}
+              onClick={() => changeTheme('dark')}
+            >
+              <Icon name="moon" size={16} />
+              Dark
+            </button>
+          </fieldset>
+        </div>
+      </section>
+    </>
+  )
+}
+
 const rootRoute = createRootRoute({ component: RootLayout })
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: Overview })
 const runsRoute = createRoute({
@@ -1419,6 +1470,11 @@ const activityRoute = createRoute({
   path: '/activity',
   component: ActivityView,
 })
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  component: SettingsView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
@@ -1430,6 +1486,7 @@ const routeTree = rootRoute.addChildren([
   issuesRoute,
   inboxRoute,
   activityRoute,
+  settingsRoute,
   taskRoute,
 ])
 export const router = createRouter({ routeTree })

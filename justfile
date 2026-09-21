@@ -5,6 +5,9 @@ install:
 
 check: lint typecheck build test
 
+# Alias used by the orchestrator's check step.
+fresh-check: check
+
 lint:
     bun x biome check .
 

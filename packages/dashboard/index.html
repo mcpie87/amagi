@@ -6,6 +6,21 @@
     <meta name="theme-color" content="#202821" />
     <meta name="description" content="Your AI orchestration workspace. Follow runs, organize tasks, and give agents direction." />
     <title>amagi · Agent workspace</title>
+    <script>
+      // Apply the saved theme before first paint to avoid a flash of the wrong theme.
+      (() => {
+        let theme = 'light'
+        try {
+          const stored = localStorage.getItem('amagi:theme')
+          if (stored === 'light' || stored === 'dark') {
+            theme = stored
+          } else {
+            theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          }
+        } catch {}
+        document.documentElement.dataset.theme = theme
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
