@@ -3,10 +3,6 @@ import { byUsage, type Usage } from './picker-usage.ts'
 
 const KINDS = ['claude', 'codex', 'opencode'] as const
 
-const bump = (usage: Usage, label: string): void => {
-  usage[label] = (usage[label] ?? 0) + 1
-}
-
 export type SelectOption<T> = { label: string; value: T }
 
 export type Picker = {
@@ -29,12 +25,8 @@ export function harnessChoices(
     defs.length > 0
       ? defs.map(([name, cfg]) => ({ label: name, value: cfg }))
       : KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) }))
-  return byUsage(usage, base)
+  return [...base].sort((a, b) => (usage[b.value.kind] ?? 0) - (usage[a.value.kind] ?? 0))
 }
-
-/** Label of a chosen harness: its definition name, else its bare kind. */
-const harnessLabel = (config: Config, chosen: Config['harness']['implement']): string =>
-  Object.entries(config.harness.definitions).find(([, cfg]) => cfg === chosen)?.[0] ?? chosen.kind
 
 const withModel = (
   cfg: Config['harness']['implement'],
@@ -45,8 +37,8 @@ const withModel = (
  * Resolves the harness and model for a run. `--harness`/`--model` win and
  * never prompt; without flags a null picker (no TTY) falls back to the config
  * defaults; with a picker the operator chooses harness then model from a
- * cached model list. Interactive picks are recorded into `usage` (label ->
- * pick count) so the most-chosen options rank first next time.
+ * cached model list. `usage` ranks the options by how often each was used in
+ * past runs (harness kinds and models), so the most common ones sit on top.
  */
 export async function pickRunSelection(
   config: Config,
@@ -69,7 +61,6 @@ export async function pickRunSelection(
   if (chosen === null) {
     return { harness: withModel(config.harness.implement, flags.model), interactive: true }
   }
-  bump(usage, harnessLabel(config, chosen))
   if (flags.model !== undefined) {
     return { harness: withModel(chosen, flags.model), interactive: true }
   }
@@ -86,16 +77,8 @@ export async function pickRunSelection(
 
   const picked = await picker.select('Which model?', byUsage(usage, options))
   let model: string | undefined
-  if (picked === null) {
-    model = defaultModel
-    if (defaultModel !== undefined) bump(usage, `default (${defaultModel})`)
-  } else if (picked === '') {
-    const typed = await picker.input('Model: ')
-    model = typed ?? defaultModel
-    if (typed !== null && model !== undefined) bump(usage, model)
-  } else {
-    model = picked
-    bump(usage, picked)
-  }
+  if (picked === null) model = defaultModel
+  else if (picked === '') model = (await picker.input('Model: ')) ?? defaultModel
+  else model = picked
   return { harness: withModel(chosen, model), interactive: true }
 }

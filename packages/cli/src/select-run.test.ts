@@ -41,14 +41,21 @@ describe('harnessChoices', () => {
     expect(labels).toEqual(['claude', 'codex', 'opencode'])
   })
 
-  test('ranks definitions by usage, most-picked first', () => {
-    const labels = harnessChoices(config(), { careful: 3, fast: 1 }).map((o) => o.label)
-    expect(labels).toEqual(['careful', 'fast'])
+  test('ranks definitions by usage of their kind, most-picked first', () => {
+    const labels = harnessChoices(config(), { opencode: 3, claude: 1 }).map((o) => o.label)
+    expect(labels).toEqual(['fast', 'careful'])
   })
 
   test('unknown counts keep the configured order', () => {
     const labels = harnessChoices(config(), { nope: 5 }).map((o) => o.label)
     expect(labels).toEqual(['fast', 'careful'])
+  })
+
+  test('ranks the bare kinds by usage', () => {
+    const labels = harnessChoices(config({ definitions: {} }), { opencode: 3, claude: 1 }).map(
+      (o) => o.label,
+    )
+    expect(labels).toEqual(['opencode', 'claude', 'codex'])
   })
 })
 
@@ -122,8 +129,8 @@ describe('pickRunSelection', () => {
     expect(harness.model).toBe('opencode/forced')
   })
 
-  test('interactive picks bump usage and reorder subsequent runs', async () => {
-    const usage: Usage = { careful: 1 }
+  test('run-history usage reorders harness and model options', async () => {
+    const usage: Usage = { opencode: 3, 'opencode/big-pickle': 2 }
     const seen: string[][] = []
     const picker: Picker = {
       select: async (_title, options) => {
@@ -134,15 +141,7 @@ describe('pickRunSelection', () => {
     }
 
     await pickRunSelection(config(), {}, picker, listModels, usage)
-    expect(seen[0]).toEqual(['careful', 'fast'])
-    expect(usage.fast).toBe(1)
-
-    await pickRunSelection(config(), {}, picker, listModels, usage)
-    expect(seen[2]).toEqual(['fast', 'careful'])
-    expect(usage.fast).toBe(2)
-
-    await pickRunSelection(config(), {}, picker, listModels, usage)
-    expect(seen[4]).toEqual(['fast', 'careful'])
-    expect(usage.fast).toBe(3)
+    expect(seen[0]).toEqual(['fast', 'careful'])
+    expect(seen[1]?.indexOf('opencode/big-pickle')).toBe(0)
   })
 })
