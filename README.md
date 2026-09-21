@@ -50,6 +50,8 @@ bun run packages/cli/src/index.ts <command>
 | Command | Description |
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
+| `continue <task-id>` | Resume a task in its recorded worktree. `--harness`/`--model` restart it with a different harness or model |
+| `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -102,7 +104,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
-| `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
+| `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. The review loop (a reviewer that inspects the PR and a fixing pass that addresses its findings) is not built yet; a task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
@@ -149,6 +151,15 @@ resumes where the dead one left off. Only in-progress states are watched;
 `pr_open` is excluded, since there the PR is out for human review and no
 worker runs the task.
 
+A per-repo **PR conflict watcher** (`loop.prCheckIntervalSec`, default 5
+minutes) is the same idea as the mention watcher but for the `check-prs` flow:
+each interval it lists open PRs, and any that conflict with `repo.baseBranch`
+get a resolution agent dispatched on the same code path the `check-prs` CLI
+uses. Ticks are sequential, and a PR is only attempted once per head SHA (the
+attempted head is kept on disk), so an unresolvable conflict is not retried
+until its head changes. Both watchers appear in the dashboard Workers section
+with their own last-run stamp and counters.
+
 The stall watcher's inactivity signal only sees a dead worker, not a stuck
 one. A **doom-loop guard** (`loop.doomEnabled`, default on) runs on the same
 tick and scans the agent event stream of every task with a live worker for
@@ -186,6 +197,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
+| `loop.prCheckIntervalSec` | integer >= 1 | `300` | How often the PR conflict watcher scans open PRs and dispatches a resolution agent per one conflicting with `repo.baseBranch`. Each PR is only attempted once per head SHA, so the default 5 minutes stays inside GitHub REST rate limits. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.doomEnabled` | boolean | `true` | Doom-loop guard: the stall watcher also scans tasks with a live worker for busy-but-not-progressing agents and stops the run. Set false to disable. |
@@ -270,6 +282,23 @@ permissions = "bypass"
 kind = "claude"
 model = "claude-opus-5"
 ```
+
+### Interrupting and restarting a task
+
+A task that hangs (the harness process stops producing output, the machine
+froze, the runner died) is not stranded: interrupt it, then start it again in
+the same worktree, optionally with a different harness or model.
+
+```bash
+amagi stop bd-1234        # park the run in `cancelled`; a live runner kills its agent process
+amagi continue bd-1234    # resume in the recorded worktree with the configured harness
+amagi continue bd-1234 --harness opencode --model local/...   # same worktree, different harness/model
+```
+
+`amagi continue` re-claims the task and drives it in the worktree and branch
+already recorded for it, so no work is lost. The same stop/restart flow is
+available over the API (`POST /api/tasks/:id/stop` and
+`POST /api/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 
