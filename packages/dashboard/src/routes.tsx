@@ -36,7 +36,7 @@ import {
 import { AgentLogView } from './AgentLogView.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { type RepoInfo, RunnerProvider, useConnection, useDashboard, useRunner } from './store.tsx'
-import { Icon, type IconName } from './ui.tsx'
+import { EmptyState, Icon, type IconName } from './ui.tsx'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
@@ -266,37 +266,34 @@ const columnHeader: Record<Issue['status'], string> = {
   closed: 'Closed',
 }
 
-const columnColor: Record<Issue['status'], string> = {
-  open: 'bg-zinc-600',
-  in_progress: 'bg-blue-600',
-  blocked: 'bg-red-600',
-  closed: 'bg-emerald-600',
+const columnDot: Record<Issue['status'], string> = {
+  open: 'bg-zinc-500',
+  in_progress: 'bg-blue-500',
+  blocked: 'bg-red-500',
+  closed: 'bg-emerald-500',
 }
 
+/** Shared pill shape; the tone supplies the tint, text and ring. */
+const PILL = 'inline-block shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset'
+
 const stateBadge: Record<TaskState, string> = {
-  claimed: 'bg-zinc-500',
-  worktree_ready: 'bg-sky-600',
-  implementing: 'bg-blue-600',
-  awaiting_answer: 'bg-amber-500',
-  checks: 'bg-violet-600',
-  committed: 'bg-cyan-600',
-  retrying: 'bg-orange-500',
-  pr_open: 'bg-sky-600',
-  done: 'bg-emerald-600',
-  no_pr: 'bg-zinc-600',
-  needs_human: 'bg-red-600',
-  abandoned: 'bg-zinc-700',
-  cancelled: 'bg-zinc-600',
+  claimed: 'bg-zinc-500/15 text-zinc-300 ring-zinc-500/30',
+  worktree_ready: 'bg-sky-500/15 text-sky-300 ring-sky-500/30',
+  implementing: 'bg-blue-500/15 text-blue-300 ring-blue-500/30',
+  awaiting_answer: 'bg-amber-500/15 text-amber-300 ring-amber-500/30',
+  checks: 'bg-violet-500/15 text-violet-300 ring-violet-500/30',
+  committed: 'bg-cyan-500/15 text-cyan-300 ring-cyan-500/30',
+  retrying: 'bg-orange-500/15 text-orange-300 ring-orange-500/30',
+  pr_open: 'bg-sky-500/15 text-sky-300 ring-sky-500/30',
+  done: 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30',
+  no_pr: 'bg-zinc-500/15 text-zinc-400 ring-zinc-500/30',
+  needs_human: 'bg-red-500/15 text-red-300 ring-red-500/30',
+  abandoned: 'bg-zinc-500/10 text-zinc-500 ring-zinc-500/25',
+  cancelled: 'bg-zinc-500/15 text-zinc-400 ring-zinc-500/30',
 }
 
 function Badge({ state }: { state: TaskState }) {
-  return (
-    <span
-      className={`inline-block rounded px-2 py-0.5 text-xs font-medium text-white ${stateBadge[state]}`}
-    >
-      {state}
-    </span>
-  )
+  return <span className={`${PILL} ${stateBadge[state]}`}>{state}</span>
 }
 
 function readyOk(repo: RepoInfo): boolean {
@@ -483,7 +480,7 @@ function RootLayout() {
           <Sidebar navOpen={navOpen} onNavigate={() => setNavOpen(false)} />
         </div>
         <div className="workspace" inert={navOpen}>
-          <header className="border-b border-zinc-800 px-4 py-3 sm:px-6">
+          <header className="app-header border-b border-zinc-800 px-4 py-3 sm:px-6">
             <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
               <button
                 ref={openButtonRef}
@@ -526,19 +523,15 @@ function RootLayout() {
 }
 
 function IssueBadge({ issue }: { issue: Issue }) {
-  const color =
+  const tone =
     issue.status === 'closed'
-      ? 'bg-emerald-600'
+      ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
       : issue.status === 'blocked'
-        ? 'bg-red-600'
+        ? 'bg-red-500/15 text-red-300 ring-red-500/30'
         : issue.status === 'in_progress'
-          ? 'bg-blue-600'
-          : 'bg-zinc-600'
-  return (
-    <span className={`rounded px-2 py-0.5 text-xs font-medium text-white ${color}`}>
-      {issue.status}
-    </span>
-  )
+          ? 'bg-blue-500/15 text-blue-300 ring-blue-500/30'
+          : 'bg-zinc-500/15 text-zinc-300 ring-zinc-500/30'
+  return <span className={`${PILL} ${tone}`}>{issue.status}</span>
 }
 
 type IssuesViewMode = 'kanban' | 'list'
@@ -716,7 +709,7 @@ function IssueFormModal({
           <button
             type="submit"
             disabled={busy || title.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
           >
             {mode === 'create' ? 'Create task' : 'Save changes'}
           </button>
@@ -927,7 +920,7 @@ function IssuesView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search tasks…"
-            className="w-52 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-600 focus:outline-none"
+            className="w-52 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-600"
           />
           <span className="text-sm text-zinc-500">
             {searched.length} {searched.length === 1 ? 'task' : 'tasks'}
@@ -1012,12 +1005,15 @@ function IssuesView() {
                 className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
               >
                 <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
-                  <span
-                    className={`truncate rounded px-2 py-0.5 text-xs font-medium text-white ${columnColor[state]}`}
-                  >
-                    {columnHeader[state]}
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${columnDot[state]}`} />
+                    <span className="truncate text-xs font-medium uppercase tracking-wide text-zinc-300">
+                      {columnHeader[state]}
+                    </span>
                   </span>
-                  <span className="text-xs text-zinc-500">{columnIssues.length}</span>
+                  <span className="rounded bg-zinc-800 px-1.5 text-xs tabular-nums text-zinc-400">
+                    {columnIssues.length}
+                  </span>
                 </div>
                 <ul className="flex flex-col gap-2 p-2">
                   {columnIssues.map((issue) => (
@@ -1151,9 +1147,7 @@ function WorkerSlot({
   return (
     <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="shrink-0 rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">
-          busy
-        </span>
+        <span className={`${PILL} bg-blue-500/15 text-blue-300 ring-blue-500/30`}>busy</span>
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
@@ -1234,7 +1228,7 @@ function WorkersPanel() {
               key={`${w.repo}/${w.name}`}
               className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2 text-xs text-zinc-400"
             >
-              <span className="shrink-0 rounded bg-teal-600 px-2 py-0.5 text-xs font-medium text-white">
+              <span className={`${PILL} bg-teal-500/15 text-teal-300 ring-teal-500/30`}>
                 {w.name}
               </span>
               <span className="font-medium text-zinc-200">{w.repo}</span>
@@ -1258,19 +1252,18 @@ function WorkersPanel() {
   )
 }
 
+const metricTone = {
+  red: { box: 'border-red-900/70 bg-red-950/25', value: 'text-red-300' },
+  amber: { box: 'border-amber-800/70 bg-amber-950/25', value: 'text-amber-300' },
+  none: { box: 'border-zinc-800 bg-zinc-900', value: 'text-zinc-100' },
+} as const
+
 function Metric({ label, value, tone }: { label: string; value: string; tone?: 'red' | 'amber' }) {
+  const t = metricTone[tone ?? 'none']
   return (
-    <div
-      className={`metric rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 ${
-        tone === 'red' ? 'border-red-900/60' : tone === 'amber' ? 'border-amber-800/60' : ''
-      }`}
-    >
-      <div className="text-xs text-zinc-500">{label}</div>
-      <div
-        className={`mt-1 text-2xl font-semibold tabular-nums ${tone !== undefined ? 'text-zinc-100' : ''}`}
-      >
-        {value}
-      </div>
+    <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className={`mt-1 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
     </div>
   )
 }
@@ -1304,7 +1297,7 @@ function OverviewView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search runs…"
-            className="w-52 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-600 focus:outline-none"
+            className="w-52 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-600"
           />
           {selected !== null && <RunButton />}
         </div>
@@ -1356,9 +1349,11 @@ function OverviewView() {
         </Link>
       </div>
       {visible.length === 0 ? (
-        <p className="text-zinc-500">
-          {q === '' ? 'No active runs.' : 'No runs match that search.'}
-        </p>
+        <EmptyState icon="runs" title={q === '' ? 'No active runs' : 'No matching runs'}>
+          {q === ''
+            ? 'Claim the next ready issue with Run next, and it will show up here.'
+            : `Nothing in the queue matches "${search}".`}
+        </EmptyState>
       ) : (
         <RunList tasks={visible} showReason={false} />
       )}
@@ -2374,7 +2369,9 @@ function InboxView() {
       )}
 
       {questions.length === 0 && attention.length === 0 && (
-        <p className="text-zinc-500">All clear.</p>
+        <EmptyState icon="check" title="All clear">
+          No open questions and no task waiting on a human.
+        </EmptyState>
       )}
     </section>
   )
@@ -2608,7 +2605,9 @@ function ActivityView() {
         <p className="text-sm text-zinc-500">Everything that happened across runs, newest first.</p>
       </div>
       {items.length === 0 ? (
-        <p className="text-zinc-500">No activity yet.</p>
+        <EmptyState icon="activity" title="No activity yet">
+          Claims, state changes, checks, commits and pull requests land here as runs progress.
+        </EmptyState>
       ) : (
         <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
           {items.map((item) => {
