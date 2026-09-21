@@ -20,7 +20,7 @@ import type {
   UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
-import { exec, execOk } from './exec.ts'
+import { type Exec, exec, execOk } from './exec.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -218,7 +218,13 @@ const config = (over: Record<string, unknown> = {}) =>
     ...over,
   })
 
-const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = new FakePr()) =>
+const makeRunner = (
+  tracker: Tracker,
+  harness: Harness,
+  cfg = config(),
+  forge = new FakePr(),
+  runExec: Exec = exec,
+) =>
   new Runner({
     store,
     tracker,
@@ -227,6 +233,7 @@ const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = 
     repoRoot: repo,
     repoName: 'demo',
     forge,
+    exec: runExec,
   })
 
 const types = (taskId: string): EventType[] =>
@@ -452,6 +459,33 @@ describe('Runner.runOnce', () => {
     ).toBe(true)
   })
 
+  test('a committed task whose diff against base is empty goes to no_pr without a PR', async () => {
+    const pr = new FakePr()
+    const emptyDiff: Exec = async (cmd, opts) => {
+      const result = await exec(cmd, opts)
+      if (cmd.includes('--numstat')) return { ...result, stdout: '' }
+      return result
+    }
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config(),
+      pr,
+      emptyDiff,
+    ).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(types(TASK.id)).toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(pr.calls).toHaveLength(0)
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'diff against main is empty',
+    )
+  })
+
   test('the commit lands in the worktree branch, not the main checkout', async () => {
     await makeRunner(new FakeTracker([TASK]), new FakeHarness([writesAFile])).runOnce()
     const row = store.task(TASK.id)
@@ -675,7 +709,14 @@ describe('Runner.runOnce', () => {
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
     ])
-    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      // "hit the turn limit" matches the transient/session-limit patterns and
+      // would retry into a fresh (empty) turn; this test is about which detail
+      // wins over the tool noise, so force immediate escalation.
+      config({ loop: { maxRetries: 0 } }),
+    ).runOnce()
 
     expect(result?.state).toBe('needs_human')
     expect(stateReason(TASK.id)).toContain('the build broke')

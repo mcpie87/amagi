@@ -1,4 +1,7 @@
 import {
+  errMsg,
+  fmtDuration,
+  fmtTokens,
   listOpenPrs,
   listPrMentions,
   loadConfig,
@@ -43,11 +46,7 @@ export const respondToMentionsCommand = defineCommand({
     try {
       prs = await listOpenPrs({ cwd: root })
     } catch (err) {
-      console.log(
-        red(
-          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is gh installed and authenticated?)`,
-        ),
-      )
+      console.log(red(`failed to list PRs: ${errMsg(err)} (is gh installed and authenticated?)`))
       return
     }
     if (prs.length === 0) {
@@ -59,20 +58,10 @@ export const respondToMentionsCommand = defineCommand({
     const handled = readHandledMentions(path)
     let total = 0
 
-    const fmtDur = (ms: number): string => {
-      const s = Math.floor(ms / 1000)
-      return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
-    }
-    const fmtTokens = (n: number): string =>
-      n >= 1_000_000
-        ? `${(n / 1_000_000).toFixed(1)}M`
-        : n >= 1000
-          ? `${Math.round(n / 1000)}k`
-          : String(n)
     const progressLine = (p: MentionProgress): string => {
       const parts = [p.phase]
       if (p.tool) parts.push(p.tool)
-      parts.push(`${fmtDur(p.phaseMs)} / ${fmtDur(p.totalMs)}`)
+      parts.push(`${fmtDuration(p.phaseMs)} / ${fmtDuration(p.totalMs)}`)
       if (p.usage) {
         parts.push(`${fmtTokens(p.usage.inputTokens)} in / ${fmtTokens(p.usage.outputTokens)} out`)
         if (p.usage.costUsd !== null) parts.push(`$${p.usage.costUsd.toFixed(3)}`)
@@ -85,11 +74,7 @@ export const respondToMentionsCommand = defineCommand({
       try {
         mentions = await listPrMentions({ driver, cwd: root, pr, handle })
       } catch (err) {
-        console.log(
-          red(
-            `#${pr.number}: failed to read comments: ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        )
+        console.log(red(`#${pr.number}: failed to read comments: ${errMsg(err)}`))
         continue
       }
       if (mentions.length === 0) continue
@@ -129,7 +114,7 @@ export const respondToMentionsCommand = defineCommand({
           console.log(green(`  responded (${kind})`))
         } catch (err) {
           clearLine()
-          console.log(red(`  failed: ${err instanceof Error ? err.message : String(err)}`))
+          console.log(red(`  failed: ${errMsg(err)}`))
         }
       }
     }

@@ -76,8 +76,12 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'review', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat'])
 export type AgentRole = z.infer<typeof AgentRole>
+
+/** What the triage worker decides to do with an unclaimed task. */
+export const TriageAction = z.enum(['implement', 'decompose', 'close', 'ask', 'skip'])
+export type TriageAction = z.infer<typeof TriageAction>
 
 /** One harness dialect normalized into a single shape. */
 export const AgentEvent = z.discriminatedUnion('kind', [
@@ -200,6 +204,17 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('triage.decision'),
+    action: TriageAction,
+    reason: z.string(),
+    /** Titles of the subtasks a decompose decision created. */
+    subtasks: z.array(z.string()).optional(),
+    /** The question text when the action was ask. */
+    question: z.string().optional(),
+    /** The question id when the action was ask, so an answer can be matched back. */
+    questionId: z.string().optional(),
+  }),
   z.object({ type: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 ])
 export type EventBody = z.infer<typeof EventBody>

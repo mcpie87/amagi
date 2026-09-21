@@ -4,6 +4,7 @@ import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import { type CheckResult, isTerminal, type StoredEvent, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
@@ -254,7 +255,7 @@ export class Runner {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
       } else {
-        const message = err instanceof Error ? err.message : String(err)
+        const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
         this.transition(task.id, 'needs_human', message)
       }
@@ -284,7 +285,7 @@ export class Runner {
     try {
       await tracker.release(taskId)
     } catch (err) {
-      console.warn(`release ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`release ${taskId}: ${errMsg(err)}`)
     }
   }
 
@@ -524,6 +525,20 @@ export class Runner {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    if (changes.length === 0) {
+      // The worktree was dirty and a commit was made, yet the three-dot diff
+      // against the base is empty: the agent re-applied change already on the
+      // base. Nothing to push, so no PR. Distinct from the 'produced no
+      // changes' reason: that agent did nothing, this one duplicated existing
+      // work.
+      this.transition(
+        task.id,
+        'no_pr',
+        `the agent committed, but the diff against ${config.repo.baseBranch} is empty; ` +
+          `the work is probably already on ${config.repo.baseBranch}`,
+      )
+      return
+    }
     // The agent may have appended a how-to-use section to the task description
     // while implementing; re-read it so the PR body is not built from the stale
     // claim. Best effort: a failed re-read falls back to the claimed task.
@@ -551,7 +566,7 @@ export class Runner {
       store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
       this.transition(task.id, 'pr_open')
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
         ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''

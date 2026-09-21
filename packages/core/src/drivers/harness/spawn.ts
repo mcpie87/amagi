@@ -1,4 +1,5 @@
 import { AsyncQueue } from '../../async-queue.ts'
+import { errMsg } from '../../errors.ts'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
 import { killTree } from '../../process.ts'
@@ -77,7 +78,7 @@ export function spawnAgent(
       }
       for (const event of options.finalize?.() ?? []) queue.push(event)
     } catch (err) {
-      queue.push({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
+      queue.push({ kind: 'error', message: errMsg(err) })
     } finally {
       queue.close()
     }
