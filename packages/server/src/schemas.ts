@@ -73,6 +73,12 @@ export const AnswerBody = z.object({
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
 
+/** Operator-supplied reason for abandoning a task that needs attention. */
+export const CloseBody = z.object({
+  reason: z.string().trim().min(1),
+})
+export type CloseBody = z.infer<typeof CloseBody>
+
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({
   deadlineMs: z.coerce.number().int().min(1).default(540_000),

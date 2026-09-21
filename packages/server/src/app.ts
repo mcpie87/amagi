@@ -25,6 +25,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
+  CloseBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -338,6 +339,33 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       ws.store.append(id, { type: 'task.reclaimed' })
       return c.json({ task: ws.store.task(id) })
     })
+
+    .post(
+      '/api/repos/:repo/tasks/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', CloseBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        // Only a parked needs-attention task can be retired this way; a live
+        // or already-settled task must not be yanked out of its run.
+        if (task.state !== 'needs_human' && task.state !== 'no_pr') {
+          return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
+        }
+        ws.store.append(id, { type: 'task.state', from: task.state, to: 'abandoned', reason })
+        // Best effort like reconcile: the store is authoritative, so a tracker
+        // hiccup logs the failure instead of losing the operator's close.
+        try {
+          await ws.tracker.close(id, reason)
+        } catch (err) {
+          console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        return c.json({ task: ws.store.task(id) })
+      },
+    )
 
     .get('/api/runner', (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)

@@ -32,6 +32,7 @@ class FakeGateTracker implements Tracker {
   readonly opened: Question[] = []
   readonly resolved: string[] = []
   readonly released: string[] = []
+  readonly closed: { id: string; reason?: string }[] = []
   releaseError: Error | null = null
 
   async ready(): Promise<TrackerTask[]> {
@@ -58,7 +59,9 @@ class FakeGateTracker implements Tracker {
     this.released.push(id)
     if (this.releaseError !== null) throw this.releaseError
   }
-  async close(): Promise<void> {}
+  async close(id: string, reason?: string): Promise<void> {
+    this.closed.push({ id, ...(reason === undefined ? {} : { reason }) })
+  }
   async openGate(_id: string, question: Question): Promise<GateRef> {
     this.opened.push(question)
     return { id: 'gate-7', advisory: false }
@@ -503,6 +506,60 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
       expect(tracker.released).toEqual(['bd-1'])
     },
   )
+})
+
+describe('POST /api/repos/:repo/tasks/:id/close', () => {
+  let tracker: FakeGateTracker
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const parked = (id: string, state: 'needs_human' | 'no_pr') => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'task.state', from: 'implementing', to: state })
+  }
+  const close = (id: string, reason?: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/close`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...(reason === undefined ? {} : { reason }) }),
+    })
+
+  test.each(['needs_human', 'no_pr'] as const)(
+    'abandons a %s task, records the reason, and closes the tracker issue',
+    async (state) => {
+      parked('bd-1', state)
+      const res = await close('bd-1', 'no longer wanted')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: TaskRow }
+      expect(body.task.state).toBe('abandoned')
+      expect(body.task.statusReason).toBe('no longer wanted')
+      expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'no longer wanted' }])
+    },
+  )
+
+  test('404s on an unknown task', async () => {
+    expect((await close('nope', 'gone')).status).toBe(404)
+  })
+
+  test('409s when the task is not parked for attention', async () => {
+    claim('bd-1')
+    const res = await close('bd-1', 'no longer wanted')
+    expect(res.status).toBe(409)
+  })
+
+  test('rejects a missing or empty reason', async () => {
+    parked('bd-1', 'needs_human')
+    expect((await close('bd-1')).status).toBe(400)
+    expect((await close('bd-1', '   ')).status).toBe(400)
+    expect(tracker.closed).toEqual([])
+  })
 })
 
 describe('runner endpoints', () => {
