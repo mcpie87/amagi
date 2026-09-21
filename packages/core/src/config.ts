@@ -88,6 +88,14 @@ export const Config = z.object({
        */
       mentionWatchIntervalSec: z.number().int().min(1).default(300),
       /**
+       * How often the PR conflict watcher scans open PRs and dispatches an
+       * agent per conflicting one. Defaults to 5 minutes: ticks are
+       * sequential (a long resolution delays the next check) and each PR is
+       * only attempted once per head SHA, so the default stays inside GitHub
+       * REST rate limits.
+       */
+      prCheckIntervalSec: z.number().int().min(1).default(300),
+      /**
        * How often the stall watcher scans in-progress tasks for a worker that
        * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
        * reads the local store and checks one timestamp per task.

@@ -46,7 +46,6 @@ export function AgentLogView({ repo, taskId }: { repo: string; taskId: string })
     overscan: 30,
   })
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: A full ring buffer changes version without changing length.
   useEffect(() => {
     if (!stickToBottom.current || buffer.length === 0) return
     rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })

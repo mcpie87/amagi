@@ -1,18 +1,13 @@
 import {
   type Config,
-  harnessStartOpts,
   isConflicting,
   listOpenPrs,
   loadConfig,
-  makeHarness,
   type PrInfo,
-  prepareConflictWorktree,
   prMergeStatus,
-  pushConflictFix,
   repoName,
   repoRoot,
-  resolveConflictPrompt,
-  resolveConflictSystemPrompt,
+  resolveConflict,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
@@ -36,75 +31,20 @@ async function resolveMergeStatuses(root: string, prs: PrInfo[]): Promise<PrInfo
 async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<void> {
   console.log(`\n${bold(`#${pr.number}`)}  ${pr.title}`)
   console.log(dim(`  ${pr.url}`))
-  try {
-    const wt = await prepareConflictWorktree({
-      repoRoot: root,
-      repoName: repoName(root),
-      worktreeRoot: config.repo.worktreeRoot,
-      baseBranch: config.repo.baseBranch,
-      pr,
-      persona: config.repo.persona,
-    })
-    console.log(dim(`  worktree: ${wt.path}`))
-
-    if (!wt.conflicted) {
-      await pushConflictFix({
-        cwd: wt.path,
-        branch: wt.branch,
-        headRef: pr.headRefName,
-        remote: config.forge.remote,
-      })
-      console.log(green('  base merges cleanly; pushed the merge to update the PR'))
-      return
-    }
-
-    const ctx = {
-      pr,
-      worktree: wt.path,
-      branch: wt.branch,
-      baseBranch: config.repo.baseBranch,
-      checks: config.checks.commands,
-    }
-    const harness = makeHarness(config.harness.implement)
-    const proc = harness.start({
-      cwd: wt.path,
-      prompt: resolveConflictPrompt(ctx),
-      systemPrompt: resolveConflictSystemPrompt(ctx),
-      ...harnessStartOpts(config.harness.implement),
-    })
-    console.log(dim(`  agent: ${harness.kind} (${wt.branch})`))
-
-    for await (const event of proc.events()) {
-      if (event.kind === 'tool_use') console.log(dim(`  ${event.name}`))
-      if (event.kind === 'text' && event.text.trim()) printBlock(event.text)
-      if (event.kind === 'error') console.log(red(`  ${event.message}`))
-    }
-    const outcome = await proc.done
-    if (!outcome.ok) {
-      console.log(
-        red(
-          `  agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-        ),
-      )
-      return
-    }
-
-    await pushConflictFix({
-      cwd: wt.path,
-      branch: wt.branch,
-      headRef: pr.headRefName,
-      remote: config.forge.remote,
-    })
-    const status = await prMergeStatus(root, pr.number)
-    const ok = status.mergeable === 'MERGEABLE' || status.mergeStateStatus === 'CLEAN'
-    console.log(
-      ok
-        ? green('  resolved and pushed; PR is mergeable')
-        : yellow(`  pushed; GitHub reports ${status.mergeStateStatus}`),
-    )
-  } catch (err) {
-    console.log(red(`  ${err instanceof Error ? err.message : String(err)}`))
-  }
+  const { ok, message } = await resolveConflict({
+    repoRoot: root,
+    repoName: repoName(root),
+    pr,
+    config,
+    onLog(level, text) {
+      if (level === 'agent') printBlock(text)
+      else if (level === 'error') console.log(red(`  ${text}`))
+      else if (level === 'ok') console.log(green(`  ${text}`))
+      else if (level === 'warn') console.log(yellow(`  ${text}`))
+      else console.log(dim(`  ${text}`))
+    },
+  })
+  if (!ok) console.log(red(`  ${message}`))
 }
 
 export const checkPrsCommand = defineCommand({

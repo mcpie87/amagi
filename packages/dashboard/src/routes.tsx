@@ -1246,9 +1246,7 @@ function WorkersPanel() {
                 w.detail !== null && w.detail !== undefined ? (
                   <span>{w.detail}</span>
                 ) : (
-                  <span>
-                    scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
-                  </span>
+                  <span>{w.counters.map((c) => `${c.label} ${c.value}`).join(' · ')}</span>
                 )
               ) : (
                 <span className="text-red-ink">error: {w.error}</span>
@@ -1561,18 +1559,24 @@ function Blockers({ issue }: { issue: Issue }) {
         }`}
       >
         {items.map((d) => (
-          <li key={d.id} className="flex items-center gap-2 py-1 text-sm">
-            <span
-              className={`rounded px-1.5 py-0.5 text-xs ${
-                tone === 'red'
-                  ? 'bg-red-soft-hover text-red-ink'
-                  : 'bg-amber-soft-hover text-amber-ink'
-              }`}
+          <li key={d.id}>
+            <Link
+              to="/tasks/$id"
+              params={{ id: d.id }}
+              className="flex items-center gap-2 py-1 text-sm hover:underline"
             >
-              {d.status}
-            </span>
-            <span className="shrink-0 text-fg-faint">{d.id}</span>
-            <span className="min-w-0 truncate text-fg">{d.title}</span>
+              <span
+                className={`rounded px-1.5 py-0.5 text-xs ${
+                  tone === 'red'
+                    ? 'bg-red-soft-hover text-red-ink'
+                    : 'bg-amber-soft-hover text-amber-ink'
+                }`}
+              >
+                {d.status}
+              </span>
+              <span className="shrink-0 text-fg-faint">{d.id}</span>
+              <span className="min-w-0 truncate text-fg">{d.title}</span>
+            </Link>
           </li>
         ))}
       </ul>
@@ -1689,6 +1693,10 @@ function AnswerBox({
 
   if (submitted) {
     return <p className="mt-2 text-sm text-emerald-ink">answered</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-400">answered</p>
   }
 
   return (
@@ -1820,6 +1828,11 @@ function CloseButton({
         type="button"
         disabled={busy}
         onClick={() => void close()}
+        title={
+          target === 'done'
+            ? 'marks the task done when the work already existed elsewhere'
+            : 'closes the task as abandoned'
+        }
         className={
           target === 'done'
             ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
@@ -1887,6 +1900,7 @@ function RetryButton({
         type="button"
         disabled={busy}
         onClick={() => void retry()}
+        title="re-claims the tracker ticket and immediately restarts the run now"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Retry
@@ -1961,6 +1975,7 @@ function RequeueButton({
         type="button"
         disabled={busy}
         onClick={() => void requeue()}
+        title="releases the tracker claim and puts the task back in the queue; it waits for a free runner slot instead of launching immediately"
         className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
       >
         Requeue

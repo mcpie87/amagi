@@ -27,6 +27,7 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
+  headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
   ...over,
 })
@@ -127,6 +128,9 @@ const start = (
 const stateFile = (): Record<string, { updatedAt: string; lastCommentId: number }> =>
   JSON.parse(readFileSync(join(cacheDir, 'amagi', 'mentions', 'demo.watch.json'), 'utf8') as string)
 
+const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): number =>
+  w.activity().counters.find((c) => c.label === label)?.value ?? 0
+
 test('scans open PRs once and responds to each unhandled mention exactly once', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
@@ -138,8 +142,8 @@ test('scans open PRs once and responds to each unhandled mention exactly once', 
   expect(driver.listCalls).toBe(1)
   const activity = w.activity()
   expect(activity.ok).toBe(true)
-  expect(activity.prsScanned).toBe(1)
-  expect(activity.mentionsResponded).toBe(1)
+  expect(counter(w, 'scanned')).toBe(1)
+  expect(counter(w, 'responded')).toBe(1)
   expect(stateFile()['7']).toEqual({ updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 1 })
 })
 
@@ -178,7 +182,7 @@ test('only responds to mentions added after the last-seen comment when a PR chan
   expect(driver.posted).toHaveLength(2)
   const second = driver.posted[1]
   expect(second).toContain('@alice')
-  expect(w2.activity().mentionsResponded).toBe(1)
+  expect(counter(w2, 'responded')).toBe(1)
   expect(stateFile()['7']).toEqual({ updatedAt: '2026-09-21T11:00:00Z', lastCommentId: 2 })
 })
 
@@ -192,14 +196,14 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   // Every attempt fails: nothing posted, nothing recorded as handled.
   expect(driver.posted).toHaveLength(0)
   expect(w.activity().ok).toBe(true)
-  expect(w.activity().mentionsResponded).toBe(0)
-  expect(w.activity().prsScanned).toBeGreaterThanOrEqual(1)
+  expect(counter(w, 'responded')).toBe(0)
+  expect(counter(w, 'scanned')).toBeGreaterThanOrEqual(1)
   // State never advances, so the same PR is re-scanned each tick.
   expect(readFileSync(join(cacheDir, 'amagi', 'mentions', 'demo.watch.json'), 'utf8')).toBe('{}')
 
   driver.failPost = 0
   await Bun.sleep(40)
   expect(driver.posted).toHaveLength(1)
-  expect(w.activity().mentionsResponded).toBe(1)
+  expect(counter(w, 'responded')).toBe(1)
   expect(stateFile()['7']).toBeDefined()
 })

@@ -59,14 +59,20 @@ export function startMentionWatcher({
 }: MentionWatcherOptions): MentionWatcher {
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
+  /** Cumulative across ticks, so the dashboard counters keep rising. */
+  let scanned = 0
+  let responded = 0
+  const counters = (): WorkerActivity['counters'] => [
+    { label: 'scanned', value: scanned },
+    { label: 'responded', value: responded },
+  ]
   let activity: WorkerActivity = {
     repo,
     name: 'mention-watcher',
     lastRunAt: 0,
     ok: true,
     error: null,
-    prsScanned: 0,
-    mentionsResponded: 0,
+    counters: counters(),
   }
 
   async function tick(): Promise<void> {
@@ -90,7 +96,7 @@ export function startMentionWatcher({
           console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
           continue
         }
-        next.prsScanned++
+        scanned++
         const maxId = comments.reduce((m, c) => Math.max(m, Number(c.id) || 0), 0)
         const lastId = seen?.lastCommentId ?? 0
         const mentions = comments.filter(
@@ -110,7 +116,7 @@ export function startMentionWatcher({
               ...(exec === undefined ? {} : { exec }),
               ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
             })
-            next.mentionsResponded++
+            responded++
           } catch (err) {
             allOk = false
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
@@ -125,6 +131,7 @@ export function startMentionWatcher({
       next.error = errMsg(err)
       console.warn(`mention watch: ${next.error}`)
     }
+    next.counters = counters()
     activity = next
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }

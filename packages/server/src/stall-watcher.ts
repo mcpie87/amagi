@@ -100,9 +100,13 @@ export function startStallWatcher({
 }: StallWatcherOptions): StallWatcher {
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
-  /** Cumulative across ticks, like the mention watcher's counters. */
+  /** Cumulative across ticks, so the dashboard counters keep rising. */
   let recovered = 0
   let stoppedDoom = 0
+  const counters = (): WorkerActivity['counters'] => [
+    { label: 'recovered', value: recovered },
+    { label: 'doom-stopped', value: stoppedDoom },
+  ]
   /** Per-task diff snapshots, keyed by worktree state; pruned when a task leaves the scan. */
   const diffSince = new Map<string, { snapshot: string; since: number }>()
   let activity: WorkerActivity = {
@@ -111,8 +115,7 @@ export function startStallWatcher({
     lastRunAt: 0,
     ok: true,
     error: null,
-    prsScanned: 0,
-    mentionsResponded: 0,
+    counters: counters(),
     detail: 'no stalled tasks',
   }
 
@@ -233,6 +236,7 @@ export function startStallWatcher({
       }
       stoppedDoom += doomCount
 
+      next.counters = counters()
       next.detail = detail()
     } catch (err) {
       next.ok = false
