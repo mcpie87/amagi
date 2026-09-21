@@ -21,6 +21,20 @@ const READY_JSON = `[
   }
 ]`
 
+const READY_WITH_DIFFICULTY_JSON = `[
+  {
+    "id": "tst-dif",
+    "title": "Harden the merge path",
+    "description": "Handle edge cases",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "metadata": {
+      "difficulty": "high"
+    }
+  }
+]`
+
 const CLAIMED_JSON = `[
   {
     "id": "tst-lmc",
@@ -161,6 +175,12 @@ describe('BeadsTracker', () => {
       url: null,
     })
     expect(calls[0]).toContain('--json')
+  })
+
+  test('surfaces the difficulty level stored in metadata', async () => {
+    const { exec } = fake((c) => (c.includes('ready') ? ok(READY_WITH_DIFFICULTY_JSON) : undefined))
+    const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
+    expect(tasks[0]?.difficulty).toBe('high')
   })
 
   test('an empty queue is an empty array, not an error', async () => {
@@ -321,6 +341,21 @@ describe('BeadsTracker', () => {
     expect(call).toContain('ui,board')
     expect(call).toContain('--deps')
     expect(call).toContain('tst-abc')
+  })
+
+  test('create stamps the difficulty level as metadata', async () => {
+    const { exec, calls } = fake((c) => (c.includes('create') ? ok(CREATE_JSON) : undefined))
+    await new BeadsTracker({ cwd: '/repo', exec }).createTask({
+      title: 'Ship the board',
+      description: '',
+      acceptanceCriteria: null,
+      priority: null,
+      labels: [],
+      dependencies: [],
+      difficulty: 'high',
+    })
+    const call = calls[0]
+    expect(call?.[call.indexOf('--metadata') + 1]).toBe('{"difficulty":"high"}')
   })
 
   test('create omits unset fields instead of passing empties', async () => {

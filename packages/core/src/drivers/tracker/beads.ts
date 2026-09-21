@@ -22,6 +22,7 @@ type BdIssue = {
   labels?: string[]
   parent?: string
   dependencies?: BdIssue[]
+  metadata?: Record<string, string>
 }
 
 export type BeadsIssue = TrackerTask & {
@@ -75,6 +76,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 }
 
 function toTask(issue: BdIssue): TrackerTask {
+  const difficulty = issue.metadata?.difficulty
   return {
     id: issue.id,
     title: issue.title,
@@ -83,6 +85,7 @@ function toTask(issue: BdIssue): TrackerTask {
     priority: issue.priority ?? null,
     type: issue.issue_type ?? null,
     url: null,
+    ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
   }
 }
 
@@ -196,6 +199,9 @@ export class BeadsTracker implements Tracker {
       ...(input.priority === null ? [] : ['--priority', `P${input.priority}`]),
       ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
       ...(input.dependencies.length === 0 ? [] : ['--deps', input.dependencies.join(',')]),
+      ...(input.difficulty === undefined || input.difficulty === null
+        ? []
+        : ['--metadata', JSON.stringify({ difficulty: input.difficulty })]),
     ]
     const issues = parseIssues(await this.bd(args))
     const created = issues[0]

@@ -299,6 +299,29 @@ describe('RunService', () => {
     expect(store.task(TASK2.id)).toBeNull()
   })
 
+  test('start refuses a specific task the model tier cannot claim', async () => {
+    const hard = { ...TASK, difficulty: 'high' }
+    const service = makeService(
+      new FakeTracker([hard]),
+      new FakeHarness(),
+      1,
+      config({
+        harness: { implement: { kind: 'claude', model: 'claude-haiku-4-5' } },
+        difficulty: {
+          enabled: true,
+          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-4-5': 'smart' },
+          requiredTier: { high: 'smart' },
+        },
+      }),
+    )
+    const res = await service.start(TASK.id)
+    expect(res).toEqual({
+      ok: false,
+      status: 409,
+      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
+    })
+  })
+
   test('start refuses a task the tracker does not see as ready', async () => {
     const service = makeService(new FakeTracker([]), new FakeHarness())
     const res = await service.start('bd-x')

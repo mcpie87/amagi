@@ -1,5 +1,6 @@
 import {
   CAPABILITY_WORDS,
+  classifyDifficulty,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -220,7 +221,14 @@ export function createApp({ workspaces, notify = [], runner, runnerRepo, workers
         const cap = capabilityError(ws.tracker, 'create')
         if (cap !== null) return c.json({ error: cap }, 501)
         try {
-          const created: TrackerTask = await ws.tracker.createTask(c.req.valid('json'))
+          const body = c.req.valid('json')
+          const input = ws.config.difficulty.enabled
+            ? {
+                ...body,
+                difficulty: await classifyDifficulty(body.title, body.description, ws.config),
+              }
+            : body
+          const created: TrackerTask = await ws.tracker.createTask(input)
           const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
           return c.json(issue ?? created, 201)
         } catch (err) {

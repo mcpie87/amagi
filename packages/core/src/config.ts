@@ -9,6 +9,22 @@ export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
 
+export const DifficultyConfig = z.object({
+  /**
+   * Master switch: when off, no LLM pass runs at task creation and no claim is
+   * gated. Defaults off so the feature is opt-in.
+   */
+  enabled: z.boolean().default(false),
+  /** Difficulty levels a task can be classified into, easiest first. */
+  levels: z.array(z.string().min(1)).default(['low', 'medium', 'high']),
+  /** Model tiers, weakest first; a model's tier is its index in this list. */
+  tierOrder: z.array(z.string().min(1)).default(['fast', 'smart']),
+  /** The minimum tier a task of a given difficulty needs; unlisted levels require the weakest tier. */
+  requiredTier: z.record(z.string(), z.string()).default({ high: 'smart' }),
+  /** Explicit model id -> tier mapping; an unlisted model counts as the weakest tier. */
+  modelTiers: z.record(z.string(), z.string()).default({}),
+})
+
 export const HarnessConfig = z.object({
   kind: HarnessKind,
   /** Command used to invoke the harness. Defaults to the harness name. */
@@ -89,6 +105,7 @@ export const Config = z.object({
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
+  difficulty: DifficultyConfig.prefault({}),
   notify: z
     .object({
       desktop: z.boolean().default(true),

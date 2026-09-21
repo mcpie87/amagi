@@ -1,4 +1,5 @@
 import type { Config } from './config.ts'
+import { claimEligible, implementModel } from './difficulty.ts'
 import {
   amagiLabels,
   type CreatePrOptions,
@@ -122,7 +123,15 @@ export class Runner {
 
   /** Claims one ready task and drives it as far as the current milestone goes. */
   async runOnce(): Promise<RunOnceResult> {
-    const task = await this.deps.tracker.claim()
+    const { store, tracker, config } = this.deps
+    const task = await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+      store.append(null, {
+        type: 'claim.rejected',
+        title: skipped.title,
+        difficulty: skipped.difficulty ?? null,
+        reason,
+      })
+    })
     if (task === null) return null
     return this.runClaimed(task)
   }
@@ -141,6 +150,9 @@ export class Runner {
       priority: task.priority,
       taskType: task.type,
       url: task.url,
+      ...(task.difficulty === undefined || task.difficulty === null
+        ? {}
+        : { difficulty: task.difficulty }),
     })
 
     try {

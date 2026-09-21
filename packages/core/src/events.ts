@@ -131,6 +131,13 @@ export const EventBody = z.discriminatedUnion('type', [
     priority: z.number().nullable().optional(),
     taskType: z.string().nullable().optional(),
     url: z.string().nullable().optional(),
+    difficulty: z.string().nullable().optional(),
+  }),
+  z.object({
+    type: z.literal('claim.rejected'),
+    title: z.string(),
+    difficulty: z.string().nullable().optional(),
+    reason: z.string(),
   }),
   z.object({
     type: z.literal('task.state'),
