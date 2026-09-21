@@ -168,7 +168,15 @@ export class BeadsTracker implements Tracker {
       HUMAN_ONLY_LABEL,
     ])
     const issues = parseIssues(out)
-    return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
+    const claimed = issues[0]
+    if (claimed !== undefined) return toTask(claimed)
+    // bd 1.3.0's ready --claim skips open issues already assigned to the
+    // claiming actor, even though `bd ready` lists them, so a queue of such
+    // issues would report nothing ready forever. Claim the first by id.
+    const ready = await this.ready(1)
+    const first = ready[0]
+    if (first === undefined) return null
+    return this.claim(first.id)
   }
 
   async get(id: string): Promise<TrackerTask | null> {

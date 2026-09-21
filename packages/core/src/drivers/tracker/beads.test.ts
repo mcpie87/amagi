@@ -179,6 +179,26 @@ describe('BeadsTracker', () => {
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
   })
 
+  test('claim falls back to a by-id claim when ready --claim skips a pre-assigned issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('update')
+        ? ok('')
+        : c.includes('show')
+          ? ok(CLAIMED_JSON)
+          : c.includes('--claim')
+            ? ok('[]')
+            : c.includes('ready')
+              ? ok(READY_JSON)
+              : undefined,
+    )
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).claim()
+
+    expect(task?.id).toBe('tst-lmc')
+    expect(task?.status).toBe('in_progress')
+    const update = calls.find((c) => c.includes('update'))
+    expect(update?.slice(0, 4)).toEqual(['bd', 'update', 'tst-lmc', '--status'])
+  })
+
   test('epics, milestones and gates are never handed out as work', async () => {
     const { exec, calls } = fake(() => ok('[]'))
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
