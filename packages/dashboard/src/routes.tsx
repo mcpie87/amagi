@@ -1567,11 +1567,24 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
-  if (task.statusReason === null || !ATTENTION_STATES.includes(task.state)) return null
+  const needsHuman = task.state === 'needs_human'
+  if (!needsHuman && (task.statusReason === null || !ATTENTION_STATES.includes(task.state))) {
+    return null
+  }
   return (
-    <div className="mt-6 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-3">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-300">Summary</h2>
-      <Markdown text={task.statusReason} />
+    <div
+      className={`mt-6 rounded-lg border px-4 py-3 ${
+        needsHuman ? 'border-red-700 bg-red-950/40' : 'border-amber-700 bg-amber-950/40'
+      }`}
+    >
+      <h2
+        className={`text-sm font-semibold uppercase tracking-wide ${
+          needsHuman ? 'text-red-300' : 'text-amber-300'
+        }`}
+      >
+        {needsHuman ? 'Needs human attention' : 'Summary'}
+      </h2>
+      {task.statusReason !== null && <Markdown text={task.statusReason} />}
     </div>
   )
 }
