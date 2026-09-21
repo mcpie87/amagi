@@ -232,6 +232,7 @@ export function serve({
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
       repoPollers.stop()
+      runner?.dispose?.()
       return server.stop(closeActiveConnections)
     },
   }

@@ -5,6 +5,7 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  currentUsageFor,
   initialDashboardState,
   openQuestionsFor,
   reduceState,
@@ -203,6 +204,102 @@ describe('dashboard state reducer', () => {
     ]
     const state = events.reduce(reduceState, initialDashboardState())
     expect(currentAgentFor(state, 'am-1')).toMatchObject({ model: 'impl', role: 'implement' })
+  })
+
+  test('current usage sums the tokens of the running agent run', () => {
+    const events = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 100, outputTokens: 50, cachedTokens: 20 },
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 20, outputTokens: 10, cachedTokens: 40 },
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(currentUsageFor(state, 'am-1')).toEqual({
+      inputTokens: 120,
+      outputTokens: 60,
+      cachedTokens: 60,
+    })
+  })
+
+  test('current usage ignores usage from earlier runs and chat runs', () => {
+    const events = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 999, outputTokens: 999 },
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 0,
+        sessionId: 's-1',
+      }),
+      ev(4, 'am-1', 1300, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm2',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(5, 'am-1', 1400, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 10, outputTokens: 5 },
+      }),
+      ev(6, 'am-1', 1500, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'usage', inputTokens: 777, outputTokens: 777 },
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(currentUsageFor(state, 'am-1')).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      cachedTokens: 0,
+    })
+    expect(currentUsageFor(state, 'missing')).toBeNull()
+  })
+
+  test('current usage is null before the harness reports anything', () => {
+    const state = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(currentUsageFor(state, 'am-1')).toBeNull()
   })
 
   test('chatTurns folds user messages and chat runs into a conversation', () => {

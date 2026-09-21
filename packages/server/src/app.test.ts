@@ -204,6 +204,7 @@ class FakeIssueTracker implements Tracker {
       labels: [],
       parent: null,
       dependencies: [],
+      childCount: 0,
       ...partial,
     }
     this.issues.set(issue.id, issue)
@@ -659,6 +660,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
           running: ['bd-1'],
           startedAt: {},
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -667,6 +669,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
           retried.push(id)
           return { ok: true, taskId: id }
         },
+        setAutoQueue: () => {},
       },
     })
     deferred('bd-1')
@@ -816,6 +819,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           running: ['bd-1'],
           startedAt: { 'bd-1': 1720000000000 },
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async (id) => {
@@ -826,6 +830,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
         },
         setMaxParallel: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setAutoQueue: () => {},
       },
     })
     claim('bd-1')
@@ -868,6 +873,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           running: ['bd-1'],
           startedAt: {},
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async (id) => {
@@ -878,6 +884,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
         },
         setMaxParallel: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setAutoQueue: () => {},
       },
     })
     claim('bd-1')
@@ -1080,11 +1087,13 @@ describe('runner endpoints', () => {
       running: [],
       startedAt: {},
       resources: {},
+      autoQueue: false,
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
     setMaxParallel: () => {},
     retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+    setAutoQueue: () => {},
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -1111,6 +1120,7 @@ describe('runner endpoints', () => {
           running: ['bd-1'],
           startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+          autoQueue: false,
         }),
       }),
     })
@@ -1123,6 +1133,7 @@ describe('runner endpoints', () => {
       running: ['bd-1'],
       startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+      autoQueue: false,
     })
   })
 
@@ -1250,29 +1261,67 @@ describe('repo settings endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET returns the current worker count', async () => {
+  test('GET returns the current worker count and auto-queue state', async () => {
     const res = await app.request('/api/repos/repo1/settings')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 1 })
+    expect(await res.json()).toEqual({ maxParallel: 1, autoQueue: false })
   })
 
   test('PATCH persists, updates the workspace config, and is re-readable', async () => {
     const res = await patch('repo1', '{"maxParallel":4}')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 4 })
+    expect(await res.json()).toEqual({ maxParallel: 4, autoQueue: false })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       maxParallel: 4,
+      autoQueue: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
   })
 
-  test('PATCH rejects worker counts outside the range', async () => {
+  test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
+    const applied: boolean[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          resources: {},
+          startedAt: {},
+          autoQueue: true,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: () => {},
+        setAutoQueue: (enabled) => applied.push(enabled),
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+      },
+      runnerRepo: 'repo1',
+    })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(applied).toEqual([true])
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
+      maxParallel: 1,
+      autoQueue: true,
+    })
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+    // the toggle only reaches the runner bound to this repo
+    expect((await patch('repo2', '{"autoQueue":false}')).status).toBe(200)
+    expect(applied).toEqual([true])
+  })
+
+  test('PATCH rejects worker counts outside the range and an empty body', async () => {
     for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
       const res = await patch('repo1', JSON.stringify({ maxParallel }))
       expect(res.status).toBe(400)
     }
+    expect((await patch('repo1', '{}')).status).toBe(400)
   })
 
   test('PATCH live-applies the runner only for the repo it serves', async () => {
@@ -1287,11 +1336,13 @@ describe('repo settings endpoints', () => {
           running: [],
           startedAt: {},
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         setMaxParallel: (n) => applied.push(n),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setAutoQueue: () => {},
       },
       runnerRepo: 'repo1',
     })
@@ -1621,6 +1672,46 @@ describe('POST /api/repos (onboarding)', () => {
       body: JSON.stringify({ path: '/nonexistent-path-xyz' }),
     })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /api/repos/:repo/run', () => {
+  test('starts a run in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/run', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker has nothing ready, so the run ends without events
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
+  })
+})
+
+describe('POST /api/repos/:repo/triage', () => {
+  test('starts a triage pass in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/triage', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker is not triage-capable, so the pass ends without a claim
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/triage', { method: 'POST' })).status).toBe(404)
   })
 })
 
