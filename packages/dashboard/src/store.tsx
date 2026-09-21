@@ -9,6 +9,7 @@ import {
   useContext,
   useEffect,
   useReducer,
+  useRef,
   useState,
 } from 'react'
 
@@ -27,6 +28,13 @@ export type DashboardValue = {
   selectRepo: (key: string) => void
   refreshRepos: () => void
   addRepo: (path: string) => Promise<RepoInfo | { error: string }>
+  /**
+   * Reconnects the selected repo's event stream from the last event the client
+   * saw. The SSE connection can silently go stale (e.g. a dev proxy holding a
+   * dead upstream after a server restart), so mutations that must be reflected
+   * promptly re-sync instead of waiting for a page refresh.
+   */
+  resyncStream: () => void
 }
 
 const ReposContext = createContext<DashboardValue>({
@@ -35,6 +43,7 @@ const ReposContext = createContext<DashboardValue>({
   selectRepo: () => {},
   refreshRepos: () => {},
   addRepo: async () => ({ error: 'no provider' }),
+  resyncStream: () => {},
 })
 
 const StreamContext = createContext<DashboardState>(initialDashboardState())
@@ -60,6 +69,8 @@ function readStored(): string | null {
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [repos, setRepos] = useState<RepoInfo[] | null>(null)
   const [selected, setSelected] = useState<string | null>(readStored)
+  const [resync, setResync] = useState(0)
+  const resyncStream = useCallback(() => setResync((n) => n + 1), [])
 
   const refreshRepos = useCallback(() => {
     fetch(`${apiBase}/api/repos`)
@@ -101,11 +112,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   )
 
   return (
-    <ReposContext.Provider value={{ repos, selected, selectRepo, refreshRepos, addRepo }}>
+    <ReposContext.Provider
+      value={{ repos, selected, selectRepo, refreshRepos, addRepo, resyncStream }}
+    >
       {selected === null ? (
         <StreamContext.Provider value={initialDashboardState()}>{children}</StreamContext.Provider>
       ) : (
-        <RepoStream key={selected} repo={selected}>
+        <RepoStream key={selected} repo={selected} resync={resync}>
           {children}
         </RepoStream>
       )}
@@ -113,12 +126,27 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   )
 }
 
-function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
+function RepoStream({
+  repo,
+  resync,
+  children,
+}: {
+  repo: string
+  resync: number
+  children: ReactNode
+}) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
+  const latestSeqRef = useRef(0)
+  latestSeqRef.current = state.latestSeq
 
   useEffect(() => {
-    const source = new EventSource(`${apiBase}/api/repos/${repo}/stream?sinceSeq=0`)
+    // Resync resumes from the last event the client already folded in, so a
+    // reconnection only replays what the stale connection missed. The first
+    // connect replays everything (latestSeq is 0).
+    const source = new EventSource(
+      `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}`,
+    )
     source.addEventListener('open', () => setConnection('connected'))
     source.addEventListener('error', () => setConnection('reconnecting'))
     source.addEventListener('message', (event: MessageEvent) => {
@@ -141,7 +169,7 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
       }
     })
     return () => source.close()
-  }, [repo])
+  }, [repo, resync])
 
   return (
     <ConnectionContext.Provider value={connection}>
@@ -169,6 +197,7 @@ const RunnerContext = createContext<RunnerApi>({
 /** Runner availability plus launch/stop, polled so the header stays honest. */
 export function RunnerProvider({ children }: { children: ReactNode }) {
   const base = (import.meta.env.VITE_API_BASE ?? '') as string
+  const { resyncStream } = useContext(ReposContext)
   const [status, setStatus] = useState<RunnerStatus | null>(null)
 
   const refresh = () => {
@@ -194,6 +223,10 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify(taskId === undefined ? {} : { taskId }),
       })
       refresh()
+      // The launch lands in the store only after this request; if the event
+      // stream is stale the new task's title/agent never arrive, so force a
+      // resync instead of leaving the worker slot showing a bare task id.
+      resyncStream()
       if (res.ok) {
         const body = (await res.json()) as { taskId?: string }
         return { ok: true, taskId: body.taskId ?? '' }
@@ -209,6 +242,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     try {
       const res = await fetch(`${base}/api/runs/${taskId}/stop`, { method: 'POST' })
       refresh()
+      resyncStream()
       if (res.ok) return { ok: true }
       const parsed = (await res.json().catch(() => null)) as { error?: string } | null
       return { ok: false, error: parsed?.error ?? `HTTP ${res.status}` }
