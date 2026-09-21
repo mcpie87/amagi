@@ -101,6 +101,12 @@ export const runCommand = defineCommand({
           }
           if (event.results.length === 0) console.log(dim('  checks: none configured'))
           break
+        case 'question.asked': {
+          console.log(`\n${bold(red('  AWAITING YOUR ANSWER'))}`)
+          printBlock(yellow(event.question))
+          if (event.options.length > 0) printBlock(dim(`options: ${event.options.join(' | ')}`))
+          break
+        }
         case 'pr.created':
           console.log(green(`  pull request: ${event.url}`))
           break
