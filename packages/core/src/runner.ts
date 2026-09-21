@@ -110,6 +110,11 @@ export class Runner {
     if (this.currentProcess !== null) void this.currentProcess.kill()
   }
 
+  /** The pid of the live agent process, or null between agent phases. */
+  currentPid(): number | null {
+    return this.currentProcess?.pid ?? null
+  }
+
   private throwIfCancelled(taskId: string): void {
     if (this.cancelled) throw new RunCancelledError(taskId)
   }

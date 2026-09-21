@@ -595,7 +595,13 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
 describe('runner endpoints', () => {
   const stubRunner = (over: Partial<RunServiceApi> = {}): RunServiceApi => ({
-    status: () => ({ available: true, capacity: 1, running: [] }),
+    status: async () => ({
+      name: 'repo1',
+      available: true,
+      capacity: 1,
+      running: [],
+      resources: {},
+    }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
     ...over,
@@ -613,16 +619,28 @@ describe('runner endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET /api/runner reports availability and capacity', async () => {
+  test('GET /api/runner reports availability, capacity and per-task resources', async () => {
     app = createApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
-        status: () => ({ available: false, capacity: 1, running: ['bd-1'] }),
+        status: async () => ({
+          name: 'repo1',
+          available: false,
+          capacity: 1,
+          running: ['bd-1'],
+          resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+        }),
       }),
     })
     const res = await app.request('/api/runner')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ available: false, capacity: 1, running: ['bd-1'] })
+    expect(await res.json()).toEqual({
+      name: 'repo1',
+      available: false,
+      capacity: 1,
+      running: ['bd-1'],
+      resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+    })
   })
 
   test('runner endpoints are 501 without a runner service', async () => {

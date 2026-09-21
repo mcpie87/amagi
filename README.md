@@ -123,6 +123,13 @@ server runs up to `loop.maxParallel` tasks at once and refuses launch requests
 that would exceed that or claim a task that is already running. The dashboard
 surfaces all of this from the task board and task detail pages.
 
+`GET /api/runner` also carries per-task resource usage for the runner, summed
+over each running task's whole agent process tree from `/proc` on Linux: resident
+memory (`rssBytes`), CPU time (`cpuMs`), and process count (`processes`), keyed
+by task id under `resources` plus the repo `name` the runner is bound to. The
+dashboard's Workers section shows these numbers as a per-runner summary strip
+and per busy slot, so the operator can see which runner is eating the machine.
+
 Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
 run`) relies on the tracker's atomic claim to avoid double-claiming.

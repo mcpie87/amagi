@@ -370,9 +370,9 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       },
     )
 
-    .get('/api/runner', (c) => {
+    .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      return c.json(runner.status())
+      return c.json(await runner.status())
     })
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
