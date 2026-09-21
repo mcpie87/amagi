@@ -6,6 +6,7 @@
     "packages/*"
   ],
   "scripts": {
+    "serve": "bun run scripts/serve.ts",
     "lint": "biome check .",
     "fmt": "biome check --write .",
     "typecheck": "tsc --noEmit",

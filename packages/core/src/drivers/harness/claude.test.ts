@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
+import { HARDCODED_MODELS } from '../../models.ts'
 import { ClaudeHarness, ClaudeTranslator, DEFAULT_ALLOWED_TOOLS } from './claude.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'claude-stream.jsonl')
@@ -29,6 +30,11 @@ describe('ClaudeTranslator against a recorded transcript', () => {
   test('the leading non-JSON warning line does not derail parsing', async () => {
     const { translator } = await replay()
     expect(translator.sessionId).toBe('b1be85f4-3be3-4f96-98da-a3902391aacf')
+  })
+
+  test('the resolved model is captured from the init message', async () => {
+    const { translator } = await replay()
+    expect(translator.model).toBe('claude-opus-5')
   })
 
   test('tool results are joined back to the tool that produced them', async () => {
@@ -131,6 +137,14 @@ describe('ClaudeHarness argv', () => {
     )
     expect(argv[argv.indexOf('--model') + 1]).toBe('claude-opus-5')
     expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe('be terse')
+  })
+})
+
+describe('ClaudeHarness listModels', () => {
+  test('returns the hardcoded curated list instead of shelling out', async () => {
+    expect(await new ClaudeHarness({ bin: 'false' }).listModels()).toEqual([
+      ...HARDCODED_MODELS.claude,
+    ])
   })
 })
 

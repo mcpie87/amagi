@@ -1,0 +1,19 @@
+{
+  "name": "@amagi/tui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@amagi/core": "workspace:*",
+    "ink": "7.1.1",
+    "react": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "ink-testing-library": "4.0.0"
+  }
+}

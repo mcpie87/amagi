@@ -3,7 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>amagi</title>
+    <meta name="theme-color" content="#0e0e11" />
+    <meta name="description" content="Your AI orchestration workspace. Follow runs, organize tasks, and give agents direction." />
+    <title>amagi · Agent workspace</title>
+    <script>
+      // Themes before first paint, so a light-theme reload never flashes dark.
+      // Mirrors src/theme.ts; change both together.
+      ;(() => {
+        let theme = 'dark'
+        try {
+          const stored = localStorage.getItem('amagi:theme')
+          theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia('(prefers-color-scheme: light)').matches
+                ? 'light'
+                : 'dark'
+        } catch {
+          // storage unavailable, keep the dark baseline
+        }
+        document.documentElement.dataset.theme = theme
+        if (theme === 'light') {
+          document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#f7f7f8')
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

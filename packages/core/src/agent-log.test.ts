@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { AgentLogBuffer, AgentLogStore, linesForAgentEvent } from './agentLog.ts'
+import { AgentLogBuffer, AgentLogStore, linesForAgentEvent } from './agent-log.ts'
 
 describe('linesForAgentEvent', () => {
   test('splits a multi-line text chunk into one row per line', () => {
@@ -137,12 +137,12 @@ describe('AgentLogStore', () => {
       scheduled.push(cb)
     })
     store.append('am-1', 'implement', 1, { kind: 'text', text: 'one' })
-    store.append('am-2', 'review', 1, { kind: 'text', text: 'two' })
+    store.append('am-2', 'chat', 1, { kind: 'text', text: 'two' })
     scheduled[0]?.()
 
     expect(store.get('am-1').length).toBe(1)
     expect(store.get('am-2').length).toBe(1)
     expect(store.get('am-1').at(0)?.text).toBe('one')
-    expect(store.get('am-2').at(0)?.role).toBe('review')
+    expect(store.get('am-2').at(0)?.role).toBe('chat')
   })
 })
