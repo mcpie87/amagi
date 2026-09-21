@@ -9,14 +9,10 @@ import {
   repoRoot,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, yellow } from '../format.ts'
+import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
 import { currentRepo } from '../repo.ts'
 import { pickRunSelection } from '../select-run.ts'
-
-function printBlock(text: string): void {
-  for (const line of text.trim().split('\n')) console.log(`  ${line}`)
-}
 
 const listModelsFor = async (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
