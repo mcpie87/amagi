@@ -35,7 +35,8 @@ export function isTerminal(state: TaskState): boolean {
 
 /**
  * Any state may fall to a terminal state, so those edges are implicit rather
- * than listed here. Only forward progress is enumerated.
+ * than listed here. Only forward progress is enumerated — except the two
+ * parked states, which an operator settles as abandoned rather than resumes.
  */
 const FORWARD: Record<TaskState, readonly TaskState[]> = {
   claimed: ['worktree_ready'],
@@ -49,8 +50,8 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   reviewing: ['fixing', 'done'],
   fixing: ['awaiting_answer', 'checks', 'reviewing'],
   done: [],
-  no_pr: [],
-  needs_human: [],
+  no_pr: ['abandoned'],
+  needs_human: ['abandoned'],
   abandoned: [],
   cancelled: [],
 }

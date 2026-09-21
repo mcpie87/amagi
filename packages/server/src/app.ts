@@ -26,7 +26,7 @@ import {
   AnswerBody,
   AskBody,
   AwaitQuery,
-  CloseBody,
+  CloseTaskBody,
   EventQuery,
   IssueCreateBody,
   IssueUpdateBody,
@@ -344,7 +344,7 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
     .post(
       '/api/repos/:repo/tasks/:id/close',
       valid('param', RepoTaskIdParam),
-      valid('json', CloseBody),
+      valid('json', CloseTaskBody),
       async (c) => {
         const { repo, id } = c.req.valid('param')
         const { reason } = c.req.valid('json')
