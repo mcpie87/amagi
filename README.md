@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="70919bb8-6f55-49e4-abc8-8da770c73bba-bluesky-16_9.png" alt="amagi" width="480">
+  <img src="banner.png" alt="amagi" width="480">
 </p>
 
 # amagi
@@ -27,6 +27,18 @@ the dashboard Vite server with hot module replacement. Open the dashboard at
 the URL Vite prints (normally `http://localhost:5173`); `/api` requests proxy
 to the API at `http://127.0.0.1:7777`.
 
+### Dashboard
+
+The dashboard is the shared control room for the connected server. The header holds the repo selector, a runner status indicator (how many capacity slots are busy), and a button to register another repository. Four pages, plus a per-task detail:
+
+- **Queue** shows active runs with state badges, a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and a Workers panel: runner capacity, per-slot resource usage (RSS, CPU, process count), and any running background workers (`respond-to-mentions`, `check-prs`). A **Run next** button launches the next ready task.
+- **Tasks** browses the tracker's issues in Kanban or List view (the choice is remembered), with a status filter, pagination, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
+- **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
+- **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
+- **Task detail** (linked from Queue and Tasks) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place. Its actions cover reclaim, retry, stop, and instant close.
+
+Starting and stopping runs, editing tracker tasks, and registering repositories are all live from the dashboard; the event stream is scoped to the selected repo.
+
 ## Usage
 
 ```bash
@@ -35,16 +47,39 @@ bun run packages/cli/src/index.ts <command>
 
 | Command | Description |
 | --- | --- |
-| `run` | Claim the next ready task and work it in its own worktree |
+| `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
+| `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
+| `respond-to-mentions` | Watch open PRs for @agent mentions; the LLM classifies each one and responds by fixing, explaining, logging a task, or asking for clarification |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
 | `config` | Print the resolved configuration and where it came from |
-| `serve` | Serve the HTTP + SSE API and the built dashboard from one process |
+| `repos` | List registered repositories and their readiness diagnostics |
+| `add <path>` | Register a repository with the orchestration workspace |
+| `remove <key>` | Unregister a repository |
+| `serve` | Serve the HTTP + SSE API and the built dashboard for every registered repo |
+| `tui` | Terminal view of the queue, task detail, and pending questions (needs `amagi serve` running) |
 
-### Pointing amagi at a repo
+### The repository registry
 
-Amagi has no `--repo` flag: it resolves the repo root from your current working directory with `git rev-parse --show-toplevel`, the same way `git` itself does. Run the `amagi` CLI from anywhere inside the repo you want it to work on. Everything else — the tracker, the worktree location, the checks it runs — comes from that repo's config (see below), so a single amagi install can drive any number of repos, one `cd` at a time.
+Amagi manages any number of repositories from one orchestration workspace. Repos are
+registered in a registry (`~/.local/state/amagi/registry.json`) with `amagi add <path>` or
+through the dashboard's onboarding form; each entry is scoped by a key (the repo directory
+name unless you pass `--key`). `amagi repos` shows every registered repo and its readiness
+(git root, config, tracker/forge CLIs on PATH, worktree root), and `amagi remove <key>`
+drops one.
+
+`amagi serve` hosts the dashboard and API for every registered repo. The dashboard's
+workspace selector streams one repo at a time; tasks, tokens, logs, SSE subscriptions and
+run actions are scoped per repo, so identical issue ids in different repos never collide.
+Adding a repo while the server runs takes effect immediately, without a restart: the
+server re-reads the registry on demand.
+
+For the repo being served, its own `.amagi/config.toml` (merged with the global config)
+picks the tracker, forge, harness and checks. The CLI (`run`, `status`, `clean`, `tui`,
+`ask`) resolves the repo from your current working directory with
+`git rev-parse --show-toplevel`, reads and writes that repo's own store, and addresses the
+server's repo-scoped routes by that key.
 
 The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default) and, for the `github` tracker/forge, a `GH_TOKEN` or `GITHUB_TOKEN` in the environment so `gh` and the unattended `git push`/`fetch` never block on interactive auth.
 
@@ -64,12 +99,57 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `reviewing` | Review harness runs against the PR | `fixing`, `done` |
 | `fixing` | Implement harness addresses review findings | `awaiting_answer`, `checks`, `reviewing` |
 | `done` | Terminal: task complete | — |
-| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, no PR, agent crash, etc.) | — |
-| `abandoned` | Terminal: task withdrawn | — |
+| `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
+| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
+| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
+| `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. `reviewing`/`fixing`/`done` are modeled in the state machine and the dashboard already renders them, but the review loop itself (running `harness.review` and looping fixes for `loop.maxReviewRounds`) isn't wired into the runner yet. A task that reaches `pr_open` today stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 A task also carries a `reviewRound` counter (visible in `amagi status`) for when that loop lands.
+
+## The runner service
+
+`amagi serve` also hosts an operator-facing runner service. It reports
+availability and capacity (`GET /api/runner`), launches a specific ready task
+or the next ready one (`POST /api/runs`, with an optional `{ "taskId": ... }`
+body), and stops a run it owns (`POST /api/runs/:id/stop`). Stop is graceful:
+the owned agent process is killed, the tracker lease is released, and the task
+is parked in the terminal `cancelled` state with its worktree untouched, so the
+existing Reclaim action (or a fresh launch) resumes it where it left off. The
+server runs up to `loop.maxParallel` tasks at once and refuses launch requests
+that would exceed that or claim a task that is already running. The dashboard
+surfaces all of this from the task board and task detail pages.
+
+`GET /api/runner` also carries per-task resource usage for the runner, summed
+over each running task's whole agent process tree from `/proc` on Linux: resident
+memory (`rssBytes`), CPU time (`cpuMs`), and process count (`processes`), keyed
+by task id under `resources` plus the repo `name` the runner is bound to. The
+dashboard's Workers section shows these numbers as a per-runner summary strip
+and per busy slot, so the operator can see which runner is eating the machine.
+
+Beyond stopping, the task detail page offers **instant close** (`POST
+/api/repos/:repo/tasks/:id/close`): it retires any in-flight or parked task by
+killing the worker if the runner owns it, deleting the task's worktree and
+branch, closing the tracker ticket, and parking the task in the terminal
+`abandoned` state. It is the operator's way to kill an in-flight task outright —
+unlike stop, which preserves the worktree for the reclaim path.
+
+Capacity is enforced per server process: each `amagi serve` owns the runs it
+launches. Launching the same task from a second server or from the CLI (`amagi
+run`) relies on the tracker's atomic claim to avoid double-claiming.
+
+A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
+runs inside `amagi serve`. Every worker process records a liveness heartbeat
+in the store while it drives a task; a worker that dies or hangs leaves its
+task in an in-progress state with no fresh heartbeat. Once a task has been
+silent for `loop.stallTimeoutSec` (default 1h) the watcher recovers it: it
+releases the tracker claim (the issue reads ready again, and any surviving
+runner of that task detects the lost lease and stops itself) and parks the
+task back to `claimed` with its recorded worktree kept, so the next worker
+resumes where the dead one left off. Only in-progress states are watched;
+`pr_open` is excluded, since there the PR is out for human review and no
+worker runs the task.
 
 ## Configuration
 
@@ -86,8 +166,9 @@ Every key is optional; the table below is the complete schema with its default.
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
 | `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. Only `github` (via `gh`) is implemented today; `forgejo` throws `NotImplementedDriverError` if selected. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
-| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code. Only `claude` is implemented today. |
-| `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"opus"`. |
+| `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
+| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
+| `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"claude-opus-5"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
@@ -96,9 +177,12 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
 | `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
 | `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
+| `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxReviewRounds` | integer >= 0 | `3` | Review/fix rounds before escalating to `needs_human`. Reserved for the review loop. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
+| `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
+| `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
@@ -107,6 +191,9 @@ Every key is optional; the table below is the complete schema with its default.
 | `notify.ntfyServer` | string | `"https://ntfy.sh"` | ntfy server base URL, for self-hosted instances. |
 | `server.host` | string | `"127.0.0.1"` | Bind address for `amagi serve` and the address the CLI (`amagi ask`) talks to. |
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
+
+`server.host`/`server.port` are read from the global config only: `serve` hosts every
+registered repo, so there is no single repo config to draw them from.
 
 ### Example
 
@@ -148,6 +235,29 @@ permissions = "bypass"
 
 `permissions = "bypass"` passes `--auto` to OpenCode. The agent runs in Amagi's dedicated worktree, but OpenCode's own permission checks are otherwise disabled.
 
+### Harness and model selection
+
+`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
+
+```bash
+amagi run                      # interactive picker
+amagi run --harness opencode   # pin the harness, pick the model and effort
+amagi run --harness codex --model gpt-5.6-sol --effort high
+```
+
+Define the choices the picker offers per repo:
+
+```toml
+[harness.definitions.fast]
+kind = "opencode"
+bin = "opencode-unconfined"
+permissions = "bypass"
+
+[harness.definitions.careful]
+kind = "claude"
+model = "claude-opus-5"
+```
+
 ## Packages
 
 | Package | Purpose |
@@ -155,4 +265,5 @@ permissions = "bypass"
 | `@amagi/core` | Runner, drivers, store, and event feed |
 | `@amagi/cli` | The `amagi` command line |
 | `@amagi/server` | HTTP + SSE event server |
-| `@amagi/dashboard` | React dashboard served alongside the API by `amagi serve` |
+| `@amagi/dashboard` | Web dashboard (React) |
+| `@amagi/tui` | Terminal dashboard (Ink) |

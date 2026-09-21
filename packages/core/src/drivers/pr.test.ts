@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { Exec, ExecResult } from '../exec.ts'
-import { gitTokenConfig, makePrDriver } from './pr.ts'
+import { amagiLabels, gitTokenConfig, makePrDriver } from './pr.ts'
 
 type Call = readonly string[]
 
@@ -42,6 +42,17 @@ describe('gitTokenConfig', () => {
   })
 })
 
+describe('amagiLabels', () => {
+  test('always carries the provenance label, plus amagi/<type> when typed', () => {
+    expect(amagiLabels('bug')).toEqual(['amagi', 'amagi/bug'])
+  })
+
+  test('skips the type label when the task has no type', () => {
+    expect(amagiLabels(null)).toEqual(['amagi'])
+    expect(amagiLabels('')).toEqual(['amagi'])
+  })
+})
+
 describe('githubPr', () => {
   test('pushes over the token rewrite and creates the pr with the title', async () => {
     process.env.GH_TOKEN = 'ghp_abc'
@@ -55,6 +66,7 @@ describe('githubPr', () => {
       remote: 'origin',
       title: 'Do the thing',
       body: 'Task: am-1',
+      labels: amagiLabels('bug'),
     })
 
     const push = calls.find((c) => c.includes('push'))
@@ -79,9 +91,34 @@ describe('githubPr', () => {
       'Do the thing',
       '--body-file',
       '-',
+      '--label',
+      'amagi',
+      '--label',
+      'amagi/bug',
     ])
     expect(calls).toContainEqual(['<stdin>', 'Task: am-1'])
     expect(pr).toEqual({ number: 7, url: 'https://github.com/x/y/pull/7' })
+  })
+
+  test('creates each label on demand before the pr', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('create') && c.includes('pr') ? ok('https://github.com/x/y/pull/7\n') : undefined,
+    )
+    await makePrDriver('github', exec).createPr({
+      cwd: '/wt',
+      branch: 'amagi/am-1',
+      base: 'main',
+      remote: 'origin',
+      title: 't',
+      body: 'b',
+      labels: ['amagi', 'amagi/chore'],
+    })
+
+    const creates = calls.filter((c) => c.includes('label') && c.includes('create'))
+    expect(creates).toEqual([
+      ['gh', 'label', 'create', 'amagi', '--force'],
+      ['gh', 'label', 'create', 'amagi/chore', '--force'],
+    ])
   })
 
   test('resolves the remote pr state from gh', async () => {
@@ -100,5 +137,41 @@ describe('githubPr', () => {
 
     expect(await makePrDriver('github', closed.exec).getPr('/repo', 7)).toBe('closed')
     expect(await makePrDriver('github', open.exec).getPr('/repo', 7)).toBe('open')
+  })
+
+  test('collects conversation, review, and inline comments from the api', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('repo') && c.includes('view') && c.includes('nameWithOwner')) {
+        return ok('owner/repo\n')
+      }
+      if (c[2] === 'repos/owner/repo/issues/7/comments') {
+        return ok('{"id":"1","user":"bob","body":"hello"}\n')
+      }
+      if (c[2] === 'repos/owner/repo/pulls/7/reviews') {
+        return ok('{"id":"2","user":"bob","body":"@chise-maru this is wrong"}\n')
+      }
+      if (c[2] === 'repos/owner/repo/pulls/7/comments') {
+        return ok('{"id":"3","user":"bob","body":"remove this file"}\n')
+      }
+      return undefined
+    })
+    const comments = await makePrDriver('github', exec).listComments('/repo', 7)
+
+    expect(calls.some((c) => c[0] === 'gh' && c[1] === 'repo' && c.includes('nameWithOwner'))).toBe(
+      true,
+    )
+    expect(comments).toEqual([
+      { id: '1', user: 'bob', body: 'hello' },
+      { id: '2', user: 'bob', body: '@chise-maru this is wrong' },
+      { id: '3', user: 'bob', body: 'remove this file' },
+    ])
+  })
+
+  test('posts a comment to the pr conversation', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await makePrDriver('github', exec).postComment('/repo', 7, 'explanation')
+
+    expect(calls).toContainEqual(['gh', 'pr', 'comment', '7', '--body-file', '-'])
+    expect(calls).toContainEqual(['<stdin>', 'explanation'])
   })
 })

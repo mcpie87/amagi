@@ -48,6 +48,38 @@ const GATE_CREATE_STDOUT = `✓ Created gate tst-77h (type: human)
 Resolve with: bd gate resolve tst-77h
 `
 
+const CREATE_JSON = `{
+  "id": "tst-new",
+  "title": "Ship the board",
+  "description": "Make it writable",
+  "acceptance_criteria": "It saves",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "labels": ["ui", "board"]
+}`
+
+const SHOW_WITH_DEPS_JSON = `[
+  {
+    "id": "tst-1",
+    "title": "Main task",
+    "description": "desc",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "labels": ["x"],
+    "dependencies": [
+      {
+        "id": "tst-abc",
+        "title": "Blocker",
+        "status": "blocked",
+        "priority": 1,
+        "issue_type": "task"
+      }
+    ]
+  }
+]`
+
 const gateListJson = (title: string) => `[
   {
     "id": "tst-77h",
@@ -59,6 +91,44 @@ const gateListJson = (title: string) => `[
     "await_type": "human"
   }
 ]`
+
+/** Recorded from bd 1.3.0 (`bd epic close-eligible --dry-run --json`). */
+const CLOSE_ELIGIBLE_JSON = `[
+  {
+    "epic": {
+      "id": "tst-1",
+      "title": "M4: question channel",
+      "description": "desc",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "epic"
+    },
+    "total_children": 7,
+    "closed_children": 7,
+    "eligible_for_close": true
+  },
+  {
+    "epic": {
+      "id": "tst-2",
+      "title": "M6: review loop",
+      "description": "desc",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "epic"
+    },
+    "total_children": 5,
+    "closed_children": 0,
+    "eligible_for_close": false
+  }
+]`
+
+/** Recorded from bd 1.3.0 (`bd epic close-eligible --reason ... --json`). */
+const EPIC_CLOSE_JSON = `{
+  "closed": ["tst-1"],
+  "count": 1,
+  "reason": "All children completed",
+  "schema_version": 1
+}`
 
 type Call = readonly string[]
 
@@ -107,6 +177,26 @@ describe('BeadsTracker', () => {
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
+  })
+
+  test('claim falls back to a by-id claim when ready --claim skips a pre-assigned issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('update')
+        ? ok('')
+        : c.includes('show')
+          ? ok(CLAIMED_JSON)
+          : c.includes('--claim')
+            ? ok('[]')
+            : c.includes('ready')
+              ? ok(READY_JSON)
+              : undefined,
+    )
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).claim()
+
+    expect(task?.id).toBe('tst-lmc')
+    expect(task?.status).toBe('in_progress')
+    const update = calls.find((c) => c.includes('update'))
+    expect(update?.slice(0, 4)).toEqual(['bd', 'update', 'tst-lmc', '--status'])
   })
 
   test('epics, milestones and gates are never handed out as work', async () => {
@@ -205,5 +295,126 @@ describe('BeadsTracker', () => {
   test('a nonzero exit surfaces stderr', async () => {
     const exec: Exec = async () => ({ exitCode: 2, stdout: '', stderr: 'no such issue' })
     expect(new BeadsTracker({ cwd: '/repo', exec }).ready()).rejects.toThrow(/no such issue/)
+  })
+
+  test('creates an issue with the planned-work fields', async () => {
+    const { exec, calls } = fake((c) => (c.includes('create') ? ok(CREATE_JSON) : undefined))
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).createTask({
+      title: 'Ship the board',
+      description: 'Make it writable',
+      acceptanceCriteria: 'It saves',
+      priority: 1,
+      labels: ['ui', 'board'],
+      dependencies: ['tst-abc'],
+    })
+
+    expect(task?.id).toBe('tst-new')
+    expect(task?.title).toBe('Ship the board')
+    const call = calls[0]
+    expect(call?.slice(0, 2)).toEqual(['bd', 'create'])
+    expect(call).toContain('--title')
+    expect(call).toContain('--description')
+    expect(call).toContain('--acceptance')
+    expect(call).toContain('--priority')
+    expect(call).toContain('P1')
+    expect(call).toContain('--labels')
+    expect(call).toContain('ui,board')
+    expect(call).toContain('--deps')
+    expect(call).toContain('tst-abc')
+  })
+
+  test('create omits unset fields instead of passing empties', async () => {
+    const { exec, calls } = fake((c) => (c.includes('create') ? ok(CREATE_JSON) : undefined))
+    await new BeadsTracker({ cwd: '/repo', exec }).createTask({
+      title: 'Bare',
+      description: '',
+      acceptanceCriteria: null,
+      priority: null,
+      labels: [],
+      dependencies: [],
+    })
+    const call = calls[0]?.join(' ')
+    expect(call).toContain('--title')
+    expect(call).not.toContain('--description')
+    expect(call).not.toContain('--acceptance')
+    expect(call).not.toContain('--priority')
+    expect(call).not.toContain('--labels')
+    expect(call).not.toContain('--deps')
+  })
+
+  test('update writes fields and adds and removes dependencies', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('show')) return ok(SHOW_WITH_DEPS_JSON)
+      return ok('')
+    })
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.updateTask('tst-1', {
+      title: 'Renamed',
+      priority: 3,
+      labels: ['y'],
+      dependencies: { add: ['tst-dep'], remove: ['tst-old'] },
+    })
+
+    const update = calls.find((c) => c.includes('update'))
+    expect(update).toContain('Renamed')
+    expect(update).toContain('P3')
+    expect(update).toContain('y')
+    const add = calls.find((c) => c.includes('add'))
+    expect(add?.slice(0, 4)).toEqual(['bd', 'dep', 'add', 'tst-1'])
+    expect(add).toContain('tst-dep')
+    const remove = calls.find((c) => c.includes('remove'))
+    expect(remove?.slice(0, 4)).toEqual(['bd', 'dep', 'remove', 'tst-1'])
+    expect(remove).toContain('tst-old')
+    const returned = calls.filter((c) => c.includes('show'))
+    expect(returned).toHaveLength(1)
+  })
+
+  test('getIssue surfaces dependency blockers with their state', async () => {
+    const { exec } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
+    const issue = await new BeadsTracker({ cwd: '/repo', exec }).getIssue('tst-1')
+
+    expect(issue?.labels).toEqual(['x'])
+    expect(issue?.dependencies).toEqual([
+      {
+        id: 'tst-abc',
+        title: 'Blocker',
+        description: '',
+        status: 'blocked',
+        priority: 1,
+        type: 'task',
+        url: null,
+      },
+    ])
+  })
+
+  test('eligibleEpics previews only the eligible epics from the dry-run', async () => {
+    const { exec, calls } = fake((c) => (c.includes('epic') ? ok(CLOSE_ELIGIBLE_JSON) : undefined))
+    const epics = await new BeadsTracker({ cwd: '/repo', exec }).eligibleEpics()
+
+    expect(epics).toEqual([
+      {
+        id: 'tst-1',
+        title: 'M4: question channel',
+        status: 'open',
+        totalChildren: 7,
+        closedChildren: 7,
+      },
+    ])
+    expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'epic', 'close-eligible', '--dry-run'])
+    expect(calls[0]).toContain('--json')
+  })
+
+  test('closeEligibleEpics runs the close with the operator reason', async () => {
+    const { exec, calls } = fake((c) => (c.includes('epic') ? ok(EPIC_CLOSE_JSON) : undefined))
+    const result = await new BeadsTracker({ cwd: '/repo', exec }).closeEligibleEpics(
+      'All children completed',
+    )
+
+    expect(result).toEqual({ closed: ['tst-1'], reason: 'All children completed' })
+    const call = calls[0]
+    expect(call?.slice(0, 3)).toEqual(['bd', 'epic', 'close-eligible'])
+    expect(call).toContain('--reason')
+    expect(call).toContain('All children completed')
+    expect(call).toContain('--json')
   })
 })

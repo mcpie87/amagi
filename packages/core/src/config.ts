@@ -1,14 +1,15 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
+import { MAX_PARALLEL } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
 
-const HarnessConfig = z.object({
+export const HarnessConfig = z.object({
   kind: HarnessKind,
   /** Command used to invoke the harness. Defaults to the harness name. */
   bin: z.string().min(1).optional(),
@@ -43,24 +44,60 @@ export const Config = z.object({
     .object({
       kind: ForgeKind.default('github'),
       remote: z.string().default('origin'),
+      /** Forge handle (without the @) the agent is pinged under on PRs; mentions of it trigger responses. */
+      agentHandle: z.string().default('chise-maru'),
     })
     .prefault({}),
   harness: z
     .object({
+      /**
+       * Named harness definitions offered by the `amagi run` interactive
+       * picker, e.g. `[harness.definitions.fast]`. Each is a full harness
+       * config; the picker falls back to the three known kinds when empty.
+       */
+      definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
       review: HarnessConfig.prefault({ kind: 'codex' }),
     })
     .prefault({}),
   loop: z
     .object({
-      maxParallel: z.number().int().min(1).default(1),
+      maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
       maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
+      /**
+       * How often the agent-mention watcher polls open PRs for comments and
+       * reviews mentioning the agent handle. Defaults to 5 minutes: paired
+       * with last-seen-per-PR tracking, unchanged PRs are not re-scanned, so
+       * the default stays inside GitHub REST rate limits.
+       */
+      mentionWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How often the stall watcher scans in-progress tasks for a worker that
+       * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
+       * reads the local store and checks one timestamp per task.
+       */
+      stallWatchIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * How long a task may sit in an in-progress state with no worker
+       * heartbeat before the stall watcher reclaims it (release the tracker
+       * claim and park it back to claimed, keeping the worktree). Default 1h.
+       */
+      stallTimeoutSec: z.number().int().min(60).default(3600),
       /** Kept under the 600s Bash timeout the harnesses impose on `amagi ask`. */
       questionTimeoutSec: z.number().int().min(10).default(540),
       /** How long the runner waits for an answer once the agent parks on a question. */
       questionParkTimeoutSec: z.number().int().min(1).default(3600),
+      /**
+       * Retries for transient harness failures (quota, rate limit, overloaded
+       * model, flaky network). Backoff starts at retryBaseMs and doubles per
+       * attempt, capped at retryMaxMs; the task escalates once maxRetries is
+       * spent.
+       */
+      maxRetries: z.number().int().min(0).default(3),
+      retryBaseMs: z.number().int().min(0).default(10_000),
+      retryMaxMs: z.number().int().min(0).default(300_000),
     })
     .prefault({}),
   checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
@@ -121,4 +158,31 @@ export function loadConfig(repoRoot: string): LoadedConfig {
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return { config, sources }
+}
+
+/**
+ * The server-wide settings (host, port) come from the global config alone,
+ * because `serve` now hosts every registered repo, not just the cwd one.
+ */
+export function loadGlobalConfig(): Config {
+  const path = globalConfigPath()
+  const merged = existsSync(path) ? readToml(path) : {}
+  const parsed = Config.safeParse(merged)
+  if (!parsed.success) {
+    throw new Error(`invalid amagi config (${path}):\n${z.prettifyError(parsed.error)}`)
+  }
+  const config = parsed.data
+  config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
+  return config
+}
+
+/**
+ * Merges a patch into the repo's own `.amagi/config.toml` and writes it back,
+ * preserving every other key. Creates the file (and directory) when absent.
+ * `loadConfig` re-reads it on next use, so persisted settings survive restarts.
+ */
+export function writeConfig(repoRoot: string, patch: Json): void {
+  const path = repoConfigPath(repoRoot)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, stringifyToml(deepMerge(readToml(path), patch)))
 }

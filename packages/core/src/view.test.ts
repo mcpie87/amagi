@@ -1,13 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import type { StoredEvent } from '@amagi/core'
+import type { StoredEvent } from './events.ts'
 import {
   activeTasks,
+  chatInFlight,
+  chatTurns,
   currentAgentFor,
   initialDashboardState,
   openQuestionsFor,
   reduceState,
   tasksNeedingAttention,
-} from './state.ts'
+} from './view.ts'
 
 function ev(seq: number, taskId: string | null, ts: number, body: object): StoredEvent {
   return { seq, ts, taskId, ...body } as StoredEvent
@@ -84,13 +86,39 @@ describe('dashboard state reducer', () => {
   })
 
   test('review round increments once per reviewing entry', () => {
+    // recorded ends am-1 at 'done'; replay without the terminal event so the
+    // second cycle starts from a legal reviewing state.
     const withSecondReview = [
-      ...recorded,
-      ev(16, 'am-1', 2500, { type: 'task.state', from: 'done', to: 'fixing' }),
+      ...recorded.filter((e) => e.seq !== 12),
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'reviewing', to: 'fixing' }),
       ev(17, 'am-1', 2600, { type: 'task.state', from: 'fixing', to: 'reviewing' }),
     ]
     const state = withSecondReview.reduce(reduceState, initialDashboardState())
     expect(state.tasks['am-1']?.reviewRound).toBe(2)
+  })
+
+  test('the shared reducer rejects illegal transitions like the server does', () => {
+    const state = recorded.reduce(reduceState, initialDashboardState())
+    expect(() =>
+      reduceState(
+        state,
+        ev(16, 'am-2', 2500, { type: 'task.state', from: 'claimed', to: 'pr_open' }),
+      ),
+    ).toThrow(/illegal transition/)
+  })
+
+  test('reclaim returns a stuck task to the queue while keeping its worktree', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'worktree.created', path: '/tmp/am-1', branch: 'x' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(5, 'am-1', 1400, { type: 'task.reclaimed' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(state.tasks['am-1']?.state).toBe('claimed')
+    expect(state.tasks['am-1']?.worktree).toBe('/tmp/am-1')
+    expect(state.tasks['am-1']?.branch).toBe('x')
+    expect(activeTasks(state).map((t) => t.id)).toEqual(['am-1'])
   })
 
   test('queue view lists only in-flight tasks, most recent first', () => {
@@ -102,8 +130,8 @@ describe('dashboard state reducer', () => {
 
   test('attention list includes only tasks stopped for a human', () => {
     const state = [
-      ...recorded,
-      ev(16, 'am-1', 2500, { type: 'task.state', from: 'done', to: 'needs_human' }),
+      ...recorded.filter((e) => e.seq !== 12),
+      ev(16, 'am-1', 2500, { type: 'task.state', from: 'reviewing', to: 'needs_human' }),
       ev(17, 'am-3', 2600, { type: 'task.claimed', title: 'Still running', tracker: 'bd' }),
     ].reduce(reduceState, initialDashboardState())
 
@@ -151,5 +179,116 @@ describe('dashboard state reducer', () => {
     const state = starts.reduce(reduceState, initialDashboardState())
     expect(currentAgentFor(state, 'am-1')).toMatchObject({ model: 'current-model', effort: null })
     expect(currentAgentFor(state, 'missing')).toBeNull()
+  })
+
+  test('current agent ignores chat runs so the implementing agent stays named', () => {
+    const events = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'impl',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+      ev(2, 'am-1', 2000, {
+        type: 'agent.started',
+        role: 'chat',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(currentAgentFor(state, 'am-1')).toMatchObject({ model: 'impl', role: 'implement' })
+  })
+
+  test('chatTurns folds user messages and chat runs into a conversation', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'chat.message', text: 'why no pr?' }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.started',
+        role: 'chat',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'text', text: 'the work ' },
+      }),
+      ev(4, 'am-1', 1300, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'text', text: 'was already done' },
+      }),
+      ev(5, 'am-1', 1400, { type: 'agent.exited', role: 'chat', exitCode: 0, sessionId: 'sess-1' }),
+      ev(6, 'am-1', 1500, { type: 'chat.message', text: 'can you show me?' }),
+      ev(7, 'am-1', 1600, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'text', text: 'ignored' },
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(chatTurns(state, 'am-1')).toEqual([
+      { id: 'u1', role: 'user', text: 'why no pr?', ts: 1000, pending: false },
+      {
+        id: 'a2',
+        role: 'assistant',
+        text: 'the work was already done',
+        ts: 1100,
+        pending: false,
+      },
+      { id: 'u6', role: 'user', text: 'can you show me?', ts: 1500, pending: false },
+    ])
+  })
+
+  test('chatTurns marks an in-flight chat run as a pending assistant turn', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'chat.message', text: 'hello' }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.started',
+        role: 'chat',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'text', text: 'almost' },
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    const turns = chatTurns(state, 'am-1')
+    expect(turns).toHaveLength(2)
+    expect(turns[1]).toMatchObject({ role: 'assistant', text: 'almost', pending: true })
+    expect(chatInFlight(state, 'am-1')).toBe(true)
+  })
+
+  test('chatInFlight is false once the chat run exits', () => {
+    const events = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'chat',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(2, 'am-1', 1100, { type: 'agent.exited', role: 'chat', exitCode: 0, sessionId: 'sess-1' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(chatInFlight(state, 'am-1')).toBe(false)
   })
 })

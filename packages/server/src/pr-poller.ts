@@ -1,8 +1,10 @@
-import { type PrDriver, reconcilePrs, type Store } from '@amagi/core'
+import { type PrDriver, reconcilePrs, type Store, type Tracker } from '@amagi/core'
 
 export type PrPollerOptions = {
   store: Store
   forge: PrDriver
+  /** Settles the tracker issue (close/setStatus) when a PR leaves the live set. */
+  tracker: Tracker
   /** Repo the open PRs live in, so the forge CLI can resolve them. */
   cwd: string
   intervalMs?: number
@@ -22,6 +24,7 @@ const DEFAULT_INTERVAL_MS = 60_000
 export function startPrPoller({
   store,
   forge,
+  tracker,
   cwd,
   intervalMs = DEFAULT_INTERVAL_MS,
 }: PrPollerOptions): PrPoller {
@@ -30,7 +33,7 @@ export function startPrPoller({
 
   async function tick(): Promise<void> {
     try {
-      await reconcilePrs(store, forge, cwd)
+      await reconcilePrs(store, forge, tracker, cwd)
     } catch (err) {
       console.warn(`pr reconcile: ${err instanceof Error ? err.message : String(err)}`)
     }

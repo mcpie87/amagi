@@ -1,1 +1,169 @@
 @import "tailwindcss";
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #5f7157;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 500px) {
+  .connection-status {
+    font-size: 9px;
+  }
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 43px 25px;
+}
+.empty-icon {
+  display: grid;
+  place-items: center;
+  width: 47px;
+  height: 47px;
+  border: 1px solid #e2e8d9;
+  border-radius: 13px;
+  background: #f5f7f0;
+  color: #8c9a7c;
+  margin-bottom: 14px;
+}
+.empty-state h3 {
+  font-size: 13px;
+  font-weight: 500;
+  color: #4e5943;
+}
+.empty-state p {
+  font-size: 11px;
+  line-height: 1.8;
+  color: #8a917e;
+  max-width: 340px;
+  margin-top: 7px;
+}
+
+.stop-button {
+  border-color: #e0c3b4;
+  color: #a0522f;
+  background: #fdf3ee;
+}
+.run-button-error {
+  margin: 6px 0 0;
+  color: #b26447;
+  font-size: 10px;
+}
+
+.agent-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 17px;
+  font-size: 10px;
+  background: #263027;
+  color: #a8b99a;
+}
+.agent-log-last {
+  margin-left: 12px;
+  color: #d5e2c8;
+}
+.agent-log-header button {
+  background: #394837;
+  color: #d5e2c8;
+  border: 1px solid #52644b;
+  padding: 4px 7px;
+  border-radius: 3px;
+  font-size: 9px;
+}
+.agent-log-scroll {
+  height: 460px;
+  overflow: auto;
+  background: #202821;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.summary-markdown {
+  font-size: 13px;
+  color: #e4e4e7;
+  line-height: 1.6;
+}
+.summary-markdown > :first-child {
+  margin-top: 0;
+}
+.summary-markdown > :last-child {
+  margin-bottom: 0;
+}
+.summary-markdown p {
+  margin: 8px 0;
+}
+.summary-markdown ul,
+.summary-markdown ol {
+  margin: 8px 0;
+  padding-left: 22px;
+  list-style: revert;
+}
+.summary-markdown li {
+  margin: 3px 0;
+}
+.summary-markdown pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.summary-markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  font-family: ui-monospace, monospace;
+  font-size: 0.92em;
+}
+.summary-markdown pre code {
+  padding: 0;
+  background: none;
+}
+.summary-markdown a {
+  color: #7dd3fc;
+  text-decoration: underline;
+}
+.summary-markdown h1,
+.summary-markdown h2,
+.summary-markdown h3,
+.summary-markdown h4,
+.summary-markdown h5,
+.summary-markdown h6 {
+  margin: 12px 0 5px;
+  font-weight: 600;
+}
+.summary-markdown h1 {
+  font-size: 16px;
+}
+.summary-markdown h2 {
+  font-size: 15px;
+}
+.summary-markdown h3 {
+  font-size: 14px;
+}
+.summary-markdown h4,
+.summary-markdown h5,
+.summary-markdown h6 {
+  font-size: 13px;
+}
+.summary-markdown blockquote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 2px solid #b45309;
+  color: #a1a1aa;
+}
+.summary-markdown hr {
+  margin: 10px 0;
+  border-color: rgba(255, 255, 255, 0.12);
+}
