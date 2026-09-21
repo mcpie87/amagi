@@ -322,9 +322,10 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       if (task.worktree === null || task.branch === null) {
         return c.json({ error: `task ${id} has no worktree to resume` }, 409)
       }
-      // A cancelled run keeps its worktree for exactly this path: the operator
-      // stops a run and later reclaims it to resume where it left off.
-      if (isTerminal(task.state) && task.state !== 'cancelled') {
+      // A terminal run keeps its worktree for exactly this path: a cancelled
+      // run was deliberately stopped, and a needs_human/no_pr run was parked
+      // for attention — the operator retries each to resume where it left off.
+      if (isTerminal(task.state) && !['cancelled', 'needs_human', 'no_pr'].includes(task.state)) {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
