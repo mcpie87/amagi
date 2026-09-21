@@ -1,4 +1,4 @@
-import { TaskState } from '@amagi/core'
+import { MAX_PARALLEL, TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -78,6 +78,11 @@ export const AnswerBody = z.object({
   via: z.enum(['web', 'cli', 'gate']).default('web'),
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
+
+export const SettingsBody = z.object({
+  maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
+})
+export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

@@ -1,4 +1,5 @@
 import { agentLogStore } from '@amagi/core/agent-log'
+import { MAX_PARALLEL } from '@amagi/core/config'
 import { type AgentEvent, isTerminal, type StoredEvent, type TaskState } from '@amagi/core/events'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -191,6 +192,9 @@ function RootLayout() {
                   </Link>
                   <Link to="/sessions" activeProps={{ className: 'text-zinc-100' }}>
                     Sessions
+                  </Link>
+                  <Link to="/settings" activeProps={{ className: 'text-zinc-100' }}>
+                    Settings
                   </Link>
                 </nav>
                 <div className="ml-auto flex items-center gap-2">
@@ -1468,6 +1472,104 @@ function TaskDetailView() {
   )
 }
 
+function SettingsView() {
+  const { selected } = useDashboard()
+  const [value, setValue] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (selected === null) return
+    setLoaded(false)
+    setMessage(null)
+    fetch(`${apiBase}/api/repos/${selected}/settings`)
+      .then((res) => (res.ok ? (res.json() as Promise<{ maxParallel: number }>) : null))
+      .then((body) => {
+        setLoaded(true)
+        setValue(body === null ? '' : String(body.maxParallel))
+      })
+      .catch(() => setLoaded(true))
+  }, [selected])
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    if (selected === null || busy) return
+    const n = Number(value)
+    if (!Number.isInteger(n) || n < 1 || n > MAX_PARALLEL) {
+      setMessage({
+        kind: 'error',
+        text: `workers must be an integer between 1 and ${MAX_PARALLEL}`,
+      })
+      return
+    }
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${selected}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ maxParallel: n }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setMessage({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
+        return
+      }
+      setMessage({ kind: 'ok', text: `saved: up to ${n} concurrent workers` })
+    } catch {
+      setMessage({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="max-w-xl">
+      <h1 className="text-xl font-semibold">Settings</h1>
+      {selected === null ? (
+        <p className="mt-2 text-zinc-500">no repository selected</p>
+      ) : (
+        <form onSubmit={save} className="mt-6 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+          <label htmlFor="max-workers" className="mb-1 block text-sm text-zinc-400">
+            Concurrent workers
+          </label>
+          <p className="mb-3 text-sm text-zinc-500">
+            How many tasks run at once for {selected}. Applied live; in-flight runs are unaffected.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              id="max-workers"
+              type="number"
+              min={1}
+              max={MAX_PARALLEL}
+              step={1}
+              value={value}
+              disabled={!loaded}
+              onChange={(e) => setValue(e.target.value)}
+              className="w-28 rounded border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm"
+            />
+            <button
+              type="submit"
+              disabled={busy || !loaded}
+              className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-zinc-950 hover:bg-sky-500 disabled:opacity-50"
+            >
+              Save
+            </button>
+          </div>
+          {message !== null && (
+            <p
+              className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}
+            >
+              {message.text}
+            </p>
+          )}
+        </form>
+      )}
+    </section>
+  )
+}
+
 const rootRoute = createRootRoute({ component: RootLayout })
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: QueueView })
 const issuesRoute = createRoute({
@@ -1480,11 +1582,22 @@ const sessionsRoute = createRoute({
   path: '/sessions',
   component: SessionsView,
 })
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  component: SettingsView,
+})
 const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute, issuesRoute, sessionsRoute, taskRoute])
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  issuesRoute,
+  sessionsRoute,
+  settingsRoute,
+  taskRoute,
+])
 export const router = createRouter({ routeTree })

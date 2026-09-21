@@ -1,12 +1,15 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'forgejo'])
+
+/** Upper bound on concurrent task runs; shared by config, API and dashboard. */
+export const MAX_PARALLEL = 16
 
 export const HarnessConfig = z.object({
   kind: HarnessKind,
@@ -61,7 +64,7 @@ export const Config = z.object({
     .prefault({}),
   loop: z
     .object({
-      maxParallel: z.number().int().min(1).default(1),
+      maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
       maxReviewRounds: z.number().int().min(0).default(3),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
@@ -154,4 +157,15 @@ export function loadGlobalConfig(): Config {
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return config
+}
+
+/**
+ * Merges a patch into the repo's own `.amagi/config.toml` and writes it back,
+ * preserving every other key. Creates the file (and directory) when absent.
+ * `loadConfig` re-reads it on next use, so persisted settings survive restarts.
+ */
+export function writeConfig(repoRoot: string, patch: Json): void {
+  const path = repoConfigPath(repoRoot)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, stringifyToml(deepMerge(readToml(path), patch)))
 }

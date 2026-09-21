@@ -16,6 +16,7 @@ import {
   type UpdateTrackerTask,
   type Workspace,
   type Workspaces,
+  writeConfig,
 } from '@amagi/core'
 import { zValidator } from '@hono/zod-validator'
 import type { Context, ValidationTargets } from 'hono'
@@ -36,6 +37,7 @@ import {
   RepoRegisterBody,
   RepoTaskIdParam,
   RunBody,
+  SettingsBody,
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
@@ -47,6 +49,8 @@ export type ServerDeps = {
   notify?: Notifier[]
   /** When present, the launch/stop runner endpoints are live. */
   runner?: RunServiceApi
+  /** The repo key the runner is bound to, so settings apply live only to it. */
+  runnerRepo?: string
 }
 
 /**
@@ -150,7 +154,7 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
-export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
+export function createApp({ workspaces, notify = [], runner, runnerRepo }: ServerDeps) {
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -408,6 +412,30 @@ export function createApp({ workspaces, notify = [], runner }: ServerDeps) {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
       return c.json(await runner.status())
     })
+
+    .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      return c.json({ maxParallel: ws.config.loop.maxParallel })
+    })
+
+    .patch(
+      '/api/repos/:repo/settings',
+      valid('param', RepoParam),
+      valid('json', SettingsBody),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const { maxParallel } = c.req.valid('json')
+        // Persist first so a restart keeps the value, then live-apply: the
+        // cached workspace config and, when this repo owns the runner, its
+        // capacity. In-flight runs are untouched — capacity gates new launches.
+        writeConfig(ws.root, { loop: { maxParallel } })
+        ws.config.loop.maxParallel = maxParallel
+        if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+        return c.json({ maxParallel })
+      },
+    )
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
