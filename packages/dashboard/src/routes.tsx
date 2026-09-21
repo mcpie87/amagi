@@ -1089,6 +1089,7 @@ function RetryButton({
   state: TaskState
   worktree: string | null
 }) {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
@@ -1100,7 +1101,13 @@ function RetryButton({
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
         method: 'POST',
       })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      if (!res.ok) {
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Reclaim only releases the tracker claim; actually restart the run.
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
     } catch {
       setError('could not reach the amagi server')
     } finally {
