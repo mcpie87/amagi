@@ -251,6 +251,7 @@ describe('RunService', () => {
       available: true,
       capacity: 2,
       running: [],
+      startedAt: {},
       resources: {},
     })
   })

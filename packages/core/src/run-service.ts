@@ -20,6 +20,8 @@ export type RunnerStatus = {
   available: boolean
   capacity: number
   running: string[]
+  /** Epoch ms at launch per running task, keyed by task id, for live elapsed-time display. */
+  startedAt: Record<string, number>
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
   /** Activity of background workers (e.g. the mention watcher), when any. */
@@ -85,7 +87,10 @@ export type RunServiceOptions = {
  */
 export class RunService implements RunServiceApi {
   private capacity: number
-  private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
+  private readonly runs = new Map<
+    string,
+    { runner: Runner; startedAt: number; done: Promise<RunOnceResult> }
+  >()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
   private stopped = false
@@ -107,6 +112,7 @@ export class RunService implements RunServiceApi {
 
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
+    const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
     await Promise.all(
       running.map(async (id) => {
@@ -115,11 +121,13 @@ export class RunService implements RunServiceApi {
         resources[id] = await processTreeStats(pid)
       }),
     )
+    for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
       available: running.length < this.capacity,
       capacity: this.capacity,
       running,
+      startedAt,
       resources,
     }
   }
@@ -230,6 +238,6 @@ export class RunService implements RunServiceApi {
       ...(forge === undefined ? {} : { forge }),
     })
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
-    this.runs.set(task.id, { runner, done })
+    this.runs.set(task.id, { runner, startedAt: Date.now(), done })
   }
 }

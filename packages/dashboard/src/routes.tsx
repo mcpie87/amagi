@@ -1137,11 +1137,16 @@ function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
 
 function WorkerSlot({
   taskId,
+  startedAt,
+  now,
   resource,
   state,
   selected,
 }: {
   taskId: string | null
+  startedAt: number | undefined
+  /** Wall-clock snapshot, advanced by one shared 1s interval in WorkersPanel. */
+  now: number
   resource?: RunnerResource | undefined
   state: DashboardState
   selected: string | null
@@ -1158,6 +1163,11 @@ function WorkerSlot({
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {startedAt !== undefined && (
+          <span className="shrink-0 font-mono tabular-nums text-sm text-fg">
+            {fmtElapsed(now - startedAt)}
+          </span>
+        )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
         <Link
           to="/tasks/$id"
@@ -1195,6 +1205,11 @@ function WorkerSlot({
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
   if (status === null) return null
   const running = status.running
   const total = running.reduce(
@@ -1226,6 +1241,8 @@ function WorkersPanel() {
           <WorkerSlot
             key={i}
             taskId={running[i] ?? null}
+            startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
+            now={now}
             resource={running[i] === undefined ? undefined : status.resources[running[i]]}
             state={state}
             selected={selected}
@@ -2040,6 +2057,16 @@ function fmtBytes(n: number): string {
 function fmtCpu(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '0s'
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Compact fixed-width elapsed time, e.g. 0:42, 12:07, 2:41:33. */
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const two = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${two(m)}:${two(sec)}` : `${m}:${two(sec)}`
 }
 
 /** Compact "x ago" for a worker's last-run stamp; empty before the first tick. */
