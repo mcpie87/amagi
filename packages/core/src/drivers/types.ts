@@ -68,16 +68,6 @@ export const CAPABILITY_WORDS: Record<keyof TrackerCapabilities, string> = {
   dependencies: 'managing dependencies',
 }
 
-export class UnsupportedCapabilityError extends Error {
-  constructor(
-    readonly capability: keyof TrackerCapabilities,
-    kind: string,
-  ) {
-    super(`${kind} tracker does not support ${CAPABILITY_WORDS[capability]}`)
-    this.name = 'UnsupportedCapabilityError'
-  }
-}
-
 export interface Tracker {
   readonly kind: string
   readonly capabilities: TrackerCapabilities
@@ -86,9 +76,9 @@ export interface Tracker {
   /** Atomically take the next ready task, or null when the queue is empty. */
   claim(id?: string): Promise<TrackerTask | null>
   get(id: string): Promise<TrackerTask | null>
-  /** Create an issue, throwing UnsupportedCapabilityError when the tracker cannot. */
+  /** Create an issue. Callers gate by capabilities before calling. */
   createTask(input: CreateTrackerTask): Promise<TrackerTask>
-  /** Update an issue, throwing UnsupportedCapabilityError when the tracker cannot. */
+  /** Update an issue. Callers gate by capabilities before calling. */
   updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask>
 
   /**

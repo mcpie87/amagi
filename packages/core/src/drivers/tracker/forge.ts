@@ -1,6 +1,7 @@
 import { exec as defaultExec, type Exec, execOk } from '../../exec.ts'
 import { ghEnv, teaEnv } from '../forge-cred.ts'
 import {
+  CAPABILITY_WORDS,
   type CreateTrackerTask,
   type GateRef,
   type Question,
@@ -8,7 +9,6 @@ import {
   type TrackerCapabilities,
   type TrackerStatus,
   type TrackerTask,
-  UnsupportedCapabilityError,
   type UpdateTrackerTask,
 } from '../types.ts'
 
@@ -104,11 +104,11 @@ export abstract class ForgeTracker implements Tracker {
   }
 
   async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
-    throw new UnsupportedCapabilityError('create', this.kind)
+    throw new Error(`${this.kind} tracker does not support ${CAPABILITY_WORDS.create}`)
   }
 
   async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
-    throw new UnsupportedCapabilityError('edit', this.kind)
+    throw new Error(`${this.kind} tracker does not support ${CAPABILITY_WORDS.edit}`)
   }
 
   async heartbeat(_id: string): Promise<boolean> {

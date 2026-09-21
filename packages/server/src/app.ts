@@ -13,7 +13,6 @@ import {
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
-  UnsupportedCapabilityError,
   type UpdateTrackerTask,
   type WorkerActivity,
   type Workspace,
@@ -242,21 +241,16 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const cap = capabilityError(ws.tracker, 'create')
         if (cap !== null) return c.json({ error: cap }, 501)
-        try {
-          const body = c.req.valid('json')
-          const input = ws.config.difficulty.enabled
-            ? {
-                ...body,
-                difficulty: await classifyDifficulty(body.title, body.description, ws.config),
-              }
-            : body
-          const created: TrackerTask = await ws.tracker.createTask(input)
-          const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
-          return c.json(issue ?? created, 201)
-        } catch (err) {
-          if (err instanceof UnsupportedCapabilityError) return c.json({ error: err.message }, 501)
-          throw err
-        }
+        const body = c.req.valid('json')
+        const input = ws.config.difficulty.enabled
+          ? {
+              ...body,
+              difficulty: await classifyDifficulty(body.title, body.description, ws.config),
+            }
+          : body
+        const created: TrackerTask = await ws.tracker.createTask(input)
+        const issue = ws.getIssue === undefined ? null : await ws.getIssue(created.id)
+        return c.json(issue ?? created, 201)
       },
     )
 
@@ -296,16 +290,9 @@ export function createApp({
             remove: current.filter((d) => !body.dependencies?.includes(d)),
           }
         }
-        try {
-          const updated = await ws.tracker.updateTask(id, input)
-          const issue = ws.getIssue === undefined ? null : await ws.getIssue(updated.id)
-          return c.json(issue ?? updated)
-        } catch (err) {
-          if (err instanceof UnsupportedCapabilityError) {
-            return c.json({ error: err.message }, 501)
-          }
-          throw err
-        }
+        const updated = await ws.tracker.updateTask(id, input)
+        const issue = ws.getIssue === undefined ? null : await ws.getIssue(updated.id)
+        return c.json(issue ?? updated)
       },
     )
 
