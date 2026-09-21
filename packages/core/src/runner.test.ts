@@ -397,6 +397,23 @@ describe('Runner.runOnce', () => {
     expect(mainLog).toContain('init')
   })
 
+  test('the implement prompt embeds the re-fetched notes and comments', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = {
+      ...TASK,
+      notes: 'root cause: biome EPIPE panic when piped through head/tail',
+      comments: ['land the prompt rule'],
+    }
+    const harness = new FakeHarness([writesAFile])
+    await makeRunner(tracker, harness).runOnce()
+
+    expect(harness.calls[0]?.prompt).toContain('Issue notes:')
+    expect(harness.calls[0]?.prompt).toContain(
+      'root cause: biome EPIPE panic when piped through head/tail',
+    )
+    expect(harness.calls[0]?.prompt).toContain('- land the prompt rule')
+  })
+
   test('an agent that changes nothing lands in no_pr with its summary as the reason', async () => {
     const harness = new FakeHarness([
       { outcome: { summary: 'already implemented upstream: nothing to do' } },

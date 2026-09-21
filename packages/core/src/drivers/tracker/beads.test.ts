@@ -68,6 +68,10 @@ const SHOW_WITH_DEPS_JSON = `[
     "priority": 2,
     "issue_type": "feature",
     "labels": ["x"],
+    "notes": "root cause already found here",
+    "comments": [
+      { "id": "c1", "issue_id": "tst-1", "author": "someone", "text": "try the fix", "created_at": "2026-09-20T14:02:53Z" }
+    ],
     "dependencies": [
       {
         "id": "tst-abc",
@@ -327,5 +331,15 @@ describe('BeadsTracker', () => {
         url: null,
       },
     ])
+  })
+
+  test('get surfaces notes and comments and asks for them', async () => {
+    const { exec, calls } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).get('tst-1')
+
+    expect(task?.notes).toBe('root cause already found here')
+    expect(task?.comments).toEqual(['try the fix'])
+    const show = calls.find((c) => c.includes('show'))
+    expect(show).toContain('--include-comments')
   })
 })

@@ -10,6 +10,10 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Free-form markdown notes on the issue; beads populates it, others leave it unset. */
+  notes?: string
+  /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
+  comments?: string[]
 }
 
 /** Opaque handle to whatever the tracker uses to block an issue on a human. */

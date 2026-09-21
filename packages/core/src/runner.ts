@@ -253,7 +253,16 @@ export class Runner {
     resume = false,
   ): Promise<void> {
     const { store, config } = this.deps
-    const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
+    // The claimed task is a lite ready row without notes or comments; re-read the
+    // full issue so the agent sees the tracker context (and never needs bd inside
+    // the worktree, where it has no database). Best effort, like the PR-body re-read.
+    let current = task
+    try {
+      current = (await this.deps.tracker.get(task.id)) ?? task
+    } catch {
+      current = task
+    }
+    const promptCtx = { task: current, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
 
     this.throwIfCancelled(task.id)
     this.transition(task.id, 'implementing')
@@ -341,7 +350,7 @@ export class Runner {
           sessionId,
           {
             cwd,
-            prompt: whyNoChangesPrompt(task),
+            prompt: whyNoChangesPrompt(current),
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
@@ -350,12 +359,14 @@ export class Runner {
         if (why.stopped) return
         reason = why.summary?.trim() !== '' ? why.summary : null
       }
+      // No changes AND no agent-written explanation: never read as "already done".
       this.transition(
         task.id,
         'no_pr',
         reason ??
-          'the agent produced no changes; the task may already be done or need no PR — ' +
-            'verify and close it explicitly, it will not be closed automatically',
+          'the agent produced no changes and wrote no summary explaining why; treat ' +
+            'this as unverified rather than done — investigate before closing, it will ' +
+            'not be closed automatically',
       )
       return
     }
