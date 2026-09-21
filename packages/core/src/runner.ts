@@ -10,7 +10,7 @@ import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/type
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
-import { changesSinceBase, formatPrBody } from './pr-body.ts'
+import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
   commitMessage,
@@ -331,7 +331,7 @@ export class Runner {
       effort = resumed.effort ?? effort
     }
 
-    const committed = await this.commit(task, cwd)
+    const committed = await this.commit(task, cwd, config.repo.baseBranch)
     if (!committed) {
       let reason = summary?.trim() !== '' ? summary : null
       if (reason === null && sessionId !== null) {
@@ -632,16 +632,22 @@ export class Runner {
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
-  private async commit(task: TrackerTask, cwd: string): Promise<boolean> {
+  private async commit(task: TrackerTask, cwd: string, base: string): Promise<boolean> {
     const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-    if (status.stdout.trim() === '') return false
-
-    await this.exec(['git', 'add', '-A'], { cwd })
-    const message = commitMessage(task)
-    const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
-    if (commit.exitCode !== 0) {
-      throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
+    if (status.stdout.trim() !== '') {
+      await this.exec(['git', 'add', '-A'], { cwd })
+      const message = commitMessage(task)
+      const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
+      if (commit.exitCode !== 0) {
+        throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
+      }
     }
+
+    // A clean worktree may still hold the agent's own commit from the session;
+    // HEAD ahead of the base is work worth a PR, not the no_changes case.
+    const ref = await diffBase(this.exec, cwd, base)
+    const ahead = await this.exec(['git', 'rev-list', '--count', `${ref}..HEAD`], { cwd })
+    if (ahead.exitCode !== 0 || Number(ahead.stdout.trim()) === 0) return false
 
     const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
     this.deps.store.append(task.id, {
