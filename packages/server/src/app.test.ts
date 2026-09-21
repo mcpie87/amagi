@@ -1133,6 +1133,7 @@ describe('repo settings endpoints', () => {
           capacity: 1,
           running: [],
           resources: {},
+          startedAt: {},
           autoQueue: true,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
