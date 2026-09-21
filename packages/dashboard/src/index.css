@@ -1558,6 +1558,10 @@ textarea::placeholder {
   background: #263027;
   color: #a8b99a;
 }
+.agent-log-last {
+  margin-left: 12px;
+  color: #d5e2c8;
+}
 .agent-log-header button {
   background: #394837;
   color: #d5e2c8;
