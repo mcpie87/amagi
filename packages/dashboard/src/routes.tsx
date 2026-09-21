@@ -846,14 +846,14 @@ function QueueView() {
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
 
-  const taskList = (tasks: TaskView[]) => (
+  const taskList = (tasks: TaskView[], closable = false) => (
     <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800 bg-zinc-900">
       {tasks.map((task) => (
-        <li key={task.id}>
+        <li key={task.id} className="flex items-center">
           <Link
             to="/tasks/$id"
             params={{ id: task.id }}
-            className="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800"
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 hover:bg-zinc-800"
           >
             <Badge state={task.state} />
             <span className="min-w-0 flex-1">
@@ -864,6 +864,9 @@ function QueueView() {
               </span>
             </span>
           </Link>
+          {closable && selected !== null && (
+            <CloseButton repo={selected} taskId={task.id} state={task.state} />
+          )}
         </li>
       ))}
     </ul>
@@ -881,7 +884,7 @@ function QueueView() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-400">
             Needs attention ({attention.length})
           </h2>
-          {taskList(attention)}
+          {taskList(attention, true)}
         </div>
       )}
       {queue.length === 0 ? <p className="text-zinc-500">No active tasks.</p> : taskList(queue)}
@@ -1071,6 +1074,45 @@ function ReclaimButton({
   )
 }
 
+function CloseButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'needs_human' && state !== 'no_pr') return null
+
+  const close = async () => {
+    const reason = window.prompt('Reason for closing this task')
+    if (reason === null || reason.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void close()}
+        className="rounded border border-zinc-700 bg-zinc-800 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+      >
+        Close
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -1193,6 +1235,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && <CloseButton repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-zinc-500">{task.id}</p>

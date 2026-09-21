@@ -57,6 +57,8 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   if (from === to) return false
+  // A parked needs-attention task is retired by the operator's close action.
+  if (to === 'abandoned' && (from === 'needs_human' || from === 'no_pr')) return true
   if (isTerminal(from)) return false
   if (isTerminal(to)) return true
   return FORWARD[from].includes(to)
