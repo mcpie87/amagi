@@ -42,6 +42,8 @@ describe('loadConfig', () => {
     expect(config.loop.maxParallel).toBe(1)
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
+    expect(config.loop.stallWatchIntervalSec).toBe(300)
+    expect(config.loop.stallTimeoutSec).toBe(3600)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {
@@ -120,6 +122,13 @@ describe('loadConfig', () => {
   test('rejects maxParallel above the ceiling', () => {
     writeRepo('[loop]\nmaxParallel = 100\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+  })
+
+  test('stall watcher keys are overridable', () => {
+    writeRepo('[loop]\nstallWatchIntervalSec = 60\nstallTimeoutSec = 7200\n')
+    const config = loadConfig(repo).config
+    expect(config.loop.stallWatchIntervalSec).toBe(60)
+    expect(config.loop.stallTimeoutSec).toBe(7200)
   })
 })
 

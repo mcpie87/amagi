@@ -36,6 +36,7 @@ type RawTask = {
   checks_ok: number | null
   created_at: number
   updated_at: number
+  last_heartbeat_at: number | null
 }
 
 type RawQuestion = {
@@ -256,6 +257,44 @@ export class Store {
     }
     const rows = this.db.query(`select * from tasks ${order}`).all(limit) as RawTask[]
     return rows.map(toTask)
+  }
+
+  /**
+   * A column rather than an event: heartbeats land on every lease tick, so
+   * folding them into the event log would drown the streams in noise. The
+   * stall watcher reads this timestamp to tell a live worker from a dead one.
+   */
+  heartbeat(taskId: string): void {
+    this.db.query('update tasks set last_heartbeat_at = ? where id = ?').run(Date.now(), taskId)
+  }
+
+  /**
+   * Tasks in the given states whose last activity (worker heartbeat, falling
+   * back to the last event) predates `beforeMs`. The stall watcher's scan set.
+   */
+  stalledTasks(
+    states: readonly TaskState[],
+    beforeMs: number,
+  ): { id: string; state: TaskState; updatedAt: number; lastHeartbeatAt: number | null }[] {
+    if (states.length === 0) return []
+    const holes = states.map(() => '?').join(', ')
+    const rows = this.db
+      .query(
+        `select id, state, updated_at, last_heartbeat_at from tasks
+         where state in (${holes}) and coalesce(last_heartbeat_at, updated_at) < ?`,
+      )
+      .all(...states, beforeMs) as {
+      id: string
+      state: string
+      updated_at: number
+      last_heartbeat_at: number | null
+    }[]
+    return rows.map((r) => ({
+      id: r.id,
+      state: r.state as TaskState,
+      updatedAt: r.updated_at,
+      lastHeartbeatAt: r.last_heartbeat_at,
+    }))
   }
 
   events(opts: { taskId?: string; sinceSeq?: number; limit?: number } = {}): StoredEvent[] {

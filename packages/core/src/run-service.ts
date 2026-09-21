@@ -36,6 +36,8 @@ export type WorkerActivity = {
   error: string | null
   prsScanned: number
   mentionsResponded: number
+  /** Human summary of the last tick for workers without PR/mention counters. */
+  detail?: string | null
 }
 
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }

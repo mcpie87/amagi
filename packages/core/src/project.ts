@@ -123,7 +123,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         tasks[event.taskId] = {
           ...current,
           state: 'claimed',
-          statusReason: null,
+          statusReason: event.reason ?? null,
           updatedAt: event.ts,
         }
       }
