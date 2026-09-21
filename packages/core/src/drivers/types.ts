@@ -10,6 +10,8 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
+  difficulty?: string | null
 }
 
 /** Opaque handle to whatever the tracker uses to block an issue on a human. */
@@ -49,6 +51,8 @@ export type CreateTrackerTask = {
   dependencies: string[]
   /** Parent issue id when the task is a child of a container (epic/milestone). */
   parent: string | null
+  /** Difficulty level stamped at creation; trackers that cannot store it ignore it. */
+  difficulty?: string | null
 }
 
 export type UpdateTrackerTask = Partial<{

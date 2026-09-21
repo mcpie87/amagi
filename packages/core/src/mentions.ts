@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
+import { classifyDifficulty } from './difficulty.ts'
+import { ghEnv } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -48,6 +50,18 @@ export function saveHandledMentions(path: string, ids: Set<string>): void {
   writeFileSync(path, JSON.stringify([...ids]))
 }
 
+/**
+ * True when a comment mentions the agent handle and was written by a human.
+ * Shared by the one-shot responder and the continuous watcher so both agree on
+ * what counts as a mention.
+ */
+export function isAgentMention(comment: PrComment, handle: string): boolean {
+  if (comment.body === '' || comment.user === handle) return false
+  const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`@${escaped}\\b`, 'i')
+  return re.test(comment.body)
+}
+
 export type ListPrMentionsOptions = {
   driver: PrDriver
   cwd: string
@@ -58,9 +72,27 @@ export type ListPrMentionsOptions = {
 /** Comments on a PR that mention the agent handle, from humans (never the agent itself). */
 export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrComment[]> {
   const comments = await opts.driver.listComments(opts.cwd, opts.pr.number)
-  const escaped = opts.handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`@${escaped}\\b`, 'i')
-  return comments.filter((c) => c.body !== '' && c.user !== opts.handle && re.test(c.body))
+  return comments.filter((c) => isAgentMention(c, opts.handle))
+}
+
+/** Last-seen comment per open PR, so the watcher skips PRs that have not changed. */
+export type MentionWatchState = Record<string, { updatedAt: string; lastCommentId: number }>
+
+export function mentionWatchPath(repoName: string): string {
+  return join(cacheHome(), 'amagi', 'mentions', `${repoName}.watch.json`)
+}
+
+export function readMentionWatch(path: string): MentionWatchState {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as MentionWatchState
+  } catch {
+    return {}
+  }
+}
+
+export function saveMentionWatch(path: string, state: MentionWatchState): void {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify(state))
 }
 
 /** Live progress of one mention response, for a status line while it works. */
@@ -233,7 +265,10 @@ async function respondToExplain(
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], { cwd: opts.root })
+  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], {
+    cwd: opts.root,
+    env: ghEnv(),
+  })
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')
@@ -316,18 +351,24 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     )
     return
   }
+  const description = [
+    `From @${opts.mention.user} on PR #${opts.pr.number} "${opts.pr.title}" (${opts.pr.url}):`,
+    '',
+    opts.mention.body.trim(),
+  ].join('\n')
+  const title = addTaskTitle(opts)
+  const difficulty = opts.config.difficulty.enabled
+    ? await classifyDifficulty(title, description, opts.config)
+    : null
   const task = await tracker.createTask({
-    title: addTaskTitle(opts),
-    description: [
-      `From @${opts.mention.user} on PR #${opts.pr.number} "${opts.pr.title}" (${opts.pr.url}):`,
-      '',
-      opts.mention.body.trim(),
-    ].join('\n'),
+    title,
+    description,
     acceptanceCriteria: null,
     priority: null,
     labels: [],
     dependencies: [],
     parent: null,
+    ...(difficulty === null ? {} : { difficulty }),
   })
   const where = task.url ?? `task ${task.id}`
   await opts.driver.postComment(

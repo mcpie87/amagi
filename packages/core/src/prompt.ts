@@ -246,6 +246,33 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
   ].join('\n')
 }
 
+export type DifficultyClassifyContext = {
+  title: string
+  description: string
+  levels: readonly string[]
+}
+
+export function classifyDifficultySystemPrompt(): string {
+  return [
+    'You are a classifier for issue tracker tasks.',
+    'Do not use any tools. Do not modify any files.',
+    'Reply with exactly one token, nothing else.',
+  ].join('\n')
+}
+
+export function classifyDifficultyPrompt(ctx: DifficultyClassifyContext): string {
+  const parts = [`Task: ${ctx.title}`]
+  if (ctx.description.trim() !== '') parts.push('', ctx.description.trim())
+  parts.push(
+    '',
+    `Classify how difficult this task is for an AI coding agent to implement, into exactly one of: ${ctx.levels.join(', ')}.`,
+    'Consider scope, ambiguity, risk, and how many files or systems it likely touches.',
+    '',
+    `Reply with exactly one token: ${ctx.levels.join(', ')}.`,
+  )
+  return parts.join('\n')
+}
+
 /** The agent changed nothing and left no summary; ask it why for the no_pr reason. */
 export function whyNoChangesPrompt(task: TrackerTask): string {
   const parts = [

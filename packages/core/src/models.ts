@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import modelTable from './models.json' with { type: 'json' }
 import { cacheHome } from './paths.ts'
 
 /**
@@ -13,7 +14,7 @@ type HarnessModelTable = Partial<Record<string, readonly string[]>> & {
   codex: readonly string[]
 }
 
-const parsed = JSON.parse(readFileSync(join(import.meta.dir, 'models.json'), 'utf8')) as {
+const parsed = modelTable as {
   models: HarnessModelTable
   efforts: HarnessModelTable
 }

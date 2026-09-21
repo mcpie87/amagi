@@ -71,12 +71,20 @@ export const runCommand = defineCommand({
           const details = [
             event.priority === null || event.priority === undefined ? null : `P${event.priority}`,
             event.taskType,
+            event.difficulty,
           ].filter(Boolean)
           if (details.length > 0) console.log(dim(`  ${details.join('  ')}`))
           if (event.url) console.log(dim(`  ${event.url}`))
           if (event.description?.trim()) printBlock(event.description)
           break
         }
+        case 'claim.rejected':
+          console.log(
+            yellow(
+              `  skipped ${event.title}${event.difficulty ? ` (${event.difficulty})` : ''}: ${event.reason}`,
+            ),
+          )
+          break
         case 'task.state':
           console.log(dim(`  -> ${event.to}${event.reason ? `: ${event.reason}` : ''}`))
           break

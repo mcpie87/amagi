@@ -1,8 +1,10 @@
 import { resolve, sep } from 'node:path'
-import type { Notifier, RunServiceApi, Workspace, Workspaces } from '@amagi/core'
+import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
 import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
+import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
+import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
 
 export type ServeOptions = {
   workspaces: Workspaces
@@ -11,6 +13,8 @@ export type ServeOptions = {
   notify?: Notifier[]
   gatePollIntervalMs?: number
   prPollIntervalMs?: number
+  mentionWatchIntervalMs?: number
+  stallWatchIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
@@ -39,15 +43,35 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
 }
 
 /**
- * Gate and PR pollers are per repo. A supervisor checks the registry every few
- * seconds so a repo added (or removed) after startup gets (or loses) its
- * pollers without restarting the server.
+ * Gate and PR pollers are per repo, plus an agent-mention watcher wherever a
+ * forge driver exists and a stall watcher (recovers tasks whose worker stopped
+ * heartbeating). A supervisor checks the registry every few seconds so a repo
+ * added (or removed) after startup gets (or loses) its pollers without
+ * restarting the server.
  */
 function startRepoPollers(
   workspaces: Workspaces,
-  { gateIntervalMs, prIntervalMs }: { gateIntervalMs?: number; prIntervalMs?: number },
+  {
+    gateIntervalMs,
+    prIntervalMs,
+    mentionIntervalMs,
+    stallIntervalMs,
+  }: {
+    gateIntervalMs?: number
+    prIntervalMs?: number
+    mentionIntervalMs?: number
+    stallIntervalMs?: number
+  },
 ) {
-  const pollers = new Map<string, { gate: GatePoller; pr: PrPoller | null }>()
+  const pollers = new Map<
+    string,
+    {
+      gate: GatePoller
+      pr: PrPoller | null
+      mention: MentionWatcher | null
+      stall: StallWatcher
+    }
+  >()
 
   function ensure(): void {
     const keys = new Set(workspaces.list().map((e) => e.key))
@@ -56,6 +80,8 @@ function startRepoPollers(
       const p = pollers.get(key)
       p?.gate.stop()
       p?.pr?.stop()
+      p?.mention?.stop()
+      p?.stall.stop()
       pollers.delete(key)
     }
     for (const key of keys) {
@@ -70,6 +96,7 @@ function startRepoPollers(
         continue
       }
       if (!ws) continue
+      const forge = ws.forge
       pollers.set(key, {
         gate: startGatePoller({
           store: ws.store,
@@ -77,27 +104,64 @@ function startRepoPollers(
           ...(gateIntervalMs === undefined ? {} : { intervalMs: gateIntervalMs }),
         }),
         pr:
-          ws.forge === null
+          forge === null
             ? null
             : startPrPoller({
                 store: ws.store,
-                forge: ws.forge,
+                forge,
                 tracker: ws.tracker,
                 cwd: ws.root,
                 ...(prIntervalMs === undefined ? {} : { intervalMs: prIntervalMs }),
               }),
+        mention:
+          forge === null
+            ? null
+            : startMentionWatcher({
+                repo: ws.key,
+                root: ws.root,
+                repoName: ws.name,
+                config: ws.config,
+                driver: forge,
+                tracker: ws.tracker,
+                intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
+              }),
+        stall: startStallWatcher({
+          repo: ws.key,
+          store: ws.store,
+          tracker: ws.tracker,
+          timeoutMs: ws.config.loop.stallTimeoutSec * 1000,
+          intervalMs: stallIntervalMs ?? ws.config.loop.stallWatchIntervalSec * 1000,
+          ...(ws.config.loop.doomEnabled
+            ? {
+                doom: {
+                  toolWindowMs: ws.config.loop.doomToolWindowSec * 1000,
+                  toolRepeat: ws.config.loop.doomToolRepeat,
+                  checkRounds: ws.config.loop.doomCheckRounds,
+                  diffWindowMs: ws.config.loop.doomDiffWindowSec * 1000,
+                },
+              }
+            : {}),
+        }),
       })
     }
   }
 
   ensure()
   const supervisor = setInterval(ensure, 10_000)
+  const workers = (): WorkerActivity[] =>
+    [...pollers.values()].flatMap((p) => [
+      ...(p.mention ? [p.mention.activity()] : []),
+      p.stall.activity(),
+    ])
   return {
+    workers,
     stop() {
       clearInterval(supervisor)
       for (const p of pollers.values()) {
         p.gate.stop()
         p.pr?.stop()
+        p.mention?.stop()
+        p.stall.stop()
       }
       pollers.clear()
     },
@@ -111,19 +175,24 @@ export function serve({
   notify,
   gatePollIntervalMs,
   prPollIntervalMs,
+  mentionWatchIntervalMs,
+  stallWatchIntervalMs,
   staticDir,
   runner,
   runnerRepo,
 }: ServeOptions) {
+  const repoPollers = startRepoPollers(workspaces, {
+    ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),
+    ...(prPollIntervalMs === undefined ? {} : { prIntervalMs: prPollIntervalMs }),
+    ...(mentionWatchIntervalMs === undefined ? {} : { mentionIntervalMs: mentionWatchIntervalMs }),
+    ...(stallWatchIntervalMs === undefined ? {} : { stallIntervalMs: stallWatchIntervalMs }),
+  })
   const app = createApp({
     workspaces,
     ...(notify === undefined ? {} : { notify }),
     ...(runner === undefined ? {} : { runner }),
     ...(runnerRepo === undefined ? {} : { runnerRepo }),
-  })
-  const repoPollers = startRepoPollers(workspaces, {
-    ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),
-    ...(prPollIntervalMs === undefined ? {} : { prIntervalMs: prPollIntervalMs }),
+    workers: repoPollers.workers,
   })
   const server = Bun.serve({
     hostname: host,

@@ -21,6 +21,20 @@ const READY_JSON = `[
   }
 ]`
 
+const READY_WITH_DIFFICULTY_JSON = `[
+  {
+    "id": "tst-dif",
+    "title": "Harden the merge path",
+    "description": "Handle edge cases",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "metadata": {
+      "difficulty": "high"
+    }
+  }
+]`
+
 const CLAIMED_JSON = `[
   {
     "id": "tst-lmc",
@@ -75,6 +89,14 @@ const SHOW_WITH_DEPS_JSON = `[
         "status": "blocked",
         "priority": 1,
         "issue_type": "task"
+      },
+      {
+        "id": "tst-human",
+        "title": "Human step",
+        "status": "open",
+        "priority": 3,
+        "issue_type": "task",
+        "labels": ["human"]
       }
     ]
   }
@@ -91,6 +113,44 @@ const gateListJson = (title: string) => `[
     "await_type": "human"
   }
 ]`
+
+/** Recorded from bd 1.3.0 (`bd epic close-eligible --dry-run --json`). */
+const CLOSE_ELIGIBLE_JSON = `[
+  {
+    "epic": {
+      "id": "tst-1",
+      "title": "M4: question channel",
+      "description": "desc",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "epic"
+    },
+    "total_children": 7,
+    "closed_children": 7,
+    "eligible_for_close": true
+  },
+  {
+    "epic": {
+      "id": "tst-2",
+      "title": "M6: review loop",
+      "description": "desc",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "epic"
+    },
+    "total_children": 5,
+    "closed_children": 0,
+    "eligible_for_close": false
+  }
+]`
+
+/** Recorded from bd 1.3.0 (`bd epic close-eligible --reason ... --json`). */
+const EPIC_CLOSE_JSON = `{
+  "closed": ["tst-1"],
+  "count": 1,
+  "reason": "All children completed",
+  "schema_version": 1
+}`
 
 type Call = readonly string[]
 
@@ -125,6 +185,12 @@ describe('BeadsTracker', () => {
     expect(calls[0]).toContain('--json')
   })
 
+  test('surfaces the difficulty level stored in metadata', async () => {
+    const { exec } = fake((c) => (c.includes('ready') ? ok(READY_WITH_DIFFICULTY_JSON) : undefined))
+    const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
+    expect(tasks[0]?.difficulty).toBe('high')
+  })
+
   test('an empty queue is an empty array, not an error', async () => {
     const { exec } = fake(() => ok('[]\n'))
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
@@ -139,6 +205,26 @@ describe('BeadsTracker', () => {
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'ready', '--claim', '--json'])
+  })
+
+  test('claim falls back to a by-id claim when ready --claim skips a pre-assigned issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('update')
+        ? ok('')
+        : c.includes('show')
+          ? ok(CLAIMED_JSON)
+          : c.includes('--claim')
+            ? ok('[]')
+            : c.includes('ready')
+              ? ok(READY_JSON)
+              : undefined,
+    )
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).claim()
+
+    expect(task?.id).toBe('tst-lmc')
+    expect(task?.status).toBe('in_progress')
+    const update = calls.find((c) => c.includes('update'))
+    expect(update?.slice(0, 4)).toEqual(['bd', 'update', 'tst-lmc', '--status'])
   })
 
   test('epics, milestones and gates are never handed out as work', async () => {
@@ -268,6 +354,22 @@ describe('BeadsTracker', () => {
     expect(call).toContain('tst-epic')
   })
 
+  test('create stamps the difficulty level as metadata', async () => {
+    const { exec, calls } = fake((c) => (c.includes('create') ? ok(CREATE_JSON) : undefined))
+    await new BeadsTracker({ cwd: '/repo', exec }).createTask({
+      title: 'Ship the board',
+      description: '',
+      acceptanceCriteria: null,
+      priority: null,
+      labels: [],
+      dependencies: [],
+      parent: null,
+      difficulty: 'high',
+    })
+    const call = calls[0]
+    expect(call?.[call.indexOf('--metadata') + 1]).toBe('{"difficulty":"high"}')
+  })
+
   test('create omits unset fields instead of passing empties', async () => {
     const { exec, calls } = fake((c) => (c.includes('create') ? ok(CREATE_JSON) : undefined))
     await new BeadsTracker({ cwd: '/repo', exec }).createTask({
@@ -327,7 +429,7 @@ describe('BeadsTracker', () => {
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'children', 'tst-epic', '--json'])
   })
 
-  test('getIssue surfaces dependency blockers with their state', async () => {
+  test('getIssue surfaces dependency blockers with their state and labels', async () => {
     const { exec } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
     const issue = await new BeadsTracker({ cwd: '/repo', exec }).getIssue('tst-1')
 
@@ -341,7 +443,49 @@ describe('BeadsTracker', () => {
         priority: 1,
         type: 'task',
         url: null,
+        labels: [],
+      },
+      {
+        id: 'tst-human',
+        title: 'Human step',
+        description: '',
+        status: 'open',
+        priority: 3,
+        type: 'task',
+        url: null,
+        labels: ['human'],
       },
     ])
+  })
+
+  test('eligibleEpics previews only the eligible epics from the dry-run', async () => {
+    const { exec, calls } = fake((c) => (c.includes('epic') ? ok(CLOSE_ELIGIBLE_JSON) : undefined))
+    const epics = await new BeadsTracker({ cwd: '/repo', exec }).eligibleEpics()
+
+    expect(epics).toEqual([
+      {
+        id: 'tst-1',
+        title: 'M4: question channel',
+        status: 'open',
+        totalChildren: 7,
+        closedChildren: 7,
+      },
+    ])
+    expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'epic', 'close-eligible', '--dry-run'])
+    expect(calls[0]).toContain('--json')
+  })
+
+  test('closeEligibleEpics runs the close with the operator reason', async () => {
+    const { exec, calls } = fake((c) => (c.includes('epic') ? ok(EPIC_CLOSE_JSON) : undefined))
+    const result = await new BeadsTracker({ cwd: '/repo', exec }).closeEligibleEpics(
+      'All children completed',
+    )
+
+    expect(result).toEqual({ closed: ['tst-1'], reason: 'All children completed' })
+    const call = calls[0]
+    expect(call?.slice(0, 3)).toEqual(['bd', 'epic', 'close-eligible'])
+    expect(call).toContain('--reason')
+    expect(call).toContain('All children completed')
+    expect(call).toContain('--json')
   })
 })

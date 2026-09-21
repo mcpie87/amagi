@@ -1,11 +1,7 @@
 import type { Config } from './config.ts'
-import {
-  amagiLabels,
-  type CreatePrOptions,
-  gitTokenConfig,
-  makePrDriver,
-  type PrDriver,
-} from './drivers/pr.ts'
+import { claimEligible, implementModel } from './difficulty.ts'
+import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { type CheckResult, isTerminal, type TaskState } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -21,7 +17,7 @@ import {
   reclaimPrompt,
   whyNoChangesPrompt,
 } from './prompt.ts'
-import { backoffDelayMs, isTransientFailure } from './retry.ts'
+import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
@@ -45,6 +41,14 @@ export type RunOnceResult = {
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
 
+/**
+ * Worker heartbeat cadence into the store, well under the default 1h stall
+ * threshold so a live runner never looks stalled. Kept separate from the
+ * tracker lease cadence: forge/github grant a 6h lease, which would make the
+ * lease tick far too slow to serve as the stall watcher's activity signal.
+ */
+const WORKER_HEARTBEAT_MS = 60_000
+
 class LeaseLostError extends Error {
   constructor(taskId: string) {
     super(`task ${taskId}: claim lease was reclaimed, stopping before another worker collides`)
@@ -67,10 +71,12 @@ export class RunCancelledError extends Error {
  */
 class Lease {
   private timer: ReturnType<typeof setInterval> | null = null
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private lost = false
 
   constructor(
     private readonly tracker: Tracker,
+    private readonly store: Store,
     private readonly taskId: string,
   ) {}
 
@@ -81,11 +87,16 @@ class Lease {
         if (!alive) this.lost = true
       })
     }, period)
+    this.heartbeatTimer = setInterval(() => {
+      this.store.heartbeat(this.taskId)
+    }, WORKER_HEARTBEAT_MS)
   }
 
   stop(): void {
     if (this.timer !== null) clearInterval(this.timer)
     this.timer = null
+    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = null
   }
 
   get isLost(): boolean {
@@ -122,7 +133,15 @@ export class Runner {
 
   /** Claims one ready task and drives it as far as the current milestone goes. */
   async runOnce(): Promise<RunOnceResult> {
-    const task = await this.deps.tracker.claim()
+    const { store, tracker, config } = this.deps
+    const task = await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+      store.append(null, {
+        type: 'claim.rejected',
+        title: skipped.title,
+        difficulty: skipped.difficulty ?? null,
+        reason,
+      })
+    })
     if (task === null) return null
     return this.runClaimed(task)
   }
@@ -141,6 +160,9 @@ export class Runner {
       priority: task.priority,
       taskType: task.type,
       url: task.url,
+      ...(task.difficulty === undefined || task.difficulty === null
+        ? {}
+        : { difficulty: task.difficulty }),
     })
 
     try {
@@ -186,6 +208,11 @@ export class Runner {
   private transition(taskId: string, to: TaskState, reason?: string): void {
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
+    // An external actor (the doom guard) may have parked the task in a
+    // terminal state mid-run; once parked, further in-run transitions are
+    // no-ops so the runner unwinds cleanly instead of throwing an illegal
+    // transition.
+    if (from !== null && isTerminal(from)) return
     this.deps.store.append(taskId, {
       type: 'task.state',
       from,
@@ -204,12 +231,20 @@ export class Runner {
 
     let worktree: WorktreeSpec
     if (resume) {
-      worktree = { path: recorded.worktree!, branch: recorded.branch! }
+      worktree = {
+        path: recorded.worktree as string,
+        branch: recorded.branch as string,
+      }
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
-      // https; without one, fall back to the local base branch so the ssh key
-      // never prompts during an unattended run.
-      const tokenCfg = config.forge.kind === 'github' ? gitTokenConfig() : []
+      // https; without one, fall back to the local base branch so git never
+      // prompts during an unattended run.
+      const tokenCfg = await gitTokenConfig(
+        this.exec,
+        this.deps.repoRoot,
+        config.forge.remote,
+        forgeToken(config.forge.kind),
+      )
       if (tokenCfg.length > 0) {
         await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
           cwd: this.deps.repoRoot,
@@ -236,7 +271,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, task.id)
+    const lease = new Lease(this.deps.tracker, this.deps.store, task.id)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, resume)
@@ -408,7 +443,7 @@ export class Runner {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const hint = /auth|login|token|not logged/i.test(message)
-        ? ' (gh needs auth: set GH_TOKEN in .env or run gh auth login)'
+        ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
         type: 'error',
@@ -605,6 +640,9 @@ export class Runner {
         reason: 'transient harness failure',
         detail: run.detail ?? '',
       })
+      // A session that hit its own limit (turn/context window) is spent and
+      // cannot be resumed; the retry starts a fresh session in the same worktree.
+      if (isSessionLimit(run.detail ?? '')) sessionId = null
       this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out.
       const deadline = Date.now() + delayMs
