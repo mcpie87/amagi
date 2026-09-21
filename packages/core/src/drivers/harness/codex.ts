@@ -1,17 +1,7 @@
-import { AsyncQueue } from '../../async-queue.ts'
 import type { AgentEvent } from '../../events.ts'
-import { CommandError, exec } from '../../exec.ts'
-import { jsonLines } from '../../jsonl.ts'
-import { parseModelLines } from '../../models.ts'
-import { killTree } from '../../process.ts'
-import type {
-  AgentOutcome,
-  AgentProcess,
-  AgentStartOptions,
-  AgentUsage,
-  Harness,
-} from '../types.ts'
-import { harnessEnv } from './env.ts'
+import { HARDCODED_EFFORTS, HARDCODED_MODELS } from '../../models.ts'
+import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type FileChange = { path: string; kind: string }
 
@@ -44,26 +34,13 @@ type CodexMessage = {
   usage?: {
     input_tokens?: number
     output_tokens?: number
+    cached_input_tokens?: number
   }
   error?: { message: string }
   message?: string
 }
 
 type ItemPhase = 'started' | 'updated' | 'completed'
-
-function renderToolResult(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === 'object' && part !== null && 'text' in part
-          ? String((part as { text: unknown }).text)
-          : JSON.stringify(part),
-      )
-      .join('\n')
-  }
-  return JSON.stringify(content ?? '')
-}
 
 /**
  * Turns codex's `exec --json` dialect (the `ThreadEvent`/`ThreadItem` shapes
@@ -216,6 +193,7 @@ export class CodexTranslator {
       this.usage = {
         inputTokens: msg.usage.input_tokens ?? 0,
         outputTokens: msg.usage.output_tokens ?? 0,
+        cachedTokens: msg.usage.cached_input_tokens ?? 0,
         // Codex's usage payload carries no dollar figure, unlike claude's.
         costUsd: null,
       }
@@ -223,6 +201,7 @@ export class CodexTranslator {
         kind: 'usage',
         inputTokens: this.usage.inputTokens,
         outputTokens: this.usage.outputTokens,
+        ...(this.usage.cachedTokens === 0 ? {} : { cachedTokens: this.usage.cachedTokens }),
       })
     }
     events.push({
@@ -259,10 +238,11 @@ export class CodexHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    const cmd = [this.bin, 'models']
-    const result = await exec(cmd)
-    if (result.exitCode !== 0) throw new CommandError(cmd, result)
-    return parseModelLines(result.stdout)
+    return [...HARDCODED_MODELS.codex]
+  }
+
+  async listEfforts(): Promise<string[]> {
+    return [...HARDCODED_EFFORTS.codex]
   }
 
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
@@ -285,6 +265,7 @@ export class CodexHarness implements Harness {
     // codex has no `--append-system-prompt`; `developer_instructions` is the
     // config key that injects extra instructions as a separate message.
     if (opts.systemPrompt) argv.push('-c', `developer_instructions=${opts.systemPrompt}`)
+    if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')
@@ -300,53 +281,11 @@ export class CodexHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    const proc = Bun.spawn(argv, {
-      cwd: opts.cwd,
-      env: { ...harnessEnv(), ...opts.env },
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-
-    const queue = new AsyncQueue<AgentEvent>()
-    const translator = new CodexTranslator()
-    const stderr = new Response(proc.stderr).text()
-
-    const done: Promise<AgentOutcome> = (async () => {
-      try {
-        for await (const raw of jsonLines(proc.stdout)) {
-          for (const event of translator.push(raw)) queue.push(event)
-        }
-      } catch (err) {
-        queue.push({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
-      } finally {
-        queue.close()
-      }
-
-      const exitCode = await proc.exited
-      return {
-        exitCode,
-        ok: translator.ok && exitCode === 0,
-        sessionId: translator.sessionId,
-        summary: translator.summary,
-        usage: translator.usage,
-        stderr: await stderr,
-      }
-    })()
-
-    return {
-      pid: proc.pid,
-      events: () => queue,
-      done,
-      kill: async () => {
-        await killTree(proc.pid)
-      },
+    return spawnAgent(argv, opts, new CodexTranslator(), {
       // codex reports no resolved model over the stream, so the requested one
       // is all the harness knows.
-      get model() {
-        return opts.model ?? null
-      },
+      model: () => opts.model ?? null,
       effort: opts.effort ?? null,
-    }
+    })
   }
 }

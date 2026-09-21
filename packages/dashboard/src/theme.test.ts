@@ -1,19 +1,27 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { currentTheme, setTheme, THEME_STORAGE_KEY } from './theme.ts'
 
-function installGlobals(prefersDark: boolean) {
+// theme.ts reads window.matchMedia at module load, so the globals have to be in
+// place before the dynamic import below.
+function installGlobals(osLight: boolean): Map<string, string> {
   const store = new Map<string, string>()
-  ;(globalThis as { localStorage?: unknown }).localStorage = {
+  ;(globalThis as Record<string, unknown>).localStorage = {
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
       store.set(key, value)
     },
+    removeItem: (key: string) => {
+      store.delete(key)
+    },
   }
-  ;(globalThis as { document?: unknown }).document = {
+  ;(globalThis as Record<string, unknown>).document = {
     documentElement: { dataset: {} as Record<string, string> },
+    querySelector: () => ({ setAttribute: () => {} }),
   }
-  ;(globalThis as { window?: unknown }).window = {
-    matchMedia: (query: string) => ({ matches: query.includes('dark') && prefersDark }),
+  ;(globalThis as Record<string, unknown>).window = {
+    matchMedia: (query: string) => ({
+      matches: query.includes('light') ? osLight : !osLight,
+      addEventListener: () => {},
+    }),
   }
   return store
 }
@@ -25,31 +33,22 @@ afterEach(() => {
 })
 
 describe('theme', () => {
-  test('falls back to the OS preference when nothing is stored', () => {
-    const store = installGlobals(true)
-    store.delete(THEME_STORAGE_KEY)
-    expect(currentTheme()).toBe('dark')
-    installGlobals(false)
-    store.delete(THEME_STORAGE_KEY)
-    expect(currentTheme()).toBe('light')
-  })
-
-  test('prefers the stored value over the OS preference', () => {
-    installGlobals(false)
-    localStorage.setItem(THEME_STORAGE_KEY, 'dark')
-    expect(currentTheme()).toBe('dark')
-  })
-
-  test('setTheme persists and applies to the document', () => {
-    installGlobals(true)
-    setTheme('light')
-    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light')
+  test('setThemePref persists the choice and applies it', async () => {
+    const store = installGlobals(false)
+    const { setThemePref } = await import('./theme.ts')
+    setThemePref('dark')
+    expect(store.get('amagi:theme')).toBe('dark')
+    expect(document.documentElement.dataset.theme).toBe('dark')
+    setThemePref('light')
+    expect(store.get('amagi:theme')).toBe('light')
     expect(document.documentElement.dataset.theme).toBe('light')
   })
 
-  test('ignores an invalid stored value', () => {
-    const store = installGlobals(false)
-    store.set(THEME_STORAGE_KEY, 'sepia')
-    expect(currentTheme()).toBe('light')
+  test('setThemePref("system") clears the stored choice', async () => {
+    const store = installGlobals(true)
+    const { setThemePref } = await import('./theme.ts')
+    setThemePref('light')
+    setThemePref('system')
+    expect(store.has('amagi:theme')).toBe(false)
   })
 })
