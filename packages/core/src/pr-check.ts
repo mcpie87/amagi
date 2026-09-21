@@ -12,6 +12,8 @@ export type PrInfo = {
   baseRefName: string
   mergeable: string
   mergeStateStatus: string
+  /** Head commit SHA, so the conflict watcher can skip PRs whose head has not changed. */
+  headRefOid: string | null
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
 }
@@ -21,7 +23,8 @@ export type PrCheckOptions = {
   exec?: Exec
 }
 
-const GH_FIELDS = 'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,updatedAt'
+const GH_FIELDS =
+  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {

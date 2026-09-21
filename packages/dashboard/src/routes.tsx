@@ -1246,9 +1246,7 @@ function WorkersPanel() {
                 w.detail !== null && w.detail !== undefined ? (
                   <span>{w.detail}</span>
                 ) : (
-                  <span>
-                    scanned {w.prsScanned} PRs · responded {w.mentionsResponded}
-                  </span>
+                  <span>{w.counters.map((c) => `${c.label} ${c.value}`).join(' · ')}</span>
                 )
               ) : (
                 <span className="text-red-ink">error: {w.error}</span>
@@ -1689,6 +1687,10 @@ function AnswerBox({
 
   if (submitted) {
     return <p className="mt-2 text-sm text-emerald-ink">answered</p>
+  }
+
+  if (submitted) {
+    return <p className="mt-2 text-sm text-emerald-400">answered</p>
   }
 
   return (

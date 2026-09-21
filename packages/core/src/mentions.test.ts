@@ -51,6 +51,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
+  headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
   ...over,
 })
