@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
 import { classifyDifficulty } from './difficulty.ts'
+import { ghEnv } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -264,7 +265,10 @@ async function respondToExplain(
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], { cwd: opts.root })
+  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], {
+    cwd: opts.root,
+    env: ghEnv(),
+  })
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')

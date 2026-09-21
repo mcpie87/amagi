@@ -27,7 +27,7 @@ export type Workspace = {
   config: Config
   store: Store
   tracker: Tracker
-  /** Null when the configured forge driver is not implemented yet (forgejo). */
+  /** Null when the configured forge driver could not be built (e.g. no forge binary). */
   forge: PrDriver | null
   listIssues?: () => Promise<BeadsIssue[]>
   /** Rich issue detail, including dependency blockers, when the tracker has it. */
