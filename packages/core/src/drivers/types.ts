@@ -49,6 +49,8 @@ export type CreateTrackerTask = {
   labels: string[]
   /** Issue ids this task depends on (blocked by). */
   dependencies: string[]
+  /** Parent issue id when the task is a child of a container (epic/milestone). */
+  parent: string | null
   /** Difficulty level stamped at creation; trackers that cannot store it ignore it. */
   difficulty?: string | null
 }

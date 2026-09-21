@@ -1,6 +1,7 @@
 export * from './app.ts'
 export * from './gate-poller.ts'
 export * from './mention-watcher.ts'
+export * from './poller.ts'
 export * from './pr-conflict-watcher.ts'
 export * from './pr-poller.ts'
 export * from './schemas.ts'

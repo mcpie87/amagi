@@ -15,6 +15,7 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  currentUsageFor,
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
@@ -1182,6 +1183,7 @@ function WorkerSlot({
   }
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
+  const usage = currentUsageFor(state, taskId)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1204,6 +1206,9 @@ function WorkerSlot({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
         <span>model: {agent?.model ?? 'unknown'}</span>
+        <span>
+          ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
+        </span>
         {resource !== undefined && (
           <>
             <span>rss: {fmtBytes(resource.rssBytes)}</span>
@@ -1224,6 +1229,66 @@ function WorkerSlot({
  * strip sums RSS/CPU/process count over the live agent trees so the operator
  * can see which runner is eating the machine.
  */
+function AutoQueueToggle() {
+  const { status } = useRunner()
+  const { repos, selected } = useDashboard()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fromStatus = status?.autoQueue ?? false
+  const [on, setOn] = useState(fromStatus)
+  useEffect(() => setOn(fromStatus), [fromStatus])
+  // The toggle config lives with the repo the runner serves; address that repo
+  // so it live-applies even when another repo is selected in the dashboard.
+  const runnerRepo = repos?.find((r) => r.name === status?.name)?.key ?? selected
+
+  const toggle = async () => {
+    if (runnerRepo === null || busy) return
+    const next = !on
+    setBusy(true)
+    setError(null)
+    setOn(next)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${runnerRepo}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ autoQueue: next }),
+      })
+      if (!res.ok) {
+        setOn(!next)
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setOn(!next)
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {error !== null && <span className="text-sm text-red-400">{error}</span>}
+      <button
+        type="button"
+        disabled={busy || runnerRepo === null}
+        onClick={() => void toggle()}
+        title={
+          on
+            ? 'free runner slots get filled automatically as tasks become claimable'
+            : 'dispatch is manual: click Run next (or retry) to start a task'
+        }
+        className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
+          on
+            ? 'bg-emerald-600 text-zinc-950 hover:bg-emerald-500'
+            : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+        }`}
+      >
+        Auto queue: {on ? 'on' : 'off'}
+      </button>
+    </div>
+  )
+}
+
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
@@ -1249,9 +1314,12 @@ function WorkersPanel() {
   )
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        Workers ({running.length}/{status.capacity})
-      </h2>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Workers ({running.length}/{status.capacity})
+        </h2>
+        <AutoQueueToggle />
+      </div>
       <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-4 py-2 text-xs text-fg-muted">
         <span className="font-medium text-fg">{status.name}</span>
         <span>rss: {fmtBytes(total.rssBytes)}</span>
