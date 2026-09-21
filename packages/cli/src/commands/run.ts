@@ -11,6 +11,7 @@ import {
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
+import { loadUsage, saveUsage } from '../picker-usage.ts'
 import { currentRepo } from '../repo.ts'
 import { pickRunSelection } from '../select-run.ts'
 
@@ -36,12 +37,15 @@ export const runCommand = defineCommand({
 
     const flags = { harness: args.harness, model: args.model }
 
+    const usage = loadUsage()
     const selection = await pickRunSelection(
       config,
       flags,
       interactive() ? picker : null,
       listModelsFor,
+      usage,
     )
+    if (selection.interactive) saveUsage(usage)
 
     const implement = selection.harness
     if (selection.interactive) {
