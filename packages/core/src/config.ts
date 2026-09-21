@@ -38,6 +38,11 @@ export const HarnessConfig = z.object({
    * isolation, not a sandbox.
    */
   permissions: z.enum(['workspace-write', 'bypass']).default('workspace-write'),
+  /**
+   * Tool allowlist handed to the harness (claude) in place of the default.
+   * Leave unset to use the harness's own default set.
+   */
+  allowedTools: z.array(z.string()).optional(),
   extraArgs: z.array(z.string()).default([]),
 })
 
