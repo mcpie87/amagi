@@ -33,6 +33,8 @@ type ForgeIssue = {
   state: 'open' | 'closed'
   url: string | null
   labels: readonly { name: string }[]
+  /** Epoch ms; null when the host did not report it. */
+  createdAt: number | null
 }
 
 function isClaimed(issue: ForgeIssue): boolean {
@@ -48,6 +50,7 @@ function toTask(issue: ForgeIssue): TrackerTask {
     priority: null,
     type: null,
     url: issue.url,
+    ...(issue.createdAt === null ? {} : { createdAt: issue.createdAt }),
   }
 }
 
@@ -129,6 +132,10 @@ export abstract class ForgeTracker implements Tracker {
     await this.removeClaimLabel(id)
   }
 
+  async openIds(limit = 500): Promise<string[]> {
+    return (await this.listOpen(limit)).map((i) => i.id)
+  }
+
   async close(id: string, _reason?: string): Promise<void> {
     await this.setState(id, true)
   }
@@ -154,7 +161,7 @@ export abstract class ForgeTracker implements Tracker {
   }
 }
 
-const GH_FIELDS = 'number,title,body,state,url,labels'
+const GH_FIELDS = 'number,title,body,state,url,labels,createdAt'
 
 function ghIssue(raw: Record<string, unknown>): ForgeIssue {
   return {
@@ -164,6 +171,7 @@ function ghIssue(raw: Record<string, unknown>): ForgeIssue {
     state: raw.state === 'CLOSED' ? 'closed' : 'open',
     url: typeof raw.url === 'string' ? raw.url : null,
     labels: ((raw.labels as Array<{ name?: string }>) ?? []).map((l) => ({ name: l.name ?? '' })),
+    createdAt: typeof raw.createdAt === 'string' ? Date.parse(raw.createdAt) : null,
   }
 }
 
@@ -235,7 +243,7 @@ export class GithubTracker extends ForgeTracker {
   }
 }
 
-const TEA_FIELDS = 'index,state,title,body,url,labels'
+const TEA_FIELDS = 'index,state,title,body,url,labels,created'
 
 function teaIssue(raw: Record<string, unknown>): ForgeIssue {
   return {
@@ -245,6 +253,8 @@ function teaIssue(raw: Record<string, unknown>): ForgeIssue {
     state: raw.state === 'closed' ? 'closed' : 'open',
     url: typeof raw.url === 'string' ? raw.url : null,
     labels: ((raw.labels as Array<{ name?: string }>) ?? []).map((l) => ({ name: l.name ?? '' })),
+    // gitea/forgejo report creation as a Unix timestamp in seconds
+    createdAt: typeof raw.created === 'number' && raw.created > 0 ? raw.created * 1000 : null,
   }
 }
 

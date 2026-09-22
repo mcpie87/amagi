@@ -36,20 +36,37 @@ export async function changesSinceBase(run: Exec, cwd: string, base: string): Pr
     })
 }
 
-/** Heading an agent appends to the task description to document a user-facing feature. */
-const HOW_TO_USE_HEADING = /^###\s+How to use\s*$/m
+/** Headings an agent appends to the task description to document the PR. */
+const SECTION_HEADING = /^###\s+(How to use|Conclusion)\s*$/gm
 
 /**
- * Splits a task description into its summary and an optional `### How to use`
- * section (agent-authored when the PR adds a user-facing feature). howToUse is
- * null when the description has no such heading.
+ * Splits a task description into its summary and any agent-authored sections:
+ * `### How to use` (optional, when the PR adds a user-facing feature) and
+ * `### Conclusion` (mandatory, written after the work against the real diff).
+ * Both are null when the description has no such heading.
  */
-function splitDescription(description: string): { summary: string; howToUse: string | null } {
-  const match = description.match(HOW_TO_USE_HEADING)
-  if (match?.index === undefined) return { summary: description.trim(), howToUse: null }
-  const summary = description.slice(0, match.index).trim()
-  const howToUse = description.slice(match.index).replace(HOW_TO_USE_HEADING, '').trim()
-  return { summary, howToUse: howToUse === '' ? null : howToUse }
+function splitDescription(description: string): {
+  summary: string
+  howToUse: string | null
+  conclusion: string | null
+} {
+  // The regex requires the group, so a matched row always has index and name.
+  const headings = [...description.matchAll(SECTION_HEADING)].map((m) => ({
+    index: m.index ?? 0,
+    name: m[1] ?? '',
+  }))
+  let summary = description.trim()
+  let howToUse: string | null = null
+  let conclusion: string | null = null
+  for (const [i, heading] of headings.entries()) {
+    const start = heading.index
+    const end = headings[i + 1]?.index ?? description.length
+    const body = description.slice(start, end).replace(SECTION_HEADING, '').trim()
+    if (heading.name === 'How to use') howToUse = body === '' ? null : body
+    else conclusion = body === '' ? null : body
+    if (i === 0) summary = description.slice(0, start).trim()
+  }
+  return { summary, howToUse, conclusion }
 }
 
 /** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
@@ -70,14 +87,49 @@ export type PrBodyMeta = {
   effort: string | null
 }
 
+/**
+ * Key of the machine-readable trailer that links a PR back to its tracker
+ * task, in the same spirit as a `Co-Authored-By:` git trailer: a plain
+ * `key: value` line a regex can find regardless of how the surrounding
+ * markdown evolves. branchName (worktree.ts) encodes the same id in the
+ * branch name, but splitting it back out of a slug is ambiguous; the trailer
+ * is unambiguous because the id is on its own line.
+ */
+export const TASK_TRAILER_KEY = 'amagi-task'
+
+/** Reads the `amagi-task:` trailer back off a PR body, or null if absent. */
+export function taskIdFromPrBody(body: string): string | null {
+  const re = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
+  return body.match(re)?.[1] ?? null
+}
+
+/**
+ * The task's age as a relative-time stamp for the Task line. GitHub and
+ * Forgejo render `<relative-time datetime>` as a live relative age; the
+ * element's text content is the plain-date fallback when they do not.
+ */
+function createdAgo(createdAt: number | null | undefined): string | null {
+  if (createdAt === null || createdAt === undefined || Number.isNaN(createdAt)) return null
+  const iso = new Date(createdAt).toISOString()
+  return `created <relative-time datetime="${iso}">${iso.slice(0, 10)}</relative-time>`
+}
+
 export function formatPrBody(
   task: TrackerTask,
   changes: readonly PrChange[],
   meta?: PrBodyMeta,
+  /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
+  fallbackSummary?: string | null,
 ): string {
-  const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
-  const { summary, howToUse } = splitDescription(task.description)
-  if (summary !== '') lines.push('', '### 📝 Summary', '', backtickFileRefs(summary))
+  const created = createdAgo(task.createdAt)
+  const lines = [
+    `## ✨ ${task.title}`,
+    '',
+    `**Task:** \`${task.id}\`${created === null ? '' : ` · ${created}`}`,
+  ]
+  const { summary, howToUse, conclusion } = splitDescription(task.description)
+  const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
+  lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
@@ -88,6 +140,10 @@ export function formatPrBody(
       lines.push(`- \`${change.path}\` ${stat}`)
     }
   }
+  const conclusionBody = conclusion ?? fallbackSummary
+  if (conclusionBody !== null && conclusionBody !== undefined && conclusionBody.trim() !== '') {
+    lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
+  }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
-  return lines.join('\n') + footer
+  return `${lines.join('\n')}${footer}\n\n${TASK_TRAILER_KEY}: ${task.id}`
 }

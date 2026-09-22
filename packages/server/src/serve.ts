@@ -128,6 +128,7 @@ function startRepoPollers(
                 config: ws.config,
                 driver: forge,
                 tracker: ws.tracker,
+                store: ws.store,
                 intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
               }),
         conflict:
@@ -138,6 +139,9 @@ function startRepoPollers(
                 root: ws.root,
                 repoName: ws.name,
                 config: ws.config,
+                store: ws.store,
+                tracker: ws.tracker,
+                driver: forge,
                 intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
               }),
         stall: startStallWatcher({

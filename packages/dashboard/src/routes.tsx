@@ -1,3 +1,4 @@
+import type { PrInfo } from '@amagi/core'
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -9,9 +10,9 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
-import { fmtTokens } from '@amagi/core/format'
+import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
-import type { RunnerResource } from '@amagi/core/run-service'
+import type { RunnerResource, RunnerTask, WorkerActivity } from '@amagi/core/run-service'
 import {
   activeTasks,
   chatInFlight,
@@ -21,6 +22,8 @@ import {
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
+  runHealth,
+  runHealthNearLimit,
   type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core/view'
@@ -37,6 +40,7 @@ import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -48,6 +52,7 @@ import { SessionsView } from './SessionsView.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
+  type RunOptions,
   useConnection,
   useDashboard,
   useReadyQueue,
@@ -108,12 +113,12 @@ function CommandPalette() {
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const open = () => {
+  const open = useCallback(() => {
     setQuery('')
     setIndex(0)
     dialogRef.current?.showModal()
     inputRef.current?.focus()
-  }
+  }, [])
   const close = () => dialogRef.current?.close()
 
   useEffect(() => {
@@ -125,7 +130,7 @@ function CommandPalette() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [open])
 
   const q = query.trim().toLowerCase()
   const taskMatches =
@@ -322,6 +327,7 @@ const stateBadge: Record<TaskState, string> = {
   committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  pr_flagged: 'bg-amber-soft text-amber-ink ring-amber-edge',
   done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
   no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
   needs_human: 'bg-red-soft text-red-ink ring-red-edge',
@@ -504,7 +510,7 @@ function RootLayout() {
   const firstRender = useRef(true)
 
   const openNav = () => setNavOpen(true)
-  const closeNav = () => setNavOpen(false)
+  const closeNav = useCallback(() => setNavOpen(false), [])
 
   // Move focus into the open navigation (and back to its trigger on close)
   // only after the DOM has committed the is-open state and the inert flag has
@@ -525,7 +531,7 @@ function RootLayout() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navOpen])
+  }, [navOpen, closeNav])
 
   return (
     <RunnerProvider>
@@ -929,6 +935,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     if (repoRef.current !== selected) {
       repoRef.current = selected
       setIssues([])
@@ -951,6 +958,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
@@ -1219,12 +1227,14 @@ function RunButton() {
   const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
 
-  const run = async () => {
+  const run = async (opts?: RunOptions) => {
     setBusy(true)
     setMessage(null)
-    const res = await start()
+    const res = await start(undefined, opts)
     setBusy(false)
+    setOpen(false)
     setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
@@ -1234,11 +1244,151 @@ function RunButton() {
       <button
         type="button"
         disabled={busy}
-        onClick={() => void run()}
+        onClick={() => setOpen(true)}
         className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
         Run next
       </button>
+      {open && <RunPicker onClose={() => setOpen(false)} onRun={run} />}
+    </div>
+  )
+}
+
+/**
+ * Lets the operator pick harness/model/effort before "Run next" dispatches.
+ * Every field defaults to "use the configured value": leaving the harness at
+ * default sends no overrides, so the server's config.harness.implement wins.
+ */
+function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunOptions) => void }) {
+  const { options } = useRunner()
+  const harnesses = options?.harnesses ?? []
+  const [harness, setHarness] = useState('')
+  const [model, setModel] = useState('')
+  const [customModel, setCustomModel] = useState('')
+  const [effort, setEffort] = useState('')
+
+  const selected = harnesses.find((h) => h.name === harness)
+  const kind = selected?.kind
+  const models = kind === undefined ? [] : (options?.models[kind] ?? [])
+  const efforts = kind === undefined ? [] : (options?.efforts[kind] ?? [])
+
+  const switchHarness = (value: string) => {
+    setHarness(value)
+    setModel('')
+    setCustomModel('')
+    setEffort('')
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const effectiveModel = model === 'custom' ? customModel.trim() : model
+    onRun({
+      ...(harness === '' ? {} : { harness }),
+      ...(effectiveModel === '' ? {} : { model: effectiveModel }),
+      ...(effort === '' ? {} : { effort }),
+    })
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-md rounded-lg border border-line-strong bg-surface p-4"
+      >
+        <h2 className="mb-3 text-lg font-semibold">Run next task</h2>
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="run-harness">
+              Harness
+            </label>
+            <select
+              id="run-harness"
+              value={harness}
+              onChange={(e) => switchHarness(e.target.value)}
+              className={input}
+            >
+              <option value="">default ({options?.default?.kind ?? 'config'})</option>
+              {harnesses.map((h) => (
+                <option key={h.name} value={h.name}>
+                  {h.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={label} htmlFor="run-model">
+              Model
+            </label>
+            <select
+              id="run-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.model === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.model})`}
+              </option>
+              {models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              <option value="custom">(custom model)</option>
+            </select>
+            {model === 'custom' && (
+              <input
+                value={customModel}
+                onChange={(e) => setCustomModel(e.target.value)}
+                placeholder="model id"
+                className={`${input} mt-1`}
+              />
+            )}
+          </div>
+          <div>
+            <label className={label} htmlFor="run-effort">
+              Effort
+            </label>
+            <select
+              id="run-effort"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.effort === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.effort})`}
+              </option>
+              {efforts.map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-line-strong px-3 py-1 text-sm text-fg-muted hover:bg-raised"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
+          >
+            Run
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -1260,6 +1410,7 @@ function WorkerSlot({
   startedAt,
   now,
   resource,
+  taskInfo,
   state,
   selected,
 }: {
@@ -1268,6 +1419,7 @@ function WorkerSlot({
   /** Wall-clock snapshot, advanced by one shared 1s interval in WorkersPanel. */
   now: number
   resource?: RunnerResource | undefined
+  taskInfo?: RunnerTask | undefined
   state: DashboardState
   selected: string | null
 }) {
@@ -1280,7 +1432,20 @@ function WorkerSlot({
   }
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
+  const title = taskInfo?.title ?? task?.title ?? taskId
+  // The runner's per-task identity is authoritative for what is actually
+  // running (rss/cpu arrive the same way); the SSE projection only fills in
+  // when the polled status has not caught up.
+  const agentLabel =
+    taskInfo?.harness !== undefined
+      ? `implement: ${taskInfo.harness}`
+      : agent === null
+        ? 'starting…'
+        : `${agent.role}: ${agent.harness}`
+  const modelLabel = taskInfo?.model ?? agent?.model ?? 'unknown'
   const usage = currentUsageFor(state, taskId)
+  const health = runHealth(state, taskId, now)
+  const nearLimit = runHealthNearLimit(health)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1290,19 +1455,27 @@ function WorkerSlot({
           </span>
         )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
+        {nearLimit && (
+          <span
+            className="shrink-0 rounded bg-amber-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-ink ring-1 ring-inset ring-amber-edge"
+            title={health.warnings.join('\n') || 'run is nearing a guard limit'}
+          >
+            near limit
+          </span>
+        )}
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
           className="flex min-w-0 items-baseline gap-x-3 hover:underline"
         >
-          <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+          <span className="min-w-0 truncate font-medium">{title}</span>
           <span className="text-xs text-fg-faint">{task?.id ?? taskId}</span>
         </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-        <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
-        <span>model: {agent?.model ?? 'unknown'}</span>
+        <span>agent: {agentLabel}</span>
+        <span>model: {modelLabel}</span>
         <span>
           ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
         </span>
@@ -1316,6 +1489,132 @@ function WorkerSlot({
       </div>
       {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
     </div>
+  )
+}
+
+/**
+ * Detail view for one background watcher (mention / pr-conflict / stall),
+ * opened by clicking its slot in the Workers section. The watcher is looked
+ * up live from the polled runner status, so the open dialog stays current.
+ */
+function WatcherDetailDialog({
+  selected,
+  workers,
+  onClose,
+}: {
+  selected: string | null
+  workers: WorkerActivity[]
+  onClose: () => void
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const open = selected !== null
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog === null) return
+    if (open) dialog.showModal()
+    else if (dialog.open) dialog.close()
+  }, [open])
+  if (selected === null) return null
+  const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
+  const statusPill =
+    watcher === null
+      ? PILL
+      : watcher.status === 'active'
+        ? `${PILL} bg-teal-soft text-teal-ink ring-teal-edge`
+        : watcher.status === 'idle'
+          ? `${PILL} bg-raised text-fg-muted ring-line`
+          : `${PILL} bg-red-soft text-red-ink ring-red-edge`
+  return (
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="watcher-dialog"
+    >
+      {watcher === null ? (
+        <p className="px-4 py-6 text-sm text-fg-faint">watcher no longer running</p>
+      ) : (
+        <div className="p-4">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>
+              {watcher.name}
+            </span>
+            <span className="font-medium text-fg">{watcher.repo}</span>
+            <span className={statusPill}>{watcher.status}</span>
+            {watcher.ok ? (
+              <span className="text-xs text-emerald-ink">last tick ok</span>
+            ) : (
+              <span className="text-xs text-red-ink">last tick failed</span>
+            )}
+          </div>
+          {watcher.detail !== null && watcher.detail !== undefined && (
+            <p className="mt-3 text-sm text-fg">{watcher.detail}</p>
+          )}
+          {watcher.error !== null && (
+            <p className="mt-1 break-words rounded border border-red-edge bg-red-soft px-2 py-1 text-xs text-red-ink">
+              {watcher.error}
+            </p>
+          )}
+          <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+              <dt className="text-xs text-fg-faint">Last run</dt>
+              <dd className="mt-0.5 text-fg">
+                {watcher.lastRunAt > 0 ? fmtLastRun(watcher.lastRunAt) : 'never'}
+              </dd>
+              {watcher.lastRunAt > 0 && (
+                <dd className="text-xs tabular-nums text-fg-faint">
+                  {new Date(watcher.lastRunAt).toLocaleString()}
+                </dd>
+              )}
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Next run</dt>
+              <dd className="mt-0.5 text-fg">
+                {watcher.status === 'off'
+                  ? 'stopped'
+                  : watcher.nextRunAt > 0
+                    ? fmtUntil(watcher.nextRunAt)
+                    : 'waiting for the first tick'}
+              </dd>
+              <dd className="text-xs text-fg-faint">every {fmtInterval(watcher.intervalMs)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Total runs</dt>
+              <dd className="mt-0.5 tabular-nums text-fg">{watcher.runs}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Success / failure</dt>
+              <dd className="mt-0.5 tabular-nums text-fg">
+                {watcher.successes} / {watcher.failures}
+              </dd>
+            </div>
+          </dl>
+          {watcher.counters.length > 0 && (
+            <div className="mt-4">
+              <dt className="text-xs text-fg-faint">What it did</dt>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {watcher.counters.map((c) => (
+                  <span key={c.label} className={`${PILL} bg-raised text-fg-muted ring-line`}>
+                    {c.label} {c.value}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </dialog>
   )
 }
 
@@ -1390,6 +1689,7 @@ function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
   const [now, setNow] = useState(() => Date.now())
+  const [watcherOpen, setWatcherOpen] = useState<string | null>(null)
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
@@ -1431,6 +1731,7 @@ function WorkersPanel() {
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
             now={now}
             resource={running[i] === undefined ? undefined : status.resources[running[i]]}
+            taskInfo={running[i] === undefined ? undefined : status.tasks?.[running[i]]}
             state={state}
             selected={selected}
           />
@@ -1439,9 +1740,12 @@ function WorkersPanel() {
       {status.workers !== undefined && status.workers.length > 0 && (
         <div className="mt-2 space-y-2">
           {status.workers.map((w) => (
-            <div
+            <button
               key={`${w.repo}/${w.name}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-xs text-fg-muted"
+              type="button"
+              onClick={() => setWatcherOpen(`${w.repo}/${w.name}`)}
+              title="open watcher detail"
+              className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-left text-xs text-fg-muted hover:bg-raised"
             >
               <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>{w.name}</span>
               <span className="font-medium text-fg">{w.repo}</span>
@@ -1455,9 +1759,17 @@ function WorkersPanel() {
               ) : (
                 <span className="text-red-ink">error: {w.error}</span>
               )}
-            </div>
+              <span className="ml-auto text-fg-faint">details ›</span>
+            </button>
           ))}
         </div>
+      )}
+      {status.workers !== undefined && (
+        <WatcherDetailDialog
+          selected={watcherOpen}
+          workers={status.workers}
+          onClose={() => setWatcherOpen(null)}
+        />
       )}
     </section>
   )
@@ -1627,6 +1939,80 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
   )
 }
 
+/**
+ * Open PRs the forge reports as currently mergeable, the dashboard twin of the
+ * check-prs CLI command. Polled, not streamed: the forge computes mergeability
+ * asynchronously and it changes slowly, so a slow refresh is enough and each
+ * poll is one forge call, not one per PR.
+ */
+function MergeablePrsPanel() {
+  const { selected } = useDashboard()
+  const [prs, setPrs] = useState<PrInfo[] | null>(null)
+
+  useEffect(() => {
+    if (selected === null) return
+    let alive = true
+    const load = () => {
+      fetch(`${apiBase}/api/repos/${selected}/mergeable-prs`)
+        .then(async (res) => {
+          // A repo without a forge driver simply has no mergeable PRs to show.
+          if (res.status === 501) return []
+          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+          return (await res.json()).prs as PrInfo[]
+        })
+        .then((list) => {
+          if (alive) setPrs(list)
+        })
+        .catch(() => {
+          // A transient fetch failure keeps the last good list, not a spinner.
+        })
+    }
+    load()
+    const timer = setInterval(load, 10_000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [selected])
+
+  if (selected === null || prs === null) return null
+
+  return (
+    <section className="mb-6">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Mergeable PRs ({prs.length})
+        </h2>
+        <span className="text-xs text-fg-faint">from the forge, refreshed every 10s</span>
+      </div>
+      {prs.length === 0 ? (
+        <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg-faint">
+          No open PRs are mergeable right now.
+        </p>
+      ) : (
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+          {prs.map((p) => (
+            <li key={p.number} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+              <a
+                href={p.url}
+                target="_blank"
+                rel="noreferrer"
+                className="min-w-0 flex-1 truncate hover:underline"
+              >
+                <span className="font-medium text-fg">#{p.number}</span>{' '}
+                <span className="text-sky-ink">{p.title}</span>
+              </a>
+              <span className="shrink-0 text-xs text-fg-faint">
+                {p.headRefName} &rarr; {p.baseRefName}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
@@ -1676,6 +2062,8 @@ function OverviewView() {
           {...(openQuestions > 0 ? { tone: 'amber' as const } : {})}
         />
       </div>
+
+      <MergeablePrsPanel />
 
       <WorkersPanel />
 
@@ -1767,7 +2155,7 @@ function DetailRow({ label, value }: { label: string; value: string | ReactNode 
   return (
     <div className="flex gap-2 py-1">
       <dt className="w-28 shrink-0 text-fg-faint">{label}</dt>
-      <dd className="min-w-0 break-all">{value}</dd>
+      <dd className="min-w-0 break-all whitespace-pre-wrap">{value}</dd>
     </div>
   )
 }
@@ -1982,6 +2370,7 @@ function ReclaimButton({
   state: TaskState
   worktree: string | null
 }) {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // A retrying task is still owned by its runner, which will retry on its own;
@@ -1995,7 +2384,13 @@ function ReclaimButton({
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
         method: 'POST',
       })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      if (!res.ok) {
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Reclaim only releases the tracker claim; actually restart the run.
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2009,6 +2404,7 @@ function ReclaimButton({
         type="button"
         disabled={busy}
         onClick={() => void reclaim()}
+        title="releases the tracker claim and immediately restarts the run, resuming its worktree"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Reclaim
@@ -2039,6 +2435,7 @@ function CloseButton({
   const [open, setOpen] = useState(false)
   const [reason, setReason] = useState<string>(TASK_DONE_REASONS[0] ?? 'completed')
   const [custom, setCustom] = useState('')
+  const { resyncStream } = useDashboard()
   if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
   const close = async (finalReason: string) => {
@@ -2050,6 +2447,10 @@ function CloseButton({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ reason: finalReason, to: target }),
       })
+      // The state change lands in the store server-side; if the event stream
+      // is stale the completed task keeps its old state until a page refresh,
+      // so force a resync instead of waiting for the operator to reload.
+      resyncStream()
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
       else setOpen(false)
     } catch {
@@ -2089,15 +2490,19 @@ function CloseButton({
         title={
           target === 'done'
             ? 'marks the task done when the work already existed elsewhere'
-            : 'closes the task as abandoned'
+            : state === 'pr_flagged'
+              ? 'closes the pointless pull request on the forge and retires the task'
+              : 'closes the task as abandoned'
         }
         className={
           target === 'done'
             ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
-            : 'rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50'
+            : state === 'pr_flagged'
+              ? 'rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50'
+              : 'rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50'
         }
       >
-        {target === 'done' ? 'Mark done' : 'Close'}
+        {target === 'done' ? 'Mark done' : state === 'pr_flagged' ? 'Close PR' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
       {target === 'done' && open && (
@@ -2167,10 +2572,17 @@ function CloseButton({
 
 /** The two operator retire actions: close as abandoned, or mark done when the work already existed. */
 function CloseButtons({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  // A pr_open task's PR is live: closing would abandon the task and leave the
+  // pull request dangling open on the forge, so only a flagged (pointless) PR
+  // gets a close action.
+  if (state === 'pr_open') return null
   if (!closable(state)) return null
+  // Only a parked no_pr/needs_human task can be marked done; the server rejects
+  // it otherwise, so don't offer a button that always errors.
+  const canMarkDone = state === 'needs_human' || state === 'no_pr'
   return (
     <div className="ml-auto flex gap-2">
-      <CloseButton repo={repo} taskId={taskId} state={state} target="done" />
+      {canMarkDone && <CloseButton repo={repo} taskId={taskId} state={state} target="done" />}
       <CloseButton repo={repo} taskId={taskId} state={state} target="abandoned" />
     </div>
   )
@@ -2382,6 +2794,65 @@ function FileAsErrorButton({
 }
 
 /**
+ * Restart a run that has no worktree recorded yet, so the runner starts fresh.
+ * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
+ * need the worktree path; done and abandoned runs have no path back, so the
+ * button is hidden for them.
+ */
+function RestartRunButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree !== null || state === 'done' || state === 'abandoned') return null
+
+  const restart = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="restart-run">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void restart()}
+        className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
+      >
+        <Icon name="refresh" size={15} />
+        {busy ? 'Restarting...' : 'Restart run'}
+      </button>
+      {error !== null && (
+        <p className="restart-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
  * Skip a deferred automatic retry's backoff and run it now, only meaningful
  * while the task sits in retrying (the runner owns it and is sleeping).
  */
@@ -2422,6 +2893,50 @@ function RetryNowButton({
         className="rounded border border-orange-edge bg-orange-soft px-3 py-1 text-sm text-orange-ink hover:bg-orange-soft-hover disabled:opacity-50"
       >
         Retry now
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
+/** Re-runs the pr reconcile for one parked PR instead of waiting for the sweep. */
+function RecheckPrButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'pr_open' && state !== 'pr_flagged') return null
+
+  const recheck = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/recheck`, {
+        method: 'POST',
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void recheck()}
+        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised disabled:opacity-50"
+      >
+        {busy ? 'Checking…' : 'Check PR status now'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
@@ -2492,6 +3007,25 @@ function fmtLastRun(epochMs: number): string {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
+/** Compact "in x" for a worker's next scheduled tick. */
+function fmtUntil(epochMs: number): string {
+  const s = Math.floor((epochMs - Date.now()) / 1000)
+  if (s <= 0) return 'due now'
+  if (s < 60) return `in ${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `in ${m}m`
+  return `in ${Math.floor(m / 60)}h`
+}
+
+/** Human tick cadence, e.g. 5m for the default watcher interval. */
+function fmtInterval(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m}m`
+  return `${Math.round(m / 60)}h`
+}
+
 function fmtAgo(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000)
   if (s < 10) return 'just now'
@@ -2514,13 +3048,26 @@ function fmtRetryIn(ts: number): string {
   return `${h}h ${m % 60}m`
 }
 
-const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+// States whose summary/verdict stays visible after the task settles: the
+// parked states for attention, plus `done` so marking a no_pr/needs_human task
+// complete does not erase the verdict the operator just recorded.
+const VERDICT_STATES: readonly TaskState[] = [
+  'no_pr',
+  'needs_human',
+  'pr_flagged',
+  'abandoned',
+  'cancelled',
+  'done',
+]
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 // Raw HTML from the agent is escaped, not rendered, so a prompt-injected tag cannot run.
 const markdown = new Marked({
+  // Keep single newlines (soft breaks) as line breaks: the LLM-authored
+  // summary/reason text is multi-line and must not flatten into one line.
+  breaks: true,
   renderer: {
     html({ text }) {
       return escapeHtml(text)
@@ -2539,6 +3086,9 @@ function Markdown({ text }: { text: string }) {
  * criteria, priority, type, assignee, labels, parent, dependencies - fetched
  * on first expand and kept for the session.
  */
+/** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
+const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
+
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
   const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
@@ -2580,7 +3130,11 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
             <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
-                value={issue.priority === null ? null : `P${issue.priority}`}
+                value={
+                  issue.priority === null
+                    ? null
+                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+                }
               />
               <DetailRow label="type" value={issue.type} />
               <DetailRow label="assignee" value={issue.assignee} />
@@ -2613,21 +3167,26 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
   const needsHuman = task.state === 'needs_human'
-  if (!needsHuman && (task.statusReason === null || !ATTENTION_STATES.includes(task.state))) {
+  const done = task.state === 'done'
+  if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
     return null
   }
   return (
     <div
       className={`mt-6 rounded-lg border px-4 py-3 ${
-        needsHuman ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
+        needsHuman
+          ? 'border-red-edge bg-red-soft'
+          : done
+            ? 'border-line bg-surface'
+            : 'border-amber-edge bg-amber-soft'
       }`}
     >
       <h2
         className={`text-sm font-semibold uppercase tracking-wide ${
-          needsHuman ? 'text-red-ink' : 'text-amber-ink'
+          needsHuman ? 'text-red-ink' : done ? 'text-fg-muted' : 'text-amber-ink'
         }`}
       >
-        {needsHuman ? 'Needs human attention' : 'Summary'}
+        {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
       {task.statusReason !== null && <Markdown text={task.statusReason} />}
     </div>
@@ -2649,7 +3208,7 @@ function RetryPanel({ task }: { task: TaskView }) {
         No human action is needed; use Retry now to skip the wait, or Close to abandon.
       </p>
       {task.lastError !== null && (
-        <p className="mt-1 text-sm text-fg-muted">
+        <p className="mt-1 whitespace-pre-wrap text-sm text-fg-muted">
           Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
         </p>
       )}
@@ -2661,11 +3220,21 @@ function RetryPanel({ task }: { task: TaskView }) {
  * Operator/worker chat on a parked no_pr task. Each message resumes the task's
  * recorded session in its worktree; the answer streams in through the repo
  * event stream, so this component only renders what chatTurns folds from it.
+ * A settled task (e.g. marked done) keeps the conversation read-only so it is
+ * not lost on completion, while the send form only shows while the task is a
+ * chattable no_pr run with a session and worktree to resume.
  */
 function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const { state } = useDashboard()
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const task = state.tasks[taskId]
+  const interactive =
+    task !== undefined &&
+    task.state === 'no_pr' &&
+    task.statusReason !== null &&
+    task.sessionId !== null &&
+    task.worktree !== null
   const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
   const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -2677,7 +3246,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const send = async (event: FormEvent) => {
     event.preventDefault()
     const message = text.trim()
-    if (message === '' || responding) return
+    if (message === '' || responding || !interactive) return
     setError(null)
     setText('')
     try {
@@ -2701,7 +3270,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
         ref={scrollRef}
         className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-line bg-sunken p-3"
       >
-        {messages.length === 0 && (
+        {messages.length === 0 && interactive && (
           <p className="text-sm text-fg-faint">Ask the worker about why there is no PR.</p>
         )}
         {messages.map((m) => (
@@ -2721,22 +3290,26 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
           </div>
         ))}
       </div>
-      <form onSubmit={send} className="flex gap-2">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={responding}
-          placeholder={responding ? 'worker is responding...' : 'ask the worker'}
-          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
-        />
-        <button
-          type="submit"
-          disabled={responding || text.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-        >
-          Send
-        </button>
-      </form>
+      {interactive ? (
+        <form onSubmit={send} className="flex gap-2">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            disabled={responding}
+            placeholder={responding ? 'worker is responding...' : 'ask the worker'}
+            className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={responding || text.trim() === ''}
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+          >
+            Send
+          </button>
+        </form>
+      ) : (
+        <p className="text-xs text-fg-faint">Conversation preserved; the task is settled.</p>
+      )}
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
@@ -2747,10 +3320,18 @@ type DetailTab = 'log' | 'checks'
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
+  const { status } = useRunner()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
+  const runnerTask = status?.tasks?.[id]
   const [tab, setTab] = useState<DetailTab>('log')
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const health = runHealth(state, id, now)
   const usageEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
@@ -2781,6 +3362,16 @@ function TaskDetailView() {
       ? [{ key: 'checks', label: `Checks ${task.checksOk ? '(passed)' : '(failed)'}` } as const]
       : []),
   ]
+
+  // The chat is live while the task is a chattable no_pr run; a settled task
+  // keeps the panel only when a conversation was actually recorded, so the
+  // operator does not lose it by completing the task.
+  const chatAvailable =
+    (task.state === 'no_pr' &&
+      task.statusReason !== null &&
+      task.sessionId !== null &&
+      task.worktree !== null) ||
+    state.events.some((e) => e.taskId === task.id && e.type === 'chat.message')
 
   return (
     <section>
@@ -2823,7 +3414,18 @@ function TaskDetailView() {
           />
         )}
         {selected !== null && (
+          <RestartRunButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
+        {selected !== null && (
           <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
+        )}
+        {selected !== null && (
+          <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
         )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
@@ -2834,21 +3436,51 @@ function TaskDetailView() {
 
       <RetryPanel task={task} />
 
-      {selected !== null &&
-        task.state === 'no_pr' &&
-        task.statusReason !== null &&
-        task.sessionId !== null &&
-        task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
+      {selected !== null && chatAvailable && <ChatPanel repo={selected} taskId={task.id} />}
 
       <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow
           label="agent"
-          value={currentAgent ? `${currentAgent.role}: ${currentAgent.harness}` : null}
+          value={
+            currentAgent
+              ? `${currentAgent.role}: ${currentAgent.harness}`
+              : runnerTask?.harness
+                ? `implement: ${runnerTask.harness}`
+                : null
+          }
         />
-        <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
-        <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
+        <DetailRow label="model" value={currentAgent?.model ?? runnerTask?.model ?? 'unknown'} />
+        <DetailRow label="effort" value={currentAgent?.effort ?? runnerTask?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
+        <DetailRow
+          label="context"
+          value={
+            health.contextTokens === null
+              ? 'no usage reported yet'
+              : health.contextWarnTokens === null
+                ? fmtTokens(health.contextTokens)
+                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn · ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+          }
+        />
+        <DetailRow
+          label="cost"
+          value={
+            !health.costSeen
+              ? 'not reported by harness'
+              : health.maxCostUsd > 0
+                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                : `$${health.costUsd.toFixed(2)}`
+          }
+        />
+        <DetailRow
+          label="elapsed"
+          value={
+            health.maxRunMs === null
+              ? fmtDuration(health.elapsedMs)
+              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+          }
+        />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow
@@ -2871,6 +3503,21 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      {health.warnings.length > 0 && (
+        <div className="mt-4 rounded-lg border border-amber-edge bg-amber-soft px-4 py-3">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
+            Guard warnings
+          </h2>
+          <ul className="space-y-1">
+            {health.warnings.map((w, i) => (
+              <li key={i} className="font-mono text-xs text-fg">
+                {w}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
@@ -3212,6 +3859,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           ts: event.ts,
           taskId: event.taskId,
           text: `error filed as task ${event.errorTaskId}`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
+      case 'run.restarted':
+        items.push({
+          key: `rr${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `context restart #${event.restart} (peak ${fmtTokens(event.contextTokens)})`,
           icon: 'refresh',
           tone: 'amber',
         })

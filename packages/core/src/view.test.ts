@@ -9,6 +9,8 @@ import {
   initialDashboardState,
   openQuestionsFor,
   reduceState,
+  runHealth,
+  runHealthNearLimit,
   tasksNeedingAttention,
 } from './view.ts'
 
@@ -133,6 +135,20 @@ describe('dashboard state reducer', () => {
       ...recorded.filter((e) => e.seq !== 11),
       ev(16, 'am-1', 2500, { type: 'task.state', from: 'pr_open', to: 'needs_human' }),
       ev(17, 'am-3', 2600, { type: 'task.claimed', title: 'Still running', tracker: 'bd' }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
+  test('a flagged pointless PR is surfaced in the attention list', () => {
+    const state = [
+      ...recorded.filter((e) => e.seq !== 11),
+      ev(16, 'am-1', 2500, {
+        type: 'task.state',
+        from: 'pr_open',
+        to: 'pr_flagged',
+        reason: 'empty diff',
+      }),
     ].reduce(reduceState, initialDashboardState())
 
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
@@ -438,5 +454,211 @@ describe('dashboard state reducer', () => {
     // automatic retry waits on its backoff, not on the operator.
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-2'])
     expect(state.tasks['am-1']?.state).toBe('retrying')
+  })
+  test('completing a parked task keeps the verdict and the chat conversation', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'worktree.created', path: '/tmp/am-1', branch: 'amagi/am-1' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(5, 'am-1', 1400, {
+        type: 'task.state',
+        from: 'implementing',
+        to: 'no_pr',
+        reason: 'the work was already done',
+      }),
+      ev(6, 'am-1', 1500, { type: 'chat.message', text: 'why no pr?' }),
+      ev(7, 'am-1', 1600, {
+        type: 'agent.started',
+        role: 'chat',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(8, 'am-1', 1700, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'text', text: 'it was already done' },
+      }),
+      ev(9, 'am-1', 1800, { type: 'agent.exited', role: 'chat', exitCode: 0, sessionId: 'sess-1' }),
+      // The operator marks the task done: the verdict reason lands on the task
+      // and the worktree is torn down, exactly as the close endpoint emits.
+      ev(10, 'am-1', 1900, { type: 'task.state', from: 'no_pr', to: 'done', reason: 'completed' }),
+      ev(11, 'am-1', 2000, { type: 'worktree.removed', path: '/tmp/am-1' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    const task = state.tasks['am-1']
+    expect(task?.state).toBe('done')
+    expect(task?.statusReason).toBe('completed')
+    // The verdict is not the conversation; the chat survives completion.
+    expect(chatTurns(state, 'am-1')).toEqual([
+      { id: 'u6', role: 'user', text: 'why no pr?', ts: 1500, pending: false },
+      {
+        id: 'a7',
+        role: 'assistant',
+        text: 'it was already done',
+        ts: 1600,
+        pending: false,
+      },
+    ])
+  })
+
+  test('a done task stays out of the active queue and attention list', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'no_pr', reason: 'parked' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'no_pr', to: 'done', reason: 'completed' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(activeTasks(state).map((t) => t.id)).toEqual([])
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual([])
+  })
+})
+
+describe('run health', () => {
+  const healthEvents = (): StoredEvent[] => [
+    ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+    ev(2, 'am-1', 1100, {
+      type: 'run.limits',
+      contextWarnTokens: 150_000,
+      contextMaxTokens: 200_000,
+      maxRunMs: 3_600_000,
+      maxCostUsd: 5,
+    }),
+    ev(3, 'am-1', 1200, {
+      type: 'agent.started',
+      role: 'implement',
+      harness: 'claude',
+      model: 'm',
+      effort: null,
+      cwd: '/tmp/am-1',
+      resumed: false,
+    }),
+    ev(4, 'am-1', 1300, {
+      type: 'agent.stream',
+      role: 'implement',
+      event: {
+        kind: 'usage',
+        inputTokens: 100_000,
+        outputTokens: 10,
+        cachedTokens: 20_000,
+        costUsd: 1.5,
+      },
+    }),
+    ev(5, 'am-1', 1400, { type: 'run.context', contextTokens: 120_000 }),
+  ]
+
+  test('folds limits, peak context, cost, elapsed and warnings from the stream', () => {
+    const state = [...healthEvents()].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 2000)
+    expect(health).toMatchObject({
+      contextTokens: 120_000,
+      contextWarnTokens: 150_000,
+      contextMaxTokens: 200_000,
+      costUsd: 1.5,
+      costSeen: true,
+      maxCostUsd: 5,
+      elapsedMs: 1000,
+      maxRunMs: 3_600_000,
+      warnings: [],
+    })
+  })
+
+  test('last run.context wins as the peak and a zero maxRunMs means unbounded', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'run.limits',
+        contextWarnTokens: 150_000,
+        contextMaxTokens: 200_000,
+        maxRunMs: 0,
+        maxCostUsd: 0,
+      }),
+      ev(3, 'am-1', 1200, { type: 'run.context', contextTokens: 50 }),
+      ev(4, 'am-1', 1300, { type: 'run.context', contextTokens: 80 }),
+    ].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 1400)
+    expect(health.contextTokens).toBe(80)
+    expect(health.maxRunMs).toBeNull()
+    expect(health.maxCostUsd).toBe(0)
+    expect(runHealthNearLimit(health)).toBe(false)
+  })
+
+  test('chat usage cost is outside the task budget', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'run.limits',
+        contextWarnTokens: 150_000,
+        contextMaxTokens: 200_000,
+        maxRunMs: 0,
+        maxCostUsd: 5,
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 2 },
+      }),
+      ev(4, 'am-1', 1300, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 99 },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 1400)
+    expect(health.costUsd).toBe(2)
+  })
+
+  test('collects doom-loop and context guard warnings', () => {
+    const state = [
+      ...healthEvents(),
+      ev(6, 'am-1', 1500, {
+        type: 'doom.detected',
+        kind: 'tool_repeat',
+        detail: 'repeated the same command 21 times',
+      }),
+      ev(7, 'am-1', 1600, { type: 'run.context', contextTokens: 160_000 }),
+      ev(8, 'am-1', 1700, { type: 'context.warn', contextTokens: 160_000, limit: 150_000 }),
+    ].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 1800)
+    expect(health.warnings).toEqual([
+      'doom loop: repeated the same command 21 times',
+      'context warning: 160000/150000 tokens',
+    ])
+    expect(runHealthNearLimit(health)).toBe(true)
+  })
+
+  test('flags a run nearing the soft context limit', () => {
+    const events = [
+      ...healthEvents(),
+      ev(9, 'am-1', 1500, { type: 'run.context', contextTokens: 150_000 }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(runHealthNearLimit(runHealth(events, 'am-1', 1600))).toBe(true)
+  })
+
+  test('flags a run past 80% of the time budget', () => {
+    const events = [
+      ...healthEvents(),
+      ev(9, 'am-1', 1500, { type: 'run.context', contextTokens: 10 }),
+    ].reduce(reduceState, initialDashboardState())
+    // 1000ms claimed at t=1000; 3_600_000ms budget; 80% at 2_890_000ms in.
+    const now = 1000 + 3_600_000 * 0.8
+    expect(runHealthNearLimit(runHealth(events, 'am-1', now))).toBe(true)
+  })
+
+  test('flags a run past 80% of the cost budget', () => {
+    const events = [
+      ...healthEvents(),
+      ev(9, 'am-1', 1500, { type: 'run.context', contextTokens: 10 }),
+      ev(10, 'am-1', 1600, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 4.2 },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    // 1.5 + 4.2 = 5.7 >= 80% of the $5 budget.
+    expect(runHealthNearLimit(runHealth(events, 'am-1', 1700))).toBe(true)
   })
 })

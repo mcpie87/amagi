@@ -13,6 +13,7 @@ export const TASK_STATES = [
   'checks',
   'committed',
   'pr_open',
+  'pr_flagged',
   'retrying',
   'done',
   'no_pr',
@@ -50,7 +51,10 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   checks: ['implementing', 'committed'],
   retrying: ['implementing'],
   committed: ['pr_open'],
-  pr_open: [],
+  pr_open: ['pr_flagged'],
+  // A flagged PR is parked for the operator, not terminal: the watcher owns
+  // the label and clears it back to pr_open when the PR stops being pointless.
+  pr_flagged: ['pr_open'],
   done: [],
   no_pr: ['abandoned', 'done'],
   needs_human: ['abandoned', 'done'],
@@ -76,7 +80,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat', 'verify'])
 export type AgentRole = z.infer<typeof AgentRole>
 
 /** What the triage worker decides to do with an unclaimed task. */
@@ -169,6 +173,48 @@ export const EventBody = z.discriminatedUnion('type', [
     exitCode: z.number().int(),
     sessionId: z.string().nullable(),
   }),
+  /**
+   * The run's running peak input context (input + cached tokens) as usage
+   * events stream in. Appended each time the peak grows; the last one of a run
+   * is its peak context.
+   */
+  z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
+  /**
+   * The effective run-health ceilings for the active harness, appended once per
+   * claim so clients can render context/cost/elapsed against them before any
+   * guard trips. A maxRunMs or maxCostUsd of 0 means that budget is unbounded.
+   */
+  z.object({
+    type: z.literal('run.limits'),
+    contextWarnTokens: z.number().int(),
+    contextMaxTokens: z.number().int(),
+    maxRunMs: z.number().int(),
+    maxCostUsd: z.number(),
+  }),
+  /** Logged once when the run's peak context crosses the soft limit. */
+  z.object({
+    type: z.literal('context.warn'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
+  /** Logged once when the run's peak context crosses the hard limit, right before the agent is killed. */
+  z.object({
+    type: z.literal('context.exceeded'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
+  /**
+   * A run that crossed the hard context limit was restarted with a fresh
+   * session in the same worktree; `summary` is the handoff of what the killed
+   * session did, handed to the new one as context. `restart` is 1-based.
+   */
+  z.object({
+    type: z.literal('run.restarted'),
+    phase: z.string(),
+    restart: z.number().int().positive(),
+    contextTokens: z.number().int(),
+    summary: z.string(),
+  }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
@@ -204,6 +250,17 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('mention.classified'),
+    /** Which response path the classifier chose for the mention. */
+    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
+    /** The raw classifier reply; when the parse is wrong this is all that explains why. */
+    reply: z.string(),
+    /** The PR the mention was on. */
+    prNumber: z.number().int(),
+    /** The comment id of the mention. */
+    mentionId: z.string(),
+  }),
   z.object({
     type: z.literal('triage.decision'),
     action: TriageAction,

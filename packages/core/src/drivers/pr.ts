@@ -1,6 +1,7 @@
 import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
+import type { PrInfo, PrMergeStatus } from '../pr-check.ts'
 import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
@@ -13,6 +14,13 @@ export type PrComment = { id: string; user: string; body: string }
 
 /** Marks a PR as agent-generated, so humans can tell it from their own. */
 export const AMAGI_LABEL = 'amagi'
+
+/**
+ * Marks an agent PR as pointless (empty diff against base). Owned by the
+ * watcher in both directions: added when the PR qualifies, removed when it
+ * stops, so a human closing the PR is the only terminal step.
+ */
+export const NEEDS_CLOSING_LABEL = 'amagi/needs-closing'
 
 /** Provenance plus an amagi/<type> intent label mirroring the source task. */
 export function amagiLabels(type: string | null): string[] {
@@ -34,13 +42,26 @@ export type PrDriver = {
   createPr(opts: CreatePrOptions): Promise<PullRequest>
   /** Resolve the remote state of a PR, run from `cwd` so the forge CLI finds the repo. */
   getPr(cwd: string, number: number): Promise<PrState>
+  /** Every open PR in the repo the `cwd` belongs to. */
+  listOpenPrs(cwd: string): Promise<PrInfo[]>
   /** Whether an open PR can merge, normalized to mergeable/conflicted/unknown. */
   getMergeStatus(cwd: string, number: number): Promise<MergeStatus>
+  /** The PR's full diff text, for explain responses. */
+  getPrDiff(cwd: string, number: number): Promise<string>
   /** Every conversation comment, review summary, and inline review comment on a PR. */
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
   postComment(cwd: string, number: number, body: string): Promise<void>
+  /** Close a pull request, recording the operator's reason on the forge. */
+  closePr(cwd: string, number: number, reason: string): Promise<void>
+  /** Add a label to an existing pull request. */
+  addLabel(cwd: string, number: number, label: string): Promise<void>
+  /** Remove a label from an existing pull request. */
+  removeLabel(cwd: string, number: number, label: string): Promise<void>
 }
+
+const GH_FIELDS =
+  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /**
  * Github PRs through `gh`, with Chise's token and an Amagi-owned GH_CONFIG_DIR
@@ -111,9 +132,20 @@ function githubPr(exec: Exec): PrDriver {
           return 'open'
       }
     },
+    async listOpenPrs(cwd) {
+      const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
+        cwd,
+        env: ghEnv(),
+      })
+      const raw = JSON.parse(out) as Array<
+        Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
+      >
+      // gh reports labels as objects; the pass only needs the names.
+      return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
+    },
+    // GitHub computes mergeability asynchronously: bulk queries report UNKNOWN
+    // until a single-PR query triggers it, so retry briefly until it resolves.
     async getMergeStatus(cwd, number) {
-      // GitHub computes mergeability asynchronously, so a fresh PR may report
-      // UNKNOWN until a single-PR query has forced the check.
       for (let attempt = 0; attempt < 5; attempt++) {
         const out = await execOk(
           exec,
@@ -130,6 +162,9 @@ function githubPr(exec: Exec): PrDriver {
         if (attempt < 4) await Bun.sleep(1000)
       }
       return 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      return execOk(exec, ['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv() })
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -165,6 +200,24 @@ function githubPr(exec: Exec): PrDriver {
         env: ghEnv(),
       })
     },
+    async closePr(cwd, number, reason) {
+      await execOk(exec, ['gh', 'pr', 'close', String(number), '--comment', reason], {
+        cwd,
+        env: ghEnv(),
+      })
+    },
+    async addLabel(cwd, number, label) {
+      await execOk(exec, ['gh', 'pr', 'edit', String(number), '--add-label', label], {
+        cwd,
+        env: ghEnv(),
+      })
+    },
+    async removeLabel(cwd, number, label) {
+      await execOk(exec, ['gh', 'pr', 'edit', String(number), '--remove-label', label], {
+        cwd,
+        env: ghEnv(),
+      })
+    },
   }
 }
 
@@ -188,16 +241,25 @@ function forgejoPr(exec: Exec): PrDriver {
     return remote
   }
 
-  async function api(cwd: string, method: string, path: string, body?: unknown) {
-    const r = await forge(cwd)
-    const token = forgeToken('forgejo')
-    if (token === null) {
+  async function forgeTokenOrThrow(): Promise<string> {
+    const t = forgeToken('forgejo')
+    if (t === null) {
       throw new Error('forgejo token missing: set FORGEJO_TOKEN in the amagi process environment')
     }
+    return t
+  }
+
+  async function request(
+    cwd: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Response> {
+    const r = await forge(cwd)
     const res = await fetch(`${r.base}/api/v1/${path}`, {
       method,
       headers: {
-        authorization: `token ${token}`,
+        authorization: `token ${await forgeTokenOrThrow()}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -207,8 +269,61 @@ function forgejoPr(exec: Exec): PrDriver {
         `forgejo api ${method} ${path}: ${res.status} ${(await res.text()).slice(0, 300)}`,
       )
     }
+    return res
+  }
+
+  async function api(
+    cwd: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Record<string, unknown>> {
+    const res = await request(cwd, method, path, body)
     if (res.status === 204) return {}
     return (await res.json()) as Record<string, unknown>
+  }
+
+  /** Forgejo endpoints like the `.diff` suffix return text, not JSON. */
+  async function rawApi(cwd: string, path: string): Promise<string> {
+    const res = await request(cwd, 'GET', path)
+    return await res.text()
+  }
+
+  const refName = (branch: unknown): string => {
+    if (typeof branch !== 'object' || branch === null) return ''
+    const ref = (branch as { ref?: unknown }).ref
+    return typeof ref === 'string' ? ref : ''
+  }
+
+  const headOid = (branch: unknown): string | null => {
+    if (typeof branch !== 'object' || branch === null) return null
+    const sha = (branch as { sha?: unknown }).sha
+    return typeof sha === 'string' ? sha : null
+  }
+
+  /** Maps Forgejo's bool mergeable + mergeable_state onto the shared shape. */
+  function mergeFields(item: Record<string, unknown>): PrMergeStatus {
+    const mergeable = item.mergeable
+    const state = typeof item.mergeable_state === 'string' ? item.mergeable_state : ''
+    if (mergeable === false || state === 'dirty') {
+      return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+    }
+    if (mergeable !== true || state === '' || state === 'unknown') {
+      return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+    }
+    return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+  }
+
+  // The Forgejo issue-labels API keys on numeric label ids, so a name must be
+  // resolved before a label can be added or removed.
+  async function labelId(cwd: string, r: ForgejoRemote, name: string): Promise<number | null> {
+    const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/labels`).catch(() => null)
+    if (raw === null) return null
+    const items = Array.isArray(raw) ? raw : []
+    for (const item of items as Array<Record<string, unknown>>) {
+      if (item.name === name && typeof item.id === 'number') return item.id
+    }
+    return null
   }
 
   return {
@@ -255,11 +370,34 @@ function forgejoPr(exec: Exec): PrDriver {
       if (pr.state === 'closed') return 'closed'
       return 'open'
     },
+    async listOpenPrs(cwd) {
+      const r = await forge(cwd)
+      const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/pulls?state=open`)
+      const items = Array.isArray(raw) ? raw : []
+      return (items as Array<Record<string, unknown>>).map((item) => ({
+        number: Number(item.number ?? 0),
+        title: typeof item.title === 'string' ? item.title : '',
+        body: typeof item.body === 'string' ? item.body : '',
+        url: typeof item.html_url === 'string' ? item.html_url : '',
+        headRefName: refName(item.head),
+        baseRefName: refName(item.base),
+        headRefOid: headOid(item.head),
+        ...mergeFields(item),
+        updatedAt: typeof item.updated_at === 'string' ? item.updated_at : '',
+        labels: ((item.labels as Array<{ name?: string }> | undefined) ?? []).map(
+          (l) => l.name ?? '',
+        ),
+      }))
+    },
     async getMergeStatus(cwd, number) {
       const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
       if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
       if (pr.mergeable === true) return 'mergeable'
       return 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      const r = await forge(cwd)
+      return rawApi(cwd, `repos/${r.ownerRepo}/pulls/${number}.diff`)
     },
     async listComments(cwd, number) {
       const r = await forge(cwd)
@@ -288,6 +426,28 @@ function forgejoPr(exec: Exec): PrDriver {
       await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/issues/${number}/comments`, {
         body,
       })
+    },
+    async closePr(cwd, number, _reason) {
+      await api(cwd, 'PATCH', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`, {
+        state: 'closed',
+      })
+    },
+    async addLabel(cwd, number, label) {
+      const r = await forge(cwd)
+      // best effort: a label that exists or a run without write perms is not fatal
+      await api(cwd, 'POST', `repos/${r.ownerRepo}/labels`, {
+        name: label,
+        color: 'A0A0A0',
+      }).catch(() => {})
+      const id = await labelId(cwd, r, label)
+      if (id === null) return
+      await api(cwd, 'POST', `repos/${r.ownerRepo}/issues/${number}/labels`, { labels: [id] })
+    },
+    async removeLabel(cwd, number, label) {
+      const r = await forge(cwd)
+      const id = await labelId(cwd, r, label)
+      if (id === null) return
+      await api(cwd, 'DELETE', `repos/${r.ownerRepo}/issues/${number}/labels/${id}`)
     },
   }
 }
