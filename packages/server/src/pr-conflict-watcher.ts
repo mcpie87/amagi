@@ -3,13 +3,17 @@ import {
   conflictWatchPath,
   type Exec,
   errMsg,
+  flagPointlessPrs,
   isConflicting,
   listOpenPrs,
   type makeHarness,
+  type PrDriver,
   type ResolveConflictResult,
   readConflictWatch,
   resolveConflict,
+  type Store,
   saveConflictWatch,
+  type Tracker,
   type WorkerActivity,
 } from '@amagi/core'
 
@@ -19,6 +23,11 @@ export type PrConflictWatcherOptions = {
   root: string
   repoName: string
   config: Config
+  /** Store and tracker for the pointlessness pass, which parks and un-parks tasks. */
+  store: Store
+  tracker: Tracker
+  /** Forge driver for the pointlessness pass's label and comment mutations. */
+  driver: PrDriver
   intervalMs?: number
   /** Test seams, forwarded to the resolver. */
   exec?: Exec
@@ -33,18 +42,22 @@ export type PrConflictWatcher = {
 const DEFAULT_INTERVAL_MS = 300_000
 
 /**
- * Continuously resolves open PRs that conflict with the base branch, one per
- * head SHA: a PR is only attempted once until its head commit changes, so an
- * unresolvable conflict cannot burn a full agent run every tick. Per-PR state
- * is kept on disk (the analogue of the mention watcher's last-seen tracking)
- * and dropped once the PR leaves the conflicting set. Ticks are sequential: a
- * long resolution delays the next scan rather than stacking on top of it.
+ * The shared PR watcher: one listOpenPrs per tick feeds the conflict and
+ * pointlessness passes over the same list, so no fourth poll loop hammers the
+ * endpoint. Conflicts are resolved one per head SHA; amagi PRs whose diff
+ * against base is empty get flagged (label + comments, task parked in
+ * pr_flagged), and a flag is cleared once real commits arrive. Ticks are
+ * sequential: a long resolution delays the next scan rather than stacking on
+ * top of it.
  */
 export function startPrConflictWatcher({
   repo,
   root,
   repoName,
   config,
+  store,
+  tracker,
+  driver,
   intervalMs = DEFAULT_INTERVAL_MS,
   exec,
   makeHarnessFn,
@@ -55,10 +68,14 @@ export function startPrConflictWatcher({
   let scanned = 0
   let conflicting = 0
   let resolved = 0
+  let flagged = 0
+  let cleared = 0
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
     { label: 'resolved', value: resolved },
+    { label: 'flagged', value: flagged },
+    { label: 'cleared', value: cleared },
   ]
   let activity: WorkerActivity = {
     repo,
@@ -104,6 +121,17 @@ export function startPrConflictWatcher({
       }
       // Only PRs that are still conflicting stay tracked; the rest drop out.
       saveConflictWatch(statePath, nextState)
+      const pointless = await flagPointlessPrs({
+        store,
+        tracker,
+        driver,
+        cwd: root,
+        repoName,
+        prs,
+        ...(exec === undefined ? {} : { exec }),
+      })
+      flagged += pointless.flagged
+      cleared += pointless.cleared
     } catch (err) {
       next.ok = false
       next.error = errMsg(err)

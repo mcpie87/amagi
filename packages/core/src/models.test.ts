@@ -110,4 +110,19 @@ describe('listModelsCached', () => {
     expect(await listModelsCached('claude', () => Promise.resolve([]), dir)).toEqual([])
     expect(existsSync(cachePath('claude'))).toBe(false)
   })
+
+  test('curated kinds skip the disk cache and return the live curated list', async () => {
+    writeCache('claude', Date.now(), ['stale-generic'])
+    let called = false
+    const models = await listModelsCached(
+      'claude',
+      () => {
+        called = true
+        return Promise.resolve(['claude-opus-5'])
+      },
+      dir,
+    )
+    expect(models).toEqual(['claude-opus-5'])
+    expect(called).toBe(true)
+  })
 })

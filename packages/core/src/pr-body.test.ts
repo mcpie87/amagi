@@ -120,6 +120,77 @@ describe('formatPrBody', () => {
     expect(body).not.toContain('How to use')
   })
 
+  test('renders the conclusion after the what-changed list, with the file names ticked', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nAdded hello.txt with a greeting; nothing else touched.',
+      },
+      [{ path: 'hello.txt', additions: 1, deletions: 0 }],
+    )
+
+    expect(body.indexOf('### 🛠️ What changed')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Added `hello.txt` with a greeting; nothing else touched.')
+  })
+
+  test('keeps both agent-authored sections and renders conclusion last', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nChanged hello.txt only.\n\n### How to use\n\nRun `hello`',
+      },
+      [],
+    )
+
+    expect(body.indexOf('### 🚀 How to use')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('Changed `hello.txt` only.')
+    expect(body).toContain('Run `hello`')
+  })
+
+  test('uses the run summary as the conclusion when the agent wrote none', () => {
+    const body = formatPrBody(TASK, [], undefined, 'Wrote hello.txt and removed stale config')
+
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Wrote `hello.txt` and removed stale config')
+  })
+
+  test('omits the conclusion when neither the description nor the summary has one', () => {
+    const body = formatPrBody(TASK, [], undefined, '  ')
+    expect(body).not.toContain('Conclusion')
+  })
+
+  test('the description conclusion wins over the run summary', () => {
+    const body = formatPrBody(
+      { ...TASK, description: 'Write hello.txt\n\n### Conclusion\n\nFrom the description' },
+      [],
+      undefined,
+      'From the summary',
+    )
+
+    expect(body).toContain('From the description')
+    expect(body).not.toContain('From the summary')
+  })
+
+  test('always renders a summary section, using the agent summary when the description is empty', () => {
+    const body = formatPrBody(
+      { ...TASK, description: '' },
+      [],
+      undefined,
+      'Dedup by exact comment id, not by a numeric watermark.',
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Dedup by exact comment id, not by a numeric watermark.')
+  })
+
+  test('renders the summary heading even with no description and no agent summary', () => {
+    const body = formatPrBody({ ...TASK, description: '' }, [])
+    expect(body).toContain('### 📝 Summary')
+  })
+
   test('appends a model/effort footer when metadata is supplied', () => {
     const body = formatPrBody(TASK, [], {
       harness: 'opencode',
