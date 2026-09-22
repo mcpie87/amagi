@@ -578,10 +578,18 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     expect(res.status).toBe(404)
   })
 
-  test('409s when the task has no worktree to resume', async () => {
+  test('restarts a task with no recorded worktree, letting the runner start fresh', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
     claim('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
-    expect(res.status).toBe(409)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('claimed')
+    expect(body.task.worktree).toBeNull()
+    expect(tracker.released).toEqual(['bd-1'])
   })
 
   test('409s when the task reached a terminal state that cannot be retried', async () => {
