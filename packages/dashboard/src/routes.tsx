@@ -3419,6 +3419,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           tone: 'amber',
         })
         break
+      case 'run.restarted':
+        items.push({
+          key: `rr${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `context restart #${event.restart} (peak ${fmtTokens(event.contextTokens)})`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
       case 'notify.sent':
         items.push({
           key: `n${event.seq}`,

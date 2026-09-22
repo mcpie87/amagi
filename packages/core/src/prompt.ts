@@ -89,6 +89,26 @@ export function reclaimPrompt(ctx: PromptContext): string {
   return parts.join('\n')
 }
 
+/**
+ * Wraps a phase prompt with a fresh-context restart handoff: the previous
+ * session tripped the context guard and was killed, so the new session gets
+ * the synthesized handoff of what was done and continues from the worktree
+ * state instead of starting over.
+ */
+export function withRestartHandoff(prompt: string, handoff: string): string {
+  return [
+    'Your previous session hit the context budget and was stopped. Its work is',
+    'still in the worktree. Continue from where it left off instead of starting',
+    'over.',
+    '',
+    'What the previous session did:',
+    handoff,
+    '',
+    'Continue the task below:',
+    prompt,
+  ].join('\n')
+}
+
 export function answerPrompt(question: string, answer: string): string {
   return [
     'A human answered the question you were waiting on. Continue the task.',

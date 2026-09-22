@@ -203,6 +203,18 @@ export const EventBody = z.discriminatedUnion('type', [
     contextTokens: z.number().int(),
     limit: z.number().int(),
   }),
+  /**
+   * A run that crossed the hard context limit was restarted with a fresh
+   * session in the same worktree; `summary` is the handoff of what the killed
+   * session did, handed to the new one as context. `restart` is 1-based.
+   */
+  z.object({
+    type: z.literal('run.restarted'),
+    phase: z.string(),
+    restart: z.number().int().positive(),
+    contextTokens: z.number().int(),
+    summary: z.string(),
+  }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
