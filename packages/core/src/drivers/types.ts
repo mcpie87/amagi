@@ -12,6 +12,10 @@ export type TrackerTask = {
   url: string | null
   /** Creation timestamp (epoch ms); absent when the tracker does not report it. */
   createdAt?: number | null
+  /** Free-form markdown notes on the issue; beads populates it, others leave it unset. */
+  notes?: string
+  /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
+  comments?: string[]
   /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
   difficulty?: string | null
 }

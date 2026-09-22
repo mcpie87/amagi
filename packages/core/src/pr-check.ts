@@ -54,6 +54,60 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
 }
 
+export type FetchPullHeadsOptions = {
+  repoRoot: string
+  /** Last seen PR head SHAs keyed by ref (refs/pull/N/head), so the fetch is skipped when none moved. */
+  lastHeads: Record<string, string>
+  exec?: Exec
+}
+
+export type FetchPullHeadsResult = {
+  /** True when a fetch ran because at least one PR head moved since lastHeads. */
+  fetched: boolean
+  /** Current PR head SHAs keyed by ref, e.g. refs/pull/7/head. */
+  heads: Record<string, string>
+}
+
+/**
+ * Mirrors every open PR head into refs/remotes/origin/pr/* with one fetch.
+ * The pull/star/head namespace covers fork PRs, which a per-branch fetch of
+ * headRefName does not. ls-remote is a zero-transfer zero-quota probe, so the
+ * fetch is skipped on ticks where no head moved.
+ */
+export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<FetchPullHeadsResult> {
+  const run = opts.exec ?? defaultExec
+  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
+
+  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', 'refs/pull/*/head'], {
+    cwd: opts.repoRoot,
+  })
+  const heads: Record<string, string> = {}
+  for (const line of out.trim().split('\n')) {
+    if (line === '') continue
+    const [sha, ref] = line.split('\t')
+    if (sha !== undefined && ref !== undefined) heads[ref] = sha
+  }
+
+  const moved =
+    Object.keys(heads).length !== Object.keys(opts.lastHeads).length ||
+    Object.keys(heads).some((ref) => opts.lastHeads[ref] !== heads[ref])
+  if (!moved) return { fetched: false, heads }
+
+  await execOk(
+    run,
+    [
+      'git',
+      ...tokenCfg,
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    ],
+    { cwd: opts.repoRoot },
+  )
+  return { fetched: true, heads }
+}
+
 export type PrepareConflictWorktreeOptions = {
   repoRoot: string
   repoName: string
@@ -99,6 +153,11 @@ export async function prepareConflictWorktree(
       ? ['git', 'worktree', 'add', path, branch]
       : ['git', 'worktree', 'add', '-b', branch, path, `origin/${opts.pr.headRefName}`]
     await execOk(run, args, { cwd: opts.repoRoot })
+  } else {
+    // A reused worktree can hold a stale in-progress merge or committed resolution
+    // from an earlier run; abort and reset so the merge below starts from the PR head.
+    await run(['git', 'merge', '--abort'], { cwd: path })
+    await execOk(run, ['git', 'reset', '--hard', `origin/${opts.pr.headRefName}`], { cwd: path })
   }
 
   if (opts.persona) {

@@ -55,6 +55,10 @@ status:
 serve:
     bun serve
 
+# Terminal view of the queue, task detail, and pending questions
+tui:
+    bun run packages/cli/src/index.ts tui
+
 # Run the bot. Pin the harness/model/effort to skip the interactive picker:
 # `just run -- --harness claude --model <model>` or `just run --harness claude`.
 [arg('model', long='model', help='model to pass to the harness')]
@@ -74,3 +78,7 @@ respond-to-mentions:
 # Check PRs the bot is involved in
 check-prs:
     bun run packages/cli/src/index.ts check-prs
+
+# Interactively draft a task with the picked agent, create it, then run it
+new:
+    bun run packages/cli/src/index.ts new
