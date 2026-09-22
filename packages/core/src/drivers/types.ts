@@ -10,6 +10,8 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Creation timestamp (epoch ms); absent when the tracker does not report it. */
+  createdAt?: number | null
   /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
   difficulty?: string | null
 }

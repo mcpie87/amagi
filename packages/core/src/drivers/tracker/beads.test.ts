@@ -35,6 +35,17 @@ const READY_WITH_DIFFICULTY_JSON = `[
   }
 ]`
 
+const READY_WITHOUT_CREATED_AT_JSON = `[
+  {
+    "id": "tst-noc",
+    "title": "No creation stamp",
+    "description": "Tracker omitted the date",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task"
+  }
+]`
+
 const CLAIMED_JSON = `[
   {
     "id": "tst-lmc",
@@ -181,6 +192,7 @@ describe('BeadsTracker', () => {
       priority: 1,
       type: 'task',
       url: null,
+      createdAt: Date.parse('2026-09-20T14:02:53Z'),
     })
     expect(calls[0]).toContain('--json')
     expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
@@ -190,6 +202,14 @@ describe('BeadsTracker', () => {
     const { exec } = fake((c) => (c.includes('ready') ? ok(READY_WITH_DIFFICULTY_JSON) : undefined))
     const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
     expect(tasks[0]?.difficulty).toBe('high')
+  })
+
+  test('leaves createdAt absent when bd omits the stamp', async () => {
+    const { exec } = fake((c) =>
+      c.includes('ready') ? ok(READY_WITHOUT_CREATED_AT_JSON) : undefined,
+    )
+    const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
+    expect(tasks[0]?.createdAt).toBeUndefined()
   })
 
   test('an empty queue is an empty array, not an error', async () => {
