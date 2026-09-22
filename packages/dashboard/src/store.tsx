@@ -10,6 +10,7 @@ import {
   useContext,
   useEffect,
   useReducer,
+  useRef,
   useState,
 } from 'react'
 
@@ -28,6 +29,13 @@ export type DashboardValue = {
   selectRepo: (key: string) => void
   refreshRepos: () => void
   addRepo: (path: string) => Promise<RepoInfo | { error: string }>
+  /**
+   * Reconnects the selected repo's event stream from the last event the client
+   * saw. The SSE connection can silently go stale (e.g. a dev proxy holding a
+   * dead upstream after a server restart), so mutations that must be reflected
+   * promptly re-sync instead of waiting for a page refresh.
+   */
+  resyncStream: () => void
 }
 
 const ReposContext = createContext<DashboardValue>({
@@ -36,6 +44,7 @@ const ReposContext = createContext<DashboardValue>({
   selectRepo: () => {},
   refreshRepos: () => {},
   addRepo: async () => ({ error: 'no provider' }),
+  resyncStream: () => {},
 })
 
 const StreamContext = createContext<DashboardState>(initialDashboardState())
@@ -64,6 +73,8 @@ function readStored(): string | null {
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [repos, setRepos] = useState<RepoInfo[] | null>(null)
   const [selected, setSelected] = useState<string | null>(readStored)
+  const [resync, setResync] = useState(0)
+  const resyncStream = useCallback(() => setResync((n) => n + 1), [])
 
   const refreshRepos = useCallback(() => {
     fetch(`${apiBase}/api/repos`)
@@ -105,11 +116,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   )
 
   return (
-    <ReposContext.Provider value={{ repos, selected, selectRepo, refreshRepos, addRepo }}>
+    <ReposContext.Provider
+      value={{ repos, selected, selectRepo, refreshRepos, addRepo, resyncStream }}
+    >
       {selected === null ? (
         <StreamContext.Provider value={initialDashboardState()}>{children}</StreamContext.Provider>
       ) : (
-        <RepoStream key={selected} repo={selected}>
+        <RepoStream key={selected} repo={selected} resync={resync}>
           {children}
         </RepoStream>
       )}
@@ -117,10 +130,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   )
 }
 
-function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
+function RepoStream({
+  repo,
+  resync,
+  children,
+}: {
+  repo: string
+  resync: number
+  children: ReactNode
+}) {
   const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
   const [readyQueue, setReadyQueue] = useState<TrackerTask[]>([])
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
+  const latestSeqRef = useRef(0)
+  latestSeqRef.current = state.latestSeq
 
   useEffect(() => {
     let alive = true
@@ -143,7 +166,13 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   }, [repo])
 
   useEffect(() => {
-    const source = new EventSource(`${apiBase}/api/repos/${repo}/stream?sinceSeq=0`)
+    // Resync resumes from the last event the client already folded in, so a
+    // reconnection only replays what the stale connection missed. The first
+    // connect replays everything (latestSeq is 0).
+    void resync
+    const source = new EventSource(
+      `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}`,
+    )
     source.addEventListener('open', () => setConnection('connected'))
     source.addEventListener('error', () => setConnection('reconnecting'))
     source.addEventListener('message', (event: MessageEvent) => {
@@ -169,7 +198,7 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
       }
     })
     return () => source.close()
-  }, [repo])
+  }, [repo, resync])
 
   return (
     <ConnectionContext.Provider value={connection}>
@@ -191,12 +220,33 @@ export function useReadyQueue(): TrackerTask[] {
 
 export type RunnerApi = {
   status: RunnerStatus | null
-  start: (taskId?: string) => Promise<{ ok: true; taskId: string } | { ok: false; error?: string }>
+  /** Choices for the Run next picker, or null before the first fetch. */
+  options: RunOptionsInfo | null
+  start: (
+    taskId?: string,
+    opts?: RunOptions,
+  ) => Promise<{ ok: true; taskId: string } | { ok: false; error?: string }>
   stop: (taskId: string) => Promise<{ ok: boolean; error?: string }>
+}
+
+/** Per-launch overrides, matching RunBody. Omitted fields use config defaults. */
+export type RunOptions = {
+  harness?: string
+  model?: string
+  effort?: string
+}
+
+export type RunOptionsInfo = {
+  harnesses: { name: string; kind: string; model?: string; effort?: string }[]
+  models: Record<string, string[]>
+  efforts: Record<string, string[]>
+  /** The configured default harness (config.harness.implement), for labeling. */
+  default: { kind: string; model?: string; effort?: string } | null
 }
 
 const RunnerContext = createContext<RunnerApi>({
   status: null,
+  options: null,
   start: async () => ({ ok: false }),
   stop: async () => ({ ok: false }),
 })
@@ -204,31 +254,47 @@ const RunnerContext = createContext<RunnerApi>({
 /** Runner availability plus launch/stop, polled so the header stays honest. */
 export function RunnerProvider({ children }: { children: ReactNode }) {
   const base = (import.meta.env.VITE_API_BASE ?? '') as string
+  const { resyncStream } = useContext(ReposContext)
   const [status, setStatus] = useState<RunnerStatus | null>(null)
+  const [options, setOptions] = useState<RunOptionsInfo | null>(null)
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     fetch(`${base}/api/runner`)
       .then((r) => (r.ok ? (r.json() as Promise<RunnerStatus>) : null))
       .then(setStatus)
       .catch(() => setStatus(null))
-  }
+  }, [])
 
   useEffect(() => {
     refresh()
+    fetch(`${base}/api/runner/options`)
+      .then((r) => (r.ok ? (r.json() as Promise<RunOptionsInfo>) : null))
+      .then(setOptions)
+      .catch(() => setOptions(null))
     const timer = setInterval(refresh, 4000)
     return () => clearInterval(timer)
-  }, [base])
+  }, [refresh])
 
   const start = async (
     taskId?: string,
+    opts?: RunOptions,
   ): Promise<{ ok: true; taskId: string } | { ok: false; error?: string }> => {
     try {
       const res = await fetch(`${base}/api/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(taskId === undefined ? {} : { taskId }),
+        body: JSON.stringify({
+          ...(taskId === undefined ? {} : { taskId }),
+          ...(opts?.harness === undefined ? {} : { harness: opts.harness }),
+          ...(opts?.model === undefined ? {} : { model: opts.model }),
+          ...(opts?.effort === undefined ? {} : { effort: opts.effort }),
+        }),
       })
       refresh()
+      // The launch lands in the store only after this request; if the event
+      // stream is stale the new task's title/agent never arrive, so force a
+      // resync instead of leaving the worker slot showing a bare task id.
+      resyncStream()
       if (res.ok) {
         const body = (await res.json()) as { taskId?: string }
         return { ok: true, taskId: body.taskId ?? '' }
@@ -244,6 +310,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     try {
       const res = await fetch(`${base}/api/runs/${taskId}/stop`, { method: 'POST' })
       refresh()
+      resyncStream()
       if (res.ok) return { ok: true }
       const parsed = (await res.json().catch(() => null)) as { error?: string } | null
       return { ok: false, error: parsed?.error ?? `HTTP ${res.status}` }
@@ -252,7 +319,11 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  return <RunnerContext.Provider value={{ status, start, stop }}>{children}</RunnerContext.Provider>
+  return (
+    <RunnerContext.Provider value={{ status, options, start, stop }}>
+      {children}
+    </RunnerContext.Provider>
+  )
 }
 
 export function useRunner(): RunnerApi {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
-import { backtickCodeRefs, changesSinceBase, formatPrBody } from './pr-body.ts'
+import { backtickFileRefs, changesSinceBase, formatPrBody, taskIdFromPrBody } from './pr-body.ts'
 
 type Call = readonly string[]
 
@@ -58,34 +58,22 @@ describe('changesSinceBase', () => {
   })
 })
 
-describe('backtickCodeRefs', () => {
+describe('backtickFileRefs', () => {
   test('wraps file paths and file names in backticks', () => {
-    expect(backtickCodeRefs('Write hello.txt, edit src/app.ts and packages/core/pr-body.ts')).toBe(
+    expect(backtickFileRefs('Write hello.txt, edit src/app.ts and packages/core/pr-body.ts')).toBe(
       'Write `hello.txt`, edit `src/app.ts` and `packages/core/pr-body.ts`',
     )
   })
 
-  test('wraps identifiers in backticks', () => {
-    expect(
-      backtickCodeRefs('set in_progress via Runner.drive, call formatPrBody and close am-9h4'),
-    ).toBe('set `in_progress` via `Runner.drive`, call `formatPrBody` and close `am-9h4`')
-  })
-
-  test('wraps commands, flags and issue references in backticks', () => {
-    expect(backtickCodeRefs('Run with --dry-run, see PR #30\n$ bun test')).toBe(
-      'Run with `--dry-run`, see PR `#30`\n$ `bun test`',
-    )
-  })
-
   test('leaves existing backticks and fenced blocks untouched', () => {
-    const text = 'Run `bun run dev`\n```\ngit status\n```\nthen in_progress'
-    expect(backtickCodeRefs(text)).toBe(
-      'Run `bun run dev`\n```\ngit status\n```\nthen `in_progress`',
+    const text = 'Run `bun run dev`\n```\ngit status\n```\nthen edit src/app.ts'
+    expect(backtickFileRefs(text)).toBe(
+      'Run `bun run dev`\n```\ngit status\n```\nthen edit `src/app.ts`',
     )
   })
 
   test('leaves plain English prose alone', () => {
-    expect(backtickCodeRefs('The summary section is now readable and consistent.')).toBe(
+    expect(backtickFileRefs('The summary section is now readable and consistent.')).toBe(
       'The summary section is now readable and consistent.',
     )
   })
@@ -105,6 +93,19 @@ describe('formatPrBody', () => {
     expect(body).toContain('### 🛠️ What changed')
     expect(body).toContain('- `hello.txt` +1 -0')
     expect(body).toContain('- `image.png` binary')
+  })
+
+  test('renders the task creation date as a relative-time stamp when known', () => {
+    const body = formatPrBody({ ...TASK, createdAt: Date.parse('2026-09-20T14:02:53Z') }, [])
+
+    expect(body).toContain(
+      '**Task:** `am-1` · created <relative-time datetime="2026-09-20T14:02:53.000Z">2026-09-20</relative-time>',
+    )
+  })
+
+  test('omits the creation date when the tracker did not report one', () => {
+    expect(formatPrBody(TASK, [])).toContain('**Task:** `am-1`')
+    expect(formatPrBody({ ...TASK, createdAt: null }, [])).not.toContain('relative-time')
   })
 
   test('omits the changes section when nothing changed', () => {
@@ -132,6 +133,77 @@ describe('formatPrBody', () => {
     expect(body).not.toContain('How to use')
   })
 
+  test('renders the conclusion after the what-changed list, with the file names ticked', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nAdded hello.txt with a greeting; nothing else touched.',
+      },
+      [{ path: 'hello.txt', additions: 1, deletions: 0 }],
+    )
+
+    expect(body.indexOf('### 🛠️ What changed')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Added `hello.txt` with a greeting; nothing else touched.')
+  })
+
+  test('keeps both agent-authored sections and renders conclusion last', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nChanged hello.txt only.\n\n### How to use\n\nRun `hello`',
+      },
+      [],
+    )
+
+    expect(body.indexOf('### 🚀 How to use')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('Changed `hello.txt` only.')
+    expect(body).toContain('Run `hello`')
+  })
+
+  test('uses the run summary as the conclusion when the agent wrote none', () => {
+    const body = formatPrBody(TASK, [], undefined, 'Wrote hello.txt and removed stale config')
+
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Wrote `hello.txt` and removed stale config')
+  })
+
+  test('omits the conclusion when neither the description nor the summary has one', () => {
+    const body = formatPrBody(TASK, [], undefined, '  ')
+    expect(body).not.toContain('Conclusion')
+  })
+
+  test('the description conclusion wins over the run summary', () => {
+    const body = formatPrBody(
+      { ...TASK, description: 'Write hello.txt\n\n### Conclusion\n\nFrom the description' },
+      [],
+      undefined,
+      'From the summary',
+    )
+
+    expect(body).toContain('From the description')
+    expect(body).not.toContain('From the summary')
+  })
+
+  test('always renders a summary section, using the agent summary when the description is empty', () => {
+    const body = formatPrBody(
+      { ...TASK, description: '' },
+      [],
+      undefined,
+      'Dedup by exact comment id, not by a numeric watermark.',
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Dedup by exact comment id, not by a numeric watermark.')
+  })
+
+  test('renders the summary heading even with no description and no agent summary', () => {
+    const body = formatPrBody({ ...TASK, description: '' }, [])
+    expect(body).toContain('### 📝 Summary')
+  })
+
   test('appends a model/effort footer when metadata is supplied', () => {
     const body = formatPrBody(TASK, [], {
       harness: 'opencode',
@@ -147,5 +219,31 @@ describe('formatPrBody', () => {
   test('omits the footer when only the harness is known', () => {
     const body = formatPrBody(TASK, [], { harness: 'opencode', model: null, effort: null })
     expect(body).not.toContain('Generated by amagi')
+  })
+
+  test('ends with a machine-readable amagi-task trailer', () => {
+    const body = formatPrBody(TASK, [], {
+      harness: 'opencode',
+      model: 'gemini-2.5-pro',
+      effort: 'high',
+    })
+    expect(body.trimEnd().endsWith('amagi-task: am-1')).toBe(true)
+  })
+})
+
+describe('taskIdFromPrBody', () => {
+  test('reads the trailer back off a PR body', () => {
+    const body = formatPrBody(TASK, [])
+    expect(taskIdFromPrBody(body)).toBe('am-1')
+  })
+
+  test('finds the trailer among other body text', () => {
+    expect(taskIdFromPrBody('## Some PR\n\nDetails here.\n\namagi-task: am-3b8.2\n')).toBe(
+      'am-3b8.2',
+    )
+  })
+
+  test('is null for a body without the trailer, e.g. a PR that predates it', () => {
+    expect(taskIdFromPrBody('## Some PR\n\n**Task:** `am-1`\n')).toBeNull()
   })
 })

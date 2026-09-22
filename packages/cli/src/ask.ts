@@ -1,3 +1,5 @@
+import { errorOf } from '@amagi/core'
+
 export type AskOutcome = { kind: 'answered'; answer: string } | { kind: 'no_answer' }
 
 export type AskOptions = {
@@ -13,14 +15,6 @@ export type AskOptions = {
 /** `amagi/<id>-<slug>` from the worktree branch is the agent's own task id. */
 export function taskIdFromBranch(branch: string): string | null {
   return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
-}
-
-async function errorOf(res: Response): Promise<string> {
-  try {
-    return ((await res.json()) as { error?: string }).error ?? `HTTP ${res.status}`
-  } catch {
-    return `HTTP ${res.status}`
-  }
 }
 
 export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {

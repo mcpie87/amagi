@@ -1,6 +1,6 @@
-import { isTerminal, loadConfig, repoRoot, type TaskState } from '@amagi/core'
+import { isTerminal, loadConfig, relTime, repoRoot, type TaskState } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, red, relTime, table, yellow } from '../format.ts'
+import { bold, dim, green, red, table, yellow } from '../format.ts'
 import { currentRepo } from '../repo.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, (s: string) => string>> = {

@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { loadConfig } from './config.ts'
 import { forgeToken } from './drivers/forge-cred.ts'
 import { makePrDriver } from './drivers/pr.ts'
+import { errMsg } from './errors.ts'
 import { expandTilde } from './paths.ts'
 import { isRepoRoot, type RegistryEntry } from './registry.ts'
 
@@ -42,10 +43,7 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     config = loaded.config
     checks.push({ name: 'config', ok: true, detail: loaded.sources.join(', ') || 'defaults' })
   } catch (err) {
-    return Promise.resolve([
-      ...checks,
-      { name: 'config', ok: false, detail: err instanceof Error ? err.message : String(err) },
-    ])
+    return Promise.resolve([...checks, { name: 'config', ok: false, detail: errMsg(err) }])
   }
 
   const trackerBin = TRACKER_BIN[config.tracker.kind]
@@ -86,7 +84,7 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     checks.push({
       name: `forge ${config.forge.kind}`,
       ok: false,
-      detail: err instanceof Error ? err.message : String(err),
+      detail: errMsg(err),
     })
   }
 
@@ -98,17 +96,17 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     checks.push({
       name: 'worktree root',
       ok: false,
-      detail: `${worktreeRoot}: ${err instanceof Error ? err.message : String(err)}`,
+      detail: `${worktreeRoot}: ${errMsg(err)}`,
     })
   }
 
+  const { commands, format, lint } = config.checks
+  const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+  const total = commands.length + gate.length
   checks.push({
     name: 'checks',
-    ok: config.checks.commands.length > 0,
-    detail:
-      config.checks.commands.length === 0
-        ? 'none configured'
-        : `${config.checks.commands.length} command(s)`,
+    ok: total > 0,
+    detail: total === 0 ? 'none configured' : `${total} step(s)`,
   })
 
   return Promise.resolve(checks)

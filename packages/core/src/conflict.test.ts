@@ -24,6 +24,7 @@ const fail = (stderr: string): ExecResult => ({ exitCode: 1, stdout: '', stderr 
 const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',
@@ -74,7 +75,7 @@ function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
   })
 
 beforeEach(() => {
