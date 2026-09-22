@@ -22,6 +22,7 @@ type BdIssue = {
   labels?: string[]
   parent?: string
   dependencies?: BdIssue[]
+  dependent_count?: number
   metadata?: Record<string, string>
 }
 
@@ -38,6 +39,8 @@ export type BeadsIssue = TrackerTask & {
   parent: string | null
   /** Issues this one is blocked by, when the tracker reports them (bd show does). */
   dependencies: BeadsBlocker[]
+  /** Number of issues with this one as their parent. */
+  childCount: number
 }
 
 export type BeadsOptions = {
@@ -106,6 +109,7 @@ function toIssue(issue: BdIssue): BeadsIssue {
       ...toTask(d),
       labels: d.labels ?? [],
     })),
+    childCount: issue.dependent_count ?? 0,
   }
 }
 
@@ -146,6 +150,9 @@ export class BeadsTracker implements Tracker {
       '--json',
       '--limit',
       String(limit),
+      // FCFS: bd defaults to priority ordering; oldest is first-created first.
+      '--sort',
+      'oldest',
       '--exclude-type',
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
@@ -158,6 +165,10 @@ export class BeadsTracker implements Tracker {
     return parseIssues(await this.bd(['list', '--all', '--json', '--limit', String(limit)])).map(
       toIssue,
     )
+  }
+
+  async children(id: string): Promise<BeadsIssue[]> {
+    return parseIssues(await this.bd(['children', id, '--json'])).map(toIssue)
   }
 
   async getIssue(id: string): Promise<BeadsIssue | null> {
@@ -174,6 +185,9 @@ export class BeadsTracker implements Tracker {
       'ready',
       '--claim',
       '--json',
+      // FCFS: claim the oldest ready task, same ordering as ready().
+      '--sort',
+      'oldest',
       '--exclude-type',
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
@@ -208,6 +222,7 @@ export class BeadsTracker implements Tracker {
       ...(input.priority === null ? [] : ['--priority', `P${input.priority}`]),
       ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
       ...(input.dependencies.length === 0 ? [] : ['--deps', input.dependencies.join(',')]),
+      ...(input.parent === null ? [] : ['--parent', input.parent]),
       ...(input.difficulty === undefined || input.difficulty === null
         ? []
         : ['--metadata', JSON.stringify({ difficulty: input.difficulty })]),

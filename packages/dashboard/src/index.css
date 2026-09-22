@@ -50,6 +50,7 @@
   --color-cyan-ink: #67e8f9;
 
   --color-orange-soft: rgb(249 115 22 / 0.15);
+  --color-orange-soft-hover: rgb(249 115 22 / 0.28);
   --color-orange-edge: rgb(249 115 22 / 0.3);
   --color-orange-ink: #fdba74;
 
@@ -105,6 +106,8 @@
   --color-amber-ink: #b45309;
   --color-violet-ink: #6d28d9;
   --color-cyan-ink: #0e7490;
+  --color-orange-soft: rgb(249 115 22 / 0.18);
+  --color-orange-soft-hover: rgb(249 115 22 / 0.3);
   --color-orange-ink: #c2410c;
   --color-emerald-soft-hover: rgb(16 185 129 / 0.25);
   --color-emerald-ink: #047857;

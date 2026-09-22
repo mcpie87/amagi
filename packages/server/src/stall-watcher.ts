@@ -4,6 +4,7 @@ import {
   exec as defaultExec,
   detectDoom,
   type Exec,
+  errMsg,
   type Store,
   type TaskRow,
   type TaskState,
@@ -64,8 +65,6 @@ const RECENT_EVENTS_LIMIT = 2000
 const DOOM_SCAN_LIMIT = 50
 const GIT_TIMEOUT_MS = 10_000
 
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
-
 function humanMs(ms: number): string {
   const seconds = Math.round(ms / 1000)
   if (seconds < 60) return `${seconds}s`
@@ -100,9 +99,13 @@ export function startStallWatcher({
 }: StallWatcherOptions): StallWatcher {
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
-  /** Cumulative across ticks, like the mention watcher's counters. */
+  /** Cumulative across ticks, so the dashboard counters keep rising. */
   let recovered = 0
   let stoppedDoom = 0
+  const counters = (): WorkerActivity['counters'] => [
+    { label: 'recovered', value: recovered },
+    { label: 'doom-stopped', value: stoppedDoom },
+  ]
   /** Per-task diff snapshots, keyed by worktree state; pruned when a task leaves the scan. */
   const diffSince = new Map<string, { snapshot: string; since: number }>()
   let activity: WorkerActivity = {
@@ -111,8 +114,7 @@ export function startStallWatcher({
     lastRunAt: 0,
     ok: true,
     error: null,
-    prsScanned: 0,
-    mentionsResponded: 0,
+    counters: counters(),
     detail: 'no stalled tasks',
   }
 
@@ -233,6 +235,7 @@ export function startStallWatcher({
       }
       stoppedDoom += doomCount
 
+      next.counters = counters()
       next.detail = detail()
     } catch (err) {
       next.ok = false

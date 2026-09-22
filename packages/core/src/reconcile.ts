@@ -1,5 +1,6 @@
 import type { PrDriver, PrState } from './drivers/pr.ts'
 import type { Tracker } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import type { Store } from './store/store.ts'
 
 export type ReconcileResult = {
@@ -27,10 +28,22 @@ export async function reconcilePrs(
     try {
       state = await forge.getPr(cwd, task.prNumber)
     } catch (err) {
-      console.warn(`pr reconcile ${task.id}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`pr reconcile ${task.id}: ${errMsg(err)}`)
       continue
     }
-    if (state === 'open') continue
+    if (state === 'open') {
+      try {
+        const mergeStatus = await forge.getMergeStatus(cwd, task.prNumber)
+        if (task.prMergeStatus !== mergeStatus) {
+          store.append(task.id, { type: 'pr.status', mergeStatus })
+        }
+      } catch (err) {
+        console.warn(
+          `pr reconcile ${task.id}: merge status: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+      continue
+    }
     const to = state === 'merged' ? 'done' : 'abandoned'
     const reason = state === 'merged' ? 'PR merged' : 'PR closed without merge'
     store.append(task.id, { type: 'task.state', from: task.state, to, reason })
@@ -41,9 +54,7 @@ export async function reconcilePrs(
         await tracker.setStatus(task.id, 'closed')
       }
     } catch (err) {
-      console.warn(
-        `pr reconcile ${task.id}: tracker settle failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      console.warn(`pr reconcile ${task.id}: tracker settle failed: ${errMsg(err)}`)
     }
     moved.push({ taskId: task.id, to })
   }
