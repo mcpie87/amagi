@@ -9,7 +9,7 @@ import {
   repoRoot,
   Workspaces,
 } from '@amagi/core'
-import { serve } from '@amagi/server'
+import { portInUse, serve } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
 
@@ -45,6 +45,19 @@ export const serveCommand = defineCommand({
       }
     }
     const config = loadGlobalConfig()
+    // Checked before the dashboard build so a second `amagi serve` fails in a
+    // second instead of rebuilding the UI and only then dying on the bind.
+    if (portInUse(config.server.host, config.server.port)) {
+      console.error(
+        `${bold('amagi')} cannot bind ${config.server.host}:${config.server.port} - it is already in use.`,
+      )
+      console.error(
+        dim(
+          'Another `amagi serve` is probably running; stop it, or set server.port in the global config.',
+        ),
+      )
+      process.exit(1)
+    }
     const dashboardDir = join(import.meta.dir, '..', '..', '..', 'dashboard')
     await buildDashboard(dashboardDir)
     const workspaces = new Workspaces()

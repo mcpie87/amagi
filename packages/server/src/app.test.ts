@@ -779,7 +779,7 @@ describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
 
     const res = await file('bd-1')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow; errorTask: BeadsIssue }
+    const body = (await res.json()) as { task: ProjectedTask; errorTask: BeadsIssue }
 
     expect(tracker.created).toHaveLength(1)
     expect(tracker.created[0]).toMatchObject({

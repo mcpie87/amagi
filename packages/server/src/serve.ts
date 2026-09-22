@@ -189,6 +189,20 @@ function startRepoPollers(
   }
 }
 
+/**
+ * Probes the bind up front so callers can refuse before doing expensive setup.
+ * A free port here can still be taken by the time the real bind happens, so
+ * this is a better error message, not a guarantee.
+ */
+export function portInUse(host: string, port: number): boolean {
+  try {
+    Bun.serve({ hostname: host, port, fetch: () => new Response('') }).stop(true)
+    return false
+  } catch {
+    return true
+  }
+}
+
 export function serve({
   workspaces,
   host,

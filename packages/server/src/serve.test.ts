@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { ProjectedTask } from '@amagi/core'
-import { serve } from './serve.ts'
+import { portInUse, serve } from './serve.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
 let ws: TestWorkspaces
@@ -40,4 +40,15 @@ test('serves dashboard assets with SPA fallback', async () => {
 
   const api = await fetch(`http://127.0.0.1:${server.port}/api/health`)
   expect(api.status).toBe(200)
+})
+
+test('portInUse tracks whether the port is bound', async () => {
+  ws = testWorkspaces(['repo1'])
+  const bound = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0 })
+  const port = bound.port ?? 0
+  expect(port).toBeGreaterThan(0)
+  expect(portInUse('127.0.0.1', port)).toBe(true)
+
+  await bound.stop(true)
+  expect(portInUse('127.0.0.1', port)).toBe(false)
 })
