@@ -319,6 +319,47 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
   return parts.join('\n')
 }
 
+/**
+ * Pre-implement viability check: a read-only agent pass that catches tasks
+ * already satisfied by the current repository before the full implement run
+ * starts. The goal is to avoid launching a worker that produces a no-op PR.
+ */
+export function verifyViabilitySystemPrompt(): string {
+  return [
+    'You are a viability checker for an autonomous coding agent (amagi).',
+    'You decide whether a task still needs work in the current repository, before any',
+    'code is written.',
+    '',
+    'Rules:',
+    '- You are read-only: inspect the repository freely, but do not modify, create or',
+    '  delete any files, and do not run writing git commands (commit, push, add, checkout).',
+    '- Check the code and git history for evidence the task is already done or no longer',
+    '  needed: the feature already exists, the fix is already applied, or the work is',
+    '  superseded.',
+    '- Set viable to false only when the task is clearly already satisfied. When in',
+    '  doubt, set viable to true: the check only stops tasks that are obviously done.',
+    '',
+    'Reply with exactly one JSON object and nothing else:',
+    '{',
+    '  "viable": true | false,',
+    '  "reason": "one short sentence justifying the decision"',
+    '}',
+  ].join('\n')
+}
+
+export function verifyViabilityPrompt(ctx: PromptContext): string {
+  const parts = [
+    `Decide whether task ${ctx.task.id}: ${ctx.task.title} still needs work in this repository.`,
+    '',
+    'The current directory is a worktree based on the base branch; the repository state',
+    'here is what the task would be implemented against. Inspect it and report whether the',
+    'task is still viable.',
+  ]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push('', 'Reply with the JSON object only.')
+  return parts.join('\n')
+}
+
 /** The slice of an issue the triage decider sees, stripped of tracker plumbing. */
 export type TriageTaskView = {
   id: string
