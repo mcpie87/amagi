@@ -45,6 +45,9 @@ describe('loadConfig', () => {
     expect(config.loop.prCheckIntervalSec).toBe(300)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
+    expect(config.loop.contextWarnTokens).toBe(160_000)
+    expect(config.loop.contextMaxTokens).toBe(200_000)
+    expect(config.loop.contextOverrides).toEqual({})
     expect(config.loop.doomEnabled).toBe(true)
     expect(config.loop.doomToolWindowSec).toBe(600)
     expect(config.loop.doomToolRepeat).toBe(20)
@@ -142,6 +145,17 @@ describe('loadConfig', () => {
     const config = loadConfig(repo).config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
     expect(config.loop.stallTimeoutSec).toBe(7200)
+  })
+
+  test('context budget keys are overridable, including per-harness', () => {
+    writeRepo(
+      '[loop]\ncontextWarnTokens = 90000\ncontextMaxTokens = 120000\n\n' +
+        '[loop.contextOverrides.codex]\nmaxTokens = 110000\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.loop.contextWarnTokens).toBe(90_000)
+    expect(config.loop.contextMaxTokens).toBe(120_000)
+    expect(config.loop.contextOverrides).toEqual({ codex: { maxTokens: 110_000 } })
   })
 
   test('pr check interval is overridable', () => {

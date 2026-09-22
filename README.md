@@ -100,10 +100,11 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `awaiting_answer` | The agent called `amagi ask` and is parked on a human answer | `implementing` |
 | `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `committed` (checks passed) |
 | `committed` | Changes committed to the branch | `pr_open` |
-| `pr_open` | Pull request opened against `repo.baseBranch` | — |
+| `pr_open` | Pull request opened against `repo.baseBranch` | `pr_flagged` |
+| `pr_flagged` | The PR's diff against base is empty; flagged with `amagi/needs-closing` and parked for the operator to close. Non-terminal: the watcher clears it back to `pr_open` if real commits arrive | `pr_open` |
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
-| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
+| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
@@ -243,6 +244,10 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.doomDiffWindowSec` | integer >= 60 | `1800` | A live worker whose worktree diff has not changed for this many seconds trips the guard. |
 | `loop.questionTimeoutSec` | integer >= 10 | `540` | How long `amagi ask` itself blocks for an answer before returning control to the agent. Kept under the 600s Bash timeout harnesses impose on tool calls. |
 | `loop.questionParkTimeoutSec` | integer >= 1 | `3600` | How long the runner waits, with the agent parked, for a human to answer via the dashboard or CLI before escalating to `needs_human`. |
+| `loop.contextWarnTokens` | integer >= 0 | `160000` | Input context (input + cached tokens) at which a run is flagged: the runner appends a `context.warn` event once the run's peak context reaches it. Kept under `loop.contextMaxTokens`. |
+| `loop.contextMaxTokens` | integer >= 0 | `200000` | Input context at which a run is stopped: crossing it kills the current agent process and routes the task to `needs_human` instead of letting the harness degrade. |
+| `loop.contextOverrides.<harness>.warnTokens` | integer >= 0 | *(falls back to `loop.contextWarnTokens`)* | Per-harness soft limit, keyed by harness kind (`claude`/`codex`/`opencode`), for harnesses whose context window differs. |
+| `loop.contextOverrides.<harness>.maxTokens` | integer >= 0 | *(falls back to `loop.contextMaxTokens`)* | Per-harness hard limit, keyed by harness kind, for harnesses whose context window differs. |
 | `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
 | `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |

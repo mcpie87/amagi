@@ -462,6 +462,26 @@ textarea::placeholder {
   font-size: 12px;
 }
 
+.restart-run {
+  position: relative;
+}
+.restart-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: 280px;
+  background: var(--color-surface);
+  color: var(--color-red-ink);
+  border: 1px solid var(--color-red-edge);
+  border-radius: 5px;
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px var(--shadow-color);
+}
+
 .agent-log-header {
   display: flex;
   justify-content: space-between;
