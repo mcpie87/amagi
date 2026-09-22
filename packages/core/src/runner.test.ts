@@ -308,6 +308,20 @@ const waitFor = async (fn: () => boolean, timeoutMs = 2000): Promise<void> => {
   }
 }
 
+/** Waits for the runner's check-recovery question and answers it as the operator. */
+const answerRecovery = async (answer: string): Promise<void> => {
+  await waitFor(() => store.unansweredQuestions(TASK.id).length > 0)
+  const q = store.unansweredQuestions(TASK.id)[0]
+  if (q === undefined) throw new Error('no recovery question to answer')
+  store.append(TASK.id, {
+    type: 'question.answered',
+    questionId: q.id,
+    answer,
+    via: 'web',
+  })
+  store.append(TASK.id, { type: 'task.state', from: 'awaiting_answer', to: 'implementing' })
+}
+
 const parksOnQuestion: Turn = {
   effect: (cwd) => {
     writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
@@ -803,11 +817,89 @@ describe('Runner.runOnce', () => {
     expect(harness.calls[1]?.prompt).toContain('checks failed')
   })
 
-  test('checks that never pass end in needs_human', async () => {
+  test('checks that never pass ask the operator and park when told to', async () => {
+    const harness = new FakeHarness([writesAFile, {}, {}])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['false'] }, loop: { maxCheckRounds: 1 } }),
+    ).runOnce()
+    await answerRecovery('park')
+
+    const result = await pending
+    expect(result?.state).toBe('needs_human')
+    expect(store.task(TASK.id)?.state).toBe('needs_human')
+    expect(types(TASK.id)).toContain('question.asked')
+  })
+
+  test('asks the operator and retries with another fix round when checks keep failing', async () => {
+    const harness = new FakeHarness([
+      writesAFile,
+      { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n') },
+      { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'good\n') },
+    ])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['grep -q good flag'] }, loop: { maxCheckRounds: 1 } }),
+    ).runOnce()
+    await answerRecovery('retry')
+
+    const result = await pending
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('question.asked')
+    expect(harness.calls).toHaveLength(3)
+  })
+
+  test('rebase recovery updates the worktree from the latest base and re-runs checks', async () => {
+    // An origin ahead of the local base: the stale worktree is missing fresh.txt.
+    const remote = mkdtempSync(join(tmpdir(), 'amagi-run-remote-'))
+    await execOk(exec, ['git', 'clone', '-q', repo, remote], { cwd: repo })
+    await execOk(exec, ['git', 'config', 'user.name', 'Remote'], { cwd: remote })
+    await execOk(exec, ['git', 'config', 'user.email', 'remote@example.com'], { cwd: remote })
+    writeFileSync(join(remote, 'fresh.txt'), 'fresh\n')
+    await execOk(exec, ['git', 'add', '.'], { cwd: remote })
+    await execOk(exec, ['git', 'commit', '-q', '-m', 'add fresh.txt'], { cwd: remote })
+    await execOk(exec, ['git', 'remote', 'add', 'origin', remote], { cwd: repo })
+
+    const harness = new FakeHarness([writesAFile, {}, {}])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['test -f fresh.txt'] } }),
+    ).runOnce()
+    await answerRecovery('rebase')
+
+    const result = await pending
+    expect(result?.state).toBe('pr_open')
+    const worktree = store.task(TASK.id)?.worktree
+    expect(worktree).not.toBeNull()
+    expect(existsSync(join(worktree as string, 'fresh.txt'))).toBe(true)
+    rmSync(remote, { recursive: true, force: true })
+  })
+
+  test('a rebase recovery that cannot fetch from origin parks the task', async () => {
+    const harness = new FakeHarness([writesAFile, {}, {}])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['false'] }, loop: { maxCheckRounds: 1 } }),
+    ).runOnce()
+    await answerRecovery('rebase')
+
+    const result = await pending
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('base failed')
+  })
+
+  test('a recovery question that never lands parks the task', async () => {
     const result = await makeRunner(
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile, {}, {}]),
-      config({ checks: { commands: ['false'] }, loop: { maxCheckRounds: 1 } }),
+      config({
+        checks: { commands: ['false'] },
+        loop: { maxCheckRounds: 1, questionParkTimeoutSec: 1 },
+      }),
     ).runOnce()
 
     expect(result?.state).toBe('needs_human')
@@ -815,11 +907,13 @@ describe('Runner.runOnce', () => {
   })
 
   test('checks stop at the first failure rather than running the rest', async () => {
-    await makeRunner(
+    const pending = makeRunner(
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile, {}, {}]),
       config({ checks: { commands: ['false', 'true'] }, loop: { maxCheckRounds: 0 } }),
     ).runOnce()
+    await answerRecovery('park')
+    await pending
 
     const finished = store.events({ taskId: TASK.id }).find((e) => e.type === 'checks.finished')
     expect(finished?.type === 'checks.finished' && finished.results).toHaveLength(1)

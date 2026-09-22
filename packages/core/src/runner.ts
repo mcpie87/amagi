@@ -502,6 +502,8 @@ export class Runner {
     if (parked === null) return
     current = mergeAgentRuns(current, parked)
 
+    let recoveryGiven = false
+    let recoveryRetry = false
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
       this.transition(task.id, 'checks')
@@ -511,16 +513,36 @@ export class Runner {
       store.append(task.id, { type: 'checks.finished', ok, results })
 
       if (ok) break
-      if (round === config.loop.maxCheckRounds) {
+      // The fix rounds are spent, or nothing is left to resume. Rather than
+      // parking the task silently (a stale worktree makes checks fail that a
+      // fresh base passes), ask the operator once how to proceed and apply it.
+      if (round === config.loop.maxCheckRounds || (current.sessionId === null && !recoveryRetry)) {
+        if (!recoveryGiven) {
+          recoveryGiven = true
+          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
+          if (action === null) return
+          if (action === 'park') {
+            this.transition(task.id, 'needs_human', 'project checks still failing')
+            return
+          }
+          if (action === 'rebase') {
+            const rebased = await this.updateFromBase(cwd)
+            if (!rebased) {
+              this.transition(
+                task.id,
+                'needs_human',
+                'project checks still failing; updating the worktree to the latest base failed',
+              )
+              return
+            }
+          }
+          // 'retry' or a successful 'rebase': give the fix rounds another full
+          // pass, resuming the recorded session or starting a fresh one.
+          recoveryRetry = true
+          round = -1
+          continue
+        }
         this.transition(task.id, 'needs_human', 'project checks still failing')
-        return
-      }
-      if (current.sessionId === null) {
-        this.transition(
-          task.id,
-          'needs_human',
-          'checks failed and the agent left no session to resume',
-        )
         return
       }
 
@@ -1041,6 +1063,99 @@ export class Runner {
       if (r.exitCode !== 0) break
     }
     return results
+  }
+
+  /**
+   * Checks failed at the end of the fix rounds. Instead of parking the task
+   * silently, ask the operator how to proceed and apply the answer. Returns
+   * the chosen action, or null when the run must stop (cancelled, budget
+   * spent, or no answer within the parking window).
+   */
+  private async recoverFailingChecks(
+    taskId: string,
+    results: CheckResult[],
+    lease: Lease,
+    budget: TaskBudget,
+  ): Promise<'retry' | 'rebase' | 'park' | null> {
+    const { store, config } = this.deps
+    const failed = results.filter((r) => r.exitCode !== 0)
+    const detail = failed
+      .map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
+      .join('\n')
+    const question = [
+      'Project checks still failing. The agent could not fix them.',
+      '',
+      detail,
+      '',
+      'How should I proceed?',
+    ].join('\n')
+    const options = [
+      'retry: run another fix round',
+      'rebase: update the worktree from the latest base and retry',
+      'park: park the task for manual attention',
+    ]
+
+    const questionId = crypto.randomUUID()
+    this.transition(taskId, 'implementing')
+    store.append(taskId, { type: 'question.asked', questionId, question, options, gateRef: null })
+    this.transition(taskId, 'awaiting_answer')
+
+    const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
+    while (Date.now() < deadline) {
+      this.throwIfCancelled(taskId)
+      this.throwIfBudgetExhausted(taskId, budget)
+      if (lease.isLost) throw new LeaseLostError(taskId)
+      if (this.isCancelled(taskId)) return null
+      const q = store.question(questionId)
+      if (q !== null && q.answer !== null) {
+        this.transition(taskId, 'implementing')
+        if (/^rebase\b/.test(q.answer)) return 'rebase'
+        if (/^retry\b/.test(q.answer)) return 'retry'
+        return 'park'
+      }
+      await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
+    }
+
+    this.transition(taskId, 'needs_human', 'no answer within the parking window')
+    return null
+  }
+
+  /**
+   * Brings the worktree up to date with the latest base branch, preserving the
+   * agent's uncommitted changes. A stale worktree (checks that pass on a fresh
+   * base, or a recipe the base added after this worktree was created) is the
+   * usual reason checks fail that a fresh base would pass. False when anything
+   * fails (network, conflicts), leaving the worktree untouched.
+   */
+  private async updateFromBase(cwd: string): Promise<boolean> {
+    const { config } = this.deps
+    const tokenCfg = await gitTokenConfig(
+      this.exec,
+      this.deps.repoRoot,
+      config.forge.remote,
+      forgeToken(config.forge.kind),
+    )
+    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+      cwd,
+    })
+    if (fetch.exitCode !== 0) return false
+
+    const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
+    const stashed =
+      dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
+    if (dirty && !stashed) return false
+
+    const rebase = await this.exec(['git', 'rebase', `origin/${config.repo.baseBranch}`], { cwd })
+    if (rebase.exitCode !== 0) {
+      await this.exec(['git', 'rebase', '--abort'], { cwd })
+      if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
+      return false
+    }
+    if (stashed) {
+      const pop = await this.exec(['git', 'stash', 'pop'], { cwd })
+      if (pop.exitCode !== 0) return false
+    }
+    return true
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
