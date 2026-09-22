@@ -29,6 +29,7 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -66,6 +67,8 @@ class FakePr implements PrDriver {
     }
     this.posted.push(body)
   }
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 function fakeHarness(summary = 'ambiguous'): Harness {

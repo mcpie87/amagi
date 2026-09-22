@@ -8,11 +8,12 @@ export type ReconcileResult = {
 }
 
 /**
- * Settles tasks parked in pr_open whose remote PR left the live set: a merged
- * PR finishes the task, a closed one marks it abandoned. The store is updated
- * and the tracker issue is settled too (closed on merge, closed-without-merge)
- * so the bead does not sit in_progress forever. Errors resolving a single PR
- * are logged and skipped, so one flaky query never stalls the sweep.
+ * Settles tasks parked in pr_open or pr_flagged whose remote PR left the live
+ * set: a merged PR finishes the task, a closed one marks it abandoned. The
+ * store is updated and the tracker issue is settled too (closed on merge,
+ * closed-without-merge) so the bead does not sit in_progress forever. Errors
+ * resolving a single PR are logged and skipped, so one flaky query never
+ * stalls the sweep.
  */
 export async function reconcilePrs(
   store: Store,
@@ -21,7 +22,7 @@ export async function reconcilePrs(
   cwd: string,
 ): Promise<ReconcileResult[]> {
   const moved: ReconcileResult[] = []
-  for (const task of store.tasks({ states: ['pr_open'] })) {
+  for (const task of store.tasks({ states: ['pr_open', 'pr_flagged'] })) {
     if (task.prNumber === null) continue
     let state: PrState
     try {

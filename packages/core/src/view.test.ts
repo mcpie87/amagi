@@ -137,6 +137,20 @@ describe('dashboard state reducer', () => {
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
   })
 
+  test('a flagged pointless PR is surfaced in the attention list', () => {
+    const state = [
+      ...recorded.filter((e) => e.seq !== 11),
+      ev(16, 'am-1', 2500, {
+        type: 'task.state',
+        from: 'pr_open',
+        to: 'pr_flagged',
+        reason: 'empty diff',
+      }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
   test('questions resolve from events', () => {
     const state = recorded.reduce(reduceState, initialDashboardState())
     expect(openQuestionsFor(state, 'am-2')).toEqual([])

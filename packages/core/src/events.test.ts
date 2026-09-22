@@ -62,6 +62,16 @@ describe('state machine', () => {
     expect(canTransition('cancelled', 'abandoned')).toBe(true)
   })
 
+  test('a pointless PR parks in pr_flagged and returns to pr_open when it stops qualifying', () => {
+    expect(canTransition('pr_open', 'pr_flagged')).toBe(true)
+    expect(canTransition('pr_flagged', 'pr_open')).toBe(true)
+    // the merge/close path still settles a flagged task
+    expect(canTransition('pr_flagged', 'done')).toBe(true)
+    expect(canTransition('pr_flagged', 'abandoned')).toBe(true)
+    // non-terminal: the watcher owns the label and clears it back to pr_open
+    expect(isTerminal('pr_flagged')).toBe(false)
+  })
+
   test('skipping stages is rejected', () => {
     expect(canTransition('claimed', 'implementing')).toBe(false)
     expect(canTransition('implementing', 'pr_open')).toBe(false)

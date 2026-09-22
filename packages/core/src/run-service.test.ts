@@ -192,6 +192,8 @@ class FakePr implements PrDriver {
     return []
   }
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 let repo: string
