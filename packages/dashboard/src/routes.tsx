@@ -1,3 +1,4 @@
+import type { OpenPr } from '@amagi/core'
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -11,7 +12,7 @@ import {
 } from '@amagi/core/events'
 import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
-import type { RunnerResource } from '@amagi/core/run-service'
+import type { RunnerResource, WorkerActivity } from '@amagi/core/run-service'
 import {
   activeTasks,
   chatInFlight,
@@ -1479,6 +1480,132 @@ function WorkerSlot({
 }
 
 /**
+ * Detail view for one background watcher (mention / pr-conflict / stall),
+ * opened by clicking its slot in the Workers section. The watcher is looked
+ * up live from the polled runner status, so the open dialog stays current.
+ */
+function WatcherDetailDialog({
+  selected,
+  workers,
+  onClose,
+}: {
+  selected: string | null
+  workers: WorkerActivity[]
+  onClose: () => void
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const open = selected !== null
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog === null) return
+    if (open) dialog.showModal()
+    else if (dialog.open) dialog.close()
+  }, [open])
+  if (selected === null) return null
+  const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
+  const statusPill =
+    watcher === null
+      ? PILL
+      : watcher.status === 'active'
+        ? `${PILL} bg-teal-soft text-teal-ink ring-teal-edge`
+        : watcher.status === 'idle'
+          ? `${PILL} bg-raised text-fg-muted ring-line`
+          : `${PILL} bg-red-soft text-red-ink ring-red-edge`
+  return (
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="watcher-dialog"
+    >
+      {watcher === null ? (
+        <p className="px-4 py-6 text-sm text-fg-faint">watcher no longer running</p>
+      ) : (
+        <div className="p-4">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>
+              {watcher.name}
+            </span>
+            <span className="font-medium text-fg">{watcher.repo}</span>
+            <span className={statusPill}>{watcher.status}</span>
+            {watcher.ok ? (
+              <span className="text-xs text-emerald-ink">last tick ok</span>
+            ) : (
+              <span className="text-xs text-red-ink">last tick failed</span>
+            )}
+          </div>
+          {watcher.detail !== null && watcher.detail !== undefined && (
+            <p className="mt-3 text-sm text-fg">{watcher.detail}</p>
+          )}
+          {watcher.error !== null && (
+            <p className="mt-1 break-words rounded border border-red-edge bg-red-soft px-2 py-1 text-xs text-red-ink">
+              {watcher.error}
+            </p>
+          )}
+          <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+              <dt className="text-xs text-fg-faint">Last run</dt>
+              <dd className="mt-0.5 text-fg">
+                {watcher.lastRunAt > 0 ? fmtLastRun(watcher.lastRunAt) : 'never'}
+              </dd>
+              {watcher.lastRunAt > 0 && (
+                <dd className="text-xs tabular-nums text-fg-faint">
+                  {new Date(watcher.lastRunAt).toLocaleString()}
+                </dd>
+              )}
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Next run</dt>
+              <dd className="mt-0.5 text-fg">
+                {watcher.status === 'off'
+                  ? 'stopped'
+                  : watcher.nextRunAt > 0
+                    ? fmtUntil(watcher.nextRunAt)
+                    : 'waiting for the first tick'}
+              </dd>
+              <dd className="text-xs text-fg-faint">every {fmtInterval(watcher.intervalMs)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Total runs</dt>
+              <dd className="mt-0.5 tabular-nums text-fg">{watcher.runs}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Success / failure</dt>
+              <dd className="mt-0.5 tabular-nums text-fg">
+                {watcher.successes} / {watcher.failures}
+              </dd>
+            </div>
+          </dl>
+          {watcher.counters.length > 0 && (
+            <div className="mt-4">
+              <dt className="text-xs text-fg-faint">What it did</dt>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {watcher.counters.map((c) => (
+                  <span key={c.label} className={`${PILL} bg-raised text-fg-muted ring-line`}>
+                    {c.label} {c.value}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </dialog>
+  )
+}
+
+/**
  * One row per runner slot from /api/runner, so busy agents and free capacity
  * are both visible at a glance. Busy slots draw their identity and activity
  * from the SSE projection plus the live agent log ring buffer. The summary
@@ -1549,6 +1676,7 @@ function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
   const [now, setNow] = useState(() => Date.now())
+  const [watcherOpen, setWatcherOpen] = useState<string | null>(null)
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
@@ -1599,9 +1727,12 @@ function WorkersPanel() {
       {status.workers !== undefined && status.workers.length > 0 && (
         <div className="mt-2 space-y-2">
           {status.workers.map((w) => (
-            <div
+            <button
               key={`${w.repo}/${w.name}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-xs text-fg-muted"
+              type="button"
+              onClick={() => setWatcherOpen(`${w.repo}/${w.name}`)}
+              title="open watcher detail"
+              className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-left text-xs text-fg-muted hover:bg-raised"
             >
               <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>{w.name}</span>
               <span className="font-medium text-fg">{w.repo}</span>
@@ -1615,9 +1746,17 @@ function WorkersPanel() {
               ) : (
                 <span className="text-red-ink">error: {w.error}</span>
               )}
-            </div>
+              <span className="ml-auto text-fg-faint">details ›</span>
+            </button>
           ))}
         </div>
+      )}
+      {status.workers !== undefined && (
+        <WatcherDetailDialog
+          selected={watcherOpen}
+          workers={status.workers}
+          onClose={() => setWatcherOpen(null)}
+        />
       )}
     </section>
   )
@@ -1787,6 +1926,80 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
   )
 }
 
+/**
+ * Open PRs the forge reports as currently mergeable, the dashboard twin of the
+ * check-prs CLI command. Polled, not streamed: the forge computes mergeability
+ * asynchronously and it changes slowly, so a slow refresh is enough and each
+ * poll is one forge call, not one per PR.
+ */
+function MergeablePrsPanel() {
+  const { selected } = useDashboard()
+  const [prs, setPrs] = useState<OpenPr[] | null>(null)
+
+  useEffect(() => {
+    if (selected === null) return
+    let alive = true
+    const load = () => {
+      fetch(`${apiBase}/api/repos/${selected}/mergeable-prs`)
+        .then(async (res) => {
+          // A repo without a forge driver simply has no mergeable PRs to show.
+          if (res.status === 501) return []
+          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+          return (await res.json()).prs as OpenPr[]
+        })
+        .then((list) => {
+          if (alive) setPrs(list)
+        })
+        .catch(() => {
+          // A transient fetch failure keeps the last good list, not a spinner.
+        })
+    }
+    load()
+    const timer = setInterval(load, 10_000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [selected])
+
+  if (selected === null || prs === null) return null
+
+  return (
+    <section className="mb-6">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Mergeable PRs ({prs.length})
+        </h2>
+        <span className="text-xs text-fg-faint">from the forge, refreshed every 10s</span>
+      </div>
+      {prs.length === 0 ? (
+        <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg-faint">
+          No open PRs are mergeable right now.
+        </p>
+      ) : (
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+          {prs.map((p) => (
+            <li key={p.number} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+              <a
+                href={p.url}
+                target="_blank"
+                rel="noreferrer"
+                className="min-w-0 flex-1 truncate hover:underline"
+              >
+                <span className="font-medium text-fg">#{p.number}</span>{' '}
+                <span className="text-sky-ink">{p.title}</span>
+              </a>
+              <span className="shrink-0 text-xs text-fg-faint">
+                {p.headRefName} &rarr; {p.baseRefName}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
@@ -1836,6 +2049,8 @@ function OverviewView() {
           {...(openQuestions > 0 ? { tone: 'amber' as const } : {})}
         />
       </div>
+
+      <MergeablePrsPanel />
 
       <WorkersPanel />
 
@@ -2642,6 +2857,25 @@ function fmtLastRun(epochMs: number): string {
   if (m < 60) return `${m}min ago`
   const h = Math.floor(m / 60)
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
+}
+
+/** Compact "in x" for a worker's next scheduled tick. */
+function fmtUntil(epochMs: number): string {
+  const s = Math.floor((epochMs - Date.now()) / 1000)
+  if (s <= 0) return 'due now'
+  if (s < 60) return `in ${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `in ${m}m`
+  return `in ${Math.floor(m / 60)}h`
+}
+
+/** Human tick cadence, e.g. 5m for the default watcher interval. */
+function fmtInterval(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m}m`
+  return `${Math.round(m / 60)}h`
 }
 
 function fmtAgo(ts: number): string {

@@ -102,6 +102,8 @@ export function startStallWatcher({
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let recovered = 0
   let stoppedDoom = 0
+  let runs = 0
+  let failures = 0
   const counters = (): WorkerActivity['counters'] => [
     { label: 'recovered', value: recovered },
     { label: 'doom-stopped', value: stoppedDoom },
@@ -116,6 +118,12 @@ export function startStallWatcher({
     error: null,
     counters: counters(),
     detail: 'no stalled tasks',
+    runs: 0,
+    successes: 0,
+    failures: 0,
+    nextRunAt: 0,
+    intervalMs,
+    status: 'idle',
   }
 
   const detail = (): string => {
@@ -208,7 +216,19 @@ export function startStallWatcher({
   }
 
   async function tick(): Promise<void> {
-    const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
+    runs++
+    const next: WorkerActivity = {
+      ...activity,
+      lastRunAt: Date.now(),
+      ok: true,
+      error: null,
+      runs,
+      successes: runs - failures,
+      failures,
+      nextRunAt: Date.now() + intervalMs,
+      intervalMs,
+      status: 'active',
+    }
     try {
       const nowMs = Date.now()
       const found = store.stalledTasks(STALLED_STATES, nowMs - timeoutMs)
@@ -238,8 +258,11 @@ export function startStallWatcher({
       next.counters = counters()
       next.detail = detail()
     } catch (err) {
+      failures++
       next.ok = false
       next.error = errMsg(err)
+      next.failures = failures
+      next.successes = runs - failures
       console.warn(`stall watch: ${next.error}`)
     }
     activity = next
@@ -252,6 +275,7 @@ export function startStallWatcher({
       stopped = true
       if (timer !== null) clearTimeout(timer)
       timer = null
+      activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,
   }
