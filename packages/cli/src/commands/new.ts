@@ -3,7 +3,7 @@ import { defineCommand } from 'citty'
 import { type DraftTask, draftTask } from '../draft.ts'
 import { bold, dim } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
-import { listModelsFor, runTask } from '../run-task.ts'
+import { listModelsFor } from '../run-task.ts'
 import { pickRunSelection } from '../select-run.ts'
 
 /** Creates the drafted task in the tracker and returns its id. */
@@ -20,7 +20,7 @@ async function createTask(root: string, draft: DraftTask): Promise<string> {
 export const newCommand = defineCommand({
   meta: {
     name: 'new',
-    description: 'Interactively draft a task with the picked agent, create it, then run it',
+    description: 'Interactively draft a task with the picked agent, then create it',
   },
   args: {
     harness: {
@@ -58,7 +58,5 @@ export const newCommand = defineCommand({
 
     const taskId = await createTask(root, draft)
     console.log(bold(`created ${taskId}`))
-
-    process.exitCode = await runTask({ root, config, selection, taskId })
   },
 })
