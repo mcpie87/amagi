@@ -1065,7 +1065,7 @@ export class Runner {
     this.deps.store.append(task.id, {
       type: 'commit.created',
       sha,
-      subject: task.title,
+      subject: `[${task.id}] ${task.title}`,
     })
     return true
   }

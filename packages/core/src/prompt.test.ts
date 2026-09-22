@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
-import { classifyMentionPrompt, implementPrompt, implementSystemPrompt, prTitle } from './prompt.ts'
+import {
+  classifyMentionPrompt,
+  commitMessage,
+  implementPrompt,
+  implementSystemPrompt,
+  prTitle,
+} from './prompt.ts'
 
 const task = (title: string): TrackerTask => ({
   id: 'am-544',
@@ -25,6 +31,12 @@ describe('prTitle', () => {
 
   test('drops a milestone-style prefix', () => {
     expect(prTitle(task('M5: forge drivers'))).toBe('am-544: forge drivers')
+  })
+})
+
+describe('commitMessage', () => {
+  test('subject starts with the bracketed task id, then the title', () => {
+    expect(commitMessage(task('Add a greeting file'))).toBe('[am-544] Add a greeting file\n')
   })
 })
 
