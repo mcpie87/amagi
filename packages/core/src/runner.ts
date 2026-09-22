@@ -33,6 +33,8 @@ export type RunnerDeps = {
   exec?: Exec
   /** Overridable so tests do not need gh installed. Defaults to the configured forge driver. */
   forge?: PrDriver
+  /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
+  leaseHeartbeatMs?: number
 }
 
 export type RunOnceResult = {
@@ -150,10 +152,11 @@ class Lease {
     private readonly tracker: Tracker,
     private readonly store: Store,
     private readonly taskId: string,
+    private readonly heartbeatMs?: number,
   ) {}
 
   start(): void {
-    const period = Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
+    const period = this.heartbeatMs ?? Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
     this.timer = setInterval(() => {
       void this.tracker.heartbeat(this.taskId).then((alive) => {
         if (!alive) this.lost = true
@@ -254,6 +257,13 @@ export class Runner {
     } catch (err) {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
+      } else if (err instanceof LeaseLostError) {
+        // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
+        // or another worker took over). Stop before colliding with the new
+        // owner and leave the task where the reclaim parked it: either the new
+        // worker drives it, or the next one resumes it from `claimed`, so no
+        // human attention is needed.
+        store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
       } else {
         const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
@@ -373,7 +383,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, this.deps.store, task.id)
+    const lease = new Lease(this.deps.tracker, this.deps.store, task.id, this.deps.leaseHeartbeatMs)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, budget, resume)

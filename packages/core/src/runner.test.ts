@@ -224,6 +224,7 @@ const makeRunner = (
   cfg = config(),
   forge = new FakePr(),
   runExec: Exec = exec,
+  leaseHeartbeatMs?: number,
 ) =>
   new Runner({
     store,
@@ -234,6 +235,7 @@ const makeRunner = (
     repoName: 'demo',
     forge,
     exec: runExec,
+    ...(leaseHeartbeatMs === undefined ? {} : { leaseHeartbeatMs }),
   })
 
 const types = (taskId: string): EventType[] =>
@@ -586,6 +588,65 @@ describe('Runner.runOnce', () => {
     expect(store.task(TASK.id)?.branch).toBe(branch)
     expect(existsSync(join(wtPath, 'hello.txt'))).toBe(true)
     expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
+  })
+
+  test('a reclaimed lease stops the run without parking the task in needs_human', async () => {
+    // The stall watcher (or bd reclaim) takes the claim back mid-run: the
+    // tracker heartbeat goes dead and the runner must stop before colliding
+    // with the new owner, leaving the task in the claimed state the reclaim
+    // parked it in instead of escalating to needs_human.
+    const tracker = new FakeTracker([TASK])
+    tracker.leaseAlive = false
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    const agent: AgentProcess = {
+      pid: 9,
+      events: () => queue,
+      done,
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const harness: Harness = {
+      kind: 'fake',
+      start: () => {
+        queue.push({ kind: 'text', text: 'working...' })
+        // The stall watcher reclaims the claim while the agent is still running.
+        setTimeout(() => store.append(TASK.id, { type: 'task.reclaimed' }), 100)
+        setTimeout(() => {
+          queue.close()
+          resolveDone({
+            exitCode: 0,
+            ok: true,
+            sessionId: 'sess-1',
+            summary: 'done',
+            usage: null,
+            stderr: '',
+          })
+        }, 300)
+        return agent
+      },
+      resume: () => agent,
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+
+    const result = await makeRunner(tracker, harness, config(), new FakePr(), exec, 50).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(store.task(TASK.id)?.state).toBe('claimed')
+    expect(store.task(TASK.id)?.lastError).toContain('claim lease was reclaimed')
+    expect(types(TASK.id)).not.toContain('needs_human')
+    // The claim was already reclaimed, so the runner must not release it again.
+    expect(released).toEqual([])
   })
 
   test('a task deferred in retrying is picked up after its retry time, reusing the worktree', async () => {
