@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   type Config,
   openDatabase,
+  type PrDriver,
   Store,
   saveRegistry,
   type Tracker,
@@ -20,6 +21,8 @@ export type TestWorkspaces = {
 export type TestWorkspacesOptions = {
   /** Injects a fake tracker into every workspace. */
   trackerFor?: ((config: Config, path: string) => Tracker) | undefined
+  /** Injects a fake forge driver into every workspace. */
+  forgeFor?: (config: Config, path: string) => PrDriver | null
 }
 
 /**
@@ -43,6 +46,7 @@ export function testWorkspaces(keys: string[], opts: TestWorkspacesOptions = {})
       return stores[key]
     },
     trackerFor: opts.trackerFor,
+    ...(opts.forgeFor === undefined ? {} : { forgeFor: opts.forgeFor }),
   })
   for (const key of keys) workspaces.get(key)
   return {

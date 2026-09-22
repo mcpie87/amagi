@@ -30,6 +30,7 @@ type RawTask = {
   status_reason: string | null
   last_error: string | null
   retry_count: number
+  retry_at: number | null
   last_commit_sha: string | null
   last_commit_subject: string | null
   checks: string | null
@@ -65,6 +66,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
+  retryAt: r.retry_at,
   lastCommit:
     r.last_commit_sha === null
       ? null
@@ -107,6 +109,7 @@ const taskRow = (t: ProjectedTask): Row => ({
   status_reason: t.statusReason,
   last_error: t.lastError,
   retry_count: t.retryCount,
+  retry_at: t.retryAt,
   created_at: t.createdAt,
   updated_at: t.updatedAt,
   last_commit_sha: t.lastCommit?.sha ?? null,
@@ -316,6 +319,32 @@ export class Store {
   question(id: string): QuestionRow | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null
+  }
+
+  /**
+   * The most recent implement-run start for a task: the model/effort an
+   * operator-facing surface can show without folding the whole event log.
+   * Chat runs are skipped so chatting with a finished worker does not
+   * overwrite the agent that did the work.
+   */
+  currentAgent(taskId: string): { model: string | null; effort: string | null } | null {
+    const rows = this.db
+      .query(
+        `select body from events where task_id = ? and type = 'agent.started'
+         order by seq desc limit 20`,
+      )
+      .all(taskId) as { body: string }[]
+    for (const row of rows) {
+      const body = JSON.parse(row.body) as {
+        role: string
+        model: string | null
+        effort: string | null
+      }
+      if (body.role !== 'chat') {
+        return { model: body.model ?? null, effort: body.effort ?? null }
+      }
+    }
+    return null
   }
 
   /**

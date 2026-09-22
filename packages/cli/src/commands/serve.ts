@@ -13,12 +13,28 @@ import { serve } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
 
+/**
+ * Rebuilds the dashboard dist so the served UI always matches the current
+ * source (transition rules, components). A stale dist is what blanked the
+ * dashboard in the past when a merge added a new task transition.
+ */
+async function buildDashboard(dashboardDir: string): Promise<void> {
+  const proc = Bun.spawn(['bun', 'run', 'build'], {
+    cwd: dashboardDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  })
+  const exit = await proc.exited
+  if (exit !== 0) {
+    throw new Error(`dashboard build failed (exit ${exit}); refusing to serve a stale UI`)
+  }
+}
+
 export const serveCommand = defineCommand({
   meta: {
     name: 'serve',
     description: 'Serve the API and dashboard for every registered repository',
   },
-  run() {
+  async run() {
     // Out of the box, register the repo the operator is standing in so the
     // dashboard has a workspace on first run.
     if (loadRegistry().length === 0) {
@@ -29,6 +45,8 @@ export const serveCommand = defineCommand({
       }
     }
     const config = loadGlobalConfig()
+    const dashboardDir = join(import.meta.dir, '..', '..', '..', 'dashboard')
+    await buildDashboard(dashboardDir)
     const workspaces = new Workspaces()
     // The operator-facing runner service is bound to the repo the server is
     // launched from, so the dashboard's launch/stop controls have one target.
@@ -56,7 +74,7 @@ export const serveCommand = defineCommand({
       workspaces,
       host: config.server.host,
       port: config.server.port,
-      staticDir: join(import.meta.dir, '..', '..', '..', 'dashboard', 'dist'),
+      staticDir: join(dashboardDir, 'dist'),
       runner,
       runnerRepo: primary?.key,
     })

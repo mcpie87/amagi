@@ -1,5 +1,8 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
-import { HARDCODED_EFFORTS, HARDCODED_MODELS } from '../../models.ts'
+import { HARDCODED_EFFORTS } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
 import { renderToolResult, spawnAgent } from './spawn.ts'
 
@@ -225,6 +228,9 @@ export type CodexHarnessOptions = {
   bin?: string | undefined
 }
 
+type CodexModelCacheEntry = { slug?: string; visibility?: string }
+type CodexModelCache = { models?: CodexModelCacheEntry[] }
+
 export class CodexHarness implements Harness {
   readonly kind = 'codex'
   private readonly bin: string
@@ -238,7 +244,21 @@ export class CodexHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    return [...HARDCODED_MODELS.codex]
+    // codex has no `models` subcommand; it does maintain a local cache of the
+    // model catalog it fetches for its own pickers, under $CODEX_HOME (the
+    // same directory codex reads config.toml and auth.json from).
+    const home = process.env.CODEX_HOME ?? join(homedir(), '.codex')
+    const path = join(home, 'models_cache.json')
+    if (!existsSync(path)) return []
+    try {
+      const cache = JSON.parse(readFileSync(path, 'utf8')) as CodexModelCache
+      return (cache.models ?? [])
+        .filter((m): m is { slug: string; visibility?: string } => typeof m.slug === 'string')
+        .filter((m) => m.visibility !== 'hide')
+        .map((m) => m.slug)
+    } catch {
+      return []
+    }
   }
 
   async listEfforts(): Promise<string[]> {
