@@ -156,12 +156,16 @@ export type MentionPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  /** True when the base branch does not merge cleanly into the PR head. */
+  conflicted: boolean
 }
 
 export type TakeDownMentionContext = {
   pr: { number: number; title: string; url: string }
   mention: { user: string; body: string }
   outPath: string
+  /** True when the base branch does not merge cleanly into the PR head. */
+  conflicted: boolean
 }
 
 export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string {
@@ -177,6 +181,11 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
     '- Commit your changes. Do not push; the dispatcher pushes.',
   ]
+  if (ctx.conflicted) {
+    lines.push(
+      '- The base branch does not merge cleanly into this PR. Resolve the conflicts before making your change.',
+    )
+  }
   return lines.join('\n')
 }
 
@@ -186,6 +195,13 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
     '',
     ctx.mention.body.trim(),
   ]
+  if (ctx.conflicted) {
+    parts.push(
+      '',
+      `Note: the base branch ${ctx.baseBranch} does not merge cleanly into this PR.`,
+      'Resolve the merge conflicts first, then address the feedback.',
+    )
+  }
   if (ctx.checks.length > 0) {
     parts.push(
       '',
@@ -205,6 +221,8 @@ export type ExplainMentionContext = {
   mention: { user: string; body: string }
   diff: string
   outPath: string
+  /** True when the base branch does not merge cleanly into the PR head. */
+  conflicted: boolean
 }
 
 export function explainMentionSystemPrompt(): string {
@@ -247,20 +265,30 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
 }
 
 export function explainMentionPrompt(ctx: ExplainMentionContext): string {
-  return [
+  const parts = [
     `A human (@${ctx.mention.user}) asked about PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
     `Write your explanation to this file: ${ctx.outPath}`,
     'It will be posted as a comment on the PR. Be concrete: what the changes do, why they were made, and how they fit together.',
+  ]
+  if (ctx.conflicted) {
+    parts.push(
+      '',
+      'The base branch does not merge cleanly into this PR: the change has drifted from',
+      'base. Report this conflict as evidence of that drift in your explanation.',
+    )
+  }
+  parts.push(
     '',
     'Pull request diff:',
     '',
     ctx.diff,
     '',
     'Write the explanation to the file and stop.',
-  ].join('\n')
+  )
+  return parts.join('\n')
 }
 
 export function takeDownSystemPrompt(): string {
@@ -272,7 +300,7 @@ export function takeDownSystemPrompt(): string {
 }
 
 export function takeDownPrompt(ctx: TakeDownMentionContext): string {
-  return [
+  const parts = [
     `A human (@${ctx.mention.user}) asked to take down PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
@@ -284,7 +312,15 @@ export function takeDownPrompt(ctx: TakeDownMentionContext): string {
     '- `KEEP` when it does not, followed by a short explanation.',
     '',
     'The reason is posted as a comment on the task issue, so keep it concise and direct.',
-  ].join('\n')
+  ]
+  if (ctx.conflicted) {
+    parts.push(
+      '',
+      'The base branch does not merge cleanly into this PR, a sign the change is drifting',
+      'from the repository. Weigh this in your verdict.',
+    )
+  }
+  return parts.join('\n')
 }
 
 export type DifficultyClassifyContext = {

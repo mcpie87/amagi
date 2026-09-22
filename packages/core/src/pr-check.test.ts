@@ -165,6 +165,39 @@ describe('prepareConflictWorktree', () => {
     expect(wt.conflicted).toBe(false)
   })
 
+  test('aborts a stale merge and resets a reused worktree to the PR head', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-wt-'))
+    const path = join(root, 'amagi-pr-7')
+    mkdirSync(path, { recursive: true })
+    try {
+      const { exec, calls } = fake((c) => {
+        if (c.join(' ').includes('merge --abort')) return ok('')
+        if (c.join(' ').includes('reset --hard')) return ok('')
+        if (c.includes('rev-parse')) return fail('')
+        if (c.includes('merge')) return fail('conflict')
+        return undefined
+      })
+      const wt = await prepareConflictWorktree({
+        repoRoot: '/repo',
+        repoName: 'amagi',
+        worktreeRoot: root,
+        baseBranch: 'main',
+        pr: pr(),
+        exec,
+      })
+
+      expect(calls).toContainEqual(['git', 'merge', '--abort'])
+      expect(calls).toContainEqual(['git', 'reset', '--hard', 'origin/amagi/am-1-do-the-thing'])
+      expect(wt).toEqual({
+        path,
+        branch: 'amagi/pr-7-conflict',
+        conflicted: true,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('scopes the persona to the conflict worktree when configured', async () => {
     const home = mkdtempSync(join(tmpdir(), 'amagi-home-'))
     const savedXdg = process.env.XDG_CONFIG_HOME

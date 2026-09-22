@@ -88,6 +88,11 @@ export async function prepareConflictWorktree(
       ? ['git', 'worktree', 'add', path, branch]
       : ['git', 'worktree', 'add', '-b', branch, path, `origin/${opts.pr.headRefName}`]
     await execOk(run, args, { cwd: opts.repoRoot })
+  } else {
+    // A reused worktree can hold a stale in-progress merge or committed resolution
+    // from an earlier run; abort and reset so the merge below starts from the PR head.
+    await run(['git', 'merge', '--abort'], { cwd: path })
+    await execOk(run, ['git', 'reset', '--hard', `origin/${opts.pr.headRefName}`], { cwd: path })
   }
 
   if (opts.persona) {
