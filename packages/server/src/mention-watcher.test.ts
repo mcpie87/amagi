@@ -7,11 +7,13 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  openDatabase,
   type PrComment,
   type PrDriver,
   type PrInfo,
   type PrState,
   type PullRequest,
+  Store,
   type Tracker,
 } from '@amagi/core'
 import { startMentionWatcher } from './mention-watcher.ts'
@@ -262,4 +264,26 @@ test('a tick that throws is counted as a failure and keeps run totals consistent
   expect(a.failures).toBeGreaterThanOrEqual(1)
   expect(a.runs).toBeGreaterThanOrEqual(a.failures)
   expect(a.successes + a.failures).toBe(a.runs)
+})
+
+test('records classification outcomes as mention.classified events when a store is wired', async () => {
+  const driver = new FakePr()
+  driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
+  const store = new Store(openDatabase(':memory:'))
+  start(driver, fakeExec([prInfo()]), { store })
+
+  await Bun.sleep(60)
+
+  expect(driver.posted).toHaveLength(1)
+  const events = store.events()
+  expect(events).toHaveLength(1)
+  expect(events[0]).toMatchObject({
+    taskId: null,
+    type: 'mention.classified',
+    prNumber: 7,
+    mentionId: '1',
+    kind: 'ambiguous',
+    reply: 'ambiguous',
+  })
+  store.close()
 })

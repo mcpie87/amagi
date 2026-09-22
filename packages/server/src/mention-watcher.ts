@@ -13,6 +13,7 @@ import {
   readHandledMentions,
   readMentionWatch,
   respondToMention,
+  type Store,
   saveHandledMentions,
   saveMentionWatch,
   type Tracker,
@@ -28,6 +29,8 @@ export type MentionWatcherOptions = {
   config: Config
   driver: PrDriver
   tracker: Tracker
+  /** Event store to record classification outcomes, so a misparse is diagnosable later. */
+  store?: Store
   intervalMs?: number
   /** Test seams, forwarded to the mention responder. */
   exec?: Exec
@@ -61,6 +64,7 @@ export function startMentionWatcher({
   config,
   driver,
   tracker,
+  store,
   intervalMs = DEFAULT_INTERVAL_MS,
   exec,
   makeHarnessFn,
@@ -145,6 +149,17 @@ export function startMentionWatcher({
               tracker,
               ...(exec === undefined ? {} : { exec }),
               ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+              ...(store === undefined
+                ? {}
+                : {
+                    onClassified: (c) =>
+                      store.append(null, {
+                        type: 'mention.classified',
+                        prNumber: pr.number,
+                        mentionId: mention.id,
+                        ...c,
+                      }),
+                  }),
             })
             handled.add(mention.id)
             saveHandledMentions(handledPath, handled)
