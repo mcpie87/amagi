@@ -7,6 +7,8 @@ import { applyPersona, branchExists } from './worktree.ts'
 export type PrInfo = {
   number: number
   title: string
+  /** Full PR description, so the amagi-task trailer can be read back off it. */
+  body: string
   url: string
   headRefName: string
   baseRefName: string
@@ -26,7 +28,7 @@ export type PrCheckOptions = {
 }
 
 const GH_FIELDS =
-  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
+  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {

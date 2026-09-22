@@ -28,6 +28,7 @@ import {
   parseMentionKind,
   readHandledMentions,
   readMentionWatch,
+  resolveTaskId,
   respondToMention,
   saveHandledMentions,
   saveMentionWatch,
@@ -53,6 +54,7 @@ const fail = (stderr: string): ExecResult => ({ exitCode: 1, stdout: '', stderr 
 const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',
@@ -573,6 +575,52 @@ describe('taskIdFromPrTitle', () => {
     expect(taskIdFromPrTitle('am-544: PR titles should use task code')).toBe('am-544')
     expect(taskIdFromPrTitle('am-3b8.2: Schema-constrained review')).toBe('am-3b8.2')
     expect(taskIdFromPrTitle('Do the thing')).toBeNull()
+  })
+})
+
+describe('resolveTaskId', () => {
+  test('prefers the amagi-task body trailer over everything else', async () => {
+    const tracker = new FakeTracker()
+    const taskId = await resolveTaskId(
+      pr({ title: 'Not an amagi PR', headRefName: 'feature/manual', body: 'amagi-task: am-9ml' }),
+      tracker,
+    )
+    expect(taskId).toBe('am-9ml')
+  })
+
+  test('falls back to the branch name matched against the tracker open ids', async () => {
+    const tracker = Object.assign(new FakeTracker(), {
+      async openIds() {
+        return ['am-3b8', 'am-9ml']
+      },
+    })
+    const taskId = await resolveTaskId(
+      pr({
+        title: 'Not an amagi PR',
+        body: '',
+        headRefName: 'amagi/am-3b8-schema-constrained-review',
+      }),
+      tracker,
+    )
+    expect(taskId).toBe('am-3b8')
+  })
+
+  test('falls back to the PR title when the body and branch name give nothing', async () => {
+    const tracker = new FakeTracker()
+    const taskId = await resolveTaskId(
+      pr({ title: 'am-123: Do the thing', body: '', headRefName: 'amagi/am-1-do-the-thing' }),
+      tracker,
+    )
+    expect(taskId).toBe('am-123')
+  })
+
+  test('is null when no source names a task', async () => {
+    const tracker = new FakeTracker()
+    const taskId = await resolveTaskId(
+      pr({ title: 'Not an amagi PR', body: '', headRefName: 'feature/manual' }),
+      tracker,
+    )
+    expect(taskId).toBeNull()
   })
 })
 

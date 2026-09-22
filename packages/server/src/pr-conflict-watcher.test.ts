@@ -24,6 +24,7 @@ const config = (): Config =>
 const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',

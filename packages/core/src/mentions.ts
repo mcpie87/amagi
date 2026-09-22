@@ -10,6 +10,7 @@ import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
 import { cacheHome } from './paths.ts'
+import { taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
   classifyMentionPrompt,
@@ -21,6 +22,7 @@ import {
   takeDownPrompt,
   takeDownSystemPrompt,
 } from './prompt.ts'
+import { taskIdFromBranch } from './worktree.ts'
 
 export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'take-down' | 'ambiguous'
 
@@ -196,6 +198,22 @@ class Progress {
 /** Task id (e.g. "am-544") embedded in an amagi-authored PR title like "am-544: Short name". */
 export function taskIdFromPrTitle(title: string): string | null {
   return title.match(/\bam-[a-z0-9.]+\b/i)?.[0] ?? null
+}
+
+/**
+ * Resolves the tracker task id for a PR, most to least reliable: the
+ * `amagi-task:` body trailer set at creation (works for any tracker, and
+ * survives a human editing the title); the branch name matched against the
+ * tracker's open ids (for PRs that predate the trailer); the PR title, as a
+ * last resort for beads ids that happen to still carry the "am-544: " prefix.
+ */
+export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
+  const fromBody = taskIdFromPrBody(pr.body)
+  if (fromBody !== null) return fromBody
+  const knownIds = tracker.openIds ? await tracker.openIds() : []
+  const fromBranch = taskIdFromBranch(pr.headRefName, knownIds)
+  if (fromBranch !== null) return fromBranch
+  return taskIdFromPrTitle(pr.title)
 }
 
 function startImplementHarness(
@@ -444,7 +462,7 @@ async function respondToTakeDown(
   if (verdict !== 'TAKE DOWN') return
   if (opts.tracker === undefined) return
 
-  const taskId = taskIdFromPrTitle(opts.pr.title)
+  const taskId = await resolveTaskId(opts.pr, opts.tracker)
   if (taskId === null) return
   const task = await opts.tracker.get(taskId)
   if (task === null) return
