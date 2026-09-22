@@ -173,6 +173,24 @@ export const EventBody = z.discriminatedUnion('type', [
     exitCode: z.number().int(),
     sessionId: z.string().nullable(),
   }),
+  /**
+   * The run's running peak input context (input + cached tokens) as usage
+   * events stream in. Appended each time the peak grows; the last one of a run
+   * is its peak context.
+   */
+  z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
+  /** Logged once when the run's peak context crosses the soft limit. */
+  z.object({
+    type: z.literal('context.warn'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
+  /** Logged once when the run's peak context crosses the hard limit, right before the agent is killed. */
+  z.object({
+    type: z.literal('context.exceeded'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
