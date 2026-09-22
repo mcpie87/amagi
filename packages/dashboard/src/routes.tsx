@@ -1,4 +1,4 @@
-import type { OpenPr } from '@amagi/core'
+import type { PrInfo } from '@amagi/core'
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -21,10 +21,10 @@ import {
   currentUsageFor,
   type DashboardState,
   openQuestionsFor,
-  type QuestionView,
+  type ProjectedQuestion,
+  type ProjectedTask,
   runHealth,
   runHealthNearLimit,
-  type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core/view'
 import {
@@ -1869,7 +1869,7 @@ function QueueView() {
                         <ReadyCard task={task} />
                       </li>
                     ))
-                  : (tasks as TaskView[]).map((task) => (
+                  : (tasks as ProjectedTask[]).map((task) => (
                       <li key={task.id}>
                         <Link
                           to="/tasks/$id"
@@ -1947,7 +1947,7 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
  */
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
-  const [prs, setPrs] = useState<OpenPr[] | null>(null)
+  const [prs, setPrs] = useState<PrInfo[] | null>(null)
 
   useEffect(() => {
     if (selected === null) return
@@ -1958,7 +1958,7 @@ function MergeablePrsPanel() {
           // A repo without a forge driver simply has no mergeable PRs to show.
           if (res.status === 501) return []
           if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return (await res.json()).prs as OpenPr[]
+          return (await res.json()).prs as PrInfo[]
         })
         .then((list) => {
           if (alive) setPrs(list)
@@ -2079,7 +2079,7 @@ function OverviewView() {
             {...(selected === null
               ? {}
               : {
-                  action: (task: TaskView) => (
+                  action: (task: ProjectedTask) => (
                     <CloseButtons repo={selected} taskId={task.id} state={task.state} />
                   ),
                 })}
@@ -2114,9 +2114,9 @@ function RunList({
   action,
   rowClass = 'run-row',
 }: {
-  tasks: TaskView[]
+  tasks: ProjectedTask[]
   showReason: boolean
-  action?: (task: TaskView) => ReactNode
+  action?: (task: ProjectedTask) => ReactNode
   rowClass?: string
 }) {
   return (
@@ -2260,7 +2260,7 @@ function AnswerBox({
 }: {
   repo: string
   taskId: string
-  question: QuestionView
+  question: ProjectedQuestion
 }) {
   const [token, setToken] = useState<string | null>(null)
   const [text, setText] = useState('')
@@ -3098,7 +3098,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
 }
 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
-function SummaryPanel({ task }: { task: TaskView }) {
+function SummaryPanel({ task }: { task: ProjectedTask }) {
   const needsHuman = task.state === 'needs_human'
   const done = task.state === 'done'
   if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
@@ -3127,7 +3127,7 @@ function SummaryPanel({ task }: { task: TaskView }) {
 }
 
 /** A task deferring an automatic retry: when it fires and why, plus the reason. */
-function RetryPanel({ task }: { task: TaskView }) {
+function RetryPanel({ task }: { task: ProjectedTask }) {
   if (task.state !== 'retrying') return null
   return (
     <div className="mt-6 rounded-lg border border-orange-edge bg-orange-soft px-4 py-3">
@@ -3254,7 +3254,7 @@ function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
   const { status } = useRunner()
-  const task: TaskView | undefined = state.tasks[id]
+  const task: ProjectedTask | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const runnerTask = status?.tasks?.[id]
@@ -3577,7 +3577,7 @@ function InboxView() {
             {...(selected === null
               ? {}
               : {
-                  action: (task: TaskView) => (
+                  action: (task: ProjectedTask) => (
                     <CloseButtons repo={selected} taskId={task.id} state={task.state} />
                   ),
                 })}

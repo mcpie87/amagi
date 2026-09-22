@@ -94,6 +94,22 @@ export type PrBodyMeta = {
 }
 
 /**
+ * Key of the machine-readable trailer that links a PR back to its tracker
+ * task, in the same spirit as a `Co-Authored-By:` git trailer: a plain
+ * `key: value` line a regex can find regardless of how the surrounding
+ * markdown evolves. branchName (worktree.ts) encodes the same id in the
+ * branch name, but splitting it back out of a slug is ambiguous; the trailer
+ * is unambiguous because the id is on its own line.
+ */
+export const TASK_TRAILER_KEY = 'amagi-task'
+
+/** Reads the `amagi-task:` trailer back off a PR body, or null if absent. */
+export function taskIdFromPrBody(body: string): string | null {
+  const re = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
+  return body.match(re)?.[1] ?? null
+}
+
+/**
  * The task's age as a relative-time stamp for the Task line. GitHub and
  * Forgejo render `<relative-time datetime>` as a live relative age; the
  * element's text content is the plain-date fallback when they do not.
@@ -135,5 +151,5 @@ export function formatPrBody(
     lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
-  return lines.join('\n') + footer
+  return `${lines.join('\n')}${footer}\n\n${TASK_TRAILER_KEY}: ${task.id}`
 }

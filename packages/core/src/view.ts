@@ -15,9 +15,6 @@ export { emptyProjection, project }
  * the server uses to keep its SQL projection (`project` in project.ts), so a
  * client renders exactly what the API would answer, from events alone.
  */
-export type TaskView = ProjectedTask
-export type QuestionView = ProjectedQuestion
-
 export type DashboardState = Projection & {
   events: StoredEvent[]
   latestSeq: number
@@ -34,19 +31,19 @@ export function reduceState(state: DashboardState, event: StoredEvent): Dashboar
 }
 
 /** The queue view: every task still in flight, most recently touched first. */
-export function activeTasks(state: DashboardState): TaskView[] {
+export function activeTasks(state: DashboardState): ProjectedTask[] {
   return Object.values(state.tasks)
     .filter((t) => !isTerminal(t.state))
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-export function tasksNeedingAttention(state: DashboardState): TaskView[] {
+export function tasksNeedingAttention(state: DashboardState): ProjectedTask[] {
   return Object.values(state.tasks)
     .filter((t) => t.state === 'needs_human' || t.state === 'no_pr' || t.state === 'pr_flagged')
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-export function openQuestionsFor(state: DashboardState, taskId: string): QuestionView[] {
+export function openQuestionsFor(state: DashboardState, taskId: string): ProjectedQuestion[] {
   return Object.values(state.questions)
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)
     .sort((a, b) => a.askedAt - b.askedAt)

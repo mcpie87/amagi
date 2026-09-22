@@ -20,7 +20,9 @@ export const mergeablePrsCommand = defineCommand({
       return
     }
 
-    const mergeable = prs.filter((p) => p.mergeStatus === 'mergeable')
+    const mergeable = prs.filter(
+      (p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN',
+    )
     if (mergeable.length === 0) {
       console.log(dim('no mergeable pull requests'))
       return

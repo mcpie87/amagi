@@ -5,8 +5,8 @@ import {
   detectDoom,
   type Exec,
   errMsg,
+  type ProjectedTask,
   type Store,
-  type TaskRow,
   type TaskState,
   type Tracker,
   type TrackerTask,
@@ -141,7 +141,7 @@ export function startStallWatcher({
     return bits.length > 0 ? bits.join(', ') : 'no stalled tasks'
   }
 
-  async function recoverDoom(task: TaskRow, signal: DoomSignal): Promise<void> {
+  async function recoverDoom(task: ProjectedTask, signal: DoomSignal): Promise<void> {
     diffSince.delete(task.id)
     try {
       await tracker.release(task.id)
@@ -163,7 +163,7 @@ export function startStallWatcher({
   }
 
   /** Heuristic 3: a live worker whose worktree diff has not changed for the window. */
-  async function diffStaleSignal(task: TaskRow, nowMs: number): Promise<DoomSignal | null> {
+  async function diffStaleSignal(task: ProjectedTask, nowMs: number): Promise<DoomSignal | null> {
     if (doom === undefined || task.worktree === null) return null
     let snapshot: string
     try {
@@ -188,7 +188,7 @@ export function startStallWatcher({
     return null
   }
 
-  async function doomSignalFor(task: TaskRow, nowMs: number): Promise<DoomSignal | null> {
+  async function doomSignalFor(task: ProjectedTask, nowMs: number): Promise<DoomSignal | null> {
     if (doom === undefined) return null
     const recent = store.recentEvents(task.id, RECENT_EVENTS_LIMIT)
     const signal = detectDoom(recent, nowMs, {

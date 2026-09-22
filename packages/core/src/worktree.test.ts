@@ -3,8 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec, execOk } from './exec.ts'
-import { listWorktrees, removeWorktree } from './test-util.ts'
-import { branchName, createWorktree, slugify, worktreeDirName } from './worktree.ts'
+import { listWorktrees, removeWorktreeGit } from './test-util.ts'
+import {
+  branchName,
+  createWorktree,
+  slugify,
+  taskIdFromBranch,
+  worktreeDirName,
+} from './worktree.ts'
 
 describe('slugify', () => {
   test('kebabs and truncates to five words', () => {
@@ -29,6 +35,30 @@ describe('slugify', () => {
     expect(worktreeDirName('amagi', 'bd-a1b2', 'Add SSE endpoint')).toBe(
       'amagi-bd-a1b2-add-sse-endpoint',
     )
+  })
+})
+
+describe('taskIdFromBranch', () => {
+  test('resolves the id by matching known ids, not the first hyphen', () => {
+    expect(taskIdFromBranch('amagi/am-3b8-schema-constrained-review', ['am-3b8', 'am-3b8.2'])).toBe(
+      'am-3b8',
+    )
+  })
+
+  test('prefers the longest matching id when a shorter one is also a prefix', () => {
+    expect(taskIdFromBranch('amagi/am-3b8-2-followup', ['am-3b8', 'am-3b8-2'])).toBe('am-3b8-2')
+  })
+
+  test('matches an id that is the whole branch suffix, with no slug', () => {
+    expect(taskIdFromBranch('amagi/am-3b8', ['am-3b8'])).toBe('am-3b8')
+  })
+
+  test('returns null when nothing in the branch is a known id', () => {
+    expect(taskIdFromBranch('amagi/am-3b8-schema-constrained-review', ['am-9ml'])).toBeNull()
+  })
+
+  test('returns null for a branch outside the amagi/ namespace', () => {
+    expect(taskIdFromBranch('feature/manual-branch', ['am-3b8'])).toBeNull()
   })
 })
 
@@ -123,7 +153,7 @@ describe('createWorktree', () => {
 
   test('removal detaches the worktree', async () => {
     const wt = await create()
-    await removeWorktree(repo, wt.path, { force: true })
+    await removeWorktreeGit(repo, wt.path, { force: true })
     expect(existsSync(wt.path)).toBe(false)
     expect((await listWorktrees(repo)).map((w) => w.path)).not.toContain(wt.path)
   })
