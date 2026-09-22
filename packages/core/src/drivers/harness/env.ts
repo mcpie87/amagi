@@ -43,8 +43,10 @@ function prepareAgentXdg(): string {
  * Env for a harness agent. Forge tokens never reach the process, and gh/tea
  * are pointed at Amagi-owned dirs with no credentials so the agent cannot
  * inherit the operator's or the bot's stored forge login. The shim dir is
- * prepended to PATH so every git/amagi the agent runs goes through the
- * read-only gate, in every harness and every phase.
+ * prepended to PATH so every git/amagi the agent runs through PATH hits the
+ * read-only gate, in every harness and every phase. This is defense-in-depth,
+ * not an enforcement boundary: an agent that uses absolute paths or rewrites
+ * its own PATH reaches the real binaries.
  */
 export function harnessEnv(): Record<string, string> {
   const env = Object.fromEntries(

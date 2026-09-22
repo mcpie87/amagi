@@ -171,6 +171,83 @@ describe('git shim', () => {
   })
 })
 
+describe('defense-in-depth limits', () => {
+  const commits = (dir: string) => git(dir, ['rev-list', '--count', 'HEAD']).stdout.trim()
+
+  test('an absolute real git path bypasses the shim', () => {
+    const real = Bun.which('git')
+    expect(real).toBeTruthy()
+    if (!real) throw new Error('git not found')
+    const r = Bun.spawnSync([real, 'commit', '--allow-empty', '-m', 'abs'], {
+      cwd: wt,
+      env: { ...process.env, ...withWorktree({ AMAGI_WORKTREE: 'WT' }) },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).toBe(0)
+    expect(commits(wt)).toBe('2')
+  })
+
+  test('a PATH without the shim resolves the real git', () => {
+    const r = Bun.spawnSync(['git', 'commit', '--allow-empty', '-m', 'noshim'], {
+      cwd: wt,
+      env: { ...process.env, ...withWorktree({ AMAGI_WORKTREE: 'WT' }) },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).toBe(0)
+    expect(commits(wt)).toBe('2')
+  })
+
+  test('--work-tree retargets the reported worktree, the write lands in the protected repo', () => {
+    const r = shimGit(
+      wt,
+      ['--work-tree', other, 'commit', '--allow-empty', '-m', 'wt-flag'],
+      withWorktree({ AMAGI_WORKTREE: 'WT' }),
+    )
+    expect(r.exitCode).toBe(0)
+    expect(commits(wt)).toBe('2')
+  })
+
+  test('GIT_WORK_TREE env retargets the reported worktree', () => {
+    const r = shimGit(wt, ['commit', '--allow-empty', '-m', 'wt-env'], {
+      ...withWorktree({ AMAGI_WORKTREE: 'WT' }),
+      GIT_WORK_TREE: other,
+    })
+    expect(r.exitCode).toBe(0)
+    expect(commits(wt)).toBe('2')
+  })
+
+  test('--git-dir and --work-tree from elsewhere target the protected repo', () => {
+    const r = shimGit(
+      other,
+      [
+        '--git-dir',
+        join(wt, '.git'),
+        '--work-tree',
+        other,
+        'commit',
+        '--allow-empty',
+        '-m',
+        'gd-flag',
+      ],
+      withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_REPO_ROOT: 'WT' }),
+    )
+    expect(r.exitCode).toBe(0)
+    expect(commits(wt)).toBe('2')
+  })
+
+  test('GIT_DIR and GIT_WORK_TREE env from elsewhere target the protected repo', () => {
+    const r = shimGit(other, ['commit', '--allow-empty', '-m', 'gd-env'], {
+      ...withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_REPO_ROOT: 'WT' }),
+      GIT_DIR: join(wt, '.git'),
+      GIT_WORK_TREE: other,
+    })
+    expect(r.exitCode).toBe(0)
+    expect(commits(wt)).toBe('2')
+  })
+})
+
 describe('amagi shim', () => {
   test('allows only ask and git-request', () => {
     const fakeBin = join(home, 'fakebin')

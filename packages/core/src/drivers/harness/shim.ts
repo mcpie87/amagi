@@ -6,6 +6,9 @@ import { stateHome } from '../../paths.ts'
  * Directory prepended to the harness agent's PATH. The `git` and `amagi`
  * executables here are shims that mechanically enforce the read-only git rule
  * the system prompt only states as advice.
+ *
+ * Defense-in-depth, not an enforcement boundary: an agent that resolves git by
+ * absolute path or rewrites its own PATH reaches the real binary untouched.
  */
 export function shimDir(): string {
   return join(stateHome(), 'amagi', 'shim', 'bin')
@@ -25,11 +28,20 @@ function resolveBinary(name: string): string {
  * project checks (`git init`/`commit` in temp dirs) keep working from inside
  * a shimmed worktree. Rejected calls append their argv to
  * `$AMAGI_RUN_STATE/rejected-git.jsonl` for the channel task to drain.
+ *
+ * Defense-in-depth, not an enforcement boundary. Known bypasses, covered by
+ * shim.test.ts:
+ * - absolute git path or a PATH without this shim dir resolves the real git;
+ * - `--git-dir`/`--work-tree` flags and `GIT_DIR`/`GIT_WORK_TREE` env can
+ *   operate on the protected repo while reporting a different worktree, so
+ *   the resolved top-level no longer matches a protected root.
  */
 function gitShimScript(realGit: string): string {
   return `#!/bin/sh
 # amagi: git shim for harness agents. Read-only inside the protected worktree
 # and main checkout; every other repository passes through untouched.
+# Defense-in-depth only: absolute paths, a rewritten PATH, and
+# GIT_DIR/GIT_WORK_TREE/--git-dir/--work-tree retargeting bypass this shim.
 set -u
 
 REAL_GIT='${realGit}'
@@ -182,6 +194,8 @@ exec "$REAL_GIT" "$@"
  * `run`, `continue` and `clean` as indirect routes to git or another task
  * state. The real binary is baked in when it is on the generating PATH;
  * otherwise it is resolved at call time from PATH, skipping this shim dir.
+ * Like the git shim this is defense-in-depth: an absolute path or a rewritten
+ * PATH bypasses it.
  */
 function amagiShimScript(realAmagi: string, binDir: string): string {
   return `#!/bin/sh
