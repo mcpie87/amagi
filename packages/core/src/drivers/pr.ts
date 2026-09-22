@@ -5,7 +5,11 @@ import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
 
-/** One open PR, with its merge status normalized across forges. */
+/**
+ * One open PR, with its merge status normalized across forges plus the forge's
+ * own mergeability flags. `mergeable`/`mergeStateStatus` use gh's wording on
+ * both drivers so consumers filter one way regardless of forge.
+ */
 export type OpenPr = {
   number: number
   title: string
@@ -13,6 +17,8 @@ export type OpenPr = {
   headRefName: string
   baseRefName: string
   mergeStatus: MergeStatus
+  mergeable: string
+  mergeStateStatus: string
 }
 
 /** Remote lifecycle of a pull request, for reconciling parked tasks. */
@@ -59,6 +65,8 @@ export type PrDriver = {
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
   postComment(cwd: string, number: number, body: string): Promise<void>
+  /** Close a pull request, recording the operator's reason on the forge. */
+  closePr(cwd: string, number: number, reason: string): Promise<void>
   /** Add a label to an existing pull request. */
   addLabel(cwd: string, number: number, label: string): Promise<void>
   /** Remove a label from an existing pull request. */
@@ -195,6 +203,8 @@ function githubPr(exec: Exec): PrDriver {
             headRefName: p.headRefName,
             baseRefName: p.baseRefName,
             mergeStatus: status === 'unknown' ? await ghMergeStatusResolved(cwd, p.number) : status,
+            mergeable: p.mergeable,
+            mergeStateStatus: p.mergeStateStatus,
           }
         }),
       )
@@ -230,6 +240,12 @@ function githubPr(exec: Exec): PrDriver {
       await execOk(exec, ['gh', 'pr', 'comment', String(number), '--body-file', '-'], {
         cwd,
         stdin: body,
+        env: ghEnv(),
+      })
+    },
+    async closePr(cwd, number, reason) {
+      await execOk(exec, ['gh', 'pr', 'close', String(number), '--comment', reason], {
+        cwd,
         env: ghEnv(),
       })
     },
@@ -381,6 +397,19 @@ function forgejoPr(exec: Exec): PrDriver {
             headRefName: head?.ref ?? '',
             baseRefName: base?.ref ?? '',
             mergeStatus: status === 'unknown' ? await fjMergeStatusResolved(cwd, number) : status,
+            // The forgejo state names map onto gh's so one filter works for both.
+            mergeable:
+              p.mergeable_state === 'has_conflicts'
+                ? 'CONFLICTING'
+                : p.mergeable === true
+                  ? 'MERGEABLE'
+                  : 'UNKNOWN',
+            mergeStateStatus:
+              p.mergeable_state === 'clean'
+                ? 'CLEAN'
+                : p.mergeable_state === 'has_conflicts'
+                  ? 'DIRTY'
+                  : 'UNKNOWN',
           }
         }),
       )
@@ -411,6 +440,11 @@ function forgejoPr(exec: Exec): PrDriver {
     async postComment(cwd, number, body) {
       await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/issues/${number}/comments`, {
         body,
+      })
+    },
+    async closePr(cwd, number, _reason) {
+      await api(cwd, 'PATCH', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`, {
+        state: 'closed',
       })
     },
     async addLabel(cwd, number, label) {

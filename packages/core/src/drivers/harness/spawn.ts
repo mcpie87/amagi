@@ -46,6 +46,8 @@ export type SpawnAgentOptions = {
   model?: () => string | null
   /** Reasoning effort in effect, or null when unknown. */
   effort?: string | null
+  /** Content to pipe into the child's stdin, which is otherwise ignored. */
+  stdin?: string
 }
 
 /**
@@ -63,7 +65,7 @@ export function spawnAgent(
   const proc = Bun.spawn(argv, {
     cwd: opts.cwd,
     env: { ...harnessEnv(), ...opts.env, ...options.env },
-    stdin: 'ignore',
+    stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
     stdout: 'pipe',
     stderr: 'pipe',
   })

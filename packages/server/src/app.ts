@@ -4,6 +4,9 @@ import {
   ChatService,
   classifyDifficulty,
   errMsg,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  HarnessKind,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -17,7 +20,6 @@ import {
   type TrackerCapabilities,
   type TrackerTask,
   Triage,
-  UnsupportedCapabilityError,
   type UpdateTrackerTask,
   type WorkerActivity,
   type Workspace,
@@ -258,22 +260,17 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const cap = capabilityError(ws.tracker, 'create')
         if (cap !== null) return c.json({ error: cap }, 501)
-        try {
-          const body = c.req.valid('json')
-          const input = ws.config.difficulty.enabled
-            ? {
-                ...body,
-                difficulty: await classifyDifficulty(body.title, body.description, ws.config),
-              }
-            : body
-          const created: TrackerTask = await ws.tracker.createTask(input)
-          const beads = beadsTracker(ws)
-          const issue = beads === null ? null : await beads.getIssue(created.id)
-          return c.json(issue ?? created, 201)
-        } catch (err) {
-          if (err instanceof UnsupportedCapabilityError) return c.json({ error: err.message }, 501)
-          throw err
-        }
+        const body = c.req.valid('json')
+        const input = ws.config.difficulty.enabled
+          ? {
+              ...body,
+              difficulty: await classifyDifficulty(body.title, body.description, ws.config),
+            }
+          : body
+        const created: TrackerTask = await ws.tracker.createTask(input)
+        const beads = beadsTracker(ws)
+        const issue = beads === null ? null : await beads.getIssue(created.id)
+        return c.json(issue ?? created, 201)
       },
     )
 
@@ -314,17 +311,10 @@ export function createApp({
             remove: current.filter((d) => !body.dependencies?.includes(d)),
           }
         }
-        try {
-          const updated = await ws.tracker.updateTask(id, input)
-          const beads = beadsTracker(ws)
-          const issue = beads === null ? null : await beads.getIssue(updated.id)
-          return c.json(issue ?? updated)
-        } catch (err) {
-          if (err instanceof UnsupportedCapabilityError) {
-            return c.json({ error: err.message }, 501)
-          }
-          throw err
-        }
+        const updated = await ws.tracker.updateTask(id, input)
+        const beads = beadsTracker(ws)
+        const issue = beads === null ? null : await beads.getIssue(updated.id)
+        return c.json(issue ?? updated)
       },
     )
 
@@ -347,6 +337,20 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       // The tracker orders the queue FCFS (bd ready --sort oldest).
       return c.json(await ws.tracker.ready())
+    })
+
+    .get('/api/repos/:repo/mergeable-prs', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The driver reports the forge's own flags (gh wording on both drivers),
+      // so one filter is all it takes to find the PRs that can merge now.
+      const open = await ws.forge.listOpenPrs(ws.root)
+      return c.json({
+        prs: open.filter((p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN'),
+      })
     })
 
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
@@ -492,6 +496,28 @@ export function createApp({
         if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
           return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
         }
+        // Closing a pr_flagged task retires its pointless pull request too: the
+        // watcher parked it because the diff is empty and a human is the only
+        // one who closes it. This is the one step that must not be best effort,
+        // else the task retires with the PR still open on the forge.
+        if (task.state === 'pr_flagged') {
+          if (ws.forge === null) {
+            return c.json(
+              {
+                error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
+              },
+              501,
+            )
+          }
+          if (task.prNumber === null) {
+            return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
+          }
+          try {
+            await ws.forge.closePr(ws.root, task.prNumber, reason)
+          } catch (err) {
+            return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
+          }
+        }
         // Shut the worker down first: stop() kills the owned agent process and
         // parks a live run in cancelled, releasing the tracker claim, so the
         // close below retires it without racing the run. A task not running on
@@ -556,6 +582,34 @@ export function createApp({
       return c.json({ ...status, workers: workers() })
     })
 
+    .get('/api/runner/options', (c) => {
+      if (runner === undefined || runnerRepo === undefined) {
+        return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
+      }
+      const ws = resolveWorkspace(workspaces, runnerRepo)
+      const defs = Object.entries(ws.config.harness.definitions)
+      const harnesses = defs.map(([name, cfg]) => ({
+        name,
+        kind: cfg.kind,
+        ...(cfg.model === undefined ? {} : { model: cfg.model }),
+        ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+      }))
+      const current = ws.config.harness.implement
+      return c.json({
+        harnesses:
+          harnesses.length > 0
+            ? harnesses
+            : HarnessKind.options.map((kind) => ({ name: kind, kind })),
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+        default: {
+          kind: current.kind,
+          ...(current.model === undefined ? {} : { model: current.model }),
+          ...(current.effort === undefined ? {} : { effort: current.effort }),
+        },
+      })
+    })
+
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -598,8 +652,13 @@ export function createApp({
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { taskId } = c.req.valid('json')
-      const result = await runner.start(taskId)
+      const { taskId, harness, model, effort } = c.req.valid('json')
+      const opts = {
+        ...(harness === undefined ? {} : { harness }),
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+      }
+      const result = await runner.start(taskId, opts)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })

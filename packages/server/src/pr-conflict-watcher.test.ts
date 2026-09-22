@@ -7,6 +7,7 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -67,7 +68,7 @@ class FakePr implements PrDriver {
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
-  async listOpenPrs(_cwd: string) {
+  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
     return []
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
@@ -76,6 +77,7 @@ class FakePr implements PrDriver {
   async postComment(_cwd: string, _number: number, body: string): Promise<void> {
     this.postedComments.push(body)
   }
+  async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {}
   async addLabel(_cwd: string, _number: number, label: string): Promise<void> {
     this.addedLabels.push(label)
   }
@@ -216,6 +218,11 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(counter(w, 'resolved')).toBe(1)
   expect(started).toBe(1)
   expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(activity.runs).toBeGreaterThanOrEqual(1)
+  expect(activity.successes).toBe(activity.runs)
+  expect(activity.failures).toBe(0)
+  expect(activity.status).toBe('active')
+  expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
@@ -284,6 +291,42 @@ test('a conflicting PR that stops conflicting drops out of the state file', asyn
   conflicting = false
   await Bun.sleep(60)
   expect(stateFile()['7']).toBeUndefined()
+})
+
+test('fetches every open PR head each tick when a head moved', async () => {
+  let started = 0
+  const calls: string[][] = []
+  const exec: Exec = async (cmd) => {
+    calls.push(cmd as string[])
+    if (cmd.includes('ls-remote')) {
+      return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
+    }
+    if (cmd.includes('gh') && cmd.includes('list')) {
+      return { exitCode: 0, stdout: JSON.stringify([pr()]), stderr: '' }
+    }
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd.includes('view')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+        stderr: '',
+      }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  start(exec, () => fakeHarness(() => started++))
+
+  await Bun.sleep(60)
+  const fetches = calls.filter((c) => c[0] === 'git' && c[1] === 'fetch')
+  expect(fetches).toContainEqual([
+    'git',
+    'fetch',
+    '--prune',
+    'origin',
+    '+refs/pull/*/head:refs/remotes/origin/pr/*',
+  ])
+  expect(started).toBeGreaterThanOrEqual(1)
 })
 
 test('a tick that fails to list PRs reports the error and keeps the previous stamp', async () => {

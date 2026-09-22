@@ -6,13 +6,20 @@ import type {
   AgentProcess,
   AgentStartOptions,
   BeadsIssue,
+  CreatePrOptions,
   CreateTrackerTask,
   EpicCloseEligible,
   EpicCloseResult,
   GateRef,
   Harness,
+  OpenPr,
+  PrComment,
+  PrDriver,
+  PrState,
+  PullRequest,
   Question,
   QuestionRow,
+  RunOptions,
   RunServiceApi,
   Store,
   TaskRow,
@@ -129,6 +136,99 @@ describe('GET /api/repos/:repo/tasks', () => {
 
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/tasks')).status).toBe(404)
+  })
+})
+
+class FakeMergePrDriver implements PrDriver {
+  open: OpenPr[] = []
+  async listOpenPrs(): Promise<OpenPr[]> {
+    return this.open
+  }
+  async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
+    throw new Error('unused')
+  }
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {}
+  async addLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+  async removeLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+}
+
+describe('GET /api/repos/:repo/mergeable-prs', () => {
+  let forge: FakeMergePrDriver
+  beforeEach(() => {
+    forge = new FakeMergePrDriver()
+    ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('returns only the PRs the forge reports as mergeable', async () => {
+    forge.open = [
+      {
+        number: 1,
+        title: 'Ready',
+        url: 'https://github.com/owner/repo/pull/1',
+        headRefName: 'amagi/am-1',
+        baseRefName: 'main',
+        mergeStatus: 'mergeable',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      {
+        number: 2,
+        title: 'Conflicted',
+        url: 'https://github.com/owner/repo/pull/2',
+        headRefName: 'amagi/am-2',
+        baseRefName: 'main',
+        mergeStatus: 'conflicted',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+      },
+      {
+        number: 3,
+        title: 'Unknown',
+        url: 'https://github.com/owner/repo/pull/3',
+        headRefName: 'amagi/am-3',
+        baseRefName: 'main',
+        mergeStatus: 'unknown',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'UNKNOWN',
+      },
+      {
+        number: 4,
+        title: 'Clean via status',
+        url: 'https://github.com/owner/repo/pull/4',
+        headRefName: 'amagi/am-4',
+        baseRefName: 'main',
+        mergeStatus: 'mergeable',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'CLEAN',
+      },
+    ]
+    const res = await app.request('/api/repos/repo1/mergeable-prs')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { prs: OpenPr[] }
+    expect(body.prs.map((p) => p.number)).toEqual([1, 4])
+  })
+
+  test('404s for an unknown repo', async () => {
+    expect((await app.request('/api/repos/nope/mergeable-prs')).status).toBe(404)
+  })
+
+  test('501s when the repo has no forge driver', async () => {
+    const noForge = testWorkspaces(['repo1'], { forgeFor: () => null })
+    const noForgeApp = createApp({ workspaces: noForge.workspaces })
+    const res = await noForgeApp.request('/api/repos/repo1/mergeable-prs')
+    expect(res.status).toBe(501)
+    noForge.cleanup()
   })
 })
 
@@ -669,6 +769,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
           running: ['bd-1'],
           startedAt: {},
           resources: {},
+          tasks: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -828,6 +929,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           running: ['bd-1'],
           startedAt: { 'bd-1': 1720000000000 },
           resources: {},
+          tasks: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -882,6 +984,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           running: ['bd-1'],
           startedAt: {},
           resources: {},
+          tasks: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -961,6 +1064,115 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const body = (await res.json()) as { task: TaskRow }
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('wont run')
+  })
+
+  class FakeForge implements PrDriver {
+    readonly closed: { number: number; reason: string }[] = []
+    closeError: Error | null = null
+    async createPr(): Promise<PullRequest> {
+      throw new Error('unused')
+    }
+    async getPr(): Promise<PrState> {
+      return 'open'
+    }
+    async getMergeStatus() {
+      return 'mergeable' as const
+    }
+    async listOpenPrs(): Promise<OpenPr[]> {
+      return []
+    }
+    async listComments(): Promise<PrComment[]> {
+      return []
+    }
+    async postComment(): Promise<void> {}
+    async closePr(_cwd: string, number: number, reason: string): Promise<void> {
+      if (this.closeError !== null) throw this.closeError
+      this.closed.push({ number, reason })
+    }
+    async addLabel(): Promise<void> {}
+    async removeLabel(): Promise<void> {}
+  }
+
+  const withForge = (forge: FakeForge) => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('workspace missing')
+    workspace.forge = forge
+  }
+
+  const flagged = (id: string, number: number) => {
+    claim(id)
+    store.append(id, { type: 'pr.created', url: `https://github.com/x/y/pull/${number}`, number })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append(id, { type: 'task.state', from: null, to })
+    }
+    store.append(id, {
+      type: 'task.state',
+      from: 'pr_open',
+      to: 'pr_flagged',
+      reason: 'this PR is pointless',
+    })
+  }
+
+  test('closing a pr_flagged task closes its pull request on the forge', async () => {
+    const forge = new FakeForge()
+    withForge(forge)
+    flagged('bd-1', 7)
+    const res = await close('bd-1', 'agree, nothing to merge')
+    expect(res.status).toBe(200)
+    expect(forge.closed).toEqual([{ number: 7, reason: 'agree, nothing to merge' }])
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('abandoned')
+    expect(body.task.statusReason).toBe('agree, nothing to merge')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'agree, nothing to merge' }])
+  })
+
+  test('closing a pr_open task does not touch the pull request', async () => {
+    const forge = new FakeForge()
+    withForge(forge)
+    claim('bd-1')
+    store.append('bd-1', { type: 'pr.created', url: 'https://github.com/x/y/pull/7', number: 7 })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('bd-1', { type: 'task.state', from: null, to })
+    }
+
+    const res = await close('bd-1', 'abandoning anyway')
+    expect(res.status).toBe(200)
+    expect(forge.closed).toEqual([])
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+  })
+
+  test('refuses to close a pr_flagged task without a forge driver', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('workspace missing')
+    workspace.forge = null
+    flagged('bd-1', 7)
+    const res = await close('bd-1', 'close it')
+    expect(res.status).toBe(501)
+    expect(tracker.closed).toHaveLength(0)
+    expect(store.task('bd-1')?.state).toBe('pr_flagged')
+  })
+
+  test('a forge failure leaves the flagged task parked so the operator can retry', async () => {
+    const forge = new FakeForge()
+    forge.closeError = new Error('forge down')
+    withForge(forge)
+    flagged('bd-1', 7)
+    const res = await close('bd-1', 'close it')
+    expect(res.status).toBe(502)
+    expect(store.task('bd-1')?.state).toBe('pr_flagged')
+    expect(tracker.closed).toHaveLength(0)
   })
 })
 
@@ -1096,6 +1308,7 @@ describe('runner endpoints', () => {
       running: [],
       startedAt: {},
       resources: {},
+      tasks: {},
       autoQueue: false,
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1129,6 +1342,7 @@ describe('runner endpoints', () => {
           running: ['bd-1'],
           startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+          tasks: {},
           autoQueue: false,
         }),
       }),
@@ -1142,6 +1356,7 @@ describe('runner endpoints', () => {
       running: ['bd-1'],
       startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+      tasks: {},
       autoQueue: false,
     })
   })
@@ -1161,6 +1376,13 @@ describe('runner endpoints', () => {
             { label: 'scanned', value: 2 },
             { label: 'responded', value: 1 },
           ],
+          detail: 'scanned 2 PRs, responded to 1 mention(s)',
+          runs: 1,
+          successes: 1,
+          failures: 0,
+          nextRunAt: 1720000300000,
+          intervalMs: 300000,
+          status: 'active',
         },
       ],
     })
@@ -1178,6 +1400,13 @@ describe('runner endpoints', () => {
           { label: 'scanned', value: 2 },
           { label: 'responded', value: 1 },
         ],
+        detail: 'scanned 2 PRs, responded to 1 mention(s)',
+        runs: 1,
+        successes: 1,
+        failures: 0,
+        nextRunAt: 1720000300000,
+        intervalMs: 300000,
+        status: 'active',
       },
     ])
   })
@@ -1220,6 +1449,69 @@ describe('runner endpoints', () => {
     expect(specific.status).toBe(201)
     expect(started).toEqual(['bd-9'])
     expect((await post('/api/runs', '{"taskId":123}')).status).toBe(400)
+  })
+
+  test('POST /api/runs forwards harness/model/effort overrides', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    const res = await post(
+      '/api/runs',
+      '{"taskId":"bd-1","harness":"fast","model":"gpt-5.6-luna","effort":"high"}',
+    )
+    expect(res.status).toBe(201)
+    expect(received).toEqual([
+      { taskId: 'bd-1', opts: { harness: 'fast', model: 'gpt-5.6-luna', effort: 'high' } },
+    ])
+  })
+
+  test('POST /api/runs sends no opts when the body omits them', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    expect((await post('/api/runs', '{}')).status).toBe(201)
+    expect(received).toEqual([{ taskId: undefined, opts: {} }])
+  })
+
+  test('GET /api/runner/options lists harnesses, models, efforts and the default', async () => {
+    app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
+    const res = await app.request('/api/runner/options')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      harnesses: { name: string; kind: string }[]
+      default: { kind: string } | null
+    }
+    expect(body.harnesses).toEqual([
+      { name: 'claude', kind: 'claude' },
+      { name: 'codex', kind: 'codex' },
+      { name: 'opencode', kind: 'opencode' },
+    ])
+    // The default mirrors the host's global config, so only its shape is asserted.
+    const dflt = body.default
+    expect(dflt).not.toBeNull()
+    if (dflt !== null) {
+      expect(['claude', 'codex', 'opencode']).toContain(dflt.kind)
+    }
+  })
+
+  test('GET /api/runner/options is empty without a runner', async () => {
+    const res = await app.request('/api/runner/options')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ harnesses: [], models: {}, efforts: {}, default: null })
   })
 
   test('POST /api/runs propagates a launch failure', async () => {
@@ -1301,6 +1593,7 @@ describe('repo settings endpoints', () => {
           running: [],
           resources: {},
           startedAt: {},
+          tasks: {},
           autoQueue: true,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1345,6 +1638,7 @@ describe('repo settings endpoints', () => {
           running: [],
           startedAt: {},
           resources: {},
+          tasks: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
