@@ -1110,7 +1110,7 @@ describe('Runner.runOnce', () => {
         events: [
           { kind: 'text', text: 'working on it' },
           { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
-          { kind: 'result', ok: false, summary: 'registry unreachable' },
+          { kind: 'result', ok: false, summary: 'the test database needs manual migration' },
         ],
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
@@ -1124,7 +1124,7 @@ describe('Runner.runOnce', () => {
     ).runOnce()
 
     expect(result?.state).toBe('needs_human')
-    expect(stateReason(TASK.id)).toContain('registry unreachable')
+    expect(stateReason(TASK.id)).toContain('the test database needs manual migration')
   })
 
   test('a failed agent falls back to the failing tool output when there is no result or text', async () => {

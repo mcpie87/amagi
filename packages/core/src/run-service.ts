@@ -15,6 +15,16 @@ export type RunnerResource = {
   cpuMs: number
 }
 
+/** A running task's identity, so the dashboard can show it from the polled
+ *  channel like rss/cpu instead of relying on the SSE projection. */
+export type RunnerTask = {
+  title: string
+  /** The configured implement harness for the run. */
+  harness: string
+  model: string | null
+  effort: string | null
+}
+
 export type RunnerStatus = {
   /** Repo name the runner is bound to, so several runners can be told apart. */
   name: string
@@ -25,6 +35,8 @@ export type RunnerStatus = {
   startedAt: Record<string, number>
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
+  /** Title and live agent per running task, keyed by task id. */
+  tasks: Record<string, RunnerTask>
   /** Whether automatic dispatch is on: ready tasks launch themselves on free slots. */
   autoQueue: boolean
   /** Activity of background workers (e.g. the mention watcher), when any. */
@@ -211,11 +223,23 @@ export class RunService implements RunServiceApi {
     const running = [...this.runs.keys()]
     const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
+    const tasks: Record<string, RunnerTask> = {}
     await Promise.all(
       running.map(async (id) => {
         const pid = this.runs.get(id)?.runner.currentPid()
-        if (pid === null || pid === undefined || pid <= 0) return
-        resources[id] = await processTreeStats(pid)
+        if (pid !== null && pid !== undefined && pid > 0) {
+          resources[id] = await processTreeStats(pid)
+        }
+        const task = this.opts.store.task(id)
+        const agent = this.opts.store.currentAgent(id)
+        tasks[id] = {
+          title: task?.title ?? id,
+          // The configured harness is known at launch; only the model/effort
+          // wait for the agent run to report them.
+          harness: this.opts.harness.kind,
+          model: agent?.model ?? null,
+          effort: agent?.effort ?? null,
+        }
       }),
     )
     for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
@@ -226,6 +250,7 @@ export class RunService implements RunServiceApi {
       running,
       startedAt,
       resources,
+      tasks,
       autoQueue: this.autoQueue,
     }
   }

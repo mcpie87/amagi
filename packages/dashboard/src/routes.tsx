@@ -12,7 +12,7 @@ import {
 } from '@amagi/core/events'
 import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
-import type { RunnerResource, WorkerActivity } from '@amagi/core/run-service'
+import type { RunnerResource, RunnerTask, WorkerActivity } from '@amagi/core/run-service'
 import {
   activeTasks,
   chatInFlight,
@@ -1410,6 +1410,7 @@ function WorkerSlot({
   startedAt,
   now,
   resource,
+  taskInfo,
   state,
   selected,
 }: {
@@ -1418,6 +1419,7 @@ function WorkerSlot({
   /** Wall-clock snapshot, advanced by one shared 1s interval in WorkersPanel. */
   now: number
   resource?: RunnerResource | undefined
+  taskInfo?: RunnerTask | undefined
   state: DashboardState
   selected: string | null
 }) {
@@ -1430,6 +1432,17 @@ function WorkerSlot({
   }
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
+  const title = taskInfo?.title ?? task?.title ?? taskId
+  // The runner's per-task identity is authoritative for what is actually
+  // running (rss/cpu arrive the same way); the SSE projection only fills in
+  // when the polled status has not caught up.
+  const agentLabel =
+    taskInfo?.harness !== undefined
+      ? `implement: ${taskInfo.harness}`
+      : agent === null
+        ? 'starting…'
+        : `${agent.role}: ${agent.harness}`
+  const modelLabel = taskInfo?.model ?? agent?.model ?? 'unknown'
   const usage = currentUsageFor(state, taskId)
   const health = runHealth(state, taskId, now)
   const nearLimit = runHealthNearLimit(health)
@@ -1455,14 +1468,14 @@ function WorkerSlot({
           params={{ id: taskId }}
           className="flex min-w-0 items-baseline gap-x-3 hover:underline"
         >
-          <span className="min-w-0 truncate font-medium">{task?.title ?? taskId}</span>
+          <span className="min-w-0 truncate font-medium">{title}</span>
           <span className="text-xs text-fg-faint">{task?.id ?? taskId}</span>
         </Link>
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-        <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
-        <span>model: {agent?.model ?? 'unknown'}</span>
+        <span>agent: {agentLabel}</span>
+        <span>model: {modelLabel}</span>
         <span>
           ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
         </span>
@@ -1719,6 +1732,7 @@ function WorkersPanel() {
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
             now={now}
             resource={running[i] === undefined ? undefined : status.resources[running[i]]}
+            taskInfo={running[i] === undefined ? undefined : status.tasks?.[running[i]]}
             state={state}
             selected={selected}
           />
@@ -3189,9 +3203,11 @@ type DetailTab = 'log' | 'checks'
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
+  const { status } = useRunner()
   const task: TaskView | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
+  const runnerTask = status?.tasks?.[id]
   const [tab, setTab] = useState<DetailTab>('log')
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -3298,10 +3314,16 @@ function TaskDetailView() {
         <DetailRow label="tracker" value={task.tracker} />
         <DetailRow
           label="agent"
-          value={currentAgent ? `${currentAgent.role}: ${currentAgent.harness}` : null}
+          value={
+            currentAgent
+              ? `${currentAgent.role}: ${currentAgent.harness}`
+              : runnerTask?.harness
+                ? `implement: ${runnerTask.harness}`
+                : null
+          }
         />
-        <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
-        <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
+        <DetailRow label="model" value={currentAgent?.model ?? runnerTask?.model ?? 'unknown'} />
+        <DetailRow label="effort" value={currentAgent?.effort ?? runnerTask?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
         <DetailRow
           label="context"
