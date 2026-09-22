@@ -31,6 +31,18 @@ export type RunSelection = {
 }
 
 /**
+ * A bare-kind harness config (no named definition): the configured implement
+ * harness when its kind matches, otherwise the kind's default. Lets the
+ * implement harness's `bin` (e.g. a NixOS `opencode-unconfined` wrapper) carry
+ * through to the picker and `--harness` flags instead of silently falling back
+ * to the harness's stock binary, which may be a read-only sandbox.
+ */
+function bareKind(kind: (typeof KINDS)[number], config: Config): Config['harness']['implement'] {
+  const implement = config.harness.implement
+  return implement.kind === kind ? implement : HarnessConfig.parse({ kind })
+}
+
+/**
  * Harness choices for the picker: named definitions, or the three known kinds.
  * Most-used first, by the kind recorded in each run.
  */
@@ -46,7 +58,7 @@ export function harnessChoices(
   if (defs.length > 0) {
     return defs.map(([name, cfg]) => ({ label: name, value: cfg })).sort(byUsage)
   }
-  return KINDS.map((kind) => ({ label: kind, value: HarnessConfig.parse({ kind }) })).sort(byUsage)
+  return KINDS.map((kind) => ({ label: kind, value: bareKind(kind, config) })).sort(byUsage)
 }
 
 const withModel = (
@@ -75,7 +87,9 @@ export async function pickRunSelection(
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
     const named = config.harness.definitions[flags.harness]
-    const harness = named ?? HarnessConfig.parse({ kind: flags.harness })
+    const known = KINDS.find((kind) => kind === flags.harness)
+    const harness = named ?? (known === undefined ? undefined : bareKind(known, config))
+    if (harness === undefined) throw new Error(`unknown harness "${flags.harness}"`)
     return {
       harness: withEffort(withModel(harness, flags.model), flags.effort),
       interactive: false,

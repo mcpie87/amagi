@@ -282,15 +282,22 @@ export class RunService implements RunServiceApi {
       if (named !== undefined) {
         base = named
       } else {
-        const parsed = HarnessConfig.safeParse({ kind: opts.harness })
-        if (!parsed.success) {
-          return {
-            ok: false,
-            status: 409,
-            error: `unknown harness "${opts.harness}"; use a harness.definitions name or claude/codex/opencode`,
+        // A bare kind keeps the implement harness's bin (e.g. a NixOS
+        // `opencode-unconfined` wrapper), not the harness's stock binary.
+        const implement = config.harness.implement
+        if (implement.kind === opts.harness) {
+          base = implement
+        } else {
+          const parsed = HarnessConfig.safeParse({ kind: opts.harness })
+          if (!parsed.success) {
+            return {
+              ok: false,
+              status: 409,
+              error: `unknown harness "${opts.harness}"; use a harness.definitions name or claude/codex/opencode`,
+            }
           }
+          base = parsed.data
         }
-        base = parsed.data
       }
     }
     if (opts.model !== undefined) base = { ...base, model: opts.model }

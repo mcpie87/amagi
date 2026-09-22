@@ -475,6 +475,36 @@ describe('RunService', () => {
     })
   })
 
+  test('start resolves a bare kind to the implement harness so its bin carries over', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const cfg = config({
+      harness: {
+        implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
+      },
+    })
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: cfg,
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (c) => {
+        captured = c
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, { harness: 'opencode' })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toMatchObject({
+      kind: 'opencode',
+      bin: 'opencode-unconfined',
+      permissions: 'bypass',
+    })
+  })
+
   test('start applies harness/model/effort overrides to the launched run', async () => {
     let captured: Config['harness']['implement'] | null = null
     const service = new RunService({
