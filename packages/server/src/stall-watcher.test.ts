@@ -19,6 +19,8 @@ class FakeTracker implements Tracker {
   readonly leaseTtlMs = 300_000
   readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   released: string[] = []
+  /** When set, get() reports this status so recovery can react to the tracker. */
+  issueStatus: TrackerStatus | null = null
 
   async ready(): Promise<TrackerTask[]> {
     return []
@@ -27,7 +29,17 @@ class FakeTracker implements Tracker {
     return null
   }
   async get(): Promise<TrackerTask | null> {
-    return null
+    return this.issueStatus === null
+      ? null
+      : {
+          id: 'bd-1',
+          title: 'stall work',
+          description: '',
+          status: this.issueStatus,
+          priority: null,
+          type: null,
+          url: null,
+        }
   }
   async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
     throw new Error('unsupported')
@@ -130,6 +142,60 @@ test('a pr_open task is not recovered: no worker drives it', async () => {
 
   expect(tracker.released).toEqual([])
   expect(store.task('bd-1')?.state).toBe('pr_open')
+})
+
+test('a stalled task whose tracker issue is closed is parked, not reclaimed', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+  tracker.issueStatus = 'closed'
+  implementing(store)
+  store.db.query('update tasks set updated_at = ? where id = ?').run(Date.now() - 120_000, 'bd-1')
+
+  const watcher = startStallWatcher({
+    repo: 'repo1',
+    store,
+    tracker,
+    timeoutMs: 60_000,
+    intervalMs: 10,
+  })
+  watchers.push(watcher)
+  await Bun.sleep(40)
+
+  expect(tracker.released).toEqual([])
+  const task = store.task('bd-1')
+  expect(task?.state).toBe('needs_human')
+  expect(task?.statusReason).toContain('already closed')
+  expect(watcher.activity().detail).toBe('parked 1 unrecoverable task')
+  expect(watcher.activity().ok).toBe(true)
+  expect(watcher.activity().failures).toBe(0)
+  const reclaimed = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'task.reclaimed')
+  expect(reclaimed).toBeUndefined()
+})
+
+test('a stalled task whose release fails is parked, not reclaimed', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+  tracker.release = async () => {
+    throw new Error('cannot unclaim closed issue')
+  }
+  implementing(store)
+  store.db.query('update tasks set updated_at = ? where id = ?').run(Date.now() - 120_000, 'bd-1')
+
+  const watcher = startStallWatcher({
+    repo: 'repo1',
+    store,
+    tracker,
+    timeoutMs: 60_000,
+    intervalMs: 10,
+  })
+  watchers.push(watcher)
+  await Bun.sleep(40)
+
+  expect(tracker.released).toEqual([])
+  expect(store.task('bd-1')?.state).toBe('needs_human')
+  expect(watcher.activity().detail).toBe('parked 1 unrecoverable task')
+  const reclaimed = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'task.reclaimed')
+  expect(reclaimed).toBeUndefined()
 })
 
 const doomOptions = {

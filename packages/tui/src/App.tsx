@@ -542,7 +542,6 @@ function TaskDetail({
             guard warnings
           </Text>
           {health.warnings.map((w, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
             <Text key={i} wrap="truncate">
               {w}
             </Text>

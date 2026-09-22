@@ -1726,7 +1726,6 @@ function WorkersPanel() {
       <div className="space-y-2">
         {Array.from({ length: status.capacity }, (_, i) => (
           <WorkerSlot
-            // biome-ignore lint/suspicious/noArrayIndexKey: slots are fixed positions, the index is their identity
             key={i}
             taskId={running[i] ?? null}
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
@@ -3003,7 +3002,6 @@ const markdown = new Marked({
 
 function Markdown({ text }: { text: string }) {
   return (
-    // biome-ignore lint/security/noDangerouslySetInnerHtml: the Marked renderer escapes raw HTML
     <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
   )
 }
@@ -3430,7 +3428,6 @@ function TaskDetailView() {
           </h2>
           <ul className="space-y-1">
             {health.warnings.map((w, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
               <li key={i} className="font-mono text-xs text-fg">
                 {w}
               </li>

@@ -280,6 +280,10 @@ export class BeadsTracker implements Tracker {
   }
 
   async release(id: string): Promise<void> {
+    // A closed issue has no claim to release: bd unclaim exits 1 on it, so
+    // treat it as already released rather than let callers trip on the error.
+    const issue = await this.get(id)
+    if (issue !== null && issue.status === 'closed') return
     await this.bd(['unclaim', id])
   }
 
