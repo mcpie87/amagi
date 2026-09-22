@@ -201,26 +201,6 @@ describe('Store', () => {
     expect(store.task('bd-1')?.sessionId).toBe('sess-42')
   })
 
-  test('rebuild reproduces the projection exactly', () => {
-    claim()
-    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
-    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt/x', branch: 'amagi/bd-1-x' })
-    store.append('bd-1', {
-      type: 'question.asked',
-      questionId: 'q1',
-      question: 'which?',
-      options: ['a'],
-      gateRef: null,
-    })
-    const before = store.task('bd-1')
-    const questionsBefore = store.openQuestions()
-
-    store.rebuild()
-
-    expect(store.task('bd-1')).toEqual(before)
-    expect(store.openQuestions()).toEqual(questionsBefore)
-  })
-
   test('subscribers see appended events', () => {
     const seen: StoredEvent[] = []
     const unsubscribe = store.subscribe((e) => seen.push(e))

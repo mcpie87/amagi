@@ -48,20 +48,23 @@ export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
 })
 
-export const TaskQuestionParam = z.object({
-  id: z.string().min(1),
-  questionId: z.string().min(1),
-})
-
 export const AskBody = z.object({
   question: z.string().min(1),
   options: z.array(z.string()).default([]),
 })
 export type AskBody = z.infer<typeof AskBody>
 
-/** Empty body (or `{}`) launches the next ready task. */
+/**
+ * Empty body (or `{}`) launches the next ready task with the configured
+ * defaults. `harness` is a harness.definitions name or a kind
+ * (claude/codex/opencode); `model` and `effort` override the chosen harness.
+ * An omitted field falls back to config.harness.implement.
+ */
 export const RunBody = z.object({
   taskId: z.string().min(1).optional(),
+  harness: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  effort: z.string().min(1).optional(),
 })
 export type RunBody = z.infer<typeof RunBody>
 
@@ -93,9 +96,14 @@ export const ChatBody = z.object({
 })
 export type ChatBody = z.infer<typeof ChatBody>
 
-export const SettingsBody = z.object({
-  maxParallel: z.number().int().min(1).max(MAX_PARALLEL),
-})
+export const SettingsBody = z
+  .object({
+    maxParallel: z.number().int().min(1).max(MAX_PARALLEL).optional(),
+    autoQueue: z.boolean().optional(),
+  })
+  .refine((body) => body.maxParallel !== undefined || body.autoQueue !== undefined, {
+    message: 'provide at least one of maxParallel or autoQueue',
+  })
 export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
@@ -103,11 +111,6 @@ export const AwaitQuery = z.object({
   deadlineMs: z.coerce.number().int().min(1).default(540_000),
 })
 export type AwaitQuery = z.infer<typeof AwaitQuery>
-
-export const ApiError = z.object({ error: z.string() })
-export type ApiError = z.infer<typeof ApiError>
-
-export const IssueIdParam = z.object({ id: z.string().min(1) })
 
 export const IssueCreateBody = z.object({
   title: z.string().trim().min(1).max(500),
@@ -117,6 +120,8 @@ export const IssueCreateBody = z.object({
   labels: z.array(z.string()).default([]),
   /** Issue ids the new task is blocked by. */
   dependencies: z.array(z.string()).default([]),
+  /** Parent issue id when the task is a child of a container (epic/milestone). */
+  parent: z.string().nullable().default(null),
 })
 export type IssueCreateBody = z.infer<typeof IssueCreateBody>
 

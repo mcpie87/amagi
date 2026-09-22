@@ -1,7 +1,7 @@
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import type { WorktreeSpec } from './worktree.ts'
 
-export async function removeWorktree(
+export async function removeWorktreeGit(
   repoRoot: string,
   path: string,
   opts: { force?: boolean; exec?: Exec } = {},

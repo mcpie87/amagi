@@ -22,6 +22,10 @@ type BdIssue = {
   labels?: string[]
   parent?: string
   dependencies?: BdIssue[]
+  notes?: string
+  comments?: Array<{ text: string }>
+  dependent_count?: number
+  created_at?: string
   metadata?: Record<string, string>
 }
 
@@ -38,6 +42,8 @@ export type BeadsIssue = TrackerTask & {
   parent: string | null
   /** Issues this one is blocked by, when the tracker reports them (bd show does). */
   dependencies: BeadsBlocker[]
+  /** Number of issues with this one as their parent. */
+  childCount: number
 }
 
 export type BeadsOptions = {
@@ -83,7 +89,8 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 
 function toTask(issue: BdIssue): TrackerTask {
   const difficulty = issue.metadata?.difficulty
-  return {
+  const created = issue.created_at === undefined ? null : Date.parse(issue.created_at)
+  const task: TrackerTask = {
     id: issue.id,
     title: issue.title,
     description: issue.description ?? '',
@@ -92,7 +99,13 @@ function toTask(issue: BdIssue): TrackerTask {
     type: issue.issue_type ?? null,
     url: null,
     ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
+    ...(created !== null && !Number.isNaN(created) ? { createdAt: created } : {}),
   }
+  const notes = issue.notes?.trim()
+  if (notes) task.notes = notes
+  const comments = (issue.comments ?? []).map((c) => c.text).filter((c) => c.trim() !== '')
+  if (comments.length > 0) task.comments = comments
+  return task
 }
 
 function toIssue(issue: BdIssue): BeadsIssue {
@@ -106,6 +119,7 @@ function toIssue(issue: BdIssue): BeadsIssue {
       ...toTask(d),
       labels: d.labels ?? [],
     })),
+    childCount: issue.dependent_count ?? 0,
   }
 }
 
@@ -163,8 +177,25 @@ export class BeadsTracker implements Tracker {
     )
   }
 
+  /** `bd list` without `--all` excludes closed issues, which is exactly "open" here. */
+  async openIds(limit = 500): Promise<string[]> {
+    const issues = parseIssues(
+      await this.bd(['list', '--brief', '--json', '--limit', String(limit)]),
+    )
+    return issues.map((i) => i.id)
+  }
+
+  /** Full detail view: notes are always present, comments need the flag. */
+  private async show(id: string): Promise<string> {
+    return this.bd(['show', id, '--json', '--include-comments'])
+  }
+
+  async children(id: string): Promise<BeadsIssue[]> {
+    return parseIssues(await this.bd(['children', id, '--json'])).map(toIssue)
+  }
+
   async getIssue(id: string): Promise<BeadsIssue | null> {
-    const issues = parseIssues(await this.bd(['show', id, '--json']))
+    const issues = parseIssues(await this.show(id))
     return issues.length > 0 && issues[0] ? toIssue(issues[0]) : null
   }
 
@@ -198,8 +229,7 @@ export class BeadsTracker implements Tracker {
   }
 
   async get(id: string): Promise<TrackerTask | null> {
-    const out = await this.bd(['show', id, '--json'])
-    const issues = parseIssues(out)
+    const issues = parseIssues(await this.show(id))
     return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
   }
 
@@ -214,6 +244,7 @@ export class BeadsTracker implements Tracker {
       ...(input.priority === null ? [] : ['--priority', `P${input.priority}`]),
       ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
       ...(input.dependencies.length === 0 ? [] : ['--deps', input.dependencies.join(',')]),
+      ...(input.parent === null ? [] : ['--parent', input.parent]),
       ...(input.difficulty === undefined || input.difficulty === null
         ? []
         : ['--metadata', JSON.stringify({ difficulty: input.difficulty })]),
@@ -260,6 +291,10 @@ export class BeadsTracker implements Tracker {
   }
 
   async release(id: string): Promise<void> {
+    // A closed issue has no claim to release: bd unclaim exits 1 on it, so
+    // treat it as already released rather than let callers trip on the error.
+    const issue = await this.get(id)
+    if (issue !== null && issue.status === 'closed') return
     await this.bd(['unclaim', id])
   }
 

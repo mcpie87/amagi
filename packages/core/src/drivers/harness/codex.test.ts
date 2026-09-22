@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
-import { HARDCODED_MODELS } from '../../models.ts'
 import { CodexHarness, CodexTranslator } from './codex.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'codex-stream.jsonl')
@@ -182,14 +183,6 @@ describe('CodexHarness argv', () => {
   })
 })
 
-describe('CodexHarness listModels', () => {
-  test('returns the hardcoded curated list instead of shelling out', async () => {
-    expect(await new CodexHarness({ bin: 'false' }).listModels()).toEqual([
-      ...HARDCODED_MODELS.codex,
-    ])
-  })
-})
-
 describe('CodexHarness process', () => {
   test('a run that produces no json still resolves with the exit code', async () => {
     const harness = new CodexHarness({ bin: 'false' })
@@ -200,5 +193,51 @@ describe('CodexHarness process', () => {
     expect(seen).toEqual([])
     expect(outcome.ok).toBe(false)
     expect(outcome.exitCode).not.toBe(0)
+  })
+})
+
+describe('CodexHarness listModels', () => {
+  const withCodexHome = async (
+    write: (dir: string) => void,
+    run: () => Promise<void>,
+  ): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-codex-home-'))
+    const prior = process.env.CODEX_HOME
+    process.env.CODEX_HOME = dir
+    try {
+      write(dir)
+      await run()
+    } finally {
+      if (prior === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = prior
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('reads slugs out of the local models cache, skipping hidden entries', async () => {
+    await withCodexHome(
+      (dir) =>
+        writeFileSync(
+          join(dir, 'models_cache.json'),
+          JSON.stringify({
+            models: [
+              { slug: 'gpt-5.6-sol', visibility: 'list' },
+              { slug: 'codex-auto-review', visibility: 'hide' },
+            ],
+          }),
+        ),
+      async () => {
+        expect(await new CodexHarness().listModels()).toEqual(['gpt-5.6-sol'])
+      },
+    )
+  })
+
+  test('returns an empty list when no cache file exists yet', async () => {
+    await withCodexHome(
+      () => {},
+      async () => {
+        expect(await new CodexHarness().listModels()).toEqual([])
+      },
+    )
   })
 })

@@ -1,5 +1,10 @@
 import * as z from 'zod'
 
+/** Whether an open PR can merge, normalized across forges (GitHub and Forgejo report different vocabularies). */
+export const MERGE_STATUSES = ['mergeable', 'conflicted', 'unknown'] as const
+export const MergeStatus = z.enum(MERGE_STATUSES)
+export type MergeStatus = z.infer<typeof MergeStatus>
+
 export const TASK_STATES = [
   'claimed',
   'worktree_ready',
@@ -8,6 +13,7 @@ export const TASK_STATES = [
   'checks',
   'committed',
   'pr_open',
+  'pr_flagged',
   'retrying',
   'done',
   'no_pr',
@@ -33,11 +39,11 @@ export function isTerminal(state: TaskState): boolean {
 
 /**
  * Any state may fall to a terminal state, so those edges are implicit rather
- * than listed here. Only forward progress is enumerated — except the two
- * parked states, which an operator settles as abandoned or, when the work
- * was already satisfied, as done.
+ * than listed here. Only forward progress is enumerated; the operator-settled
+ * exits of the parked/stopped states are special-cased in canTransition, not
+ * listed here.
  */
-const FORWARD: Record<TaskState, readonly TaskState[]> = {
+const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   claimed: ['worktree_ready'],
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
@@ -45,12 +51,10 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   checks: ['implementing', 'committed'],
   retrying: ['implementing'],
   committed: ['pr_open'],
-  pr_open: [],
-  done: [],
-  no_pr: ['abandoned', 'done'],
-  needs_human: ['abandoned', 'done'],
-  abandoned: [],
-  cancelled: [],
+  pr_open: ['pr_flagged'],
+  // A flagged PR is parked for the operator, not terminal: the watcher owns
+  // the label and clears it back to pr_open when the PR stops being pointless.
+  pr_flagged: ['pr_open'],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
@@ -68,11 +72,15 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   }
   if (isTerminal(from)) return false
   if (isTerminal(to)) return true
-  return FORWARD[from].includes(to)
+  return FORWARD[from]?.includes(to) ?? false
 }
 
-export const AgentRole = z.enum(['implement', 'review', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat', 'verify'])
 export type AgentRole = z.infer<typeof AgentRole>
+
+/** What the triage worker decides to do with an unclaimed task. */
+export const TriageAction = z.enum(['implement', 'decompose', 'close', 'ask', 'skip'])
+export type TriageAction = z.infer<typeof TriageAction>
 
 /** One harness dialect normalized into a single shape. */
 export const AgentEvent = z.discriminatedUnion('kind', [
@@ -160,9 +168,52 @@ export const EventBody = z.discriminatedUnion('type', [
     exitCode: z.number().int(),
     sessionId: z.string().nullable(),
   }),
+  /**
+   * The run's running peak input context (input + cached tokens) as usage
+   * events stream in. Appended each time the peak grows; the last one of a run
+   * is its peak context.
+   */
+  z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
+  /**
+   * The effective run-health ceilings for the active harness, appended once per
+   * claim so clients can render context/cost/elapsed against them before any
+   * guard trips. A maxRunMs or maxCostUsd of 0 means that budget is unbounded.
+   */
+  z.object({
+    type: z.literal('run.limits'),
+    contextWarnTokens: z.number().int(),
+    contextMaxTokens: z.number().int(),
+    maxRunMs: z.number().int(),
+    maxCostUsd: z.number(),
+  }),
+  /** Logged once when the run's peak context crosses the soft limit. */
+  z.object({
+    type: z.literal('context.warn'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
+  /** Logged once when the run's peak context crosses the hard limit, right before the agent is killed. */
+  z.object({
+    type: z.literal('context.exceeded'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
+  /**
+   * A run that crossed the hard context limit was restarted with a fresh
+   * session in the same worktree; `summary` is the handoff of what the killed
+   * session did, handed to the new one as context. `restart` is 1-based.
+   */
+  z.object({
+    type: z.literal('run.restarted'),
+    phase: z.string(),
+    restart: z.number().int().positive(),
+    contextTokens: z.number().int(),
+    summary: z.string(),
+  }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
+  z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),
@@ -187,6 +238,28 @@ export const EventBody = z.discriminatedUnion('type', [
     detail: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('mention.classified'),
+    /** Which response path the classifier chose for the mention. */
+    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
+    /** The raw classifier reply; when the parse is wrong this is all that explains why. */
+    reply: z.string(),
+    /** The PR the mention was on. */
+    prNumber: z.number().int(),
+    /** The comment id of the mention. */
+    mentionId: z.string(),
+  }),
+  z.object({
+    type: z.literal('triage.decision'),
+    action: TriageAction,
+    reason: z.string(),
+    /** Titles of the subtasks a decompose decision created. */
+    subtasks: z.array(z.string()).optional(),
+    /** The question text when the action was ask. */
+    question: z.string().optional(),
+    /** The question id when the action was ask, so an answer can be matched back. */
+    questionId: z.string().optional(),
+  }),
   z.object({ type: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 ])
 export type EventBody = z.infer<typeof EventBody>

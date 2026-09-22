@@ -38,6 +38,11 @@ export const HarnessConfig = z.object({
    * isolation, not a sandbox.
    */
   permissions: z.enum(['workspace-write', 'bypass']).default('workspace-write'),
+  /**
+   * Tool allowlist handed to the harness (claude) in place of the default.
+   * Leave unset to use the harness's own default set.
+   */
+  allowedTools: z.array(z.string()).optional(),
   extraArgs: z.array(z.string()).default([]),
 })
 
@@ -73,6 +78,8 @@ export const Config = z.object({
        */
       definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
+      review: HarnessConfig.prefault({ kind: 'codex' }),
+      triage: HarnessConfig.prefault({ kind: 'claude' }),
     })
     .prefault({}),
   loop: z
@@ -134,9 +141,78 @@ export const Config = z.object({
       maxRetries: z.number().int().min(0).default(3),
       retryBaseMs: z.number().int().min(0).default(10_000),
       retryMaxMs: z.number().int().min(0).default(300_000),
+      /**
+       * Input context at which a run is flagged: the runner appends a
+       * `context.warn` event once the run's peak context (input + cached
+       * tokens) reaches it. Kept under `contextMaxTokens` so there is a
+       * breathing room between warning and acting.
+       */
+      contextWarnTokens: z.number().int().min(0).default(160_000),
+      /**
+       * Input context at which a run is stopped: crossing it kills the current
+       * agent process and restarts it with a fresh session instead of letting
+       * the harness degrade. Defaults to the claude 200k window; harnesses with
+       * a different window override it via `contextOverrides`.
+       */
+      contextMaxTokens: z.number().int().min(0).default(200_000),
+      /**
+       * How many fresh-context restarts a task gets after a run trips the hard
+       * context limit, before escalating to needs_human. Each restart reuses
+       * the worktree and claim and hands the new session a synthesized handoff
+       * of what was done so far. 0 keeps the historical hard-kill behavior.
+       */
+      contextMaxRestarts: z.number().int().min(0).default(1),
+      /**
+       * Per-harness context budget overrides, keyed by harness kind
+       * (claude/codex/opencode), since context windows differ between them.
+       * Unset fields fall back to contextWarnTokens/contextMaxTokens.
+       */
+      contextOverrides: z
+        .record(
+          z.string(),
+          z.object({
+            warnTokens: z.number().int().min(0).optional(),
+            maxTokens: z.number().int().min(0).optional(),
+          }),
+        )
+        .default({}),
+      /**
+       * Automatic dispatch: while on, the runner polls for the next ready task
+       * and launches it whenever a slot is free, instead of waiting for Run.
+       */
+      autoQueue: z.boolean().default(false),
+      /**
+       * How long the auto-queue waits between polls when nothing is claimable,
+       * so an empty queue does not hammer the tracker.
+       */
+      autoQueueIdleSec: z.number().int().min(1).default(60),
+      /**
+       * Hard ceiling on how long a task may run, in minutes, counted from
+       * first claim and spanning every round and reclaim. 0 disables the
+       * wall-clock budget (the historical unbounded behavior).
+       */
+      maxRunMinutes: z.number().int().min(0).default(0),
+      /**
+       * Hard ceiling on how much a task may spend, in USD, accumulated from
+       * usage cost across every round and reclaim. Harnesses that report no
+       * cost (codex) skip the budget rather than treating cost as zero. 0
+       * disables the cost budget.
+       */
+      maxCostUsd: z.number().min(0).default(0),
     })
     .prefault({}),
-  checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
+  checks: z
+    .object({
+      commands: z.array(z.string()).default([]),
+      /**
+       * Mandatory pre-commit gate, run before `commands`: the auto-fix formatter
+       * (writes the worktree) and the read-only lint check. Null disables a
+       * step; both default on so a PR can never be pushed unformatted.
+       */
+      format: z.string().nullable().default('just fmt'),
+      lint: z.string().nullable().default('just lint'),
+    })
+    .prefault({}),
   difficulty: DifficultyConfig.prefault({}),
   notify: z
     .object({

@@ -1,4 +1,10 @@
-import { type CheckResult, canTransition, type StoredEvent, type TaskState } from './events.ts'
+import {
+  type CheckResult,
+  canTransition,
+  type MergeStatus,
+  type StoredEvent,
+  type TaskState,
+} from './events.ts'
 
 export class InvalidTransitionError extends Error {
   constructor(
@@ -27,9 +33,13 @@ export type ProjectedTask = {
   sessionId: string | null
   prUrl: string | null
   prNumber: number | null
+  /** Merge status of the task's open PR, set by the pr poller while the PR is open. */
+  prMergeStatus: MergeStatus | null
   statusReason: string | null
   lastError: string | null
   retryCount: number
+  /** Epoch ms when the current deferred automatic retry fires; null when none is scheduled. */
+  retryAt: number | null
   lastCommit: { sha: string; subject: string } | null
   checks: CheckResult[] | null
   checksOk: boolean | null
@@ -90,9 +100,11 @@ export function project(state: Projection, event: StoredEvent): Projection {
             sessionId: null,
             prUrl: null,
             prNumber: null,
+            prMergeStatus: null,
             statusReason: null,
             lastError: null,
             retryCount: 0,
+            retryAt: null,
             lastCommit: null,
             checks: null,
             checksOk: null,
@@ -170,6 +182,12 @@ export function project(state: Projection, event: StoredEvent): Projection {
       }
       break
 
+    case 'pr.status':
+      if (current) {
+        tasks[event.taskId] = { ...current, prMergeStatus: event.mergeStatus, updatedAt: event.ts }
+      }
+      break
+
     case 'checks.finished':
       if (current) {
         tasks[event.taskId] = {
@@ -186,6 +204,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         tasks[event.taskId] = {
           ...current,
           retryCount: current.retryCount + 1,
+          retryAt: event.ts + event.delayMs,
           updatedAt: event.ts,
         }
       }

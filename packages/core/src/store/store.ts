@@ -1,5 +1,5 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite'
-import type { CheckResult, EventBody, StoredEvent, TaskState } from '../events.ts'
+import type { CheckResult, EventBody, MergeStatus, StoredEvent, TaskState } from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -7,7 +7,6 @@ import {
   type Projection,
   project,
 } from '../project.ts'
-import { openDatabase } from './db.ts'
 
 export { InvalidTransitionError } from '../project.ts'
 export type { ProjectedQuestion, ProjectedTask, Projection }
@@ -26,9 +25,11 @@ type RawTask = {
   session_id: string | null
   pr_url: string | null
   pr_number: number | null
+  pr_merge_status: string | null
   status_reason: string | null
   last_error: string | null
   retry_count: number
+  retry_at: number | null
   last_commit_sha: string | null
   last_commit_subject: string | null
   checks: string | null
@@ -60,9 +61,11 @@ const toTask = (r: RawTask): ProjectedTask => ({
   sessionId: r.session_id,
   prUrl: r.pr_url,
   prNumber: r.pr_number,
+  prMergeStatus: r.pr_merge_status as MergeStatus | null,
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
+  retryAt: r.retry_at,
   lastCommit:
     r.last_commit_sha === null
       ? null
@@ -101,9 +104,11 @@ const taskRow = (t: ProjectedTask): Row => ({
   session_id: t.sessionId,
   pr_url: t.prUrl,
   pr_number: t.prNumber,
+  pr_merge_status: t.prMergeStatus,
   status_reason: t.statusReason,
   last_error: t.lastError,
   retry_count: t.retryCount,
+  retry_at: t.retryAt,
   created_at: t.createdAt,
   updated_at: t.updatedAt,
   last_commit_sha: t.lastCommit?.sha ?? null,
@@ -148,7 +153,7 @@ export type Listener = (event: StoredEvent) => void
 export class Store {
   private readonly listeners = new Set<Listener>()
 
-  constructor(readonly db: Database = openDatabase()) {}
+  constructor(readonly db: Database) {}
 
   append(taskId: string | null, body: EventBody): StoredEvent {
     let seq = 0
@@ -314,6 +319,32 @@ export class Store {
   }
 
   /**
+   * The most recent implement-run start for a task: the model/effort an
+   * operator-facing surface can show without folding the whole event log.
+   * Chat runs are skipped so chatting with a finished worker does not
+   * overwrite the agent that did the work.
+   */
+  currentAgent(taskId: string): { model: string | null; effort: string | null } | null {
+    const rows = this.db
+      .query(
+        `select body from events where task_id = ? and type = 'agent.started'
+         order by seq desc limit 20`,
+      )
+      .all(taskId) as { body: string }[]
+    for (const row of rows) {
+      const body = JSON.parse(row.body) as {
+        role: string
+        model: string | null
+        effort: string | null
+      }
+      if (body.role !== 'chat') {
+        return { model: body.model ?? null, effort: body.effort ?? null }
+      }
+    }
+    return null
+  }
+
+  /**
    * Lazily minted credential that binds an ask/answer to its task. A column
    * rather than an event so the secret never reaches the SSE stream; the cost
    * is that a manual rebuild mints a fresh one.
@@ -356,26 +387,6 @@ export class Store {
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
-  }
-
-  /** Long lived streams leak the store if they forget to unsubscribe. */
-  get listenerCount(): number {
-    return this.listeners.size
-  }
-
-  /** Drops the projections and folds the whole log back over them. */
-  rebuild(): void {
-    this.db.transaction(() => {
-      this.db.exec('delete from tasks; delete from questions;')
-      const rows = this.db
-        .query('select seq, ts, task_id, body from events order by seq')
-        .all() as {
-        ts: number
-        task_id: string | null
-        body: string
-      }[]
-      for (const r of rows) this.apply(r.task_id, r.ts, JSON.parse(r.body) as EventBody)
-    })()
   }
 
   close(): void {

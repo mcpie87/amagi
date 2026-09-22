@@ -4,10 +4,12 @@ import {
   exec as defaultExec,
   detectDoom,
   type Exec,
+  errMsg,
   type Store,
   type TaskRow,
   type TaskState,
   type Tracker,
+  type TrackerTask,
   type WorkerActivity,
 } from '@amagi/core'
 
@@ -64,8 +66,6 @@ const RECENT_EVENTS_LIMIT = 2000
 const DOOM_SCAN_LIMIT = 50
 const GIT_TIMEOUT_MS = 10_000
 
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
-
 function humanMs(ms: number): string {
   const seconds = Math.round(ms / 1000)
   if (seconds < 60) return `${seconds}s`
@@ -80,7 +80,9 @@ function humanMs(ms: number): string {
  * releases the tracker claim so the issue reads ready again and parks the
  * task back to `claimed`, keeping the recorded worktree for the next worker
  * to resume. Releasing the claim also makes any surviving (hung) runner
- * detect the lost lease and stop itself.
+ * detect the lost lease and stop itself. A stalled task whose tracker issue
+ * is already closed cannot be recovered (nothing to release, no worker will
+ * ever take it), so it is parked in `needs_human` for a human to settle.
  *
  * The same tick also runs the doom-loop guard (`doom` option): a worker that
  * keeps heartbeating but never progresses (repeated identical tool calls,
@@ -103,9 +105,14 @@ export function startStallWatcher({
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let recovered = 0
   let stoppedDoom = 0
+  /** Tasks reconciled out of the stalled state because they could not be recovered. */
+  let parked = 0
+  let runs = 0
+  let failures = 0
   const counters = (): WorkerActivity['counters'] => [
     { label: 'recovered', value: recovered },
     { label: 'doom-stopped', value: stoppedDoom },
+    { label: 'parked', value: parked },
   ]
   /** Per-task diff snapshots, keyed by worktree state; pruned when a task leaves the scan. */
   const diffSince = new Map<string, { snapshot: string; since: number }>()
@@ -117,6 +124,12 @@ export function startStallWatcher({
     error: null,
     counters: counters(),
     detail: 'no stalled tasks',
+    runs: 0,
+    successes: 0,
+    failures: 0,
+    nextRunAt: 0,
+    intervalMs,
+    status: 'idle',
   }
 
   const detail = (): string => {
@@ -124,6 +137,7 @@ export function startStallWatcher({
     if (recovered > 0) bits.push(`recovered ${recovered} stalled task${recovered === 1 ? '' : 's'}`)
     if (stoppedDoom > 0)
       bits.push(`stopped ${stoppedDoom} doom loop${stoppedDoom === 1 ? '' : 's'}`)
+    if (parked > 0) bits.push(`parked ${parked} unrecoverable task${parked === 1 ? '' : 's'}`)
     return bits.length > 0 ? bits.join(', ') : 'no stalled tasks'
   }
 
@@ -209,22 +223,66 @@ export function startStallWatcher({
   }
 
   async function tick(): Promise<void> {
-    const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
+    runs++
+    const next: WorkerActivity = {
+      ...activity,
+      lastRunAt: Date.now(),
+      ok: true,
+      error: null,
+      runs,
+      successes: runs - failures,
+      failures,
+      nextRunAt: Date.now() + intervalMs,
+      intervalMs,
+      status: 'active',
+    }
     try {
       const nowMs = Date.now()
       const found = store.stalledTasks(STALLED_STATES, nowMs - timeoutMs)
+      let reclaimed = 0
+      let parkedCount = 0
       for (const task of found) {
+        // A tracker issue that is already closed has no claim to release and no
+        // worker will ever pick it up again, so reclaiming would leave the task
+        // parked back in a stalled state for the next sweep. Reconcile it out
+        // of the stalled set instead and let a human settle it.
+        let issue: TrackerTask | null = null
         try {
-          await tracker.release(task.id)
+          issue = await tracker.get(task.id)
         } catch (err) {
           console.warn(`stall recover ${task.id}: ${errMsg(err)}`)
         }
+        if (issue?.status === 'closed') {
+          parkedCount++
+          store.append(task.id, {
+            type: 'task.state',
+            from: task.state,
+            to: 'needs_human',
+            reason: 'stall recovered: tracker issue is already closed',
+          })
+          continue
+        }
+        try {
+          await tracker.release(task.id)
+        } catch (err) {
+          parkedCount++
+          console.warn(`stall recover ${task.id}: ${errMsg(err)}`)
+          store.append(task.id, {
+            type: 'task.state',
+            from: task.state,
+            to: 'needs_human',
+            reason: `stall recover failed: ${errMsg(err)}`,
+          })
+          continue
+        }
+        reclaimed++
         store.append(task.id, {
           type: 'task.reclaimed',
           reason: `recovered by stall watcher: no worker activity for ${humanMs(timeoutMs)}`,
         })
       }
-      recovered += found.length
+      recovered += reclaimed
+      parked += parkedCount
 
       let doomCount = 0
       if (doom !== undefined) {
@@ -239,8 +297,11 @@ export function startStallWatcher({
       next.counters = counters()
       next.detail = detail()
     } catch (err) {
+      failures++
       next.ok = false
       next.error = errMsg(err)
+      next.failures = failures
+      next.successes = runs - failures
       console.warn(`stall watch: ${next.error}`)
     }
     activity = next
@@ -253,6 +314,7 @@ export function startStallWatcher({
       stopped = true
       if (timer !== null) clearTimeout(timer)
       timer = null
+      activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,
   }

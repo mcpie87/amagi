@@ -1,6 +1,40 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
-import { implementSystemPrompt, prTitle } from './prompt.ts'
+import {
+  classifyMentionPrompt,
+  commitMessage,
+  implementPrompt,
+  implementSystemPrompt,
+  prTitle,
+} from './prompt.ts'
+
+const TASK: TrackerTask = {
+  id: 'am-1',
+  title: 'Add a greeting file',
+  description: 'Write hello.txt',
+  status: 'in_progress',
+  priority: 1,
+  type: 'task',
+  url: null,
+}
+
+describe('commitMessage', () => {
+  test('renders the title, task and a bullet-point summary of changes', () => {
+    const message = commitMessage(TASK, [
+      { path: 'hello.txt', additions: 1, deletions: 0 },
+      { path: 'image.png', additions: Number.NaN, deletions: Number.NaN },
+    ])
+
+    expect(message).toBe(
+      'Add a greeting file\n\nTask: am-1\n\nChanges:\n- `hello.txt` +1 -0\n- `image.png` binary\n',
+    )
+  })
+
+  test('omits the changes section when nothing changed', () => {
+    const message = commitMessage(TASK)
+    expect(message).toBe('Add a greeting file\n\nTask: am-1\n')
+  })
+})
 
 const task = (title: string): TrackerTask => ({
   id: 'am-544',
@@ -40,5 +74,64 @@ describe('implementSystemPrompt', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('Never pipe check or lint output through head/tail')
     expect(prompt).toContain('Redirect to a file instead')
+  })
+
+  test('tells the agent bd is unavailable in the worktree and the issue text is embedded', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('tracker CLI (bd) is unavailable inside this worktree')
+    expect(prompt).toContain('embedded in the prompt')
+  })
+
+  test('a clean tree is not a valid outcome for investigation-style tasks', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('investigation-style tasks')
+    expect(prompt).toContain('clean working tree is not a valid outcome')
+  })
+
+  test('tells the agent to append a mandatory conclusion written against the real diff', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('### Conclusion')
+    expect(prompt).toContain('git diff <base>...HEAD')
+    expect(prompt).toContain('file by file')
+    expect(prompt).toContain('mandatory')
+    expect(prompt).toContain('deviations from')
+  })
+})
+
+describe('implementPrompt', () => {
+  test('embeds notes and comments so the agent sees them without bd', () => {
+    const ctx = {
+      task: {
+        ...task('Investigate the crash'),
+        notes: 'root cause: biome EPIPE panic when piped through head/tail',
+        comments: ['try the fix', '  '],
+      },
+      worktree: '/wt',
+      branch: 'b',
+    }
+    const prompt = implementPrompt(ctx)
+    expect(prompt).toContain('Issue notes:')
+    expect(prompt).toContain('root cause: biome EPIPE panic when piped through head/tail')
+    expect(prompt).toContain('Issue comments:')
+    expect(prompt).toContain('- try the fix')
+    expect(prompt).not.toContain('-   ')
+  })
+
+  test('omits notes and comments sections when the tracker has none', () => {
+    const prompt = implementPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).not.toContain('Issue notes:')
+    expect(prompt).not.toContain('Issue comments:')
+  })
+})
+
+describe('classifyMentionPrompt', () => {
+  test('maps questions about a change still being relevant to explain, not ambiguous', () => {
+    const prompt = classifyMentionPrompt({
+      pr: { number: 102, title: 'Revert PR #36', url: 'https://github.com/owner/repo/pull/102' },
+      mention: { user: 'mcpie87', body: '@chise-maru is this change still relevant?' },
+    })
+    expect(prompt).toContain('explain: the human is asking anything about the PR')
+    expect(prompt).toContain('still relevant')
+    expect(prompt).toContain('never ambiguous')
   })
 })

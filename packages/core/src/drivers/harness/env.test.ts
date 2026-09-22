@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { harnessEnv } from './env.ts'
+import { shimDir } from './shim.ts'
 
 const savedToken = process.env.GH_TOKEN
 const savedXdg = process.env.XDG_CONFIG_HOME
@@ -40,4 +41,12 @@ test('points gh and tea at empty Amagi-owned dirs so agents fail closed', () => 
   expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi', 'forge', 'agents', 'gh'))
   expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'agents', 'xdg'))
   expect(env.XDG_CONFIG_HOME).not.toBe(home)
+})
+
+test('prepends the generated shim dir to PATH so every agent inherits the gate', () => {
+  const env = harnessEnv()
+  const dir = shimDir()
+  expect(env.PATH).toStartWith(`${dir}:`)
+  expect(existsSync(join(dir, 'git'))).toBe(true)
+  expect(existsSync(join(dir, 'amagi'))).toBe(true)
 })

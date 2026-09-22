@@ -3,13 +3,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
 import { classifyDifficulty } from './difficulty.ts'
-import { ghEnv } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
-import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { agentFailure } from './errors.ts'
+import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
 import { cacheHome } from './paths.ts'
+import { taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
   classifyMentionPrompt,
@@ -18,19 +19,25 @@ import {
   explainMentionSystemPrompt,
   respondToMentionPrompt,
   respondToMentionSystemPrompt,
+  takeDownPrompt,
+  takeDownSystemPrompt,
 } from './prompt.ts'
+import { taskIdFromBranch } from './worktree.ts'
 
-export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'ambiguous'
+export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'take-down' | 'ambiguous'
 
-const MENTION_KINDS: readonly MentionKind[] = ['fix-pr', 'explain', 'add-a-task', 'ambiguous']
+const MENTION_KINDS: readonly MentionKind[] = [
+  'fix-pr',
+  'explain',
+  'add-a-task',
+  'take-down',
+  'ambiguous',
+]
 
-/** Best-effort parse of the classifier's reply; anything unrecognised is ambiguous. */
+/** Parse of the classifier's reply; only an exact known kind matches, anything else is ambiguous. */
 export function parseMentionKind(reply: string): MentionKind {
-  const lower = reply.toLowerCase()
-  for (const k of MENTION_KINDS) {
-    if (lower.includes(k)) return k
-  }
-  return 'ambiguous'
+  const kind = reply.trim().toLowerCase()
+  return MENTION_KINDS.includes(kind as MentionKind) ? (kind as MentionKind) : 'ambiguous'
 }
 
 export function mentionsPath(repoName: string): string {
@@ -75,8 +82,8 @@ export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrCom
   return comments.filter((c) => isAgentMention(c, opts.handle))
 }
 
-/** Last-seen comment per open PR, so the watcher skips PRs that have not changed. */
-export type MentionWatchState = Record<string, { updatedAt: string; lastCommentId: number }>
+/** Last-seen updatedAt per open PR, so the watcher skips PRs that have not changed. */
+export type MentionWatchState = Record<string, string>
 
 export function mentionWatchPath(repoName: string): string {
   return join(cacheHome(), 'amagi', 'mentions', `${repoName}.watch.json`)
@@ -109,6 +116,12 @@ export type MentionProgress = {
   tool: string | null
 }
 
+/** The classifier's choice plus its raw reply, for the watcher to record as an event. */
+export type MentionClassified = {
+  kind: MentionKind
+  reply: string
+}
+
 export type RespondToMentionOptions = {
   root: string
   repoName: string
@@ -116,13 +129,15 @@ export type RespondToMentionOptions = {
   mention: PrComment
   config: Config
   driver: PrDriver
-  /** Tracker used by the add-a-task response; optional so callers without one still work. */
+  /** Tracker used to post take-down reasons and log add-a-task responses; optional so callers without one still reply on the PR. */
   tracker?: Tracker
   exec?: Exec
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness
   /** Called with live progress while a response is produced, for a status line. */
   onProgress?: (progress: MentionProgress) => void
+  /** Called once classification settles, with the chosen kind and the raw reply. */
+  onClassified?: (classified: MentionClassified) => void
 }
 
 /**
@@ -180,6 +195,27 @@ class Progress {
   }
 }
 
+/** Task id (e.g. "am-544") embedded in an amagi-authored PR title like "am-544: Short name". */
+export function taskIdFromPrTitle(title: string): string | null {
+  return title.match(/\bam-[a-z0-9.]+\b/i)?.[0] ?? null
+}
+
+/**
+ * Resolves the tracker task id for a PR, most to least reliable: the
+ * `amagi-task:` body trailer set at creation (works for any tracker, and
+ * survives a human editing the title); the branch name matched against the
+ * tracker's open ids (for PRs that predate the trailer); the PR title, as a
+ * last resort for beads ids that happen to still carry the "am-544: " prefix.
+ */
+export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
+  const fromBody = taskIdFromPrBody(pr.body)
+  if (fromBody !== null) return fromBody
+  const knownIds = tracker.openIds ? await tracker.openIds() : []
+  const fromBranch = taskIdFromBranch(pr.headRefName, knownIds)
+  if (fromBranch !== null) return fromBranch
+  return taskIdFromPrTitle(pr.title)
+}
+
 function startImplementHarness(
   mk: typeof makeHarness,
   config: Config['harness']['implement'],
@@ -231,6 +267,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       baseBranch: opts.config.repo.baseBranch,
       checks: opts.config.checks.commands,
+      conflicted: wt.conflicted,
     }),
     respondToMentionSystemPrompt({
       pr: opts.pr,
@@ -239,13 +276,12 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       baseBranch: opts.config.repo.baseBranch,
       checks: opts.config.checks.commands,
+      conflicted: wt.conflicted,
     }),
   )
   const outcome = await p.agent(proc, 'fixing in worktree')
   if (!outcome.ok) {
-    throw new Error(
-      `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-    )
+    throw new Error(`agent failed: ${agentFailure(outcome)}`)
   }
   p.phase('pushing fix')
   await pushConflictFix({
@@ -265,10 +301,7 @@ async function respondToExplain(
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], {
-    cwd: opts.root,
-    env: ghEnv(),
-  })
+  const diff = await opts.driver.getPrDiff(opts.root, opts.pr.number)
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')
@@ -281,14 +314,13 @@ async function respondToExplain(
         mention: opts.mention,
         diff,
         outPath,
+        conflicted: wt.conflicted,
       }),
       explainMentionSystemPrompt(),
     )
     const outcome = await p.agent(proc, 'explaining')
     if (!outcome.ok) {
-      throw new Error(
-        `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-      )
+      throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }
     const explanation = readFileSync(outPath, 'utf8').trim()
     if (explanation === '') throw new Error('agent produced no explanation')
@@ -328,11 +360,12 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   )
   const outcome = await p.agent(proc, 'classifying')
   if (!outcome.ok) {
-    throw new Error(
-      `classifier failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-    )
+    throw new Error(`classifier failed: ${agentFailure(outcome)}`)
   }
-  return parseMentionKind(outcome.summary ?? '')
+  const reply = outcome.summary ?? ''
+  const kind = parseMentionKind(reply)
+  opts.onClassified?.({ kind, reply })
+  return kind
 }
 
 function addTaskTitle(opts: RespondToMentionOptions): string {
@@ -367,6 +400,7 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     priority: null,
     labels: [],
     dependencies: [],
+    parent: null,
     ...(difficulty === null ? {} : { difficulty }),
   })
   const where = task.url ?? `task ${task.id}`
@@ -375,6 +409,64 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     opts.pr.number,
     `@${opts.mention.user} Logged this as ${where}.${configuredFooter(opts.config)}`,
   )
+}
+
+/**
+ * Lets the LLM judge whether a PR deserves to be taken down. When it rules
+ * `TAKE DOWN`, the reason is posted as a comment on the task issue in the
+ * tracker; a `KEEP` verdict only replies on the PR. The agent never touches
+ * the forge itself, so nothing is closed or reverted automatically.
+ */
+async function respondToTakeDown(
+  opts: RespondToMentionOptions,
+  run: Exec,
+  p: Progress,
+): Promise<void> {
+  const mk = opts.makeHarnessFn ?? makeHarness
+  p.phase('preparing worktree')
+  const wt = await prWorktree(opts, run)
+  const outPath = join(tmpdir(), `amagi-takedown-${opts.pr.number}-${opts.mention.id}.md`)
+  let verdict: string
+  let reason: string
+  try {
+    p.phase('judging')
+    const proc = startImplementHarness(
+      mk,
+      opts.config.harness.implement,
+      wt.path,
+      takeDownPrompt({
+        pr: opts.pr,
+        mention: opts.mention,
+        outPath,
+        conflicted: wt.conflicted,
+      }),
+      takeDownSystemPrompt(),
+    )
+    const outcome = await p.agent(proc, 'judging')
+    if (!outcome.ok) {
+      throw new Error(
+        `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
+      )
+    }
+    const raw = readFileSync(outPath, 'utf8').trim()
+    if (raw === '') throw new Error('agent produced no take-down verdict')
+    verdict = raw.split('\n', 1)[0]?.trim().toUpperCase() ?? ''
+    reason = raw.split('\n').slice(1).join('\n').trim()
+    if (reason === '') reason = raw
+  } finally {
+    rmSync(outPath, { force: true })
+  }
+
+  p.phase('posting comment')
+  await opts.driver.postComment(opts.root, opts.pr.number, reason)
+  if (verdict !== 'TAKE DOWN') return
+  if (opts.tracker === undefined) return
+
+  const taskId = await resolveTaskId(opts.pr, opts.tracker)
+  if (taskId === null) return
+  const task = await opts.tracker.get(taskId)
+  if (task === null) return
+  await opts.tracker.comment(taskId, reason)
 }
 
 /** Responds to a single mention. Throws when the response fails so the caller can retry. */
@@ -389,6 +481,9 @@ export async function respondToMention(opts: RespondToMentionOptions): Promise<M
     case 'explain':
       await respondToExplain(opts, run, p)
       return 'explain'
+    case 'take-down':
+      await respondToTakeDown(opts, run, p)
+      return 'take-down'
     case 'add-a-task':
       await respondToAddTask(opts, p)
       return 'add-a-task'

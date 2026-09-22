@@ -12,7 +12,8 @@ const GH_READY = `[
     "body": "Stream events to the dashboard",
     "state": "OPEN",
     "url": "https://github.com/acme/amagi/issues/3",
-    "labels": []
+    "labels": [],
+    "createdAt": "2026-09-20T14:02:53Z"
   },
   {
     "number": 5,
@@ -30,7 +31,8 @@ const GH_VIEW = `{
   "body": "Stream events to the dashboard",
   "state": "OPEN",
   "url": "https://github.com/acme/amagi/issues/3",
-  "labels": []
+  "labels": [],
+  "createdAt": "2026-09-20T14:02:53Z"
 }`
 
 const GH_COMMENTS = `{
@@ -47,7 +49,8 @@ const TEA_READY = `[
     "title": "Add Forgejo driver",
     "body": "Implement tea issues",
     "url": "https://gitea.local/acme/amagi/issues/7",
-    "labels": []
+    "labels": [],
+    "created": 1789912973
   }
 ]`
 
@@ -104,7 +107,14 @@ describe('GithubTracker', () => {
       priority: null,
       type: null,
       url: 'https://github.com/acme/amagi/issues/3',
+      createdAt: Date.parse('2026-09-20T14:02:53Z'),
     })
+  })
+
+  test('openIds includes claimed issues too, unlike ready', async () => {
+    const { exec } = fake(() => ok(GH_READY))
+    const ids = await new GithubTracker({ cwd: '/repo', exec }).openIds()
+    expect(ids).toEqual(['3', '5'])
   })
 
   test('claim marks the issue with the claim label', async () => {
@@ -154,6 +164,7 @@ describe('GithubTracker', () => {
         priority: null,
         labels: [],
         dependencies: [],
+        parent: null,
       }),
     ).rejects.toThrow(/does not support creating issues/)
     await expect(tracker.updateTask('3', { title: 'x' })).rejects.toThrow(
@@ -170,6 +181,7 @@ describe('ForgejoTracker', () => {
     expect(tasks).toHaveLength(1)
     expect(tasks[0]?.id).toBe('7')
     expect(tasks[0]?.status).toBe('open')
+    expect(tasks[0]?.createdAt).toBe(Date.parse('2026-09-20T14:02:53Z'))
   })
 
   test('an unanswered question keeps blocking', async () => {

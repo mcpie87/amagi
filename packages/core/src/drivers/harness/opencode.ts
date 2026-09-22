@@ -169,10 +169,7 @@ export class OpencodeHarness implements Harness {
   }
 
   argv(opts: AgentStartOptions, sessionId: string | null): string[] {
-    // opencode has no `--append-system-prompt` equivalent, so it is folded
-    // into the message itself.
-    const prompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.prompt}` : opts.prompt
-    const argv = [this.bin, 'run', prompt, '--format', 'json', '--dir', opts.cwd]
+    const argv = [this.bin, 'run', '--format', 'json', '--dir', opts.cwd]
 
     if (sessionId !== null) argv.push('--session', sessionId)
     if (opts.model) argv.push('--model', opts.model)
@@ -188,11 +185,23 @@ export class OpencodeHarness implements Harness {
     return argv
   }
 
+  /**
+   * opencode has no `--append-system-prompt` equivalent, so it is folded into
+   * the message itself. The message goes over stdin, not argv: a single argv
+   * element is capped at MAX_ARG_STRLEN (~128 KB), which a mention prompt with
+   * PR context easily exceeds (E2BIG on spawn). opencode's `run` reads the
+   * message from piped stdin when no positional is given.
+   */
+  private static message(opts: AgentStartOptions): string {
+    return opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.prompt}` : opts.prompt
+  }
+
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
     const translator = new OpencodeTranslator()
     return spawnAgent(argv, opts, translator, {
       finalize: () => translator.finalize(),
       effort: opts.effort ?? null,
+      stdin: OpencodeHarness.message(opts),
     })
   }
 }

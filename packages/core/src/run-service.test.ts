@@ -21,7 +21,8 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
-import { RunService } from './run-service.ts'
+import type { PrInfo } from './pr-check.ts'
+import { RunService, type RunServiceOptions } from './run-service.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 
@@ -49,11 +50,8 @@ class FakeTracker implements Tracker {
     return this.queue
   }
   async claim(id?: string): Promise<TrackerTask | null> {
-    if (id !== undefined) {
-      const found = this.queue.find((t) => t.id === id)
-      if (found !== undefined) this.queue = this.queue.filter((t) => t.id !== id)
-      return found ?? null
-    }
+    if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
+    // Like a real tracker's atomic claim, a no-id claim consumes the task.
     return this.queue.shift() ?? null
   }
   async get(): Promise<TrackerTask | null> {
@@ -178,6 +176,47 @@ class BlockingHarness implements Harness {
   }
 }
 
+/** Emits one stream event so the runner records agent.started, then stays alive. */
+class ModelHarness implements Harness {
+  readonly kind = 'fake'
+
+  start(): AgentProcess {
+    const queue = new AsyncQueue<AgentEvent>()
+    queue.push({ kind: 'text', text: 'working' })
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    return {
+      pid: 12346,
+      events: () => queue,
+      done,
+      kill: async () => {
+        queue.close()
+        resolveDone({
+          exitCode: 130,
+          ok: false,
+          sessionId: null,
+          summary: null,
+          usage: null,
+          stderr: 'killed',
+        })
+      },
+      model: 'fake-model',
+      effort: 'high',
+    }
+  }
+  resume(): AgentProcess {
+    throw new Error('no resume in run-service tests')
+  }
+  async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+}
+
 class FakePr implements PrDriver {
   async createPr(opts: CreatePrOptions): Promise<PullRequest> {
     return { url: `https://example.com/pull/${opts.branch}`, number: 1 }
@@ -185,10 +224,22 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return []
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async closePr(): Promise<void> {}
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 let repo: string
@@ -198,11 +249,17 @@ let store: Store
 const config = (over: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
     ...over,
   })
 
-const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = config()) =>
+const makeService = (
+  tracker: Tracker,
+  harness: Harness,
+  maxParallel = 1,
+  cfg = config(),
+  over: Partial<RunServiceOptions> = {},
+) =>
   new RunService({
     store,
     tracker,
@@ -212,7 +269,7 @@ const makeService = (tracker: Tracker, harness: Harness, maxParallel = 1, cfg = 
     repoName: 'demo',
     forge: new FakePr(),
     maxParallel,
-    autoPick: false,
+    ...over,
   })
 
 const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
@@ -251,8 +308,89 @@ describe('RunService', () => {
       available: true,
       capacity: 2,
       running: [],
+      startedAt: {},
       resources: {},
+      tasks: {},
+      autoQueue: false,
     })
+    service.dispose()
+  })
+
+  test('setAutoQueue flips the reported state and toggles dispatch', async () => {
+    const tracker = new FakeTracker([TASK])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 1, config(), { autoQueueActiveMs: 10 })
+    expect((await service.status()).autoQueue).toBe(false)
+    service.setAutoQueue(true)
+    expect((await service.status()).autoQueue).toBe(true)
+    await waitFor(() => harness.starts > 0)
+    expect(store.task(TASK.id)?.state).toBe('implementing')
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
+  test('auto queue fills every free slot and backs off when the queue is empty', async () => {
+    const tracker = new FakeTracker([TASK, TASK2])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 2, config(), {
+      autoQueue: true,
+      autoQueueActiveMs: 10,
+    })
+    // Both slots fill over successive polls, one task per pass.
+    await waitFor(() => harness.starts >= 2)
+    expect(harness.starts).toBe(2)
+    expect((await service.status()).running).toEqual([TASK.id, TASK2.id])
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+    service.dispose()
+  })
+
+  test('auto queue does nothing when disabled and idles after an empty poll', async () => {
+    const tracker = new FakeTracker([])
+    const service = makeService(tracker, new FakeHarness(), 1, config(), {
+      autoQueue: true,
+      autoQueueIdleMs: 20,
+      autoQueueActiveMs: 10,
+    })
+    // Nothing to claim, so the first poll backs off to the idle interval; a
+    // second poll still finds nothing and never launches.
+    await Bun.sleep(100)
+    expect((await service.status()).running).toEqual([])
+    service.dispose()
+  })
+
+  test('status carries each running task title and live agent', async () => {
+    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1)
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+
+    const status = await service.status()
+    expect(status.tasks[TASK.id]).toEqual({
+      title: 'Add a greeting file',
+      harness: 'fake',
+      model: null,
+      effort: null,
+    })
+
+    await service.stop(TASK.id)
+  })
+
+  test('status carries the model once the agent run reports it', async () => {
+    const service = makeService(new FakeTracker([TASK]), new ModelHarness(), 1)
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+
+    const status = await service.status()
+    expect(status.tasks[TASK.id]).toEqual({
+      title: 'Add a greeting file',
+      harness: 'fake',
+      model: 'fake-model',
+      effort: 'high',
+    })
+
+    await service.stop(TASK.id)
   })
 
   test('setMaxParallel changes capacity live without touching running runs', async () => {
@@ -327,6 +465,106 @@ describe('RunService', () => {
     })
   })
 
+  test('start rejects an unknown harness name', async () => {
+    const service = makeService(new FakeTracker([TASK]), new FakeHarness())
+    const res = await service.start(undefined, { harness: 'nope' })
+    expect(res).toEqual({
+      ok: false,
+      status: 409,
+      error: 'unknown harness "nope"; use a harness.definitions name or claude/codex/opencode',
+    })
+  })
+
+  test('start applies harness/model/effort overrides to the launched run', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config(),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, {
+      harness: 'codex',
+      model: 'gpt-5.6-luna',
+      effort: 'high',
+    })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual(
+      expect.objectContaining({ kind: 'codex', model: 'gpt-5.6-luna', effort: 'high' }),
+    )
+  })
+
+  test('start resolves a named harness definition for the harness override', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config({
+        harness: {
+          definitions: { fast: { kind: 'claude', model: 'claude-haiku-4-5', effort: 'low' } },
+        },
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, { harness: 'fast' })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual(
+      expect.objectContaining({ kind: 'claude', model: 'claude-haiku-4-5', effort: 'low' }),
+    )
+  })
+
+  test('start gates a claimed task on the override model, not the configured default', async () => {
+    const hard = { ...TASK, difficulty: 'high' }
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([hard]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config({
+        harness: { implement: { kind: 'claude', model: 'claude-sonnet-5' } },
+        difficulty: {
+          enabled: true,
+          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-5': 'smart' },
+          requiredTier: { high: 'smart' },
+        },
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const weak = await service.start(hard.id, { model: 'claude-haiku-4-5' })
+    expect(weak).toEqual({
+      ok: false,
+      status: 409,
+      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
+    })
+    expect(captured).toBeNull()
+    const ok = await service.start(hard.id, { model: 'claude-sonnet-5' })
+    expect(ok).toEqual({ ok: true, taskId: hard.id })
+    await waitFor(() => store.task(hard.id)?.state === 'pr_open')
+    expect(captured).toEqual(expect.objectContaining({ model: 'claude-sonnet-5' }))
+  })
+
   test('start refuses a task the tracker does not see as ready', async () => {
     const service = makeService(new FakeTracker([]), new FakeHarness())
     const res = await service.start('bd-x')
@@ -380,41 +618,5 @@ describe('RunService', () => {
     expect(store.task(TASK.id)?.worktree).not.toBeNull()
     expect(store.task(TASK.id)?.branch).not.toBeNull()
     await waitFor(async () => (await service.status()).running.length === 0)
-  })
-
-  test('auto-pick claims the next ready task without a manual start', async () => {
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK]),
-      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
-      config: config(),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      maxParallel: 1,
-      autoPick: true,
-    })
-    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    await waitFor(async () => (await service.status()).running.length === 0)
-    service.close()
-  })
-
-  test('auto-pick keeps every slot busy up to maxParallel', async () => {
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK, TASK2]),
-      harness: new BlockingHarness(),
-      config: config(),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      maxParallel: 2,
-      autoPick: true,
-    })
-    await waitFor(async () => (await service.status()).running.length === 2)
-    expect((await service.status()).running.sort()).toEqual([TASK.id, TASK2.id].sort())
-    await service.stop(TASK.id)
-    await service.stop(TASK2.id)
-    service.close()
   })
 })
