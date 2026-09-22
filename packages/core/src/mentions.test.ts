@@ -58,6 +58,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -80,6 +81,8 @@ class FakeDriver implements PrDriver {
   async postComment(_cwd: string, _number: number, body: string): Promise<void> {
     this.posted.push(body)
   }
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 class FakeTracker implements Tracker {

@@ -322,6 +322,7 @@ const stateBadge: Record<TaskState, string> = {
   committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  pr_flagged: 'bg-amber-soft text-amber-ink ring-amber-edge',
   done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
   no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
   needs_human: 'bg-red-soft text-red-ink ring-red-edge',
@@ -2506,7 +2507,13 @@ function fmtRetryIn(ts: number): string {
   return `${h}h ${m % 60}m`
 }
 
-const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+const ATTENTION_STATES: readonly TaskState[] = [
+  'no_pr',
+  'needs_human',
+  'pr_flagged',
+  'abandoned',
+  'cancelled',
+]
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
