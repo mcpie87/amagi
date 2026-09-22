@@ -320,6 +320,32 @@ export class Store {
   }
 
   /**
+   * The most recent implement-run start for a task: the model/effort an
+   * operator-facing surface can show without folding the whole event log.
+   * Chat runs are skipped so chatting with a finished worker does not
+   * overwrite the agent that did the work.
+   */
+  currentAgent(taskId: string): { model: string | null; effort: string | null } | null {
+    const rows = this.db
+      .query(
+        `select body from events where task_id = ? and type = 'agent.started'
+         order by seq desc limit 20`,
+      )
+      .all(taskId) as { body: string }[]
+    for (const row of rows) {
+      const body = JSON.parse(row.body) as {
+        role: string
+        model: string | null
+        effort: string | null
+      }
+      if (body.role !== 'chat') {
+        return { model: body.model ?? null, effort: body.effort ?? null }
+      }
+    }
+    return null
+  }
+
+  /**
    * Lazily minted credential that binds an ask/answer to its task. A column
    * rather than an event so the secret never reaches the SSE stream; the cost
    * is that a manual rebuild mints a fresh one.

@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
-import { HARDCODED_MODELS } from '../../models.ts'
+import { CommandError, exec } from '../../exec.ts'
+import { parseClaudeModelHint } from '../../models.ts'
 import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
 import { renderToolResult, spawnAgent } from './spawn.ts'
 
@@ -165,7 +166,13 @@ export class ClaudeHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    return [...HARDCODED_MODELS.claude]
+    // claude has no `model list` subcommand; `-p "/model"` runs the slash
+    // command non-interactively (a free local_command, no API call) and its
+    // reply names the available models.
+    const cmd = [this.bin, '-p', '/model']
+    const result = await exec(cmd)
+    if (result.exitCode !== 0) throw new CommandError(cmd, result)
+    return parseClaudeModelHint(result.stdout)
   }
 
   async listEfforts(): Promise<string[]> {

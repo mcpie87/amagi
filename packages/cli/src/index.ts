@@ -6,6 +6,8 @@ import { checkPrsCommand } from './commands/check-prs.ts'
 import { cleanCommand } from './commands/clean.ts'
 import { configCommand } from './commands/config.ts'
 import { continueCommand } from './commands/continue.ts'
+import { mergeablePrsCommand } from './commands/mergeable-prs.ts'
+import { newCommand } from './commands/new.ts'
 import { removeCommand } from './commands/remove.ts'
 import { reposCommand } from './commands/repos.ts'
 import { respondToMentionsCommand } from './commands/respond-to-mentions.ts'
@@ -23,6 +25,7 @@ const main = defineCommand({
   },
   subCommands: {
     run: runCommand,
+    new: newCommand,
     status: statusCommand,
     triage: triageCommand,
     config: configCommand,
@@ -36,6 +39,7 @@ const main = defineCommand({
     add: addCommand,
     remove: removeCommand,
     'check-prs': checkPrsCommand,
+    'mergeable-prs': mergeablePrsCommand,
     'respond-to-mentions': respondToMentionsCommand,
   },
 })

@@ -50,18 +50,19 @@ function splitDescription(description: string): {
   howToUse: string | null
   conclusion: string | null
 } {
+  // The regex requires the group, so a matched row always has index and name.
   const headings = [...description.matchAll(SECTION_HEADING)].map((m) => ({
-    index: m.index!,
-    name: m[1]!,
+    index: m.index ?? 0,
+    name: m[1] ?? '',
   }))
   let summary = description.trim()
   let howToUse: string | null = null
   let conclusion: string | null = null
-  for (let i = 0; i < headings.length; i++) {
-    const start = headings[i]!.index
+  for (const [i, heading] of headings.entries()) {
+    const start = heading.index
     const end = headings[i + 1]?.index ?? description.length
     const body = description.slice(start, end).replace(SECTION_HEADING, '').trim()
-    if (headings[i]!.name === 'How to use') howToUse = body === '' ? null : body
+    if (heading.name === 'How to use') howToUse = body === '' ? null : body
     else conclusion = body === '' ? null : body
     if (i === 0) summary = description.slice(0, start).trim()
   }
@@ -86,6 +87,17 @@ export type PrBodyMeta = {
   effort: string | null
 }
 
+/**
+ * The task's age as a relative-time stamp for the Task line. GitHub and
+ * Forgejo render `<relative-time datetime>` as a live relative age; the
+ * element's text content is the plain-date fallback when they do not.
+ */
+function createdAgo(createdAt: number | null | undefined): string | null {
+  if (createdAt === null || createdAt === undefined || Number.isNaN(createdAt)) return null
+  const iso = new Date(createdAt).toISOString()
+  return `created <relative-time datetime="${iso}">${iso.slice(0, 10)}</relative-time>`
+}
+
 export function formatPrBody(
   task: TrackerTask,
   changes: readonly PrChange[],
@@ -93,7 +105,12 @@ export function formatPrBody(
   /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
   fallbackSummary?: string | null,
 ): string {
-  const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
+  const created = createdAgo(task.createdAt)
+  const lines = [
+    `## ✨ ${task.title}`,
+    '',
+    `**Task:** \`${task.id}\`${created === null ? '' : ` · ${created}`}`,
+  ]
   const { summary, howToUse, conclusion } = splitDescription(task.description)
   const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
   lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
