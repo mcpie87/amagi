@@ -13,6 +13,7 @@ export const TASK_STATES = [
   'checks',
   'committed',
   'pr_open',
+  'pr_flagged',
   'retrying',
   'done',
   'no_pr',
@@ -50,7 +51,10 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   checks: ['implementing', 'committed'],
   retrying: ['implementing'],
   committed: ['pr_open'],
-  pr_open: [],
+  pr_open: ['pr_flagged'],
+  // A flagged PR is parked for the operator, not terminal: the watcher owns
+  // the label and clears it back to pr_open when the PR stops being pointless.
+  pr_flagged: ['pr_open'],
   done: [],
   no_pr: ['abandoned', 'done'],
   needs_human: ['abandoned', 'done'],

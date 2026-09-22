@@ -100,10 +100,11 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `awaiting_answer` | The agent called `amagi ask` and is parked on a human answer | `implementing` |
 | `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `committed` (checks passed) |
 | `committed` | Changes committed to the branch | `pr_open` |
-| `pr_open` | Pull request opened against `repo.baseBranch` | — |
+| `pr_open` | Pull request opened against `repo.baseBranch` | `pr_flagged` |
+| `pr_flagged` | The PR's diff against base is empty; flagged with `amagi/needs-closing` and parked for the operator to close. Non-terminal: the watcher clears it back to `pr_open` if real commits arrive | `pr_open` |
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
-| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
+| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 

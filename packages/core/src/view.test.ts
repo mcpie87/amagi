@@ -138,6 +138,20 @@ describe('dashboard state reducer', () => {
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
   })
 
+  test('a flagged pointless PR is surfaced in the attention list', () => {
+    const state = [
+      ...recorded.filter((e) => e.seq !== 11),
+      ev(16, 'am-1', 2500, {
+        type: 'task.state',
+        from: 'pr_open',
+        to: 'pr_flagged',
+        reason: 'empty diff',
+      }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
   test('questions resolve from events', () => {
     const state = recorded.reduce(reduceState, initialDashboardState())
     expect(openQuestionsFor(state, 'am-2')).toEqual([])
@@ -386,5 +400,57 @@ describe('dashboard state reducer', () => {
     ]
     const state = events.reduce(reduceState, initialDashboardState())
     expect(chatInFlight(state, 'am-1')).toBe(false)
+  })
+
+  test('a scheduled retry folds its fire time into the projection', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Retried', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1300, {
+        type: 'retry.scheduled',
+        attempt: 2,
+        delayMs: 30_000,
+        reason: 'transient harness failure',
+        detail: 'rate limit exceeded',
+      }),
+      ev(5, 'am-1', 1400, { type: 'task.state', from: 'implementing', to: 'retrying' }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(state.tasks['am-1']).toMatchObject({
+      state: 'retrying',
+      retryCount: 1,
+      retryAt: 31_300,
+    })
+  })
+
+  test('a deferred retry is absent from the needs-attention list', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Deferred', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1300, {
+        type: 'retry.scheduled',
+        attempt: 1,
+        delayMs: 60_000,
+        reason: 'transient harness failure',
+        detail: 'quota exceeded',
+      }),
+      ev(5, 'am-1', 1400, { type: 'task.state', from: 'implementing', to: 'retrying' }),
+      ev(6, 'am-2', 1500, { type: 'task.claimed', title: 'Stopped', tracker: 'bd' }),
+      ev(7, 'am-2', 1600, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(8, 'am-2', 1700, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(9, 'am-2', 1800, {
+        type: 'task.state',
+        from: 'implementing',
+        to: 'needs_human',
+        reason: 'checks failing',
+      }),
+    ].reduce(reduceState, initialDashboardState())
+
+    // Only the task actually stopped for a human needs attention; the deferred
+    // automatic retry waits on its backoff, not on the operator.
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-2'])
+    expect(state.tasks['am-1']?.state).toBe('retrying')
   })
 })

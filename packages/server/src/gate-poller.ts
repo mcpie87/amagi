@@ -1,4 +1,4 @@
-import type { Store, Tracker } from '@amagi/core'
+import { errMsg, type Store, type Tracker } from '@amagi/core'
 import { startPoller } from './poller.ts'
 
 export type GatePollerOptions = {
@@ -51,9 +51,7 @@ export function startGatePoller({
           })
         }
       } catch (err) {
-        console.warn(
-          `gate poll ${question.id}: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        console.warn(`gate poll ${question.id}: ${errMsg(err)}`)
       }
     }
   })
