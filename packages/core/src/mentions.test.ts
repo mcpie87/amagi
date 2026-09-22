@@ -3,14 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from './config.ts'
-import type {
-  CreatePrOptions,
-  OpenPr,
-  PrComment,
-  PrDriver,
-  PrState,
-  PullRequest,
-} from './drivers/pr.ts'
+import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentStartOptions,
@@ -81,11 +74,14 @@ class FakeDriver implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    throw new Error('unused')
+  }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
-  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
-    return []
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return this.comments

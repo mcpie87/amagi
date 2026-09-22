@@ -3,7 +3,6 @@ import {
   type Exec,
   errMsg,
   isAgentMention,
-  listOpenPrs,
   type MentionWatchState,
   type makeHarness,
   mentionsPath,
@@ -114,7 +113,7 @@ export function startMentionWatcher({
       const handledPath = mentionsPath(repoName)
       const watchPath = mentionWatchPath(repoName)
       const handled = readHandledMentions(handledPath)
-      const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
+      const prs = await driver.listOpenPrs(root)
       const state = readMentionWatch(watchPath)
       const nextState: MentionWatchState = {}
       for (const pr of prs) {
