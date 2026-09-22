@@ -1,5 +1,6 @@
 import type { PrDriver, PrState } from './drivers/pr.ts'
 import type { Tracker } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import type { Store } from './store/store.ts'
 
 export type ReconcileResult = {
@@ -28,7 +29,7 @@ export async function reconcilePrs(
     try {
       state = await forge.getPr(cwd, task.prNumber)
     } catch (err) {
-      console.warn(`pr reconcile ${task.id}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`pr reconcile ${task.id}: ${errMsg(err)}`)
       continue
     }
     if (state === 'open') {
@@ -54,9 +55,7 @@ export async function reconcilePrs(
         await tracker.setStatus(task.id, 'closed')
       }
     } catch (err) {
-      console.warn(
-        `pr reconcile ${task.id}: tracker settle failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      console.warn(`pr reconcile ${task.id}: tracker settle failed: ${errMsg(err)}`)
     }
     moved.push({ taskId: task.id, to })
   }

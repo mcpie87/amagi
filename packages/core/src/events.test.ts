@@ -36,6 +36,13 @@ describe('state machine', () => {
     }
   })
 
+  test('an operator interrupt may cancel any non-terminal state', () => {
+    for (const s of TASK_STATES) {
+      if (isTerminal(s)) continue
+      expect(canTransition(s, 'cancelled')).toBe(true)
+    }
+  })
+
   test('cancelled is terminal and only reclaim can resume it', () => {
     expect(isTerminal('cancelled')).toBe(true)
     expect(canTransition('cancelled', 'claimed')).toBe(false)
@@ -46,6 +53,8 @@ describe('state machine', () => {
     expect(canTransition('done', 'implementing')).toBe(false)
     expect(canTransition('needs_human', 'implementing')).toBe(false)
     expect(canTransition('abandoned', 'claimed')).toBe(false)
+    expect(canTransition('cancelled', 'implementing')).toBe(false)
+    expect(isTerminal('cancelled')).toBe(true)
   })
 
   test('a parked needs-attention task can be abandoned by the close action', () => {

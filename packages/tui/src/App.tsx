@@ -4,6 +4,7 @@ import {
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
+  relTime,
   type StoredEvent,
   type TaskState,
   type TaskView,
@@ -11,7 +12,6 @@ import {
 import { Box, Text, useApp, useInput } from 'ink'
 import { useMemo, useState, useSyncExternalStore } from 'react'
 import { fetchTaskToken, submitAnswer } from './answer.ts'
-import { relTime } from './format.ts'
 import { useDashboardStream } from './useDashboardStream.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {

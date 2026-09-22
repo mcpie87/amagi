@@ -5,6 +5,7 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  currentUsageFor,
   initialDashboardState,
   openQuestionsFor,
   reduceState,
@@ -219,6 +220,102 @@ describe('dashboard state reducer', () => {
     expect(currentAgentFor(state, 'am-1')).toMatchObject({ model: 'impl', role: 'implement' })
   })
 
+  test('current usage sums the tokens of the running agent run', () => {
+    const events = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 100, outputTokens: 50, cachedTokens: 20 },
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 20, outputTokens: 10, cachedTokens: 40 },
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(currentUsageFor(state, 'am-1')).toEqual({
+      inputTokens: 120,
+      outputTokens: 60,
+      cachedTokens: 60,
+    })
+  })
+
+  test('current usage ignores usage from earlier runs and chat runs', () => {
+    const events = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 999, outputTokens: 999 },
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 0,
+        sessionId: 's-1',
+      }),
+      ev(4, 'am-1', 1300, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm2',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(5, 'am-1', 1400, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 10, outputTokens: 5 },
+      }),
+      ev(6, 'am-1', 1500, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'usage', inputTokens: 777, outputTokens: 777 },
+      }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(currentUsageFor(state, 'am-1')).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      cachedTokens: 0,
+    })
+    expect(currentUsageFor(state, 'missing')).toBeNull()
+  })
+
+  test('current usage is null before the harness reports anything', () => {
+    const state = [
+      ev(1, 'am-1', 1000, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'm',
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: false,
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(currentUsageFor(state, 'am-1')).toBeNull()
+  })
+
   test('chatTurns folds user messages and chat runs into a conversation', () => {
     const events = [
       ev(1, 'am-1', 1000, { type: 'chat.message', text: 'why no pr?' }),
@@ -303,5 +400,57 @@ describe('dashboard state reducer', () => {
     ]
     const state = events.reduce(reduceState, initialDashboardState())
     expect(chatInFlight(state, 'am-1')).toBe(false)
+  })
+
+  test('a scheduled retry folds its fire time into the projection', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Retried', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1300, {
+        type: 'retry.scheduled',
+        attempt: 2,
+        delayMs: 30_000,
+        reason: 'transient harness failure',
+        detail: 'rate limit exceeded',
+      }),
+      ev(5, 'am-1', 1400, { type: 'task.state', from: 'implementing', to: 'retrying' }),
+    ].reduce(reduceState, initialDashboardState())
+
+    expect(state.tasks['am-1']).toMatchObject({
+      state: 'retrying',
+      retryCount: 1,
+      retryAt: 31_300,
+    })
+  })
+
+  test('a deferred retry is absent from the needs-attention list', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Deferred', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1300, {
+        type: 'retry.scheduled',
+        attempt: 1,
+        delayMs: 60_000,
+        reason: 'transient harness failure',
+        detail: 'quota exceeded',
+      }),
+      ev(5, 'am-1', 1400, { type: 'task.state', from: 'implementing', to: 'retrying' }),
+      ev(6, 'am-2', 1500, { type: 'task.claimed', title: 'Stopped', tracker: 'bd' }),
+      ev(7, 'am-2', 1600, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(8, 'am-2', 1700, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(9, 'am-2', 1800, {
+        type: 'task.state',
+        from: 'implementing',
+        to: 'needs_human',
+        reason: 'checks failing',
+      }),
+    ].reduce(reduceState, initialDashboardState())
+
+    // Only the task actually stopped for a human needs attention; the deferred
+    // automatic retry waits on its backoff, not on the operator.
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-2'])
+    expect(state.tasks['am-1']?.state).toBe('retrying')
   })
 })

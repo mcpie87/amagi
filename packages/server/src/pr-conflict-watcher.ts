@@ -2,6 +2,7 @@ import {
   type Config,
   conflictWatchPath,
   type Exec,
+  errMsg,
   flagPointlessPrs,
   isConflicting,
   listOpenPrs,
@@ -39,8 +40,6 @@ export type PrConflictWatcher = {
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
-
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /**
  * The shared PR watcher: one listOpenPrs per tick feeds the conflict and

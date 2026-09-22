@@ -67,6 +67,31 @@ export function currentAgentFor(
   return null
 }
 
+/** Context size of the agent currently running on the task, if any usage has been reported. */
+export function currentUsageFor(
+  state: DashboardState,
+  taskId: string,
+): { inputTokens: number; outputTokens: number; cachedTokens: number } | null {
+  let inputTokens = 0
+  let outputTokens = 0
+  let cachedTokens = 0
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const event = state.events[i]
+    if (event?.taskId !== taskId) continue
+    // Stop at the current implementing run; earlier runs are another context.
+    // Chat runs are not the implementing agent, so their usage is skipped like
+    // currentAgentFor skips their starts.
+    if (event.type === 'agent.started' && event.role !== 'chat') break
+    if (event.type === 'agent.stream' && event.event.kind === 'usage' && event.role !== 'chat') {
+      inputTokens += event.event.inputTokens
+      outputTokens += event.event.outputTokens
+      cachedTokens += event.event.cachedTokens ?? 0
+    }
+  }
+  if (inputTokens === 0 && outputTokens === 0 && cachedTokens === 0) return null
+  return { inputTokens, outputTokens, cachedTokens }
+}
+
 /** One message in the operator/worker chat: a user message or an assistant turn. */
 export type ChatTurn = {
   id: string
