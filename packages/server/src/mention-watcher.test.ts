@@ -67,6 +67,7 @@ class FakePr implements PrDriver {
     }
     this.posted.push(body)
   }
+  async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
 }

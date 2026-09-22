@@ -492,6 +492,28 @@ export function createApp({
         if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
           return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
         }
+        // Closing a pr_flagged task retires its pointless pull request too: the
+        // watcher parked it because the diff is empty and a human is the only
+        // one who closes it. This is the one step that must not be best effort,
+        // else the task retires with the PR still open on the forge.
+        if (task.state === 'pr_flagged') {
+          if (ws.forge === null) {
+            return c.json(
+              {
+                error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
+              },
+              501,
+            )
+          }
+          if (task.prNumber === null) {
+            return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
+          }
+          try {
+            await ws.forge.closePr(ws.root, task.prNumber, reason)
+          } catch (err) {
+            return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
+          }
+        }
         // Shut the worker down first: stop() kills the owned agent process and
         // parks a live run in cancelled, releasing the tracker claim, so the
         // close below retires it without racing the run. A task not running on

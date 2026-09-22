@@ -11,6 +11,10 @@ import type {
   EpicCloseResult,
   GateRef,
   Harness,
+  PrComment,
+  PrDriver,
+  PrState,
+  PullRequest,
   Question,
   QuestionRow,
   RunServiceApi,
@@ -961,6 +965,112 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const body = (await res.json()) as { task: TaskRow }
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('wont run')
+  })
+
+  class FakeForge implements PrDriver {
+    readonly closed: { number: number; reason: string }[] = []
+    closeError: Error | null = null
+    async createPr(): Promise<PullRequest> {
+      throw new Error('unused')
+    }
+    async getPr(): Promise<PrState> {
+      return 'open'
+    }
+    async getMergeStatus() {
+      return 'mergeable' as const
+    }
+    async listComments(): Promise<PrComment[]> {
+      return []
+    }
+    async postComment(): Promise<void> {}
+    async closePr(_cwd: string, number: number, reason: string): Promise<void> {
+      if (this.closeError !== null) throw this.closeError
+      this.closed.push({ number, reason })
+    }
+    async addLabel(): Promise<void> {}
+    async removeLabel(): Promise<void> {}
+  }
+
+  const withForge = (forge: FakeForge) => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('workspace missing')
+    workspace.forge = forge
+  }
+
+  const flagged = (id: string, number: number) => {
+    claim(id)
+    store.append(id, { type: 'pr.created', url: `https://github.com/x/y/pull/${number}`, number })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append(id, { type: 'task.state', from: null, to })
+    }
+    store.append(id, {
+      type: 'task.state',
+      from: 'pr_open',
+      to: 'pr_flagged',
+      reason: 'this PR is pointless',
+    })
+  }
+
+  test('closing a pr_flagged task closes its pull request on the forge', async () => {
+    const forge = new FakeForge()
+    withForge(forge)
+    flagged('bd-1', 7)
+    const res = await close('bd-1', 'agree, nothing to merge')
+    expect(res.status).toBe(200)
+    expect(forge.closed).toEqual([{ number: 7, reason: 'agree, nothing to merge' }])
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('abandoned')
+    expect(body.task.statusReason).toBe('agree, nothing to merge')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'agree, nothing to merge' }])
+  })
+
+  test('closing a pr_open task does not touch the pull request', async () => {
+    const forge = new FakeForge()
+    withForge(forge)
+    claim('bd-1')
+    store.append('bd-1', { type: 'pr.created', url: 'https://github.com/x/y/pull/7', number: 7 })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('bd-1', { type: 'task.state', from: null, to })
+    }
+
+    const res = await close('bd-1', 'abandoning anyway')
+    expect(res.status).toBe(200)
+    expect(forge.closed).toEqual([])
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+  })
+
+  test('refuses to close a pr_flagged task without a forge driver', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('workspace missing')
+    workspace.forge = null
+    flagged('bd-1', 7)
+    const res = await close('bd-1', 'close it')
+    expect(res.status).toBe(501)
+    expect(tracker.closed).toHaveLength(0)
+    expect(store.task('bd-1')?.state).toBe('pr_flagged')
+  })
+
+  test('a forge failure leaves the flagged task parked so the operator can retry', async () => {
+    const forge = new FakeForge()
+    forge.closeError = new Error('forge down')
+    withForge(forge)
+    flagged('bd-1', 7)
+    const res = await close('bd-1', 'close it')
+    expect(res.status).toBe(502)
+    expect(store.task('bd-1')?.state).toBe('pr_flagged')
+    expect(tracker.closed).toHaveLength(0)
   })
 })
 
