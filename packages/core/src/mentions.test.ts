@@ -209,7 +209,7 @@ function fakeHarness(
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
   })
 
 describe('parseMentionKind', () => {

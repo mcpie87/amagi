@@ -39,6 +39,7 @@ import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -111,12 +112,12 @@ function CommandPalette() {
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const open = () => {
+  const open = useCallback(() => {
     setQuery('')
     setIndex(0)
     dialogRef.current?.showModal()
     inputRef.current?.focus()
-  }
+  }, [])
   const close = () => dialogRef.current?.close()
 
   useEffect(() => {
@@ -128,7 +129,7 @@ function CommandPalette() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [open])
 
   const q = query.trim().toLowerCase()
   const taskMatches =
@@ -508,7 +509,7 @@ function RootLayout() {
   const firstRender = useRef(true)
 
   const openNav = () => setNavOpen(true)
-  const closeNav = () => setNavOpen(false)
+  const closeNav = useCallback(() => setNavOpen(false), [])
 
   // Move focus into the open navigation (and back to its trigger on close)
   // only after the DOM has committed the is-open state and the inert flag has
@@ -529,7 +530,7 @@ function RootLayout() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navOpen])
+  }, [navOpen, closeNav])
 
   return (
     <RunnerProvider>
@@ -933,6 +934,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     if (repoRef.current !== selected) {
       repoRef.current = selected
       setIssues([])
@@ -955,6 +957,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
@@ -1582,6 +1585,7 @@ function WorkersPanel() {
       <div className="space-y-2">
         {Array.from({ length: status.capacity }, (_, i) => (
           <WorkerSlot
+            // biome-ignore lint/suspicious/noArrayIndexKey: slots are fixed positions, the index is their identity
             key={i}
             taskId={running[i] ?? null}
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
@@ -2687,6 +2691,7 @@ const markdown = new Marked({
 
 function Markdown({ text }: { text: string }) {
   return (
+    // biome-ignore lint/security/noDangerouslySetInnerHtml: the Marked renderer escapes raw HTML
     <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
   )
 }
@@ -3077,6 +3082,7 @@ function TaskDetailView() {
           </h2>
           <ul className="space-y-1">
             {health.warnings.map((w, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
               <li key={i} className="font-mono text-xs text-fg">
                 {w}
               </li>

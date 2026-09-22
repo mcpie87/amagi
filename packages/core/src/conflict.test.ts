@@ -74,7 +74,7 @@ function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
   })
 
 beforeEach(() => {
