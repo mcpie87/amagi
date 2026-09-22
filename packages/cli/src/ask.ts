@@ -1,3 +1,5 @@
+import { errorOf } from '@amagi/core'
+
 export type AskOutcome = { kind: 'answered'; answer: string } | { kind: 'no_answer' }
 
 export type AskOptions = {
@@ -10,15 +12,7 @@ export type AskOptions = {
   deadlineMs: number
 }
 
-export { taskIdFromBranch } from '@amagi/core'
-
-async function errorOf(res: Response): Promise<string> {
-  try {
-    return ((await res.json()) as { error?: string }).error ?? `HTTP ${res.status}`
-  } catch {
-    return `HTTP ${res.status}`
-  }
-}
+export { taskIdFromAmagiBranch as taskIdFromBranch } from '@amagi/core'
 
 export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
   const headers = { 'content-type': 'application/json', 'X-Amagi-Token': opts.token }

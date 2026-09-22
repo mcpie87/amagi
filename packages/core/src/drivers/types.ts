@@ -10,6 +10,12 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Creation timestamp (epoch ms); absent when the tracker does not report it. */
+  createdAt?: number | null
+  /** Free-form markdown notes on the issue; beads populates it, others leave it unset. */
+  notes?: string
+  /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
+  comments?: string[]
   /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
   difficulty?: string | null
 }
@@ -107,6 +113,14 @@ export interface Tracker {
   setStatus(id: string, status: TrackerStatus): Promise<void>
   release(id: string): Promise<void>
   close(id: string, reason?: string): Promise<void>
+
+  /**
+   * Ids of tasks the tracker currently considers open, for recovering a task
+   * id from a branch/PR head ref when nothing else names it. Optional: only
+   * the pre-trailer PR fallback needs it, and a test double need not implement
+   * it just to satisfy the interface.
+   */
+  openIds?(limit?: number): Promise<string[]>
 
   openGate(taskId: string, question: Question): Promise<GateRef>
   gateResolved(ref: GateRef): Promise<boolean>

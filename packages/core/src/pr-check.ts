@@ -7,6 +7,8 @@ import { applyPersona, branchExists } from './worktree.ts'
 export type PrInfo = {
   number: number
   title: string
+  /** Full PR description, so the amagi-task trailer can be read back off it. */
+  body: string
   url: string
   headRefName: string
   baseRefName: string
@@ -16,8 +18,8 @@ export type PrInfo = {
   headRefOid: string | null
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
-  /** Label names; filled by listOpenPrs, absent in hand-built fixtures. */
-  labels?: string[]
+  /** Label names, so the pointlessness pass can scope to the amagi provenance label. */
+  labels: string[]
 }
 
 export type PrCheckOptions = {
@@ -26,7 +28,7 @@ export type PrCheckOptions = {
 }
 
 const GH_FIELDS =
-  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
+  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -36,6 +38,11 @@ export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
   )
 }
 
+/**
+ * Lists open PRs through gh. GitHub-only by design: the pollers and the
+ * pointlessness pass that consume it share this binding rather than each
+ * hammering a forge-specific endpoint.
+ */
 export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
   const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
@@ -43,9 +50,10 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
     env: ghEnv(),
   })
   const raw = JSON.parse(out) as Array<
-    Omit<PrInfo, 'labels'> & { labels?: Array<{ name: string }> }
+    Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
   >
-  return raw.map((p) => ({ ...p, labels: (p.labels ?? []).map((l) => l.name) }))
+  // gh reports labels as objects; the pass only needs the names.
+  return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
 }
 
 /** Label counting how many times a conflicting PR has been re-resolved. */
@@ -65,7 +73,7 @@ export function iterationsFromLabels(labels: readonly string[] | undefined): num
 }
 
 /** The task id an amagi PR's head branch encodes (`amagi/<id>-...`), null for non-amagi PRs. */
-export function taskIdFromBranch(branch: string): string | null {
+export function taskIdFromAmagiBranch(branch: string): string | null {
   return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
 }
 
@@ -86,7 +94,7 @@ export async function stampIterationLabel(opts: {
   exec?: Exec
 }): Promise<StampedIteration | null> {
   const run = opts.exec ?? defaultExec
-  const taskId = taskIdFromBranch(opts.pr.headRefName)
+  const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
   if (taskId === null) return null
   const current = iterationsFromLabels(opts.pr.labels)
   const iteration = current + 1
@@ -105,6 +113,60 @@ export async function stampIterationLabel(opts: {
   if (current > 0) edit.push('--remove-label', iterationLabel(current))
   await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
   return { taskId, iteration }
+}
+
+export type FetchPullHeadsOptions = {
+  repoRoot: string
+  /** Last seen PR head SHAs keyed by ref (refs/pull/N/head), so the fetch is skipped when none moved. */
+  lastHeads: Record<string, string>
+  exec?: Exec
+}
+
+export type FetchPullHeadsResult = {
+  /** True when a fetch ran because at least one PR head moved since lastHeads. */
+  fetched: boolean
+  /** Current PR head SHAs keyed by ref, e.g. refs/pull/7/head. */
+  heads: Record<string, string>
+}
+
+/**
+ * Mirrors every open PR head into refs/remotes/origin/pr/* with one fetch.
+ * The pull/star/head namespace covers fork PRs, which a per-branch fetch of
+ * headRefName does not. ls-remote is a zero-transfer zero-quota probe, so the
+ * fetch is skipped on ticks where no head moved.
+ */
+export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<FetchPullHeadsResult> {
+  const run = opts.exec ?? defaultExec
+  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
+
+  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', 'refs/pull/*/head'], {
+    cwd: opts.repoRoot,
+  })
+  const heads: Record<string, string> = {}
+  for (const line of out.trim().split('\n')) {
+    if (line === '') continue
+    const [sha, ref] = line.split('\t')
+    if (sha !== undefined && ref !== undefined) heads[ref] = sha
+  }
+
+  const moved =
+    Object.keys(heads).length !== Object.keys(opts.lastHeads).length ||
+    Object.keys(heads).some((ref) => opts.lastHeads[ref] !== heads[ref])
+  if (!moved) return { fetched: false, heads }
+
+  await execOk(
+    run,
+    [
+      'git',
+      ...tokenCfg,
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    ],
+    { cwd: opts.repoRoot },
+  )
+  return { fetched: true, heads }
 }
 
 export type PrepareConflictWorktreeOptions = {
@@ -152,6 +214,11 @@ export async function prepareConflictWorktree(
       ? ['git', 'worktree', 'add', path, branch]
       : ['git', 'worktree', 'add', '-b', branch, path, `origin/${opts.pr.headRefName}`]
     await execOk(run, args, { cwd: opts.repoRoot })
+  } else {
+    // A reused worktree can hold a stale in-progress merge or committed resolution
+    // from an earlier run; abort and reset so the merge below starts from the PR head.
+    await run(['git', 'merge', '--abort'], { cwd: path })
+    await execOk(run, ['git', 'reset', '--hard', `origin/${opts.pr.headRefName}`], { cwd: path })
   }
 
   if (opts.persona) {

@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HARDCODED_EFFORTS, HARDCODED_MODELS, listModelsCached, parseModelLines } from './models.ts'
+import {
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  listModelsCached,
+  parseClaudeModelHint,
+  parseModelLines,
+} from './models.ts'
 
 describe('HARDCODED_MODELS', () => {
   test('claude and codex each expose a curated list', () => {
@@ -60,6 +66,32 @@ describe('parseModelLines', () => {
   })
 })
 
+describe('parseClaudeModelHint', () => {
+  test('parses the alias list out of the /model reply', () => {
+    const out = parseClaudeModelHint(
+      'Current model: `Sonnet 5` (effort: high)\n' +
+        'Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, ' +
+        'sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.',
+    )
+    expect(out).toEqual([
+      'sonnet',
+      'opus',
+      'haiku',
+      'fable',
+      'best',
+      'sonnet[1m]',
+      'opus[1m]',
+      'fable[1m]',
+      'opusplan',
+      'default',
+    ])
+  })
+
+  test('returns an empty list when the reply has no Available: section', () => {
+    expect(parseClaudeModelHint('some unrelated error output')).toEqual([])
+  })
+})
+
 describe('listModelsCached', () => {
   let dir: string
   beforeEach(() => {
@@ -109,5 +141,20 @@ describe('listModelsCached', () => {
   test('an empty listing is not cached, so it retries next time', async () => {
     expect(await listModelsCached('claude', () => Promise.resolve([]), dir)).toEqual([])
     expect(existsSync(cachePath('claude'))).toBe(false)
+  })
+
+  test('curated kinds skip the disk cache and return the live curated list', async () => {
+    writeCache('claude', Date.now(), ['stale-generic'])
+    let called = false
+    const models = await listModelsCached(
+      'claude',
+      () => {
+        called = true
+        return Promise.resolve(['claude-opus-5'])
+      },
+      dir,
+    )
+    expect(models).toEqual(['claude-opus-5'])
+    expect(called).toBe(true)
   })
 })

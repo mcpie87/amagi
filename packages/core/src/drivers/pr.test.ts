@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { Exec, ExecResult } from '../exec.ts'
+import type { PrInfo } from '../pr-check.ts'
 import { gitTokenConfig } from './forge-cred.ts'
 import { amagiLabels, makePrDriver } from './pr.ts'
 
@@ -18,6 +19,21 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
 }
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
+
+const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
+  number: 7,
+  title: 'Do the thing',
+  body: 'Task: am-1',
+  url: 'https://github.com/owner/repo/pull/7',
+  headRefName: 'amagi/am-1-do-the-thing',
+  baseRefName: 'main',
+  mergeable: 'MERGEABLE',
+  mergeStateStatus: 'CLEAN',
+  headRefOid: 'deadbeef',
+  updatedAt: '2026-09-21T10:00:00Z',
+  labels: ['amagi'],
+  ...over,
+})
 
 beforeEach(() => {
   delete process.env.GH_TOKEN
@@ -210,6 +226,67 @@ describe('githubPr', () => {
     expect(calls).toContainEqual(['gh', 'pr', 'comment', '7', '--body-file', '-'])
     expect(calls).toContainEqual(['<stdin>', 'explanation'])
   })
+
+  test('closes the pr with the reason as the closing comment', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await makePrDriver('github', exec).closePr('/repo', 7, 'pointless')
+
+    expect(calls).toContainEqual(['gh', 'pr', 'close', '7', '--comment', 'pointless'])
+  })
+
+  test('lists open PRs from gh', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('list') && c.includes('pr')
+        ? ok(JSON.stringify([prInfo(), prInfo({ number: 8, headRefName: 'amagi/am-2' })]))
+        : undefined,
+    )
+    const prs = await makePrDriver('github', exec).listOpenPrs('/repo')
+
+    expect(calls[0]).toEqual([
+      'gh',
+      'pr',
+      'list',
+      '--state',
+      'open',
+      '--json',
+      'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
+    ])
+    expect(prs).toHaveLength(2)
+    expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+  })
+
+  test('resolves a merge status by retrying while gh reports UNKNOWN', async () => {
+    let n = 0
+    const { exec, calls } = fake(() => {
+      n++
+      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
+      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
+    })
+    const status = await makePrDriver('github', exec).getMergeStatus('/repo', 7)
+
+    expect(status).toBe('mergeable')
+    expect(calls).toHaveLength(2)
+  })
+
+  test('fetches the pr diff from gh', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('diff') ? ok('diff --git a/x b/x\n') : undefined,
+    )
+    const diff = await makePrDriver('github', exec).getPrDiff('/repo', 7)
+
+    expect(calls[0]).toEqual(['gh', 'pr', 'diff', '7'])
+    expect(diff).toBe('diff --git a/x b/x\n')
+  })
+
+  test('adds and removes a label on an existing pr', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const driver = makePrDriver('github', exec)
+    await driver.addLabel('/repo', 7, 'amagi/needs-closing')
+    await driver.removeLabel('/repo', 7, 'amagi/needs-closing')
+
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/needs-closing'])
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--remove-label', 'amagi/needs-closing'])
+  })
 })
 
 describe('forgejoPr', () => {
@@ -285,6 +362,50 @@ describe('forgejoPr', () => {
     expect(state).toBe('merged')
   })
 
+  test('lists open PRs through the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const prs = await withFetch(
+      (path) => {
+        if (path === 'repos/owner/repo/pulls?state=open') {
+          return new Response(
+            JSON.stringify([
+              {
+                number: 3,
+                title: 'Do the thing',
+                html_url: 'https://git.example.com/owner/repo/pulls/3',
+                head: { ref: 'amagi/am-1' },
+                base: { ref: 'main' },
+                mergeable: true,
+                mergeable_state: 'clean',
+                updated_at: '2026-09-21T10:00:00Z',
+              },
+            ]),
+            { status: 200 },
+          )
+        }
+        return new Response('[]', { status: 200 })
+      },
+      () => makePrDriver('forgejo', exec).listOpenPrs('/wt'),
+    )
+
+    expect(prs).toEqual([
+      {
+        number: 3,
+        title: 'Do the thing',
+        body: '',
+        url: 'https://git.example.com/owner/repo/pulls/3',
+        headRefName: 'amagi/am-1',
+        baseRefName: 'main',
+        headRefOid: null,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        updatedAt: '2026-09-21T10:00:00Z',
+        labels: [],
+      },
+    ])
+  })
+
   test('resolves the merge status from the forgejo api', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
@@ -306,6 +427,37 @@ describe('forgejoPr', () => {
     expect(conflicted).toBe('conflicted')
   })
 
+  test('fetches the pr diff through the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const diff = await withFetch(
+      (path) =>
+        path === 'repos/owner/repo/pulls/3.diff'
+          ? new Response('diff --git a/x b/x\n', { status: 200 })
+          : new Response('[]', { status: 200 }),
+      () => makePrDriver('forgejo', exec).getPrDiff('/wt', 3),
+    )
+    expect(diff).toBe('diff --git a/x b/x\n')
+  })
+
+  test('closes the pr through the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    let patched = false
+    await withFetch(
+      (path, method, body) => {
+        if (path === 'repos/owner/repo/pulls/3' && method === 'PATCH') {
+          patched = true
+          expect(body).toEqual({ state: 'closed' })
+          return new Response(JSON.stringify({ state: 'closed' }), { status: 200 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+      () => makePrDriver('forgejo', exec).closePr('/wt', 3, 'pointless'),
+    )
+    expect(patched).toBe(true)
+  })
+
   test('throws a clear error without a token', async () => {
     const { exec } = remote()
     await expect(
@@ -314,5 +466,31 @@ describe('forgejoPr', () => {
         () => makePrDriver('forgejo', exec).postComment('/wt', 3, 'hi'),
       ),
     ).rejects.toThrow(/FORGEJO_TOKEN/)
+  })
+
+  test('adds and removes a label on an existing pull request', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    await withFetch(
+      (path, method) => {
+        if (path === 'repos/owner/repo/labels' && method === 'GET') {
+          return new Response(JSON.stringify([{ id: 5, name: 'amagi/needs-closing' }]), {
+            status: 200,
+          })
+        }
+        if (path === 'repos/owner/repo/issues/3/labels' && method === 'POST') {
+          return new Response('{}', { status: 200 })
+        }
+        if (path === 'repos/owner/repo/issues/3/labels/5' && method === 'DELETE') {
+          return new Response('', { status: 204 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+      async () => {
+        const driver = makePrDriver('forgejo', exec)
+        await driver.addLabel('/wt', 3, 'amagi/needs-closing')
+        await driver.removeLabel('/wt', 3, 'amagi/needs-closing')
+      },
+    )
   })
 })

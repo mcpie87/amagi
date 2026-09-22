@@ -7,11 +7,13 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  openDatabase,
   type PrComment,
   type PrDriver,
   type PrInfo,
   type PrState,
   type PullRequest,
+  Store,
   type Tracker,
 } from '@amagi/core'
 import { startMentionWatcher } from './mention-watcher.ts'
@@ -22,6 +24,7 @@ const config = (): Config =>
 const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',
@@ -29,18 +32,13 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
-function fakeExec(prs: PrInfo[]): Exec {
-  return async (cmd) =>
-    cmd.includes('pr') && cmd.includes('list')
-      ? { exitCode: 0, stdout: JSON.stringify(prs), stderr: '' }
-      : { exitCode: 0, stdout: '', stderr: '' }
-}
-
 class FakePr implements PrDriver {
   comments: PrComment[] = []
+  prs: PrInfo[] = []
   readonly posted: string[] = []
   listCalls = 0
   /** Throw on the nth postComment call (1-based) to simulate a failed response. */
@@ -52,8 +50,14 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return this.prs
+  }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
+  }
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    throw new Error('unused')
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     this.listCalls++
@@ -66,6 +70,9 @@ class FakePr implements PrDriver {
     }
     this.posted.push(body)
   }
+  async closePr(): Promise<void> {}
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 function fakeHarness(summary = 'ambiguous'): Harness {
@@ -107,9 +114,11 @@ afterEach(() => {
   rmSync(cacheDir, { recursive: true, force: true })
 })
 
+const noopExec: Exec = async () => ({ exitCode: 0, stdout: '', stderr: '' })
+
 const start = (
   driver: PrDriver,
-  exec: Exec,
+  exec: Exec = noopExec,
   over: Partial<Parameters<typeof startMentionWatcher>[0]> = {},
 ) => {
   const w = startMentionWatcher({
@@ -128,7 +137,7 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, { updatedAt: string; lastCommentId: number }> =>
+const stateFile = (): Record<string, string> =>
   JSON.parse(readFileSync(join(cacheDir, 'amagi', 'mentions', 'demo.watch.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): number =>
@@ -137,7 +146,8 @@ const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): numb
 test('scans open PRs once and responds to each unhandled mention exactly once', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
-  const w = start(driver, fakeExec([prInfo()]))
+  driver.prs = [prInfo()]
+  const w = start(driver)
 
   await Bun.sleep(60)
 
@@ -147,13 +157,19 @@ test('scans open PRs once and responds to each unhandled mention exactly once', 
   expect(activity.ok).toBe(true)
   expect(counter(w, 'scanned')).toBe(1)
   expect(counter(w, 'responded')).toBe(1)
-  expect(stateFile()['7']).toEqual({ updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 1 })
+  expect(stateFile()['7']).toBe('2026-09-21T10:00:00Z')
+  expect(activity.runs).toBeGreaterThanOrEqual(1)
+  expect(activity.successes).toBe(activity.runs)
+  expect(activity.failures).toBe(0)
+  expect(activity.status).toBe('active')
+  expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
 test('skips re-scanning PRs whose updatedAt has not changed', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
-  start(driver, fakeExec([prInfo()]))
+  driver.prs = [prInfo()]
+  start(driver)
 
   await Bun.sleep(60)
   const postsAfterFirst = driver.posted.length
@@ -166,8 +182,8 @@ test('skips re-scanning PRs whose updatedAt has not changed', async () => {
 test('only responds to mentions added after the last-seen comment when a PR changes', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
-  const exec = fakeExec([prInfo()])
-  start(driver, exec)
+  driver.prs = [prInfo()]
+  start(driver)
 
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(1)
@@ -179,21 +195,55 @@ test('only responds to mentions added after the last-seen comment when a PR chan
   ]
   const w1 = watchers[0]
   w1?.stop()
-  const w2 = start(driver, fakeExec([prInfo({ updatedAt: '2026-09-21T11:00:00Z' })]))
+  driver.prs = [prInfo({ updatedAt: '2026-09-21T11:00:00Z' })]
+  const w2 = start(driver)
 
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(2)
   const second = driver.posted[1]
   expect(second).toContain('@alice')
   expect(counter(w2, 'responded')).toBe(1)
-  expect(stateFile()['7']).toEqual({ updatedAt: '2026-09-21T11:00:00Z', lastCommentId: 2 })
+  expect(stateFile()['7']).toBe('2026-09-21T11:00:00Z')
+})
+
+test('a later mention in a lower-numbered id space (issue comment) is not skipped by a higher review id', async () => {
+  const driver = new FakePr()
+  // A review id lives in a different, much larger id space than issue comments.
+  driver.comments = [
+    { id: '1', user: 'bob', body: '@chise-maru hi' },
+    { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
+  ]
+  driver.prs = [prInfo()]
+  start(driver)
+
+  await Bun.sleep(60)
+  expect(driver.posted).toHaveLength(1)
+  expect(stateFile()['7']).toBeDefined()
+
+  // New issue comment (smaller id than the review id) mentions the agent.
+  driver.comments = [
+    { id: '1', user: 'bob', body: '@chise-maru hi' },
+    { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
+    { id: '2', user: 'alice', body: '@chise-maru and this?' },
+  ]
+  const w1 = watchers[0]
+  w1?.stop()
+  driver.prs = [prInfo({ updatedAt: '2026-09-21T11:00:00Z' })]
+  const w2 = start(driver)
+
+  await Bun.sleep(60)
+  expect(driver.posted).toHaveLength(2)
+  const second = driver.posted[1]
+  expect(second).toContain('@alice')
+  expect(counter(w2, 'responded')).toBe(1)
 })
 
 test('a failed response is retried on later ticks, not marked handled', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
+  driver.prs = [prInfo()]
   driver.failPost = 10
-  const w = start(driver, fakeExec([prInfo()]))
+  const w = start(driver)
 
   await Bun.sleep(60)
   // Every attempt fails: nothing posted, nothing recorded as handled.
@@ -209,4 +259,42 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   expect(driver.posted).toHaveLength(1)
   expect(counter(w, 'responded')).toBe(1)
   expect(stateFile()['7']).toBeDefined()
+})
+
+test('a tick that throws is counted as a failure and keeps run totals consistent', async () => {
+  const driver = new FakePr()
+  driver.listOpenPrs = async () => {
+    throw new Error('boom')
+  }
+  const w = start(driver)
+
+  await Bun.sleep(30)
+  const a = w.activity()
+  expect(a.ok).toBe(false)
+  expect(a.failures).toBeGreaterThanOrEqual(1)
+  expect(a.runs).toBeGreaterThanOrEqual(a.failures)
+  expect(a.successes + a.failures).toBe(a.runs)
+})
+
+test('records classification outcomes as mention.classified events when a store is wired', async () => {
+  const driver = new FakePr()
+  driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
+  driver.prs = [prInfo()]
+  const store = new Store(openDatabase(':memory:'))
+  start(driver, noopExec, { store })
+
+  await Bun.sleep(60)
+
+  expect(driver.posted).toHaveLength(1)
+  const events = store.events()
+  expect(events).toHaveLength(1)
+  expect(events[0]).toMatchObject({
+    taskId: null,
+    type: 'mention.classified',
+    prNumber: 7,
+    mentionId: '1',
+    kind: 'ambiguous',
+    reply: 'ambiguous',
+  })
+  store.close()
 })

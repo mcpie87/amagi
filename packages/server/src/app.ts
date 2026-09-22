@@ -3,6 +3,10 @@ import {
   CAPABILITY_WORDS,
   ChatService,
   classifyDifficulty,
+  errMsg,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  HarnessKind,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -10,13 +14,13 @@ import {
   type RegistryEntry,
   Runner,
   type RunServiceApi,
+  reconcilePr,
   removeWorktree,
   type Store,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
   Triage,
-  UnsupportedCapabilityError,
   type UpdateTrackerTask,
   type WorkerActivity,
   type Workspace,
@@ -111,7 +115,7 @@ async function notifyChannels(
     try {
       await notifier.notify(title, body)
     } catch (err) {
-      console.warn(`notify ${notifier.kind}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`notify ${notifier.kind}: ${errMsg(err)}`)
     }
     store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
   }
@@ -131,7 +135,7 @@ async function openQuestionGate(
   try {
     return (await tracker.openGate(taskId, question)).id
   } catch (err) {
-    console.warn(`openGate ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+    console.warn(`openGate ${taskId}: ${errMsg(err)}`)
     return null
   }
 }
@@ -144,7 +148,7 @@ async function resolveQuestionGate(
   try {
     await tracker.resolveGate({ id: gateRef, advisory: false })
   } catch (err) {
-    console.warn(`resolveGate ${gateRef}: ${err instanceof Error ? err.message : String(err)}`)
+    console.warn(`resolveGate ${gateRef}: ${errMsg(err)}`)
   }
 }
 
@@ -165,7 +169,7 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   try {
     ws = workspaces.get(repo)
   } catch (err) {
-    throw new RepoError(500, `repo ${repo}: ${err instanceof Error ? err.message : String(err)}`)
+    throw new RepoError(500, `repo ${repo}: ${errMsg(err)}`)
   }
   if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
   return ws
@@ -215,7 +219,7 @@ export function createApp({
               {
                 name: 'workspace',
                 ok: false,
-                detail: err instanceof Error ? err.message : String(err),
+                detail: errMsg(err),
               },
             ],
           })
@@ -230,7 +234,7 @@ export function createApp({
       try {
         entry = workspaces.add(path, key)
       } catch (err) {
-        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+        return c.json({ error: errMsg(err) }, 400)
       }
       const ready = await workspaces.diagnose(entry)
       return c.json({ ...entry, ready }, 201)
@@ -257,22 +261,17 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const cap = capabilityError(ws.tracker, 'create')
         if (cap !== null) return c.json({ error: cap }, 501)
-        try {
-          const body = c.req.valid('json')
-          const input = ws.config.difficulty.enabled
-            ? {
-                ...body,
-                difficulty: await classifyDifficulty(body.title, body.description, ws.config),
-              }
-            : body
-          const created: TrackerTask = await ws.tracker.createTask(input)
-          const beads = beadsTracker(ws)
-          const issue = beads === null ? null : await beads.getIssue(created.id)
-          return c.json(issue ?? created, 201)
-        } catch (err) {
-          if (err instanceof UnsupportedCapabilityError) return c.json({ error: err.message }, 501)
-          throw err
-        }
+        const body = c.req.valid('json')
+        const input = ws.config.difficulty.enabled
+          ? {
+              ...body,
+              difficulty: await classifyDifficulty(body.title, body.description, ws.config),
+            }
+          : body
+        const created: TrackerTask = await ws.tracker.createTask(input)
+        const beads = beadsTracker(ws)
+        const issue = beads === null ? null : await beads.getIssue(created.id)
+        return c.json(issue ?? created, 201)
       },
     )
 
@@ -313,17 +312,10 @@ export function createApp({
             remove: current.filter((d) => !body.dependencies?.includes(d)),
           }
         }
-        try {
-          const updated = await ws.tracker.updateTask(id, input)
-          const beads = beadsTracker(ws)
-          const issue = beads === null ? null : await beads.getIssue(updated.id)
-          return c.json(issue ?? updated)
-        } catch (err) {
-          if (err instanceof UnsupportedCapabilityError) {
-            return c.json({ error: err.message }, 501)
-          }
-          throw err
-        }
+        const updated = await ws.tracker.updateTask(id, input)
+        const beads = beadsTracker(ws)
+        const issue = beads === null ? null : await beads.getIssue(updated.id)
+        return c.json(issue ?? updated)
       },
     )
 
@@ -346,6 +338,20 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       // The tracker orders the queue FCFS (bd ready --sort oldest).
       return c.json(await ws.tracker.ready())
+    })
+
+    .get('/api/repos/:repo/mergeable-prs', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The driver reports the forge's own flags (gh wording on both drivers),
+      // so one filter is all it takes to find the PRs that can merge now.
+      const open = await ws.forge.listOpenPrs(ws.root)
+      return c.json({
+        prs: open.filter((p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN'),
+      })
     })
 
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
@@ -432,13 +438,11 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       const task = ws.store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      if (task.worktree === null || task.branch === null) {
-        return c.json({ error: `task ${id} has no worktree to resume` }, 409)
-      }
-      // A terminal run keeps its worktree for exactly this path: a cancelled
-      // run was deliberately stopped, and a needs_human/no_pr run was parked
-      // for attention — the operator retries each to resume where it left off.
-      if (isTerminal(task.state) && !['cancelled', 'needs_human', 'no_pr'].includes(task.state)) {
+      // A completed or abandoned run cannot come back: the tracker issue is
+      // closed and the runner will never claim it again. Everything else is
+      // restartable — the runner resumes the recorded worktree when present
+      // and starts from a fresh worktree otherwise.
+      if (task.state === 'done' || task.state === 'abandoned') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
@@ -446,9 +450,50 @@ export function createApp({
       try {
         await ws.tracker.release(id)
       } catch (err) {
-        console.warn(`release ${id}: ${err instanceof Error ? err.message : String(err)}`)
+        console.warn(`release ${id}: ${errMsg(err)}`)
       }
       ws.store.append(id, { type: 'task.reclaimed' })
+      return c.json({ task: ws.store.task(id) })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/retry', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      // The runner's backoff only reacts to a wake-up while the task is
+      // actually deferring a retry; anything else would mislead the operator.
+      if (task.state !== 'retrying') {
+        return c.json({ error: `task ${id} is not deferring a retry` }, 409)
+      }
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const result = await runner.retryNow(id)
+      if (!result.ok) return c.json({ error: result.error }, result.status)
+      return c.json({ taskId: result.taskId })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/recheck', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      // Only a task parked on its pull request has anything to re-check; the
+      // sweep these states otherwise wait for is what this endpoint short-cuts.
+      if (task.state !== 'pr_open' && task.state !== 'pr_flagged') {
+        return c.json(
+          { error: `task ${id} is not waiting on a pull request (state ${task.state})` },
+          409,
+        )
+      }
+      if (task.prNumber === null) {
+        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
+      }
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The reconcile writes events the dashboard already streams, so the
+      // caller's live state picks up a merge/close without a page reload.
+      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, task)
       return c.json({ task: ws.store.task(id) })
     })
 
@@ -477,6 +522,28 @@ export function createApp({
         if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
           return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
         }
+        // Closing a pr_flagged task retires its pointless pull request too: the
+        // watcher parked it because the diff is empty and a human is the only
+        // one who closes it. This is the one step that must not be best effort,
+        // else the task retires with the PR still open on the forge.
+        if (task.state === 'pr_flagged') {
+          if (ws.forge === null) {
+            return c.json(
+              {
+                error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
+              },
+              501,
+            )
+          }
+          if (task.prNumber === null) {
+            return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
+          }
+          try {
+            await ws.forge.closePr(ws.root, task.prNumber, reason)
+          } catch (err) {
+            return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
+          }
+        }
         // Shut the worker down first: stop() kills the owned agent process and
         // parks a live run in cancelled, releasing the tracker claim, so the
         // close below retires it without racing the run. A task not running on
@@ -485,7 +552,7 @@ export function createApp({
           try {
             await runner.stop(id)
           } catch (err) {
-            console.warn(`stop on close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+            console.warn(`stop on close ${id}: ${errMsg(err)}`)
           }
         }
         const afterStop = ws.store.task(id)
@@ -506,15 +573,13 @@ export function createApp({
               branch: branch ?? null,
             })
           } catch (err) {
-            console.warn(
-              `worktree removal on close ${id}: ${err instanceof Error ? err.message : String(err)}`,
-            )
+            console.warn(`worktree removal on close ${id}: ${errMsg(err)}`)
           }
         }
         try {
           await ws.tracker.close(id, reason)
         } catch (err) {
-          console.warn(`close ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          console.warn(`close ${id}: ${errMsg(err)}`)
         }
         return c.json({ task: ws.store.task(id) })
       },
@@ -541,6 +606,34 @@ export function createApp({
       const status = await runner.status()
       if (workers === undefined) return c.json(status)
       return c.json({ ...status, workers: workers() })
+    })
+
+    .get('/api/runner/options', (c) => {
+      if (runner === undefined || runnerRepo === undefined) {
+        return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
+      }
+      const ws = resolveWorkspace(workspaces, runnerRepo)
+      const defs = Object.entries(ws.config.harness.definitions)
+      const harnesses = defs.map(([name, cfg]) => ({
+        name,
+        kind: cfg.kind,
+        ...(cfg.model === undefined ? {} : { model: cfg.model }),
+        ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+      }))
+      const current = ws.config.harness.implement
+      return c.json({
+        harnesses:
+          harnesses.length > 0
+            ? harnesses
+            : HarnessKind.options.map((kind) => ({ name: kind, kind })),
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+        default: {
+          kind: current.kind,
+          ...(current.model === undefined ? {} : { model: current.model }),
+          ...(current.effort === undefined ? {} : { effort: current.effort }),
+        },
+      })
     })
 
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
@@ -585,8 +678,13 @@ export function createApp({
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { taskId } = c.req.valid('json')
-      const result = await runner.start(taskId)
+      const { taskId, harness, model, effort } = c.req.valid('json')
+      const opts = {
+        ...(harness === undefined ? {} : { harness }),
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+      }
+      const result = await runner.start(taskId, opts)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })

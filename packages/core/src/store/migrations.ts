@@ -80,6 +80,12 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
     `,
   },
   {
+    name: '007_retry_at',
+    sql: `
+      alter table tasks add column retry_at integer;
+    `,
+  },
+  {
     name: '007_pr_merge_status',
     sql: `
       alter table tasks add column pr_merge_status text;

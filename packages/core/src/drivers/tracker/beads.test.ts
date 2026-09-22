@@ -35,6 +35,17 @@ const READY_WITH_DIFFICULTY_JSON = `[
   }
 ]`
 
+const READY_WITHOUT_CREATED_AT_JSON = `[
+  {
+    "id": "tst-noc",
+    "title": "No creation stamp",
+    "description": "Tracker omitted the date",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task"
+  }
+]`
+
 const CLAIMED_JSON = `[
   {
     "id": "tst-lmc",
@@ -82,6 +93,10 @@ const SHOW_WITH_DEPS_JSON = `[
     "priority": 2,
     "issue_type": "feature",
     "labels": ["x"],
+    "notes": "root cause already found here",
+    "comments": [
+      { "id": "c1", "issue_id": "tst-1", "author": "someone", "text": "try the fix", "created_at": "2026-09-20T14:02:53Z" }
+    ],
     "dependencies": [
       {
         "id": "tst-abc",
@@ -181,6 +196,7 @@ describe('BeadsTracker', () => {
       priority: 1,
       type: 'task',
       url: null,
+      createdAt: Date.parse('2026-09-20T14:02:53Z'),
     })
     expect(calls[0]).toContain('--json')
     expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
@@ -190,6 +206,14 @@ describe('BeadsTracker', () => {
     const { exec } = fake((c) => (c.includes('ready') ? ok(READY_WITH_DIFFICULTY_JSON) : undefined))
     const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
     expect(tasks[0]?.difficulty).toBe('high')
+  })
+
+  test('leaves createdAt absent when bd omits the stamp', async () => {
+    const { exec } = fake((c) =>
+      c.includes('ready') ? ok(READY_WITHOUT_CREATED_AT_JSON) : undefined,
+    )
+    const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
+    expect(tasks[0]?.createdAt).toBeUndefined()
   })
 
   test('an empty queue is an empty array, not an error', async () => {
@@ -278,6 +302,13 @@ describe('BeadsTracker', () => {
     expect(seenStdin).toBe('--not-a-flag\n"quoted"')
   })
 
+  test('openIds lists without --all, so closed issues are excluded', async () => {
+    const { exec, calls } = fake((c) => (c.includes('list') ? ok(READY_JSON) : undefined))
+    const ids = await new BeadsTracker({ cwd: '/repo', exec }).openIds()
+    expect(ids).toEqual(['tst-lmc'])
+    expect(calls[0]).not.toContain('--all')
+  })
+
   test('gate id comes from a tagged lookup, not from parsing prose', async () => {
     const title = gateTitle('q-1')
     const { exec, calls } = fake((c) => {
@@ -308,6 +339,27 @@ describe('BeadsTracker', () => {
     expect(tracker.openGate('tst-lmc', { id: 'q-1', text: 'which?', options: [] })).rejects.toThrow(
       /q-1/,
     )
+  })
+
+  test('release is a no-op for an already-closed issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"closed"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
+  })
+
+  test('release unclaims an in-progress issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    const unclaim = calls.find((c) => c.includes('unclaim'))
+    expect(unclaim).toBeDefined()
   })
 
   test('a closed gate reads as resolved', async () => {
@@ -473,6 +525,16 @@ describe('BeadsTracker', () => {
         labels: ['human'],
       },
     ])
+  })
+
+  test('get surfaces notes and comments and asks for them', async () => {
+    const { exec, calls } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).get('tst-1')
+
+    expect(task?.notes).toBe('root cause already found here')
+    expect(task?.comments).toEqual(['try the fix'])
+    const show = calls.find((c) => c.includes('show'))
+    expect(show).toContain('--include-comments')
   })
 
   test('eligibleEpics previews only the eligible epics from the dry-run', async () => {
