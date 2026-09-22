@@ -13,6 +13,7 @@ export const TASK_STATES = [
   'checks',
   'committed',
   'pr_open',
+  'pr_flagged',
   'retrying',
   'done',
   'no_pr',
@@ -50,7 +51,10 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   checks: ['implementing', 'committed'],
   retrying: ['implementing'],
   committed: ['pr_open'],
-  pr_open: [],
+  pr_open: ['pr_flagged'],
+  // A flagged PR is parked for the operator, not terminal: the watcher owns
+  // the label and clears it back to pr_open when the PR stops being pointless.
+  pr_flagged: ['pr_open'],
   done: [],
   no_pr: ['abandoned', 'done'],
   needs_human: ['abandoned', 'done'],
@@ -168,6 +172,24 @@ export const EventBody = z.discriminatedUnion('type', [
     role: AgentRole,
     exitCode: z.number().int(),
     sessionId: z.string().nullable(),
+  }),
+  /**
+   * The run's running peak input context (input + cached tokens) as usage
+   * events stream in. Appended each time the peak grows; the last one of a run
+   * is its peak context.
+   */
+  z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
+  /** Logged once when the run's peak context crosses the soft limit. */
+  z.object({
+    type: z.literal('context.warn'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
+  }),
+  /** Logged once when the run's peak context crosses the hard limit, right before the agent is killed. */
+  z.object({
+    type: z.literal('context.exceeded'),
+    contextTokens: z.number().int(),
+    limit: z.number().int(),
   }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),

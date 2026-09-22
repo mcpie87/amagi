@@ -48,6 +48,7 @@ import { SessionsView } from './SessionsView.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
+  type RunOptions,
   useConnection,
   useDashboard,
   useReadyQueue,
@@ -322,6 +323,7 @@ const stateBadge: Record<TaskState, string> = {
   committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  pr_flagged: 'bg-amber-soft text-amber-ink ring-amber-edge',
   done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
   no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
   needs_human: 'bg-red-soft text-red-ink ring-red-edge',
@@ -1219,12 +1221,14 @@ function RunButton() {
   const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
 
-  const run = async () => {
+  const run = async (opts?: RunOptions) => {
     setBusy(true)
     setMessage(null)
-    const res = await start()
+    const res = await start(undefined, opts)
     setBusy(false)
+    setOpen(false)
     setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
@@ -1234,11 +1238,151 @@ function RunButton() {
       <button
         type="button"
         disabled={busy}
-        onClick={() => void run()}
+        onClick={() => setOpen(true)}
         className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
         Run next
       </button>
+      {open && <RunPicker onClose={() => setOpen(false)} onRun={run} />}
+    </div>
+  )
+}
+
+/**
+ * Lets the operator pick harness/model/effort before "Run next" dispatches.
+ * Every field defaults to "use the configured value": leaving the harness at
+ * default sends no overrides, so the server's config.harness.implement wins.
+ */
+function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunOptions) => void }) {
+  const { options } = useRunner()
+  const harnesses = options?.harnesses ?? []
+  const [harness, setHarness] = useState('')
+  const [model, setModel] = useState('')
+  const [customModel, setCustomModel] = useState('')
+  const [effort, setEffort] = useState('')
+
+  const selected = harnesses.find((h) => h.name === harness)
+  const kind = selected?.kind
+  const models = kind === undefined ? [] : (options?.models[kind] ?? [])
+  const efforts = kind === undefined ? [] : (options?.efforts[kind] ?? [])
+
+  const switchHarness = (value: string) => {
+    setHarness(value)
+    setModel('')
+    setCustomModel('')
+    setEffort('')
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const effectiveModel = model === 'custom' ? customModel.trim() : model
+    onRun({
+      ...(harness === '' ? {} : { harness }),
+      ...(effectiveModel === '' ? {} : { model: effectiveModel }),
+      ...(effort === '' ? {} : { effort }),
+    })
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-md rounded-lg border border-line-strong bg-surface p-4"
+      >
+        <h2 className="mb-3 text-lg font-semibold">Run next task</h2>
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="run-harness">
+              Harness
+            </label>
+            <select
+              id="run-harness"
+              value={harness}
+              onChange={(e) => switchHarness(e.target.value)}
+              className={input}
+            >
+              <option value="">default ({options?.default?.kind ?? 'config'})</option>
+              {harnesses.map((h) => (
+                <option key={h.name} value={h.name}>
+                  {h.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={label} htmlFor="run-model">
+              Model
+            </label>
+            <select
+              id="run-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.model === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.model})`}
+              </option>
+              {models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              <option value="custom">(custom model)</option>
+            </select>
+            {model === 'custom' && (
+              <input
+                value={customModel}
+                onChange={(e) => setCustomModel(e.target.value)}
+                placeholder="model id"
+                className={`${input} mt-1`}
+              />
+            )}
+          </div>
+          <div>
+            <label className={label} htmlFor="run-effort">
+              Effort
+            </label>
+            <select
+              id="run-effort"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.effort === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.effort})`}
+              </option>
+              {efforts.map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-line-strong px-3 py-1 text-sm text-fg-muted hover:bg-raised"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
+          >
+            Run
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -2315,6 +2459,65 @@ function RequeueButton({
 }
 
 /**
+ * Restart a run that has no worktree recorded yet, so the runner starts fresh.
+ * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
+ * need the worktree path; done and abandoned runs have no path back, so the
+ * button is hidden for them.
+ */
+function RestartRunButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree !== null || state === 'done' || state === 'abandoned') return null
+
+  const restart = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="restart-run">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void restart()}
+        className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
+      >
+        <Icon name="refresh" size={15} />
+        {busy ? 'Restarting...' : 'Restart run'}
+      </button>
+      {error !== null && (
+        <p className="restart-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
  * Skip a deferred automatic retry's backoff and run it now, only meaningful
  * while the task sits in retrying (the runner owns it and is sleeping).
  */
@@ -2447,7 +2650,13 @@ function fmtRetryIn(ts: number): string {
   return `${h}h ${m % 60}m`
 }
 
-const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+const ATTENTION_STATES: readonly TaskState[] = [
+  'no_pr',
+  'needs_human',
+  'pr_flagged',
+  'abandoned',
+  'cancelled',
+]
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -2741,6 +2950,14 @@ function TaskDetailView() {
         )}
         {selected !== null && (
           <RequeueButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
+        {selected !== null && (
+          <RestartRunButton
             repo={selected}
             taskId={task.id}
             state={task.state}

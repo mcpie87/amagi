@@ -4,6 +4,9 @@ import {
   ChatService,
   classifyDifficulty,
   errMsg,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  HarnessKind,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -433,13 +436,11 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       const task = ws.store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      if (task.worktree === null || task.branch === null) {
-        return c.json({ error: `task ${id} has no worktree to resume` }, 409)
-      }
-      // A terminal run keeps its worktree for exactly this path: a cancelled
-      // run was deliberately stopped, and a needs_human/no_pr run was parked
-      // for attention — the operator retries each to resume where it left off.
-      if (isTerminal(task.state) && !['cancelled', 'needs_human', 'no_pr'].includes(task.state)) {
+      // A completed or abandoned run cannot come back: the tracker issue is
+      // closed and the runner will never claim it again. Everything else is
+      // restartable — the runner resumes the recorded worktree when present
+      // and starts from a fresh worktree otherwise.
+      if (task.state === 'done' || task.state === 'abandoned') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
       }
       // Best effort: the runner only re-claims issues the tracker sees as
@@ -558,6 +559,34 @@ export function createApp({
       return c.json({ ...status, workers: workers() })
     })
 
+    .get('/api/runner/options', (c) => {
+      if (runner === undefined || runnerRepo === undefined) {
+        return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
+      }
+      const ws = resolveWorkspace(workspaces, runnerRepo)
+      const defs = Object.entries(ws.config.harness.definitions)
+      const harnesses = defs.map(([name, cfg]) => ({
+        name,
+        kind: cfg.kind,
+        ...(cfg.model === undefined ? {} : { model: cfg.model }),
+        ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+      }))
+      const current = ws.config.harness.implement
+      return c.json({
+        harnesses:
+          harnesses.length > 0
+            ? harnesses
+            : HarnessKind.options.map((kind) => ({ name: kind, kind })),
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+        default: {
+          kind: current.kind,
+          ...(current.model === undefined ? {} : { model: current.model }),
+          ...(current.effort === undefined ? {} : { effort: current.effort }),
+        },
+      })
+    })
+
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -600,8 +629,13 @@ export function createApp({
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { taskId } = c.req.valid('json')
-      const result = await runner.start(taskId)
+      const { taskId, harness, model, effort } = c.req.valid('json')
+      const opts = {
+        ...(harness === undefined ? {} : { harness }),
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+      }
+      const result = await runner.start(taskId, opts)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })

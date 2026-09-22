@@ -13,6 +13,7 @@ import type {
   Harness,
   Question,
   QuestionRow,
+  RunOptions,
   RunServiceApi,
   Store,
   TaskRow,
@@ -578,10 +579,18 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     expect(res.status).toBe(404)
   })
 
-  test('409s when the task has no worktree to resume', async () => {
+  test('restarts a task with no recorded worktree, letting the runner start fresh', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
     claim('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
-    expect(res.status).toBe(409)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('claimed')
+    expect(body.task.worktree).toBeNull()
+    expect(tracker.released).toEqual(['bd-1'])
   })
 
   test('409s when the task reached a terminal state that cannot be retried', async () => {
@@ -1212,6 +1221,69 @@ describe('runner endpoints', () => {
     expect(specific.status).toBe(201)
     expect(started).toEqual(['bd-9'])
     expect((await post('/api/runs', '{"taskId":123}')).status).toBe(400)
+  })
+
+  test('POST /api/runs forwards harness/model/effort overrides', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    const res = await post(
+      '/api/runs',
+      '{"taskId":"bd-1","harness":"fast","model":"gpt-5.6-luna","effort":"high"}',
+    )
+    expect(res.status).toBe(201)
+    expect(received).toEqual([
+      { taskId: 'bd-1', opts: { harness: 'fast', model: 'gpt-5.6-luna', effort: 'high' } },
+    ])
+  })
+
+  test('POST /api/runs sends no opts when the body omits them', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    expect((await post('/api/runs', '{}')).status).toBe(201)
+    expect(received).toEqual([{ taskId: undefined, opts: {} }])
+  })
+
+  test('GET /api/runner/options lists harnesses, models, efforts and the default', async () => {
+    app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
+    const res = await app.request('/api/runner/options')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      harnesses: { name: string; kind: string }[]
+      default: { kind: string } | null
+    }
+    expect(body.harnesses).toEqual([
+      { name: 'claude', kind: 'claude' },
+      { name: 'codex', kind: 'codex' },
+      { name: 'opencode', kind: 'opencode' },
+    ])
+    // The default mirrors the host's global config, so only its shape is asserted.
+    const dflt = body.default
+    expect(dflt).not.toBeNull()
+    if (dflt !== null) {
+      expect(['claude', 'codex', 'opencode']).toContain(dflt.kind)
+    }
+  })
+
+  test('GET /api/runner/options is empty without a runner', async () => {
+    const res = await app.request('/api/runner/options')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ harnesses: [], models: {}, efforts: {}, default: null })
   })
 
   test('POST /api/runs propagates a launch failure', async () => {
