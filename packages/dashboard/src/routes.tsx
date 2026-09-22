@@ -2370,6 +2370,7 @@ function ReclaimButton({
   state: TaskState
   worktree: string | null
 }) {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // A retrying task is still owned by its runner, which will retry on its own;
@@ -2383,7 +2384,13 @@ function ReclaimButton({
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
         method: 'POST',
       })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      if (!res.ok) {
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Reclaim only releases the tracker claim; actually restart the run.
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2397,6 +2404,7 @@ function ReclaimButton({
         type="button"
         disabled={busy}
         onClick={() => void reclaim()}
+        title="releases the tracker claim and immediately restarts the run, resuming its worktree"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Reclaim
