@@ -103,6 +103,14 @@ export const Config = z.object({
        */
       prCheckIntervalSec: z.number().int().min(1).default(300),
       /**
+       * Observation-only merge-tree audit: each tick, compare the local
+       * `git merge-tree` verdict against GitHub's `mergeable` for every open
+       * PR and append the result to an observation JSONL under the cache dir.
+       * Dispatch stays on GitHub's verdict, so this changes no behaviour.
+       * Defaults off; the JSONL is the evidence for trusting either side.
+       */
+      mergeTreeCheck: z.boolean().default(false),
+      /**
        * How often the stall watcher scans in-progress tasks for a worker that
        * stopped heartbeating. Defaults to 5 minutes; cheap, since it only
        * reads the local store and checks one timestamp per task.

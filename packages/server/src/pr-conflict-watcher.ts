@@ -1,16 +1,27 @@
 import {
   type Config,
   conflictWatchPath,
+  exec as defaultExec,
   type Exec,
   errMsg,
+  execOk,
   fetchPullHeads,
   flagPointlessPrs,
+  forgeToken,
+  gitTokenConfig,
   isConflicting,
   listOpenPrs,
+  type MergeTreeVerdict,
   type makeHarness,
+  mergeableToVerdict,
+  mergeTreeLogPath,
+  mergeTreeVerdict,
   type PrDriver,
+  type PrInfo,
+  prMergeStatus,
   type ResolveConflictResult,
   readConflictWatch,
+  recordMergeTreeObservation,
   resolveConflict,
   type Store,
   saveConflictWatch,
@@ -75,10 +86,15 @@ export function startPrConflictWatcher({
   let failures = 0
   let flagged = 0
   let cleared = 0
+  /** PRs whose local merge-tree verdict disagreed with GitHub's mergeable, cumulative. */
+  let divergent = 0
+  /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
+  let unknownCursor = 0
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
     { label: 'resolved', value: resolved },
+    { label: 'divergent', value: divergent },
     { label: 'flagged', value: flagged },
     { label: 'cleared', value: cleared },
   ]
@@ -98,6 +114,58 @@ export function startPrConflictWatcher({
     status: 'idle',
   }
 
+  /**
+   * Observation-only audit: for every open PR, compare the local
+   * `git merge-tree` verdict against GitHub's `mergeable` and append one row
+   * per PR to the observation JSONL. Dispatch never reads these verdicts.
+   * UNKNOWN is a third bucket, never a divergence; up to two UNKNOWN PRs per
+   * tick are forced through `prMergeStatus` so the mergeability job resolves
+   * round-robin and coverage accrues without a tenfold call increase.
+   */
+  async function observeMergeTree(prs: PrInfo[], run: Exec): Promise<void> {
+    const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
+    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
+    for (const base of baseRefs) {
+      await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', base], { cwd: root })
+    }
+    const forced = new Map<number, string>()
+    const unknown = prs.filter((p) => p.mergeable === 'UNKNOWN')
+    if (unknown.length > 0) {
+      const start = unknownCursor % unknown.length
+      for (let i = 0; i < 2 && i < unknown.length; i++) {
+        const p = unknown[(start + i) % unknown.length]
+        if (p === undefined) continue
+        const status = await prMergeStatus(root, p.number, run)
+        forced.set(p.number, status.mergeable)
+      }
+      unknownCursor += 2
+    }
+    const logPath = mergeTreeLogPath(repoName)
+    for (const p of prs) {
+      let local: MergeTreeVerdict
+      try {
+        local = await mergeTreeVerdict({
+          repoRoot: root,
+          base: `origin/${p.baseRefName}`,
+          head: `refs/remotes/origin/pr/${p.number}/head`,
+          exec: run,
+        })
+      } catch (err) {
+        console.warn(`merge-tree #${p.number}: ${errMsg(err)}`)
+        continue
+      }
+      const github = mergeableToVerdict(forced.get(p.number) ?? p.mergeable)
+      recordMergeTreeObservation(logPath, {
+        pr: p.number,
+        headOid: p.headRefOid ?? '',
+        local,
+        github,
+        timestamp: new Date().toISOString(),
+      })
+      if (github !== 'unknown' && github !== local) divergent++
+    }
+  }
+
   async function tick(): Promise<void> {
     runs++
     const next: WorkerActivity = {
@@ -113,6 +181,7 @@ export function startPrConflictWatcher({
       status: 'active',
     }
     try {
+      const run = exec ?? defaultExec
       const heads = await fetchPullHeads({
         repoRoot: root,
         lastHeads: lastPullHeads,
@@ -121,6 +190,14 @@ export function startPrConflictWatcher({
       lastPullHeads = heads.heads
       const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
       scanned = prs.length
+      if (config.loop.mergeTreeCheck) {
+        // Observation never blocks dispatch: a failed audit is logged and skipped.
+        try {
+          await observeMergeTree(prs, run)
+        } catch (err) {
+          console.warn(`merge-tree observation: ${errMsg(err)}`)
+        }
+      }
       const statePath = conflictWatchPath(repoName)
       const state = readConflictWatch(statePath)
       const nextState: Record<string, { headOid: string }> = {}
