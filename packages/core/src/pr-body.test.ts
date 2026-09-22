@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
-import { backtickCodeRefs, changesSinceBase, formatPrBody } from './pr-body.ts'
+import { backtickFileRefs, changesSinceBase, formatPrBody } from './pr-body.ts'
 
 type Call = readonly string[]
 
@@ -58,34 +58,22 @@ describe('changesSinceBase', () => {
   })
 })
 
-describe('backtickCodeRefs', () => {
+describe('backtickFileRefs', () => {
   test('wraps file paths and file names in backticks', () => {
-    expect(backtickCodeRefs('Write hello.txt, edit src/app.ts and packages/core/pr-body.ts')).toBe(
+    expect(backtickFileRefs('Write hello.txt, edit src/app.ts and packages/core/pr-body.ts')).toBe(
       'Write `hello.txt`, edit `src/app.ts` and `packages/core/pr-body.ts`',
     )
   })
 
-  test('wraps identifiers in backticks', () => {
-    expect(
-      backtickCodeRefs('set in_progress via Runner.drive, call formatPrBody and close am-9h4'),
-    ).toBe('set `in_progress` via `Runner.drive`, call `formatPrBody` and close `am-9h4`')
-  })
-
-  test('wraps commands, flags and issue references in backticks', () => {
-    expect(backtickCodeRefs('Run with --dry-run, see PR #30\n$ bun test')).toBe(
-      'Run with `--dry-run`, see PR `#30`\n$ `bun test`',
-    )
-  })
-
   test('leaves existing backticks and fenced blocks untouched', () => {
-    const text = 'Run `bun run dev`\n```\ngit status\n```\nthen in_progress'
-    expect(backtickCodeRefs(text)).toBe(
-      'Run `bun run dev`\n```\ngit status\n```\nthen `in_progress`',
+    const text = 'Run `bun run dev`\n```\ngit status\n```\nthen edit src/app.ts'
+    expect(backtickFileRefs(text)).toBe(
+      'Run `bun run dev`\n```\ngit status\n```\nthen edit `src/app.ts`',
     )
   })
 
   test('leaves plain English prose alone', () => {
-    expect(backtickCodeRefs('The summary section is now readable and consistent.')).toBe(
+    expect(backtickFileRefs('The summary section is now readable and consistent.')).toBe(
       'The summary section is now readable and consistent.',
     )
   })
@@ -130,6 +118,23 @@ describe('formatPrBody', () => {
     expect(body).toContain('### 📝 Summary')
     expect(body).toContain('Write `hello.txt`')
     expect(body).not.toContain('How to use')
+  })
+
+  test('always renders a summary section, using the agent summary when the description is empty', () => {
+    const body = formatPrBody(
+      { ...TASK, description: '' },
+      [],
+      undefined,
+      'Dedup by exact comment id, not by a numeric watermark.',
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Dedup by exact comment id, not by a numeric watermark.')
+  })
+
+  test('renders the summary heading even with no description and no agent summary', () => {
+    const body = formatPrBody({ ...TASK, description: '' }, [])
+    expect(body).toContain('### 📝 Summary')
   })
 
   test('appends a model/effort footer when metadata is supplied', () => {
