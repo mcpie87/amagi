@@ -129,7 +129,7 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
 }
 
 export function commitMessage(task: TrackerTask): string {
-  return `${task.title}\n\nTask: ${task.id}\n`
+  return `[${task.id}] ${task.title}\n`
 }
 
 /**
