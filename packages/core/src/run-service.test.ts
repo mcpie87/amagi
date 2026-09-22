@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
+import type {
+  CreatePrOptions,
+  OpenPr,
+  PrComment,
+  PrDriver,
+  PrState,
+  PullRequest,
+} from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -184,6 +191,9 @@ class FakePr implements PrDriver {
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
+  }
+  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
+    return []
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []

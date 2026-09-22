@@ -1,3 +1,4 @@
+import type { OpenPr } from '@amagi/core'
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -1628,6 +1629,80 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
   )
 }
 
+/**
+ * Open PRs the forge reports as currently mergeable, the dashboard twin of the
+ * check-prs CLI command. Polled, not streamed: the forge computes mergeability
+ * asynchronously and it changes slowly, so a slow refresh is enough and each
+ * poll is one forge call, not one per PR.
+ */
+function MergeablePrsPanel() {
+  const { selected } = useDashboard()
+  const [prs, setPrs] = useState<OpenPr[] | null>(null)
+
+  useEffect(() => {
+    if (selected === null) return
+    let alive = true
+    const load = () => {
+      fetch(`${apiBase}/api/repos/${selected}/mergeable-prs`)
+        .then(async (res) => {
+          // A repo without a forge driver simply has no mergeable PRs to show.
+          if (res.status === 501) return []
+          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+          return (await res.json()).prs as OpenPr[]
+        })
+        .then((list) => {
+          if (alive) setPrs(list)
+        })
+        .catch(() => {
+          // A transient fetch failure keeps the last good list, not a spinner.
+        })
+    }
+    load()
+    const timer = setInterval(load, 10_000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [selected])
+
+  if (selected === null || prs === null) return null
+
+  return (
+    <section className="mb-6">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Mergeable PRs ({prs.length})
+        </h2>
+        <span className="text-xs text-fg-faint">from the forge, refreshed every 10s</span>
+      </div>
+      {prs.length === 0 ? (
+        <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg-faint">
+          No open PRs are mergeable right now.
+        </p>
+      ) : (
+        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+          {prs.map((p) => (
+            <li key={p.number} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+              <a
+                href={p.url}
+                target="_blank"
+                rel="noreferrer"
+                className="min-w-0 flex-1 truncate hover:underline"
+              >
+                <span className="font-medium text-fg">#{p.number}</span>{' '}
+                <span className="text-sky-ink">{p.title}</span>
+              </a>
+              <span className="shrink-0 text-xs text-fg-faint">
+                {p.headRefName} &rarr; {p.baseRefName}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
@@ -1677,6 +1752,8 @@ function OverviewView() {
           {...(openQuestions > 0 ? { tone: 'amber' as const } : {})}
         />
       </div>
+
+      <MergeablePrsPanel />
 
       <WorkersPanel />
 
