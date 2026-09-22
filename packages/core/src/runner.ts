@@ -545,7 +545,7 @@ export class Runner {
     branch: string,
     model: string | null,
     effort: string | null,
-    summary: string | null,
+    fallbackSummary?: string | null,
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
@@ -587,7 +587,7 @@ export class Runner {
           model,
           effort,
         },
-        summary,
+        fallbackSummary,
       ),
       labels: amagiLabels(current.type),
     }
