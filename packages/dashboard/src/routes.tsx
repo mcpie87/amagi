@@ -1,6 +1,7 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
+import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
   isTerminal,
@@ -8,6 +9,7 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
+import { fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -15,6 +17,7 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  currentUsageFor,
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
@@ -271,6 +274,25 @@ type EligibleEpic = {
   totalChildren: number
   closedChildren: number
 }
+
+/** Preset close reasons offered for an epic; '__other' falls back to free text. */
+const EPIC_CLOSE_REASONS = [
+  'completed',
+  'superseded / duplicate',
+  'abandoned',
+  'merged into another epic',
+  'out of scope',
+  '__other',
+]
+
+/** Preset reasons offered when marking a task done; '__other' falls back to free text. */
+const TASK_DONE_REASONS = [
+  'completed',
+  'already done elsewhere',
+  'duplicate / superseded',
+  'out of scope',
+  '__other',
+]
 
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
@@ -764,20 +786,24 @@ function CloseEpicButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(EPIC_CLOSE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
 
-  const close = async () => {
-    const reason = window.prompt(`Reason for closing ${epic.title}`)
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/epics/close-eligible`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim() }),
+        body: JSON.stringify({ reason: finalReason }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-      else onClosed()
+      else {
+        onClosed()
+        setOpen(false)
+      }
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -785,17 +811,89 @@ function CloseEpicButton({
     }
   }
 
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div className="ml-auto">
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => setOpen(true)}
         className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
       >
         Close
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Close {epic.id}</h2>
+            <div className="space-y-3">
+              <p className="text-sm text-fg-muted">{epic.title}</p>
+              <div>
+                <label className={label} htmlFor="epic-close-reason">
+                  Reason for closing
+                </label>
+                <select
+                  id="epic-close-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {EPIC_CLOSE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="epic-close-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="epic-close-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Close
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -848,7 +946,7 @@ function IssuesView() {
           current === null ? null : (items.find((i) => i.id === current.id) ?? null),
         )
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setError(errMsg(err)))
   }, [selected, refresh])
 
   useEffect(() => {
@@ -1182,6 +1280,7 @@ function WorkerSlot({
   }
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
+  const usage = currentUsageFor(state, taskId)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1204,6 +1303,9 @@ function WorkerSlot({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>agent: {agent === null ? 'starting…' : `${agent.role}: ${agent.harness}`}</span>
         <span>model: {agent?.model ?? 'unknown'}</span>
+        <span>
+          ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
+        </span>
         {resource !== undefined && (
           <>
             <span>rss: {fmtBytes(resource.rssBytes)}</span>
@@ -1224,6 +1326,66 @@ function WorkerSlot({
  * strip sums RSS/CPU/process count over the live agent trees so the operator
  * can see which runner is eating the machine.
  */
+function AutoQueueToggle() {
+  const { status } = useRunner()
+  const { repos, selected } = useDashboard()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fromStatus = status?.autoQueue ?? false
+  const [on, setOn] = useState(fromStatus)
+  useEffect(() => setOn(fromStatus), [fromStatus])
+  // The toggle config lives with the repo the runner serves; address that repo
+  // so it live-applies even when another repo is selected in the dashboard.
+  const runnerRepo = repos?.find((r) => r.name === status?.name)?.key ?? selected
+
+  const toggle = async () => {
+    if (runnerRepo === null || busy) return
+    const next = !on
+    setBusy(true)
+    setError(null)
+    setOn(next)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${runnerRepo}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ autoQueue: next }),
+      })
+      if (!res.ok) {
+        setOn(!next)
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setOn(!next)
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {error !== null && <span className="text-sm text-red-400">{error}</span>}
+      <button
+        type="button"
+        disabled={busy || runnerRepo === null}
+        onClick={() => void toggle()}
+        title={
+          on
+            ? 'free runner slots get filled automatically as tasks become claimable'
+            : 'dispatch is manual: click Run next (or retry) to start a task'
+        }
+        className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
+          on
+            ? 'bg-emerald-600 text-zinc-950 hover:bg-emerald-500'
+            : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+        }`}
+      >
+        Auto queue: {on ? 'on' : 'off'}
+      </button>
+    </div>
+  )
+}
+
 function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
@@ -1249,9 +1411,12 @@ function WorkersPanel() {
   )
   return (
     <section className="mb-6">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        Workers ({running.length}/{status.capacity})
-      </h2>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Workers ({running.length}/{status.capacity})
+        </h2>
+        <AutoQueueToggle />
+      </div>
       <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-4 py-2 text-xs text-fg-muted">
         <span className="font-medium text-fg">{status.name}</span>
         <span>rss: {fmtBytes(total.rssBytes)}</span>
@@ -1319,7 +1484,13 @@ const KANBAN_COLUMNS: KanbanColumn[] = [
     key: 'implementing',
     title: 'In progress',
     accent: 'bg-blue-600',
-    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks', 'retrying'],
+    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks'],
+  },
+  {
+    key: 'retrying',
+    title: 'Retrying',
+    accent: 'bg-orange-600',
+    states: ['retrying'],
   },
   {
     key: 'needs_human',
@@ -1406,6 +1577,14 @@ function QueueView() {
                                 {task.statusReason}
                               </span>
                             )}
+                          {column.key === 'retrying' && (
+                            <span className="mt-1 block truncate text-xs text-orange-300">
+                              {task.retryAt !== null
+                                ? `retries in ${fmtRetryIn(task.retryAt)}`
+                                : 'retry pending'}
+                              {task.lastError !== null && ` · ${task.lastError}`}
+                            </span>
+                          )}
                           {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
                             <span
                               className={`mt-1 block truncate text-xs ${
@@ -1567,6 +1746,12 @@ function RunList({
               <span className="block truncate text-xs text-fg-faint">{task.id}</span>
               {showReason && task.statusReason !== null && (
                 <span className="block truncate text-xs text-fg-muted">{task.statusReason}</span>
+              )}
+              {task.state === 'retrying' && (
+                <span className="block truncate text-xs text-orange-ink">
+                  {task.retryAt !== null ? `retrying in ${fmtRetryIn(task.retryAt)}` : 'retrying'}
+                  {task.lastError !== null && ` · ${task.lastError}`}
+                </span>
               )}
             </span>
           </Link>
@@ -1799,7 +1984,9 @@ function ReclaimButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (worktree === null || isTerminal(state)) return null
+  // A retrying task is still owned by its runner, which will retry on its own;
+  // reclaiming it here would hand the tracker claim to a second worker.
+  if (worktree === null || isTerminal(state) || state === 'retrying') return null
 
   const reclaim = async () => {
     setBusy(true)
@@ -1849,22 +2036,22 @@ function CloseButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(TASK_DONE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
   if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
-  const close = async () => {
-    const reason = window.prompt(
-      target === 'done' ? 'Reason for marking this task done' : 'Reason for closing this task',
-    )
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim(), to: target }),
+        body: JSON.stringify({ reason: finalReason, to: target }),
       })
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setOpen(false)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -1872,12 +2059,33 @@ function CloseButton({
     }
   }
 
+  const onMarkDone = () => {
+    setOpen(true)
+  }
+
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div>
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => {
+          if (target === 'done') onMarkDone()
+          else {
+            const reason = window.prompt(`Reason for closing ${taskId}`)
+            if (reason === null || reason.trim() === '') return
+            void close(reason.trim())
+          }
+        }}
         title={
           target === 'done'
             ? 'marks the task done when the work already existed elsewhere'
@@ -1892,6 +2100,67 @@ function CloseButton({
         {target === 'done' ? 'Mark done' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {target === 'done' && open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Mark done {taskId}</h2>
+            <div className="space-y-3">
+              <div>
+                <label className={label} htmlFor="task-done-reason">
+                  Reason for marking this task done
+                </label>
+                <select
+                  id="task-done-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {TASK_DONE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="task-done-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="task-done-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Mark done
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -2045,6 +2314,112 @@ function RequeueButton({
   )
 }
 
+/**
+ * Restart a run that has no worktree recorded yet, so the runner starts fresh.
+ * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
+ * need the worktree path; done and abandoned runs have no path back, so the
+ * button is hidden for them.
+ */
+function RestartRunButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree !== null || state === 'done' || state === 'abandoned') return null
+
+  const restart = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="restart-run">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void restart()}
+        className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
+      >
+        <Icon name="refresh" size={15} />
+        {busy ? 'Restarting...' : 'Restart run'}
+      </button>
+      {error !== null && (
+        <p className="restart-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Skip a deferred automatic retry's backoff and run it now, only meaningful
+ * while the task sits in retrying (the runner owns it and is sleeping).
+ */
+function RetryNowButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'retrying') return null
+
+  const retryNow = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/retry`, {
+        method: 'POST',
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void retryNow()}
+        className="rounded border border-orange-edge bg-orange-soft px-3 py-1 text-sm text-orange-ink hover:bg-orange-soft-hover disabled:opacity-50"
+      >
+        Retry now
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -2070,10 +2445,6 @@ function StopButton({ taskId }: { taskId: string }) {
 }
 
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-}
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
@@ -2124,6 +2495,17 @@ function fmtAgo(ts: number): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
+/** How long until a scheduled retry fires, e.g. "in 45s". */
+function fmtRetryIn(ts: number): string {
+  const s = Math.max(0, Math.round((ts - Date.now()) / 1000))
+  if (s <= 0) return 'now'
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
+}
+
 const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
 
 const escapeHtml = (s: string) =>
@@ -2167,7 +2549,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
           return res.json() as Promise<Issue>
         })
         .then(setIssue)
-        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => setError(errMsg(err)))
     }
   }
 
@@ -2240,6 +2622,29 @@ function SummaryPanel({ task }: { task: TaskView }) {
         {needsHuman ? 'Needs human attention' : 'Summary'}
       </h2>
       {task.statusReason !== null && <Markdown text={task.statusReason} />}
+    </div>
+  )
+}
+
+/** A task deferring an automatic retry: when it fires and why, plus the reason. */
+function RetryPanel({ task }: { task: TaskView }) {
+  if (task.state !== 'retrying') return null
+  return (
+    <div className="mt-6 rounded-lg border border-orange-edge bg-orange-soft px-4 py-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-orange-ink">
+        Deferred automatic retry
+      </h2>
+      <p className="mt-1 text-sm text-fg">
+        {task.retryAt !== null
+          ? `Retrying in ${fmtRetryIn(task.retryAt)} (attempt ${task.retryCount}).`
+          : `Retry pending (attempt ${task.retryCount}).`}{' '}
+        No human action is needed; use Retry now to skip the wait, or Close to abandon.
+      </p>
+      {task.lastError !== null && (
+        <p className="mt-1 text-sm text-fg-muted">
+          Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
+        </p>
+      )}
     </div>
   )
 }
@@ -2401,12 +2806,25 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && (
+          <RestartRunButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
+        {selected !== null && (
+          <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
+        )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
 
       <SummaryPanel task={task} />
+
+      <RetryPanel task={task} />
 
       {selected !== null &&
         task.state === 'no_pr' &&

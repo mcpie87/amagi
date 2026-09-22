@@ -248,10 +248,8 @@ describe('handled mentions', () => {
     try {
       const path = join(dir, 'watch.json')
       expect(readMentionWatch(path)).toEqual({})
-      saveMentionWatch(path, { 7: { updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 3 } })
-      expect(readMentionWatch(path)).toEqual({
-        7: { updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 3 },
-      })
+      saveMentionWatch(path, { 7: '2026-09-21T10:00:00Z' })
+      expect(readMentionWatch(path)).toEqual({ 7: '2026-09-21T10:00:00Z' })
       expect(mentionWatchPath('amagi')).toContain('amagi/mentions/amagi.watch.json')
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -271,6 +269,19 @@ describe('isAgentMention', () => {
       isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru'),
     ).toBe(false)
     expect(isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru')).toBe(false)
+  })
+
+  test('matches the PR #102 relevance question, which is a mention but not a fix request', () => {
+    expect(
+      isAgentMention(
+        {
+          id: '5768283300',
+          user: 'mcpie87',
+          body: '@chise-maru is still change still relevant compared to current repo state?',
+        },
+        'chise-maru',
+      ),
+    ).toBe(true)
   })
 })
 

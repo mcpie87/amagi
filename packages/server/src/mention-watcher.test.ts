@@ -128,7 +128,7 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, { updatedAt: string; lastCommentId: number }> =>
+const stateFile = (): Record<string, string> =>
   JSON.parse(readFileSync(join(cacheDir, 'amagi', 'mentions', 'demo.watch.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): number =>
@@ -147,7 +147,7 @@ test('scans open PRs once and responds to each unhandled mention exactly once', 
   expect(activity.ok).toBe(true)
   expect(counter(w, 'scanned')).toBe(1)
   expect(counter(w, 'responded')).toBe(1)
-  expect(stateFile()['7']).toEqual({ updatedAt: '2026-09-21T10:00:00Z', lastCommentId: 1 })
+  expect(stateFile()['7']).toBe('2026-09-21T10:00:00Z')
 })
 
 test('skips re-scanning PRs whose updatedAt has not changed', async () => {
@@ -186,7 +186,38 @@ test('only responds to mentions added after the last-seen comment when a PR chan
   const second = driver.posted[1]
   expect(second).toContain('@alice')
   expect(counter(w2, 'responded')).toBe(1)
-  expect(stateFile()['7']).toEqual({ updatedAt: '2026-09-21T11:00:00Z', lastCommentId: 2 })
+  expect(stateFile()['7']).toBe('2026-09-21T11:00:00Z')
+})
+
+test('a later mention in a lower-numbered id space (issue comment) is not skipped by a higher review id', async () => {
+  const driver = new FakePr()
+  // A review id lives in a different, much larger id space than issue comments.
+  driver.comments = [
+    { id: '1', user: 'bob', body: '@chise-maru hi' },
+    { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
+  ]
+  const exec = fakeExec([prInfo()])
+  start(driver, exec)
+
+  await Bun.sleep(60)
+  expect(driver.posted).toHaveLength(1)
+  expect(stateFile()['7']).toBeDefined()
+
+  // New issue comment (smaller id than the review id) mentions the agent.
+  driver.comments = [
+    { id: '1', user: 'bob', body: '@chise-maru hi' },
+    { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
+    { id: '2', user: 'alice', body: '@chise-maru and this?' },
+  ]
+  const w1 = watchers[0]
+  w1?.stop()
+  const w2 = start(driver, fakeExec([prInfo({ updatedAt: '2026-09-21T11:00:00Z' })]))
+
+  await Bun.sleep(60)
+  expect(driver.posted).toHaveLength(2)
+  const second = driver.posted[1]
+  expect(second).toContain('@alice')
+  expect(counter(w2, 'responded')).toBe(1)
 })
 
 test('a failed response is retried on later ticks, not marked handled', async () => {

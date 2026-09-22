@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
+import { agentFailure, errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { cacheHome } from './paths.ts'
@@ -88,9 +89,7 @@ export async function resolveConflict(
     }
     const outcome = await proc.done
     if (!outcome.ok) {
-      const message = `agent failed: ${
-        outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
-      }`
+      const message = `agent failed: ${agentFailure(outcome)}`
       log('error', message)
       return { ok: false, message }
     }
@@ -110,7 +109,7 @@ export async function resolveConflict(
     log(ok ? 'ok' : 'warn', message)
     return { ok, message }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+    const message = errMsg(err)
     log('error', message)
     return { ok: false, message }
   }

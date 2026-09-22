@@ -2,6 +2,7 @@ import {
   type Config,
   conflictWatchPath,
   type Exec,
+  errMsg,
   fetchPullHeads,
   isConflicting,
   listOpenPrs,
@@ -31,8 +32,6 @@ export type PrConflictWatcher = {
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
-
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /**
  * Continuously resolves open PRs that conflict with the base branch, one per
