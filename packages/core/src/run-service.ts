@@ -20,8 +20,12 @@ export type RunnerStatus = {
   available: boolean
   capacity: number
   running: string[]
+  /** Epoch ms at launch per running task, keyed by task id, for live elapsed-time display. */
+  startedAt: Record<string, number>
   /** Resource usage per running task, keyed by task id; absent when no agent is live. */
   resources: Record<string, RunnerResource>
+  /** Whether automatic dispatch is on: ready tasks launch themselves on free slots. */
+  autoQueue: boolean
   /** Activity of background workers (e.g. the mention watcher), when any. */
   workers?: WorkerActivity[]
 }
@@ -35,17 +39,17 @@ export type WorkerActivity = {
   lastRunAt: number
   ok: boolean
   error: string | null
-  prsScanned: number
-  mentionsResponded: number
-  /** Human summary of the last tick for workers without PR/mention counters. */
+  /** Counters reported by the worker, rendered as label/value pairs in the dashboard. */
+  counters: WorkerCounter[]
+  /** Human summary of the last tick for workers without counters. */
   detail?: string | null
 }
 
+/** One named counter a worker reports (e.g. scanned, responded, resolved). */
+export type WorkerCounter = { label: string; value: number }
+
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }
-
-/** How often the auto-pick loop re-checks for ready work. */
-const AUTO_PICK_POLL_MS = 3000
 
 /** The slice of RunService the HTTP layer depends on, so tests can stub it. */
 export interface RunServiceApi {
@@ -54,6 +58,15 @@ export interface RunServiceApi {
   stop(taskId: string): Promise<StopResult>
   /** Live capacity change; only affects new launches, never in-flight runs. */
   setMaxParallel(n: number): void
+  /**
+   * Skip the backoff of a task currently deferring an automatic retry and
+   * start the next attempt immediately. 404 when the task runs elsewhere.
+   */
+  retryNow(taskId: string): Promise<StopResult>
+  /** Live automatic-dispatch toggle; a fresh launch loop starts or stops. */
+  setAutoQueue(enabled: boolean): void
+  /** Stops the automatic-dispatch loop, for server shutdown. */
+  dispose?(): void
 }
 
 export type RunServiceOptions = {
@@ -67,11 +80,12 @@ export type RunServiceOptions = {
   forge?: PrDriver
   /** Overrides config.loop.maxParallel, mainly for tests. */
   maxParallel?: number
-  /**
-   * When true (default), the service fills every free runner slot with the
-   * next ready task on its own, so nothing waits for a manual run click.
-   */
-  autoPick?: boolean
+  /** Overrides config.loop.autoQueue, mainly for tests. */
+  autoQueue?: boolean
+  /** Overrides config.loop.autoQueueIdleSec, mainly for tests. */
+  autoQueueIdleMs?: number
+  /** How often to poll while a launch just succeeded (filling free slots). */
+  autoQueueActiveMs?: number
 }
 
 /**
@@ -82,15 +96,26 @@ export type RunServiceOptions = {
  */
 export class RunService implements RunServiceApi {
   private capacity: number
-  private readonly runs = new Map<string, { runner: Runner; done: Promise<RunOnceResult> }>()
+  private readonly runs = new Map<
+    string,
+    { runner: Runner; startedAt: number; done: Promise<RunOnceResult> }
+  >()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
+  private autoQueue: boolean
+  private readonly autoQueueIdleMs: number
+  /** While work is flowing (a launch just happened) poll quickly to fill free slots. */
+  private readonly autoQueueActiveMs: number
+  private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
+  private autoQueuePolling = false
   private stopped = false
-  private pollTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private readonly opts: RunServiceOptions) {
     this.capacity = opts.maxParallel ?? opts.config.loop.maxParallel
-    if (opts.autoPick ?? true) void this.pickLoop()
+    this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
+    this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
+    this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
+    if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
   /**
@@ -102,8 +127,58 @@ export class RunService implements RunServiceApi {
     this.capacity = Math.max(1, n)
   }
 
+  /**
+   * Live automatic-dispatch toggle. Turning it on starts the poll loop (a poll
+   * is scheduled immediately, not after the first idle wait); turning it off
+   * cancels the pending poll. In-flight runs are untouched either way.
+   */
+  setAutoQueue(enabled: boolean): void {
+    this.autoQueue = enabled
+    if (enabled) {
+      this.scheduleAutoQueuePoll(0)
+    } else if (this.autoQueueTimer !== null) {
+      clearTimeout(this.autoQueueTimer)
+      this.autoQueueTimer = null
+    }
+  }
+
+  /** Stops the auto-queue loop; the runner stays usable for manual launch/stop. */
+  dispose(): void {
+    this.stopped = true
+    if (this.autoQueueTimer !== null) {
+      clearTimeout(this.autoQueueTimer)
+      this.autoQueueTimer = null
+    }
+  }
+
+  private scheduleAutoQueuePoll(ms: number): void {
+    if (this.stopped) return
+    if (this.autoQueueTimer !== null) clearTimeout(this.autoQueueTimer)
+    this.autoQueueTimer = setTimeout(() => void this.autoQueuePoll(), ms)
+  }
+
+  /**
+   * One auto-queue pass: claim and launch the next ready task when a slot is
+   * free. A claimed task means more free slots may exist, so the next poll is
+   * soon; an empty (or gated, or at-capacity) queue means nothing to do, so
+   * the poll backs off to the idle interval.
+   */
+  private async autoQueuePoll(): Promise<void> {
+    if (this.autoQueuePolling) return
+    this.autoQueuePolling = true
+    try {
+      if (!this.autoQueue || this.stopped) return
+      const result = await this.start()
+      const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
+      if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
+    } finally {
+      this.autoQueuePolling = false
+    }
+  }
+
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
+    const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
     await Promise.all(
       running.map(async (id) => {
@@ -112,45 +187,15 @@ export class RunService implements RunServiceApi {
         resources[id] = await processTreeStats(pid)
       }),
     )
+    for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
       available: running.length < this.capacity,
       capacity: this.capacity,
       running,
+      startedAt,
       resources,
-    }
-  }
-
-  /** Stops the server-driven pick loop; in-flight runs keep going. */
-  close(): void {
-    this.stopped = true
-    if (this.pollTimer !== null) clearTimeout(this.pollTimer)
-    this.pollTimer = null
-  }
-
-  /**
-   * Server-driven picking: keeps every free runner slot filled with the next
-   * ready task (FCFS via the tracker) so a run never waits for a click. Polls
-   * so freshly created tasks and freed slots are both picked up; launches go
-   * through the same launchQueue as manual starts, so no double-claim.
-   */
-  private async pickLoop(): Promise<void> {
-    while (!this.stopped) {
-      try {
-        await this.fillSlots()
-      } catch (err) {
-        console.warn(`auto-pick: ${err instanceof Error ? err.message : String(err)}`)
-      }
-      await new Promise((resolve) => {
-        this.pollTimer = setTimeout(resolve, AUTO_PICK_POLL_MS)
-      })
-    }
-  }
-
-  private async fillSlots(): Promise<void> {
-    while (this.runs.size < this.capacity) {
-      const result = await this.start()
-      if (!result.ok) return
+      autoQueue: this.autoQueue,
     }
   }
 
@@ -214,6 +259,15 @@ export class RunService implements RunServiceApi {
     return { ok: true, taskId }
   }
 
+  async retryNow(taskId: string): Promise<StopResult> {
+    const entry = this.runs.get(taskId)
+    if (entry === undefined) {
+      return { ok: false, status: 404, error: `task ${taskId} is not running here` }
+    }
+    entry.runner.retryNow()
+    return { ok: true, taskId }
+  }
+
   private launch(task: TrackerTask): void {
     const { store, tracker, harness, config, repoRoot, repoName, exec, forge } = this.opts
     const runner = new Runner({
@@ -227,6 +281,6 @@ export class RunService implements RunServiceApi {
       ...(forge === undefined ? {} : { forge }),
     })
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
-    this.runs.set(task.id, { runner, done })
+    this.runs.set(task.id, { runner, startedAt: Date.now(), done })
   }
 }

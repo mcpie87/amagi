@@ -32,7 +32,12 @@ async function resolveMergeStatuses(
   return Promise.all(
     prs.map(async (p) => {
       if (p.mergeable !== 'UNKNOWN' && p.mergeStateStatus !== 'UNKNOWN') return p
-      return { ...p, ...(await driver.getMergeStatus(root, p.number)) }
+      const status = await driver.getMergeStatus(root, p.number)
+      const mergeable =
+        status === 'conflicted' ? 'CONFLICTING' : status === 'mergeable' ? 'MERGEABLE' : 'UNKNOWN'
+      const mergeStateStatus =
+        status === 'conflicted' ? 'DIRTY' : status === 'mergeable' ? 'CLEAN' : 'UNKNOWN'
+      return { ...p, mergeable, mergeStateStatus }
     }),
   )
 }
@@ -105,11 +110,11 @@ async function resolveOne(
       remote: config.forge.remote,
     })
     const status = await driver.getMergeStatus(root, pr.number)
-    const ok = status.mergeable === 'MERGEABLE' || status.mergeStateStatus === 'CLEAN'
+    const ok = status === 'mergeable'
     console.log(
       ok
         ? green('  resolved and pushed; PR is mergeable')
-        : yellow(`  pushed; GitHub reports ${status.mergeStateStatus}`),
+        : yellow(`  pushed; GitHub reports ${status}`),
     )
   } catch (err) {
     console.log(red(`  ${err instanceof Error ? err.message : String(err)}`))

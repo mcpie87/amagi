@@ -50,6 +50,7 @@
   --color-cyan-ink: #67e8f9;
 
   --color-orange-soft: rgb(249 115 22 / 0.15);
+  --color-orange-soft-hover: rgb(249 115 22 / 0.28);
   --color-orange-edge: rgb(249 115 22 / 0.3);
   --color-orange-ink: #fdba74;
 
@@ -105,6 +106,8 @@
   --color-amber-ink: #b45309;
   --color-violet-ink: #6d28d9;
   --color-cyan-ink: #0e7490;
+  --color-orange-soft: rgb(249 115 22 / 0.18);
+  --color-orange-soft-hover: rgb(249 115 22 / 0.3);
   --color-orange-ink: #c2410c;
   --color-emerald-soft-hover: rgb(16 185 129 / 0.25);
   --color-emerald-ink: #047857;
@@ -443,6 +446,26 @@ textarea::placeholder {
   margin: 4px 0 0;
   color: var(--color-red-ink);
   font-size: 12px;
+}
+
+.restart-run {
+  position: relative;
+}
+.restart-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: 280px;
+  background: var(--color-surface);
+  color: var(--color-red-ink);
+  border: 1px solid var(--color-red-edge);
+  border-radius: 5px;
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px var(--shadow-color);
 }
 
 .agent-log-header {

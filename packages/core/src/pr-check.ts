@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { applyPersona, branchExists } from './worktree.ts'
 
@@ -12,9 +12,19 @@ export type PrInfo = {
   baseRefName: string
   mergeable: string
   mergeStateStatus: string
+  /** Head commit SHA, so the conflict watcher can skip PRs whose head has not changed. */
+  headRefOid: string | null
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
 }
+
+export type PrCheckOptions = {
+  cwd: string
+  exec?: Exec
+}
+
+const GH_FIELDS =
+  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -24,9 +34,13 @@ export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
   )
 }
 
-export type PrMergeStatus = {
-  mergeable: string
-  mergeStateStatus: string
+export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
+  const run = opts.exec ?? defaultExec
+  const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
+    cwd: opts.cwd,
+    env: ghEnv(),
+  })
+  return JSON.parse(out) as PrInfo[]
 }
 
 export type PrepareConflictWorktreeOptions = {
@@ -101,4 +115,34 @@ export async function pushConflictFix(opts: PushConflictFixOptions): Promise<voi
     ['git', ...tokenCfg, 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],
     { cwd: opts.cwd },
   )
+}
+
+export type PrMergeStatus = {
+  mergeable: string
+  mergeStateStatus: string
+}
+
+/**
+ * Reads a PR's merge status. GitHub computes mergeability asynchronously: bulk
+ * queries (`gh pr list`) report UNKNOWN until a single-PR query triggers it, so
+ * retry briefly until the state resolves.
+ */
+export async function prMergeStatus(
+  cwd: string,
+  number: number,
+  exec?: Exec,
+): Promise<PrMergeStatus> {
+  const run = exec ?? defaultExec
+  let status: PrMergeStatus = { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const out = await execOk(
+      run,
+      ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
+      { cwd, env: ghEnv() },
+    )
+    status = JSON.parse(out) as PrMergeStatus
+    if (status.mergeable !== 'UNKNOWN' && status.mergeStateStatus !== 'UNKNOWN') break
+    if (attempt < 4) await Bun.sleep(1000)
+  }
+  return status
 }

@@ -1,5 +1,6 @@
 import type { Config } from './config.ts'
 import type { Harness } from './drivers/types.ts'
+import { agentFailure, errMsg } from './errors.ts'
 import type { Store } from './store/store.ts'
 
 export type ChatResult = { ok: true } | { ok: false; status: 404 | 409; error: string }
@@ -87,7 +88,7 @@ export class ChatService {
         sessionId: outcome.sessionId,
       })
       if (!outcome.ok) {
-        const detail = outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`
+        const detail = agentFailure(outcome)
         store.append(taskId, {
           type: 'error',
           message: `chat agent failed: ${detail}`,
@@ -95,7 +96,7 @@ export class ChatService {
         })
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = errMsg(err)
       store.append(taskId, { type: 'error', message: `chat failed: ${message}`, fatal: false })
     } finally {
       this.busy.delete(taskId)

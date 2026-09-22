@@ -28,6 +28,7 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
+  headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
   ...over,
 })
@@ -166,6 +167,28 @@ describe('githubPr', () => {
     expect(await makePrDriver('github', open.exec).getPr('/repo', 7)).toBe('open')
   })
 
+  test('resolves the merge status from gh', async () => {
+    const conflicting = fake((c) =>
+      c.includes('view')
+        ? ok('{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}\n')
+        : undefined,
+    )
+    const mergeable = fake((c) =>
+      c.includes('view') ? ok('{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}\n') : undefined,
+    )
+    const unknown = fake((c) =>
+      c.includes('view') ? ok('{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}\n') : undefined,
+    )
+
+    expect(await makePrDriver('github', conflicting.exec).getMergeStatus('/repo', 7)).toBe(
+      'conflicted',
+    )
+    expect(await makePrDriver('github', mergeable.exec).getMergeStatus('/repo', 7)).toBe(
+      'mergeable',
+    )
+    expect(await makePrDriver('github', unknown.exec).getMergeStatus('/repo', 7)).toBe('unknown')
+  })
+
   test('collects conversation, review, and inline comments from the api', async () => {
     const { exec, calls } = fake((c) => {
       if (c.includes('repo') && c.includes('view') && c.includes('nameWithOwner')) {
@@ -217,7 +240,7 @@ describe('githubPr', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,updatedAt',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
@@ -232,7 +255,7 @@ describe('githubPr', () => {
     })
     const status = await makePrDriver('github', exec).getMergeStatus('/repo', 7)
 
-    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
+    expect(status).toBe('mergeable')
     expect(calls).toHaveLength(2)
   })
 
@@ -354,6 +377,7 @@ describe('forgejoPr', () => {
         url: 'https://git.example.com/owner/repo/pulls/3',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',
+        headRefOid: null,
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         updatedAt: '2026-09-21T10:00:00Z',
@@ -361,30 +385,25 @@ describe('forgejoPr', () => {
     ])
   })
 
-  test('maps forgejo mergeability onto the shared merge status', async () => {
+  test('resolves the merge status from the forgejo api', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
-    const status = await withFetch(
+    const mergeable = await withFetch(
       () =>
         new Response(JSON.stringify({ mergeable: true, mergeable_state: 'clean' }), {
           status: 200,
         }),
       () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
     )
-    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
-  })
-
-  test('maps a dirty forgejo PR as conflicting', async () => {
-    process.env.FORGEJO_TOKEN = 'fj_tok'
-    const { exec } = remote()
-    const status = await withFetch(
+    const conflicted = await withFetch(
       () =>
-        new Response(JSON.stringify({ mergeable: false, mergeable_state: 'dirty' }), {
+        new Response(JSON.stringify({ mergeable: false, mergeable_state: 'has_conflicts' }), {
           status: 200,
         }),
       () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
     )
-    expect(status).toEqual({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' })
+    expect(mergeable).toBe('mergeable')
+    expect(conflicted).toBe('conflicted')
   })
 
   test('fetches the pr diff through the forgejo api', async () => {
