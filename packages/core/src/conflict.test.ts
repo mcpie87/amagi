@@ -31,6 +31,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'DIRTY',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -73,7 +74,7 @@ function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
   })
 
 beforeEach(() => {

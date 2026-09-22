@@ -30,7 +30,8 @@ describe('diagnoseRepo', () => {
     expect(d('tracker beads')).toBeDefined()
     expect(d('forge github')).toBeDefined()
     expect(d('worktree root')?.ok).toBe(true)
-    expect(d('checks')?.ok).toBe(false) // none configured
+    // the mandatory format+lint gate is on by default
+    expect(d('checks')?.ok).toBe(true)
   })
 
   test('fails loudly when the path is not a git root', async () => {

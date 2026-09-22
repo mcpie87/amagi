@@ -20,6 +20,7 @@ import type { Exec, ExecResult } from './exec.ts'
 import {
   isAgentMention,
   listPrMentions,
+  type MentionClassified,
   type MentionProgress,
   mentionsPath,
   mentionWatchPath,
@@ -58,6 +59,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -80,6 +82,8 @@ class FakeDriver implements PrDriver {
   async postComment(_cwd: string, _number: number, body: string): Promise<void> {
     this.posted.push(body)
   }
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 class FakeTracker implements Tracker {
@@ -205,7 +209,7 @@ function fakeHarness(
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
   })
 
 describe('parseMentionKind', () => {
@@ -221,7 +225,8 @@ describe('parseMentionKind', () => {
   test('falls back to ambiguous for anything unrecognised', () => {
     expect(parseMentionKind('')).toBe('ambiguous')
     expect(parseMentionKind('sure, go ahead')).toBe('ambiguous')
-    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('fix-pr')
+    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('ambiguous')
+    expect(parseMentionKind('not fix-pr, this is explain')).toBe('ambiguous')
   })
 })
 
@@ -269,6 +274,19 @@ describe('isAgentMention', () => {
       isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru'),
     ).toBe(false)
     expect(isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru')).toBe(false)
+  })
+
+  test('matches the PR #102 relevance question, which is a mention but not a fix request', () => {
+    expect(
+      isAgentMention(
+        {
+          id: '5768283300',
+          user: 'mcpie87',
+          body: '@chise-maru is still change still relevant compared to current repo state?',
+        },
+        'chise-maru',
+      ),
+    ).toBe(true)
   })
 })
 
@@ -574,5 +592,46 @@ describe('respondToMention progress', () => {
       expect(p.phaseMs).toBeGreaterThanOrEqual(0)
       expect(p.totalMs).toBeGreaterThanOrEqual(p.phaseMs)
     }
+  })
+
+  test('reports the chosen kind and the raw classifier reply', async () => {
+    const reply = "Hmm, I'd say this is ambiguous, please clarify"
+    const proc = {
+      pid: -1,
+      events: async function* () {},
+      done: Promise.resolve({
+        exitCode: 0,
+        ok: true,
+        sessionId: null,
+        summary: reply,
+        usage: null,
+        stderr: '',
+      } satisfies AgentOutcome),
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const driver = new FakeDriver()
+    const classified: MentionClassified[] = []
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '9', user: 'bob', body: 'what should I do with this?' },
+      config: config(),
+      driver,
+      exec: fake((c) => (c.includes('rev-parse') ? fail('') : undefined)).exec,
+      makeHarnessFn: () => ({
+        kind: 'fake',
+        start: () => proc,
+        resume: () => proc,
+        listModels: async () => [],
+        listEfforts: async () => [],
+      }),
+      onClassified: (c) => classified.push(c),
+    })
+
+    expect(kind).toBe('ambiguous')
+    expect(classified).toEqual([{ kind: 'ambiguous', reply }])
   })
 })

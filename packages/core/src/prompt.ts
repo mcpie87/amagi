@@ -20,12 +20,27 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
+    '- Before finishing, run the project formatter then its lint check on your',
+    '  changes (e.g. `just fmt` then `just lint`) and fix every failure. The',
+    '  orchestrator runs the same commands as a mandatory gate and blocks the',
+    '  pull request on them.',
     '- Never pipe check or lint output through head/tail: it aborts the tool',
     '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
     '- If your changes add a user-facing feature (new CLI command or flag, new config',
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    '- The tracker CLI (bd) is unavailable inside this worktree; the full issue text',
+    '  (description, notes, comments) is embedded in the prompt instead.',
+    '- For investigation-style tasks ("determine whether ... and fix accordingly"), a',
+    '  clean working tree is not a valid outcome: even when no code change is needed,',
+    '  still write your findings, evidence, and conclusion in your final summary.',
+    "- Once the work is finished, append a `### Conclusion` section to the task's",
+    '  description in the issue tracker, written against the real diff',
+    '  (`git diff <base>...HEAD`), not against the task: what the changes do',
+    '  file by file and anything the reviewer needs to know (deviations from the',
+    '  task, what was left out, why a file that looks unrelated was touched). It',
+    '  is mandatory for every PR.',
     '- The task description is rendered verbatim into the PR body as markdown, so',
     '  wrap paths, identifiers and commands in `backticks` where you mean code.',
     '- End your final message with a short summary of what was done; when the task',
@@ -45,9 +60,20 @@ export function implementSystemPrompt(ctx: PromptContext): string {
   return lines.join('\n')
 }
 
+/** Notes and comments the tracker carries, so the agent never needs bd to see them. */
+function trackerContext(task: TrackerTask): string[] {
+  const parts: string[] = []
+  const notes = task.notes?.trim()
+  if (notes !== undefined && notes !== '') parts.push('', 'Issue notes:', '', notes)
+  const comments = (task.comments ?? []).map((c) => c.trim()).filter((c) => c !== '')
+  if (comments.length > 0) parts.push('', 'Issue comments:', '', ...comments.map((c) => `- ${c}`))
+  return parts
+}
+
 export function implementPrompt(ctx: PromptContext): string {
   const parts = [`Task ${ctx.task.id}: ${ctx.task.title}`]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push(...trackerContext(ctx.task))
   parts.push('', 'Implement this task completely, then stop.')
   return parts.join('\n')
 }
@@ -62,8 +88,29 @@ export function reclaimPrompt(ctx: PromptContext): string {
     'where it left off, and finish what is missing.',
   ]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push(...trackerContext(ctx.task))
   parts.push('', 'Continue this task completely, then stop.')
   return parts.join('\n')
+}
+
+/**
+ * Wraps a phase prompt with a fresh-context restart handoff: the previous
+ * session tripped the context guard and was killed, so the new session gets
+ * the synthesized handoff of what was done and continues from the worktree
+ * state instead of starting over.
+ */
+export function withRestartHandoff(prompt: string, handoff: string): string {
+  return [
+    'Your previous session hit the context budget and was stopped. Its work is',
+    'still in the worktree. Continue from where it left off instead of starting',
+    'over.',
+    '',
+    'What the previous session did:',
+    handoff,
+    '',
+    'Continue the task below:',
+    prompt,
+  ].join('\n')
 }
 
 export function answerPrompt(question: string, answer: string): string {
@@ -229,10 +276,12 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
     ctx.mention.body.trim(),
     '',
     'Classify the comment into exactly one of:',
-    '- fix-pr — the human wants code in this PR changed',
-    '- explain — the human is asking why or how something was done',
-    '- add-a-task — the human wants a new task tracked in the issue tracker, not done in this PR',
-    '- ambiguous — the intent is unclear or none of the above',
+    '- fix-pr: the human wants code in this PR changed',
+    '- explain: the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
+    '- add-a-task: the human wants a new task tracked in the issue tracker, not done in this PR',
+    '- ambiguous: only when the intent genuinely cannot be determined',
+    '',
+    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" is explain.',
     '',
     'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
   ].join('\n')
@@ -319,6 +368,7 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
     'Do not modify any files; reply with the explanation only.',
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
+  parts.push(...trackerContext(task))
   return parts.join('\n')
 }
 
