@@ -1911,7 +1911,7 @@ function DetailRow({ label, value }: { label: string; value: string | ReactNode 
   return (
     <div className="flex gap-2 py-1">
       <dt className="w-28 shrink-0 text-fg-faint">{label}</dt>
-      <dd className="min-w-0 break-all">{value}</dd>
+      <dd className="min-w-0 break-all whitespace-pre-wrap">{value}</dd>
     </div>
   )
 }
@@ -2663,6 +2663,9 @@ const escapeHtml = (s: string) =>
 
 // Raw HTML from the agent is escaped, not rendered, so a prompt-injected tag cannot run.
 const markdown = new Marked({
+  // Keep single newlines (soft breaks) as line breaks: the LLM-authored
+  // summary/reason text is multi-line and must not flatten into one line.
+  breaks: true,
   renderer: {
     html({ text }) {
       return escapeHtml(text)
@@ -2681,6 +2684,9 @@ function Markdown({ text }: { text: string }) {
  * criteria, priority, type, assignee, labels, parent, dependencies - fetched
  * on first expand and kept for the session.
  */
+/** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
+const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
+
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
   const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
@@ -2722,7 +2728,11 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
             <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
-                value={issue.priority === null ? null : `P${issue.priority}`}
+                value={
+                  issue.priority === null
+                    ? null
+                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+                }
               />
               <DetailRow label="type" value={issue.type} />
               <DetailRow label="assignee" value={issue.assignee} />
@@ -2791,7 +2801,7 @@ function RetryPanel({ task }: { task: TaskView }) {
         No human action is needed; use Retry now to skip the wait, or Close to abandon.
       </p>
       {task.lastError !== null && (
-        <p className="mt-1 text-sm text-fg-muted">
+        <p className="mt-1 whitespace-pre-wrap text-sm text-fg-muted">
           Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
         </p>
       )}
