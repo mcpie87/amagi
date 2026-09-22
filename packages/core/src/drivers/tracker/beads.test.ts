@@ -351,15 +351,29 @@ describe('BeadsTracker', () => {
     expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
   })
 
-  test('release unclaims an in-progress issue', async () => {
+  test('release unclaims a claimed in-progress issue', async () => {
     const { exec, calls } = fake((c) =>
-      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+      c.includes('show')
+        ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress","assignee":"amagi"}]')
+        : undefined,
     )
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
     await tracker.release('tst-lmc')
 
     const unclaim = calls.find((c) => c.includes('unclaim'))
     expect(unclaim).toBeDefined()
+  })
+
+  // bd unclaim exits 1 on an unassigned issue, which the stall watcher turns
+  // into a needs_human park for a task that needed no human at all.
+  test('release is a no-op for an in-progress issue with no assignee', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
   })
 
   test('a closed gate reads as resolved', async () => {

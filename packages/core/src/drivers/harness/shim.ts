@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { stateHome } from '../../paths.ts'
 
 /**
@@ -14,8 +14,20 @@ export function shimDir(): string {
   return join(stateHome(), 'amagi', 'shim', 'bin')
 }
 
+/**
+ * Resolves a binary from PATH with the shim dir removed. prepareShim runs under
+ * whatever PATH its own process has, and harnessEnv prepends the shim dir, so a
+ * nested amagi (an agent that starts a run, a CLI launched from a shimmed shell)
+ * would otherwise resolve `git` to the shim and bake it in as REAL_GIT, turning
+ * every git call on the host into an endless fork chain.
+ */
 function resolveBinary(name: string): string {
-  const found = Bun.which(name)
+  const shim = shimDir()
+  const path = (process.env.PATH ?? '')
+    .split(':')
+    .filter((dir) => dir !== '' && resolve(dir) !== shim)
+    .join(':')
+  const found = Bun.which(name, { PATH: path })
   return found ?? ''
 }
 
@@ -36,7 +48,7 @@ function resolveBinary(name: string): string {
  *   operate on the protected repo while reporting a different worktree, so
  *   the resolved top-level no longer matches a protected root.
  */
-function gitShimScript(realGit: string): string {
+function gitShimScript(realGit: string, binDir: string): string {
   return `#!/bin/sh
 # amagi: git shim for harness agents. Read-only inside the protected worktree
 # and main checkout; every other repository passes through untouched.
@@ -45,6 +57,35 @@ function gitShimScript(realGit: string): string {
 set -u
 
 REAL_GIT='${realGit}'
+SHIM_BIN='${binDir}'
+
+canon_file() {
+  _d=$(dirname "$1")
+  _b=$(basename "$1")
+  (cd "$_d" 2>/dev/null && printf '%s/%s\\n' "$(pwd -P)" "$_b") || printf '%s\\n' "$1"
+}
+
+# A REAL_GIT that points back at this script makes resolve() below run this
+# script again, forking without bound until the host's pid table is full. Refuse
+# to exec self under any circumstance, and rescan PATH skipping SHIM_BIN.
+SELF=$(canon_file "$0")
+if [ -z "$REAL_GIT" ] || [ "$(canon_file "$REAL_GIT")" = "$SELF" ]; then
+  REAL_GIT=''
+  for d in $(printf '%s' "$PATH" | tr ':' ' '); do
+    if [ -z "$d" ] || [ "$d" = "$SHIM_BIN" ]; then
+      continue
+    fi
+    if [ -x "$d/git" ] && [ "$(canon_file "$d/git")" != "$SELF" ]; then
+      REAL_GIT="$d/git"
+      break
+    fi
+  done
+fi
+
+if [ -z "$REAL_GIT" ]; then
+  echo "amagi: git shim found no real git outside $SHIM_BIN; refusing to run" >&2
+  exit 127
+fi
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g'
@@ -240,7 +281,7 @@ export function prepareShim(): string {
   mkdirSync(dir, { recursive: true })
   const git = join(dir, 'git')
   const amagi = join(dir, 'amagi')
-  writeFileSync(git, gitShimScript(resolveBinary('git') || 'git'))
+  writeFileSync(git, gitShimScript(resolveBinary('git'), dir))
   writeFileSync(amagi, amagiShimScript(resolveBinary('amagi'), dir))
   chmodSync(git, 0o755)
   chmodSync(amagi, 0o755)

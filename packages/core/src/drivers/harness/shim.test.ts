@@ -271,3 +271,65 @@ describe('amagi shim', () => {
     }
   })
 })
+
+describe('git shim self-reference guard', () => {
+  test('prepareShim resolves the real git even when the shim dir is first on PATH', () => {
+    const saved = process.env.PATH
+    process.env.PATH = `${shim}:${saved ?? ''}`
+    try {
+      const dir = prepareShim()
+      const script = readFileSync(join(dir, 'git'), 'utf8')
+      const real = /^REAL_GIT='(.*)'$/m.exec(script)?.[1]
+      expect(real).toBeDefined()
+      expect(real).not.toBe(join(dir, 'git'))
+      expect(real).not.toBe('git')
+    } finally {
+      if (saved === undefined) delete process.env.PATH
+      else process.env.PATH = saved
+    }
+  })
+
+  // A shim that execs itself forks without bound until the host's pid table is
+  // full, so the generated script must refuse even when handed a poisoned
+  // REAL_GIT it did not write. Both cases run with no real git on PATH: a
+  // regression here hangs the test rather than bombing the machine.
+  test('a shim whose REAL_GIT points at itself refuses to run', () => {
+    const bin = join(home, 'poisoned')
+    mkdirSync(bin, { recursive: true })
+    const self = join(bin, 'git')
+    const script = readFileSync(join(shim, 'git'), 'utf8')
+      .replace(/^REAL_GIT='.*'$/m, `REAL_GIT='${self}'`)
+      .replace(/^SHIM_BIN='.*'$/m, `SHIM_BIN='${bin}'`)
+    writeFileSync(self, script)
+    chmodSync(self, 0o755)
+
+    const r = Bun.spawnSync([self, 'status'], {
+      cwd: wt,
+      env: { ...process.env, PATH: bin },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).not.toBe(0)
+    expect(r.stderr.toString()).toContain('refusing to run')
+  })
+
+  test('an empty REAL_GIT falls back to a PATH scan that skips the shim dir', () => {
+    const bin = join(home, 'empty-real')
+    mkdirSync(bin, { recursive: true })
+    const self = join(bin, 'git')
+    const script = readFileSync(join(shim, 'git'), 'utf8')
+      .replace(/^REAL_GIT='.*'$/m, "REAL_GIT=''")
+      .replace(/^SHIM_BIN='.*'$/m, `SHIM_BIN='${bin}'`)
+    writeFileSync(self, script)
+    chmodSync(self, 0o755)
+
+    const r = Bun.spawnSync([self, 'status'], {
+      cwd: wt,
+      env: { ...process.env, PATH: bin },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).not.toBe(0)
+    expect(r.stderr.toString()).toContain('refusing to run')
+  })
+})
