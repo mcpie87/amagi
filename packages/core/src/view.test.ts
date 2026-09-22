@@ -455,6 +455,66 @@ describe('dashboard state reducer', () => {
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-2'])
     expect(state.tasks['am-1']?.state).toBe('retrying')
   })
+  test('completing a parked task keeps the verdict and the chat conversation', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'worktree.created', path: '/tmp/am-1', branch: 'amagi/am-1' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(5, 'am-1', 1400, {
+        type: 'task.state',
+        from: 'implementing',
+        to: 'no_pr',
+        reason: 'the work was already done',
+      }),
+      ev(6, 'am-1', 1500, { type: 'chat.message', text: 'why no pr?' }),
+      ev(7, 'am-1', 1600, {
+        type: 'agent.started',
+        role: 'chat',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp/am-1',
+        resumed: true,
+      }),
+      ev(8, 'am-1', 1700, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'text', text: 'it was already done' },
+      }),
+      ev(9, 'am-1', 1800, { type: 'agent.exited', role: 'chat', exitCode: 0, sessionId: 'sess-1' }),
+      // The operator marks the task done: the verdict reason lands on the task
+      // and the worktree is torn down, exactly as the close endpoint emits.
+      ev(10, 'am-1', 1900, { type: 'task.state', from: 'no_pr', to: 'done', reason: 'completed' }),
+      ev(11, 'am-1', 2000, { type: 'worktree.removed', path: '/tmp/am-1' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    const task = state.tasks['am-1']
+    expect(task?.state).toBe('done')
+    expect(task?.statusReason).toBe('completed')
+    // The verdict is not the conversation; the chat survives completion.
+    expect(chatTurns(state, 'am-1')).toEqual([
+      { id: 'u6', role: 'user', text: 'why no pr?', ts: 1500, pending: false },
+      {
+        id: 'a7',
+        role: 'assistant',
+        text: 'it was already done',
+        ts: 1600,
+        pending: false,
+      },
+    ])
+  })
+
+  test('a done task stays out of the active queue and attention list', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'no_pr', reason: 'parked' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'no_pr', to: 'done', reason: 'completed' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(activeTasks(state).map((t) => t.id)).toEqual([])
+    expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual([])
+  })
 })
 
 describe('run health', () => {

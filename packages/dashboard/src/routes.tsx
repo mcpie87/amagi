@@ -2414,6 +2414,7 @@ function CloseButton({
   const [open, setOpen] = useState(false)
   const [reason, setReason] = useState<string>(TASK_DONE_REASONS[0] ?? 'completed')
   const [custom, setCustom] = useState('')
+  const { resyncStream } = useDashboard()
   if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
   const close = async (finalReason: string) => {
@@ -2425,6 +2426,10 @@ function CloseButton({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ reason: finalReason, to: target }),
       })
+      // The state change lands in the store server-side; if the event stream
+      // is stale the completed task keeps its old state until a page refresh,
+      // so force a resync instead of waiting for the operator to reload.
+      resyncStream()
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
       else setOpen(false)
     } catch {
@@ -2900,12 +2905,16 @@ function fmtRetryIn(ts: number): string {
   return `${h}h ${m % 60}m`
 }
 
-const ATTENTION_STATES: readonly TaskState[] = [
+// States whose summary/verdict stays visible after the task settles: the
+// parked states for attention, plus `done` so marking a no_pr/needs_human task
+// complete does not erase the verdict the operator just recorded.
+const VERDICT_STATES: readonly TaskState[] = [
   'no_pr',
   'needs_human',
   'pr_flagged',
   'abandoned',
   'cancelled',
+  'done',
 ]
 
 const escapeHtml = (s: string) =>
@@ -3016,21 +3025,26 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
   const needsHuman = task.state === 'needs_human'
-  if (!needsHuman && (task.statusReason === null || !ATTENTION_STATES.includes(task.state))) {
+  const done = task.state === 'done'
+  if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
     return null
   }
   return (
     <div
       className={`mt-6 rounded-lg border px-4 py-3 ${
-        needsHuman ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
+        needsHuman
+          ? 'border-red-edge bg-red-soft'
+          : done
+            ? 'border-line bg-surface'
+            : 'border-amber-edge bg-amber-soft'
       }`}
     >
       <h2
         className={`text-sm font-semibold uppercase tracking-wide ${
-          needsHuman ? 'text-red-ink' : 'text-amber-ink'
+          needsHuman ? 'text-red-ink' : done ? 'text-fg-muted' : 'text-amber-ink'
         }`}
       >
-        {needsHuman ? 'Needs human attention' : 'Summary'}
+        {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
       {task.statusReason !== null && <Markdown text={task.statusReason} />}
     </div>
@@ -3064,11 +3078,21 @@ function RetryPanel({ task }: { task: TaskView }) {
  * Operator/worker chat on a parked no_pr task. Each message resumes the task's
  * recorded session in its worktree; the answer streams in through the repo
  * event stream, so this component only renders what chatTurns folds from it.
+ * A settled task (e.g. marked done) keeps the conversation read-only so it is
+ * not lost on completion, while the send form only shows while the task is a
+ * chattable no_pr run with a session and worktree to resume.
  */
 function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const { state } = useDashboard()
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const task = state.tasks[taskId]
+  const interactive =
+    task !== undefined &&
+    task.state === 'no_pr' &&
+    task.statusReason !== null &&
+    task.sessionId !== null &&
+    task.worktree !== null
   const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
   const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -3080,7 +3104,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const send = async (event: FormEvent) => {
     event.preventDefault()
     const message = text.trim()
-    if (message === '' || responding) return
+    if (message === '' || responding || !interactive) return
     setError(null)
     setText('')
     try {
@@ -3104,7 +3128,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
         ref={scrollRef}
         className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-line bg-sunken p-3"
       >
-        {messages.length === 0 && (
+        {messages.length === 0 && interactive && (
           <p className="text-sm text-fg-faint">Ask the worker about why there is no PR.</p>
         )}
         {messages.map((m) => (
@@ -3124,22 +3148,26 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
           </div>
         ))}
       </div>
-      <form onSubmit={send} className="flex gap-2">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={responding}
-          placeholder={responding ? 'worker is responding...' : 'ask the worker'}
-          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
-        />
-        <button
-          type="submit"
-          disabled={responding || text.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-        >
-          Send
-        </button>
-      </form>
+      {interactive ? (
+        <form onSubmit={send} className="flex gap-2">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            disabled={responding}
+            placeholder={responding ? 'worker is responding...' : 'ask the worker'}
+            className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={responding || text.trim() === ''}
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+          >
+            Send
+          </button>
+        </form>
+      ) : (
+        <p className="text-xs text-fg-faint">Conversation preserved; the task is settled.</p>
+      )}
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
@@ -3190,6 +3218,16 @@ function TaskDetailView() {
       ? [{ key: 'checks', label: `Checks ${task.checksOk ? '(passed)' : '(failed)'}` } as const]
       : []),
   ]
+
+  // The chat is live while the task is a chattable no_pr run; a settled task
+  // keeps the panel only when a conversation was actually recorded, so the
+  // operator does not lose it by completing the task.
+  const chatAvailable =
+    (task.state === 'no_pr' &&
+      task.statusReason !== null &&
+      task.sessionId !== null &&
+      task.worktree !== null) ||
+    state.events.some((e) => e.taskId === task.id && e.type === 'chat.message')
 
   return (
     <section>
@@ -3243,11 +3281,7 @@ function TaskDetailView() {
 
       <RetryPanel task={task} />
 
-      {selected !== null &&
-        task.state === 'no_pr' &&
-        task.statusReason !== null &&
-        task.sessionId !== null &&
-        task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
+      {selected !== null && chatAvailable && <ChatPanel repo={selected} taskId={task.id} />}
 
       <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />
