@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -338,6 +338,110 @@ test('a tick that fails to list PRs reports the error and keeps the previous sta
   expect(activity.ok).toBe(false)
   expect(activity.error).toContain('not logged in')
   expect(activity.lastRunAt).toBeGreaterThan(0)
+})
+
+const mergeTreeConfig = (): Config =>
+  Config.parse({
+    repo: { baseBranch: 'main', worktreeRoot: '/wt' },
+    checks: { commands: [] },
+    loop: { mergeTreeCheck: true },
+  })
+
+const mergeTreeLog = (): { pr: number; local: string; github: string; headOid: string }[] =>
+  readFileSync(join(cacheDir, 'amagi', 'merge-tree', 'demo.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .filter((l) => l !== '')
+    .map((l) => JSON.parse(l) as { pr: number; local: string; github: string; headOid: string })
+
+test('records merge-tree observations and divergences when the flag is on', async () => {
+  const local = new Map<number, 'conflict' | 'clean'>()
+  const exec: Exec = async (cmd) => {
+    if (cmd.includes('gh') && cmd.includes('list')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify([
+          pr({ number: 7, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+          pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+        ]),
+        stderr: '',
+      }
+    }
+    if (cmd.includes('merge-tree')) {
+      const head = cmd[cmd.length - 1] ?? ''
+      const n = Number(head.match(/pr\/(\d+)\/head/)?.[1] ?? '0')
+      return local.get(n) === 'conflict'
+        ? { exitCode: 1, stdout: '', stderr: '' }
+        : { exitCode: 0, stdout: '', stderr: '' }
+    }
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd.includes('view')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+        stderr: '',
+      }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  local.set(7, 'clean')
+  local.set(8, 'conflict')
+  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig() })
+
+  await Bun.sleep(60)
+
+  // #8 conflicts locally while GitHub reports it mergeable: the divergence.
+  expect(counter(w, 'divergent')).toBeGreaterThanOrEqual(1)
+  const rows = mergeTreeLog()
+  expect(rows.length).toBeGreaterThanOrEqual(2)
+  expect(rows.some((r) => r.pr === 7 && r.local === 'clean' && r.github === 'clean')).toBe(true)
+  expect(rows.some((r) => r.pr === 8 && r.local === 'conflict' && r.github === 'clean')).toBe(true)
+})
+
+test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', async () => {
+  let views = 0
+  const exec: Exec = async (cmd) => {
+    if (cmd.includes('gh') && cmd.includes('list')) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify([
+          pr({ number: 7, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }),
+        ]),
+        stderr: '',
+      }
+    }
+    if (cmd.includes('merge-tree')) return { exitCode: 0, stdout: '', stderr: '' }
+    if (cmd.includes('view')) {
+      views++
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+        stderr: '',
+      }
+    }
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig() })
+
+  await Bun.sleep(60)
+
+  expect(views).toBeGreaterThanOrEqual(1)
+  expect(counter(w, 'divergent')).toBe(0)
+  const rows = mergeTreeLog()
+  expect(rows.length).toBeGreaterThanOrEqual(1)
+  expect(rows.some((r) => r.pr === 7 && r.local === 'clean' && r.github === 'clean')).toBe(true)
+})
+
+test('merge-tree observations stay off when the flag is off', async () => {
+  const exec = fakeExec(() => [pr()])
+  start(exec, () => fakeHarness(() => {}))
+
+  await Bun.sleep(60)
+
+  expect(existsSync(join(cacheDir, 'amagi', 'merge-tree', 'demo.jsonl'))).toBe(false)
 })
 
 const openPrTask = (store: Store): void => {

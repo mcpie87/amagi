@@ -7,6 +7,8 @@ import {
   fetchPullHeads,
   isConflicting,
   listOpenPrs,
+  mergeableToVerdict,
+  mergeTreeVerdict,
   type PrInfo,
   prepareConflictWorktree,
   prMergeStatus,
@@ -162,6 +164,63 @@ describe('prMergeStatus', () => {
 
     expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
     expect(calls).toHaveLength(2)
+  })
+})
+
+describe('mergeTreeVerdict', () => {
+  test('runs merge-tree with the pinned config and maps the exit code', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('merge-tree') ? { exitCode: 1, stdout: '', stderr: '' } : undefined,
+    )
+    const verdict = await mergeTreeVerdict({
+      repoRoot: '/repo',
+      base: 'origin/main',
+      head: 'refs/remotes/origin/pr/7/head',
+      exec,
+    })
+
+    expect(verdict).toBe('conflict')
+    expect(calls[0]).toEqual([
+      'git',
+      '-c',
+      'merge.renames=true',
+      '-c',
+      'merge.conflictStyle=merge',
+      '-c',
+      'merge.directoryRenames=conflicts',
+      'merge-tree',
+      '--write-tree',
+      '--quiet',
+      'origin/main',
+      'refs/remotes/origin/pr/7/head',
+    ])
+  })
+
+  test('reports clean on exit 0', async () => {
+    const { exec } = fake((c) => (c.includes('merge-tree') ? ok('') : undefined))
+    expect(await mergeTreeVerdict({ repoRoot: '/repo', base: 'main', head: 'head', exec })).toBe(
+      'clean',
+    )
+  })
+
+  test('treats a missing ref (exit 1 with stderr) as an error, never a conflict', async () => {
+    const { exec } = fake((c) =>
+      c.includes('merge-tree')
+        ? fail('merge-tree: nosuchref - not something we can merge')
+        : undefined,
+    )
+    await expect(
+      mergeTreeVerdict({ repoRoot: '/repo', base: 'main', head: 'nosuchref', exec }),
+    ).rejects.toThrow('nosuchref')
+  })
+})
+
+describe('mergeableToVerdict', () => {
+  test('maps CONFLICTING and MERGEABLE 1:1 and UNKNOWN to a third bucket', () => {
+    expect(mergeableToVerdict('CONFLICTING')).toBe('conflict')
+    expect(mergeableToVerdict('MERGEABLE')).toBe('clean')
+    expect(mergeableToVerdict('UNKNOWN')).toBe('unknown')
+    expect(mergeableToVerdict('')).toBe('unknown')
   })
 })
 
