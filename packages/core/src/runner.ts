@@ -634,8 +634,11 @@ export class Runner {
         changes,
         {
           harness: this.deps.harness.kind,
-          model,
-          effort,
+          // Fall back to the configured implement model/effort when the run
+          // reports none (fix/resume rounds do not carry one), mirroring the
+          // comment footer so the PR body always carries the same provenance.
+          model: model ?? config.harness.implement.model ?? null,
+          effort: effort ?? config.harness.implement.effort ?? null,
         },
         fallbackSummary,
       ),
