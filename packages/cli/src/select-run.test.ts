@@ -53,6 +53,21 @@ describe('harnessChoices', () => {
     expect(labels).toEqual(['claude', 'codex', 'opencode'])
   })
 
+  test('fallback kind matching the implement harness keeps its bin', () => {
+    const choices = harnessChoices(
+      config({
+        definitions: {},
+        implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
+      }),
+    )
+    const opencode = choices.find((o) => o.label === 'opencode')
+    expect(opencode?.value).toMatchObject({
+      kind: 'opencode',
+      bin: 'opencode-unconfined',
+      permissions: 'bypass',
+    })
+  })
+
   test('sorts definitions by how often their kind was used', () => {
     const counts = usageCounts([
       started(1, 'claude', 'sonnet'),
@@ -111,6 +126,24 @@ describe('pickRunSelection', () => {
     expect(interactive).toBe(false)
     expect(harness).toMatchObject({ kind: 'claude' })
     expect(harness.permissions).toBe('workspace-write')
+  })
+
+  test('a --harness bare kind inherits the implement bin for its kind', async () => {
+    const cfg = config({
+      implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
+    })
+    const { harness } = await pickRunSelection(cfg, { harness: 'opencode' }, null, listModels)
+    expect(harness).toMatchObject({
+      kind: 'opencode',
+      bin: 'opencode-unconfined',
+      permissions: 'bypass',
+    })
+  })
+
+  test('a --harness unknown kind is rejected', async () => {
+    await expect(pickRunSelection(config(), { harness: 'nope' }, null, listModels)).rejects.toThrow(
+      'unknown harness "nope"',
+    )
   })
 
   test('no tty and no flags keeps the configured implement harness', async () => {
