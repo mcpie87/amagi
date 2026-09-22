@@ -198,6 +198,17 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
   z.object({
+    type: z.literal('mention.classified'),
+    /** Which response path the classifier chose for the mention. */
+    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
+    /** The raw classifier reply; when the parse is wrong this is all that explains why. */
+    reply: z.string(),
+    /** The PR the mention was on. */
+    prNumber: z.number().int(),
+    /** The comment id of the mention. */
+    mentionId: z.string(),
+  }),
+  z.object({
     type: z.literal('triage.decision'),
     action: TriageAction,
     reason: z.string(),

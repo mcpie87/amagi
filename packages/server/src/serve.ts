@@ -128,6 +128,7 @@ function startRepoPollers(
                 config: ws.config,
                 driver: forge,
                 tracker: ws.tracker,
+                store: ws.store,
                 intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
               }),
         conflict:
