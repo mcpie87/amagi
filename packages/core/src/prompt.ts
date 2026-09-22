@@ -158,7 +158,7 @@ export type MentionPromptContext = {
   checks: readonly string[]
 }
 
-export type TakeDownMentionContext = {
+export type FlagMentionContext = {
   pr: { number: number; title: string; url: string }
   mention: { user: string; body: string }
   outPath: string
@@ -238,11 +238,12 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
     '- fix-pr: the human wants code in this PR changed',
     '- explain: the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
     '- add-a-task: the human wants a new task tracked in the issue tracker, not done in this PR',
+    '- flag: the human explicitly wants this pull request closed or reverted',
     '- ambiguous: only when the intent genuinely cannot be determined',
     '',
     'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" is explain.',
     '',
-    'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
+    'Reply with exactly one token: fix-pr, explain, add-a-task, flag, or ambiguous.',
   ].join('\n')
 }
 
@@ -263,24 +264,24 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
   ].join('\n')
 }
 
-export function takeDownSystemPrompt(): string {
+export function flagSystemPrompt(): string {
   return [
-    'You are deciding whether a pull request deserves to be taken down (closed or reverted).',
+    'You are deciding whether a pull request should be flagged as a candidate for closure (closed or reverted).',
     'Read the PR and the request, then write a verdict to the file.',
     'Do not modify any files in the repository.',
   ].join('\n')
 }
 
-export function takeDownPrompt(ctx: TakeDownMentionContext): string {
+export function flagPrompt(ctx: FlagMentionContext): string {
   return [
-    `A human (@${ctx.mention.user}) asked to take down PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    `A human (@${ctx.mention.user}) asked to flag PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
     `Write your verdict to this file: ${ctx.outPath}`,
     '',
     'Start the file with one of these verdict lines:',
-    '- `TAKE DOWN` when the PR deserves to be taken down, followed by the concise, direct reason on the next line.',
+    '- `TAKE DOWN` when the PR deserves to be flagged for closure, followed by the concise, direct reason on the next line.',
     '- `KEEP` when it does not, followed by a short explanation.',
     '',
     'The reason is posted as a comment on the task issue, so keep it concise and direct.',

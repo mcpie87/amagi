@@ -217,7 +217,7 @@ describe('parseMentionKind', () => {
     expect(parseMentionKind('FIX-PR')).toBe('fix-pr')
     expect(parseMentionKind('explain')).toBe('explain')
     expect(parseMentionKind('add-a-task')).toBe('add-a-task')
-    expect(parseMentionKind('take-down')).toBe('take-down')
+    expect(parseMentionKind('flag')).toBe('flag')
     expect(parseMentionKind('ambiguous')).toBe('ambiguous')
   })
 
@@ -438,7 +438,7 @@ describe('respondToMention', () => {
   })
 
   test('a TAKE DOWN verdict posts the reason on the tracker issue and replies on the PR', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-1.md')
+    const outPath = join(tmpdir(), 'amagi-flag-7-1.md')
     writeFileSync(
       outPath,
       'TAKE DOWN\nThis PR reverses the base behavior and breaks existing callers.\n',
@@ -456,10 +456,10 @@ describe('respondToMention', () => {
         driver,
         tracker,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual([
         'This PR reverses the base behavior and breaks existing callers.',
       ])
@@ -473,7 +473,7 @@ describe('respondToMention', () => {
   })
 
   test('a KEEP verdict replies on the PR but does not comment on the tracker', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-2.md')
+    const outPath = join(tmpdir(), 'amagi-flag-7-2.md')
     writeFileSync(outPath, 'KEEP\nThe conflicts are trivial and the PR is fine.\n')
     const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
@@ -488,10 +488,10 @@ describe('respondToMention', () => {
         driver,
         tracker,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual(['The conflicts are trivial and the PR is fine.'])
       expect(tracker.comments).toEqual([])
     } finally {
@@ -499,8 +499,8 @@ describe('respondToMention', () => {
     }
   })
 
-  test('take-down without a tracker or task id still replies on the PR', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-3.md')
+  test('flag without a tracker or task id still replies on the PR', async () => {
+    const outPath = join(tmpdir(), 'amagi-flag-7-3.md')
     writeFileSync(outPath, 'TAKE DOWN\nThe PR duplicates existing functionality.\n')
     const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
@@ -513,10 +513,10 @@ describe('respondToMention', () => {
         config: config(),
         driver,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual(['The PR duplicates existing functionality.'])
     } finally {
       rmSync(outPath, { force: true })
