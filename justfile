@@ -75,6 +75,10 @@ respond-to-mentions:
 check-prs:
     bun run packages/cli/src/index.ts check-prs
 
+# List open PRs that are currently mergeable, for the configured forge
+mergeable-prs:
+    bun run packages/cli/src/index.ts mergeable-prs
+
 # Interactively draft a task with the picked agent, create it, then run it
 new:
     bun run packages/cli/src/index.ts new
