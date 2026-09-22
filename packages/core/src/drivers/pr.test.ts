@@ -30,6 +30,7 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: ['amagi'],
   ...over,
 })
 
@@ -240,7 +241,7 @@ describe('githubPr', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
@@ -267,6 +268,16 @@ describe('githubPr', () => {
 
     expect(calls[0]).toEqual(['gh', 'pr', 'diff', '7'])
     expect(diff).toBe('diff --git a/x b/x\n')
+  })
+
+  test('adds and removes a label on an existing pr', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const driver = makePrDriver('github', exec)
+    await driver.addLabel('/repo', 7, 'amagi/needs-closing')
+    await driver.removeLabel('/repo', 7, 'amagi/needs-closing')
+
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/needs-closing'])
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--remove-label', 'amagi/needs-closing'])
   })
 })
 
@@ -381,6 +392,7 @@ describe('forgejoPr', () => {
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         updatedAt: '2026-09-21T10:00:00Z',
+        labels: [],
       },
     ])
   })
@@ -427,5 +439,31 @@ describe('forgejoPr', () => {
         () => makePrDriver('forgejo', exec).postComment('/wt', 3, 'hi'),
       ),
     ).rejects.toThrow(/FORGEJO_TOKEN/)
+  })
+
+  test('adds and removes a label on an existing pull request', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    await withFetch(
+      (path, method) => {
+        if (path === 'repos/owner/repo/labels' && method === 'GET') {
+          return new Response(JSON.stringify([{ id: 5, name: 'amagi/needs-closing' }]), {
+            status: 200,
+          })
+        }
+        if (path === 'repos/owner/repo/issues/3/labels' && method === 'POST') {
+          return new Response('{}', { status: 200 })
+        }
+        if (path === 'repos/owner/repo/issues/3/labels/5' && method === 'DELETE') {
+          return new Response('', { status: 204 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+      async () => {
+        const driver = makePrDriver('forgejo', exec)
+        await driver.addLabel('/wt', 3, 'amagi/needs-closing')
+        await driver.removeLabel('/wt', 3, 'amagi/needs-closing')
+      },
+    )
   })
 })

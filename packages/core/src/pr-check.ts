@@ -16,6 +16,8 @@ export type PrInfo = {
   headRefOid: string | null
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
+  /** Label names, so the pointlessness pass can scope to the amagi provenance label. */
+  labels: string[]
 }
 
 export type PrCheckOptions = {
@@ -24,7 +26,7 @@ export type PrCheckOptions = {
 }
 
 const GH_FIELDS =
-  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt'
+  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -34,13 +36,22 @@ export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
   )
 }
 
+/**
+ * Lists open PRs through gh. GitHub-only by design: the pollers and the
+ * pointlessness pass that consume it share this binding rather than each
+ * hammering a forge-specific endpoint.
+ */
 export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
   const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
     cwd: opts.cwd,
     env: ghEnv(),
   })
-  return JSON.parse(out) as PrInfo[]
+  const raw = JSON.parse(out) as Array<
+    Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
+  >
+  // gh reports labels as objects; the pass only needs the names.
+  return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
 }
 
 export type PrepareConflictWorktreeOptions = {

@@ -32,13 +32,10 @@ const MENTION_KINDS: readonly MentionKind[] = [
   'ambiguous',
 ]
 
-/** Best-effort parse of the classifier's reply; anything unrecognised is ambiguous. */
+/** Parse of the classifier's reply; only an exact known kind matches, anything else is ambiguous. */
 export function parseMentionKind(reply: string): MentionKind {
-  const lower = reply.toLowerCase()
-  for (const k of MENTION_KINDS) {
-    if (lower.includes(k)) return k
-  }
-  return 'ambiguous'
+  const kind = reply.trim().toLowerCase()
+  return MENTION_KINDS.includes(kind as MentionKind) ? (kind as MentionKind) : 'ambiguous'
 }
 
 export function mentionsPath(repoName: string): string {

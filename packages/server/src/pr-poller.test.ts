@@ -43,6 +43,8 @@ class FakePr implements PrDriver {
     return []
   }
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 class FakeTracker implements Tracker {
@@ -161,6 +163,21 @@ test('an open pr records its merge status for the pr_open task', async () => {
   await Bun.sleep(40)
 
   expect(store.task('bd-1')?.prMergeStatus).toBe('conflicted')
+})
+
+test('a merged pr settles a flagged task as done', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_flagged' })
+  const forge = new FakePr()
+  forge.state = 'merged'
+  const tracker = new FakeTracker()
+
+  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.state).toBe('done')
+  expect(tracker.closed.map((c) => c.id)).toEqual(['bd-1'])
 })
 
 test('an unresolvable merge status keeps the task in pr_open without settling it', async () => {

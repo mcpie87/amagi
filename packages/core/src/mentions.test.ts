@@ -58,6 +58,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -86,6 +87,8 @@ class FakeDriver implements PrDriver {
   async postComment(_cwd: string, _number: number, body: string): Promise<void> {
     this.posted.push(body)
   }
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 class FakeTracker implements Tracker {
@@ -227,7 +230,8 @@ describe('parseMentionKind', () => {
   test('falls back to ambiguous for anything unrecognised', () => {
     expect(parseMentionKind('')).toBe('ambiguous')
     expect(parseMentionKind('sure, go ahead')).toBe('ambiguous')
-    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('fix-pr')
+    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('ambiguous')
+    expect(parseMentionKind('not fix-pr, this is explain')).toBe('ambiguous')
   })
 })
 

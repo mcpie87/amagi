@@ -74,3 +74,7 @@ respond-to-mentions:
 # Check PRs the bot is involved in
 check-prs:
     bun run packages/cli/src/index.ts check-prs
+
+# Interactively draft a task with the picked agent, create it, then run it
+new:
+    bun run packages/cli/src/index.ts new
