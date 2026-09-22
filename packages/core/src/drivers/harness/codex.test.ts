@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
@@ -53,12 +55,13 @@ describe('CodexTranslator against a recorded transcript', () => {
     expect(result).toEqual({ kind: 'tool_result', name: 'command_execution', ok: true, output: '' })
   })
 
-  test('usage has no cost figure, unlike claude', async () => {
+  test('usage has no cost figure, unlike claude, but carries cached input tokens', async () => {
     const { events, translator } = await replay()
     expect(events.find((e) => e.kind === 'usage')).toEqual({
       kind: 'usage',
       inputTokens: 28644,
       outputTokens: 83,
+      cachedTokens: 26240,
     })
     expect(translator.usage?.costUsd).toBeNull()
   })
@@ -159,6 +162,21 @@ describe('CodexHarness argv', () => {
     expect(argv[argv.indexOf('-c') + 1]).toBe('developer_instructions=be terse')
   })
 
+  test('effort is wired through as model_reasoning_effort', () => {
+    const argv = new CodexHarness().argv({ ...base, effort: 'high' }, null)
+    expect(argv[argv.indexOf('-c') + 1]).toBe('model_reasoning_effort=high')
+  })
+
+  test('effort and system prompt each get their own -c', () => {
+    const argv = new CodexHarness().argv(
+      { ...base, systemPrompt: 'be terse', effort: 'xhigh' },
+      null,
+    )
+    expect(argv.filter((a) => a === '-c')).toHaveLength(2)
+    expect(argv).toContain('developer_instructions=be terse')
+    expect(argv).toContain('model_reasoning_effort=xhigh')
+  })
+
   test('extraArgs land before the trailing prompt', () => {
     const argv = new CodexHarness().argv({ ...base, extraArgs: ['--add-dir', '/other'] }, null)
     expect(argv.slice(-3)).toEqual(['--add-dir', '/other', 'do the thing'])
@@ -175,5 +193,51 @@ describe('CodexHarness process', () => {
     expect(seen).toEqual([])
     expect(outcome.ok).toBe(false)
     expect(outcome.exitCode).not.toBe(0)
+  })
+})
+
+describe('CodexHarness listModels', () => {
+  const withCodexHome = async (
+    write: (dir: string) => void,
+    run: () => Promise<void>,
+  ): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-codex-home-'))
+    const prior = process.env.CODEX_HOME
+    process.env.CODEX_HOME = dir
+    try {
+      write(dir)
+      await run()
+    } finally {
+      if (prior === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = prior
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('reads slugs out of the local models cache, skipping hidden entries', async () => {
+    await withCodexHome(
+      (dir) =>
+        writeFileSync(
+          join(dir, 'models_cache.json'),
+          JSON.stringify({
+            models: [
+              { slug: 'gpt-5.6-sol', visibility: 'list' },
+              { slug: 'codex-auto-review', visibility: 'hide' },
+            ],
+          }),
+        ),
+      async () => {
+        expect(await new CodexHarness().listModels()).toEqual(['gpt-5.6-sol'])
+      },
+    )
+  })
+
+  test('returns an empty list when no cache file exists yet', async () => {
+    await withCodexHome(
+      () => {},
+      async () => {
+        expect(await new CodexHarness().listModels()).toEqual([])
+      },
+    )
   })
 })

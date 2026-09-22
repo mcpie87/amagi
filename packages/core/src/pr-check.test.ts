@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
 import {
   isConflicting,
   listOpenPrs,
   type PrInfo,
   prepareConflictWorktree,
+  prMergeStatus,
   pushConflictFix,
 } from './pr-check.ts'
 
@@ -32,6 +36,9 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'CONFLICTING',
   mergeStateStatus: 'DIRTY',
+  headRefOid: 'deadbeef',
+  updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -64,7 +71,7 @@ describe('listOpenPrs', () => {
       c.includes('list') && c.includes('pr')
         ? ok(
             JSON.stringify([
-              pr(),
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/bug' }] },
               pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
             ]),
           )
@@ -79,10 +86,31 @@ describe('listOpenPrs', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+    // gh reports labels as objects; listOpenPrs reduces them to names
+    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/bug'])
+    expect(prs[1]?.labels).toEqual([])
+  })
+})
+
+describe('prMergeStatus', () => {
+  test('retries while GitHub reports UNKNOWN, then returns the resolved state', async () => {
+    const calls: Call[] = []
+    let n = 0
+    const exec: Exec = async (cmd) => {
+      calls.push(cmd)
+      n++
+      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
+      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
+    }
+
+    const status = await prMergeStatus('/repo', 7, exec)
+
+    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
+    expect(calls).toHaveLength(2)
   })
 })
 
@@ -139,6 +167,48 @@ describe('prepareConflictWorktree', () => {
     })
 
     expect(wt.conflicted).toBe(false)
+  })
+
+  test('scopes the persona to the conflict worktree when configured', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'amagi-home-'))
+    const savedXdg = process.env.XDG_CONFIG_HOME
+    try {
+      process.env.XDG_CONFIG_HOME = home
+      const dir = join(home, 'git', 'personas')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'agent.gitconfig'),
+        '[user]\n  name = Chise\n  email = chise@example.com\n',
+      )
+      const { exec, calls } = fake((c) => {
+        if (c.includes('rev-parse')) return fail('')
+        if (c.includes('merge')) return fail('conflict')
+        return undefined
+      })
+
+      await prepareConflictWorktree({
+        repoRoot: '/repo',
+        repoName: 'amagi',
+        worktreeRoot: '/wt',
+        baseBranch: 'main',
+        pr: pr(),
+        persona: 'agent',
+        exec,
+      })
+
+      expect(calls).toContainEqual(['git', 'config', 'extensions.worktreeConfig', 'true'])
+      expect(calls).toContainEqual([
+        'git',
+        'config',
+        '--worktree',
+        'include.path',
+        join(dir, 'agent.gitconfig'),
+      ])
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
+      else process.env.XDG_CONFIG_HOME = savedXdg
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 

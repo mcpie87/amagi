@@ -1,10 +1,10 @@
 import type { Config } from './config.ts'
 import { ClaudeHarness } from './drivers/harness/claude.ts'
 import { CodexHarness } from './drivers/harness/codex.ts'
-import { OpenCodeHarness } from './drivers/harness/opencode.ts'
+import { OpencodeHarness } from './drivers/harness/opencode.ts'
 import { BeadsTracker } from './drivers/tracker/beads.ts'
 import { ForgejoTracker, GithubTracker } from './drivers/tracker/forge.ts'
-import type { Harness, Tracker } from './drivers/types.ts'
+import type { AgentStartOptions, Harness, Tracker } from './drivers/types.ts'
 
 export class NotImplementedDriverError extends Error {
   constructor(role: string, kind: string) {
@@ -31,10 +31,30 @@ export function makeHarness(config: Config['harness']['implement']): Harness {
     case 'claude':
       return new ClaudeHarness(config.bin === undefined ? {} : { bin: config.bin })
     case 'opencode':
-      return new OpenCodeHarness(config.bin === undefined ? {} : { bin: config.bin })
+      return new OpencodeHarness(config.bin === undefined ? {} : { bin: config.bin })
     case 'codex':
       return new CodexHarness(config.bin === undefined ? {} : { bin: config.bin })
     default:
       throw new NotImplementedDriverError('harness', config.kind)
+  }
+}
+
+/**
+ * Maps the option fields of a harness config onto their AgentStartOptions
+ * counterparts, dropping model/effort when unset. Shared by every
+ * harness.start() call site so the spread stays in one place.
+ */
+export function harnessStartOpts(
+  cfg: Pick<
+    Config['harness']['implement'],
+    'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs'
+  >,
+): Pick<AgentStartOptions, 'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs'> {
+  return {
+    ...(cfg.model === undefined ? {} : { model: cfg.model }),
+    ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+    ...(cfg.allowedTools === undefined ? {} : { allowedTools: cfg.allowedTools }),
+    permissions: cfg.permissions,
+    extraArgs: cfg.extraArgs,
   }
 }

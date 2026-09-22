@@ -1,0 +1,117 @@
+import type { TrackerTask } from './drivers/types.ts'
+import type { Exec } from './exec.ts'
+import { modelFooter } from './footer.ts'
+
+export type PrChange = {
+  path: string
+  /** NaN when the file is binary. */
+  additions: number
+  /** NaN when the file is binary. */
+  deletions: number
+}
+
+/**
+ * Resolves the ref the worktree branched from so the PR diff excludes base
+ * changes: `origin/<base>` when a token fetch happened, else `<base>`.
+ */
+export async function diffBase(run: Exec, cwd: string, base: string): Promise<string> {
+  const remote = `origin/${base}`
+  const r = await run(['git', 'rev-parse', '--verify', '--quiet', remote], { cwd })
+  return r.exitCode === 0 ? remote : base
+}
+
+export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
+  const ref = await diffBase(run, cwd, base)
+  const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
+  return r.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [additions, deletions, ...rest] = line.split('\t')
+      return {
+        path: rest.join('\t'),
+        additions: Number(additions),
+        deletions: Number(deletions),
+      }
+    })
+}
+
+/** Headings an agent appends to the task description to document the PR. */
+const SECTION_HEADING = /^###\s+(How to use|Conclusion)\s*$/gm
+
+/**
+ * Splits a task description into its summary and any agent-authored sections:
+ * `### How to use` (optional, when the PR adds a user-facing feature) and
+ * `### Conclusion` (mandatory, written after the work against the real diff).
+ * Both are null when the description has no such heading.
+ */
+function splitDescription(description: string): {
+  summary: string
+  howToUse: string | null
+  conclusion: string | null
+} {
+  // The regex requires the group, so a matched row always has index and name.
+  const headings = [...description.matchAll(SECTION_HEADING)].map((m) => ({
+    index: m.index ?? 0,
+    name: m[1] ?? '',
+  }))
+  let summary = description.trim()
+  let howToUse: string | null = null
+  let conclusion: string | null = null
+  for (const [i, heading] of headings.entries()) {
+    const start = heading.index
+    const end = headings[i + 1]?.index ?? description.length
+    const body = description.slice(start, end).replace(SECTION_HEADING, '').trim()
+    if (heading.name === 'How to use') howToUse = body === '' ? null : body
+    else conclusion = body === '' ? null : body
+    if (i === 0) summary = description.slice(0, start).trim()
+  }
+  return { summary, howToUse, conclusion }
+}
+
+/** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
+const FILE_REF = /[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}/g
+
+/** Wraps file names and paths in backticks, leaving existing code spans alone. */
+export function backtickFileRefs(text: string): string {
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]+`)/g)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
+    .join('')
+}
+
+/** Provenance of the model run that produced the PR, for the body footer. */
+export type PrBodyMeta = {
+  harness: string
+  model: string | null
+  effort: string | null
+}
+
+export function formatPrBody(
+  task: TrackerTask,
+  changes: readonly PrChange[],
+  meta?: PrBodyMeta,
+  /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
+  fallbackSummary?: string | null,
+): string {
+  const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
+  const { summary, howToUse, conclusion } = splitDescription(task.description)
+  const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
+  lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
+  if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
+  if (changes.length > 0) {
+    lines.push('', '### 🛠️ What changed', '')
+    for (const change of changes) {
+      const stat = Number.isFinite(change.additions)
+        ? `+${change.additions} -${change.deletions}`
+        : 'binary'
+      lines.push(`- \`${change.path}\` ${stat}`)
+    }
+  }
+  const conclusionBody = conclusion ?? fallbackSummary
+  if (conclusionBody !== null && conclusionBody !== undefined && conclusionBody.trim() !== '') {
+    lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
+  }
+  const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
+  return lines.join('\n') + footer
+}

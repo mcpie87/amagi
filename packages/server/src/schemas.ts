@@ -1,4 +1,4 @@
-import { TaskState } from '@amagi/core'
+import { MAX_PARALLEL, TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -14,7 +14,22 @@ export const TaskListQuery = z.object({
 })
 export type TaskListQuery = z.infer<typeof TaskListQuery>
 
-export const TaskIdParam = z.object({ id: z.string().min(1) })
+/** Every repo-scoped route starts with the workspace key. */
+export const RepoParam = z.object({ repo: z.string().min(1) })
+
+/** Combined because hono's zValidator replaces, not merges, a validated target. */
+export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string().min(1) })
+export const RepoQuestionParam = z.object({
+  repo: z.string().min(1),
+  id: z.string().min(1),
+  questionId: z.string().min(1),
+})
+
+export const RepoRegisterBody = z.object({
+  path: z.string().min(1),
+  key: z.string().min(1).optional(),
+})
+export type RepoRegisterBody = z.infer<typeof RepoRegisterBody>
 
 export const EventQuery = z.object({
   taskId: z.string().min(1).optional(),
@@ -44,11 +59,57 @@ export const AskBody = z.object({
 })
 export type AskBody = z.infer<typeof AskBody>
 
+/**
+ * Empty body (or `{}`) launches the next ready task with the configured
+ * defaults. `harness` is a harness.definitions name or a kind
+ * (claude/codex/opencode); `model` and `effort` override the chosen harness.
+ * An omitted field falls back to config.harness.implement.
+ */
+export const RunBody = z.object({
+  taskId: z.string().min(1).optional(),
+  harness: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  effort: z.string().min(1).optional(),
+})
+export type RunBody = z.infer<typeof RunBody>
+
+export const TaskIdParam = z.object({ id: z.string().min(1) })
+
+/** Operator-supplied reason for closing a needs_human/no_pr task. */
+export const CloseTaskBody = z.object({
+  reason: z.string().trim().min(1).max(1000),
+  /** Retire a parked no_pr/needs_human task as done instead of abandoned. */
+  to: z.enum(['done', 'abandoned']).default('abandoned'),
+})
+export type CloseTaskBody = z.infer<typeof CloseTaskBody>
+
+/** Operator-supplied reason for closing eligible epics. */
+export const EpicCloseBody = z.object({
+  reason: z.string().trim().min(1).max(1000),
+})
+export type EpicCloseBody = z.infer<typeof EpicCloseBody>
+
 export const AnswerBody = z.object({
   answer: z.string().min(1),
   via: z.enum(['web', 'cli', 'gate']).default('web'),
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
+
+/** A message from the operator to the worker behind a parked task. */
+export const ChatBody = z.object({
+  message: z.string().trim().min(1).max(4000),
+})
+export type ChatBody = z.infer<typeof ChatBody>
+
+export const SettingsBody = z
+  .object({
+    maxParallel: z.number().int().min(1).max(MAX_PARALLEL).optional(),
+    autoQueue: z.boolean().optional(),
+  })
+  .refine((body) => body.maxParallel !== undefined || body.autoQueue !== undefined, {
+    message: 'provide at least one of maxParallel or autoQueue',
+  })
+export type SettingsBody = z.infer<typeof SettingsBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({
@@ -58,3 +119,29 @@ export type AwaitQuery = z.infer<typeof AwaitQuery>
 
 export const ApiError = z.object({ error: z.string() })
 export type ApiError = z.infer<typeof ApiError>
+
+export const IssueIdParam = z.object({ id: z.string().min(1) })
+
+export const IssueCreateBody = z.object({
+  title: z.string().trim().min(1).max(500),
+  description: z.string().default(''),
+  acceptanceCriteria: z.string().nullable().default(null),
+  priority: z.number().int().min(0).max(4).nullable().default(null),
+  labels: z.array(z.string()).default([]),
+  /** Issue ids the new task is blocked by. */
+  dependencies: z.array(z.string()).default([]),
+  /** Parent issue id when the task is a child of a container (epic/milestone). */
+  parent: z.string().nullable().default(null),
+})
+export type IssueCreateBody = z.infer<typeof IssueCreateBody>
+
+export const IssueUpdateBody = z.object({
+  title: z.string().trim().min(1).max(500).optional(),
+  description: z.string().optional(),
+  acceptanceCriteria: z.string().nullable().optional(),
+  priority: z.number().int().min(0).max(4).nullable().optional(),
+  labels: z.array(z.string()).optional(),
+  /** Full desired set of blocker ids; the server diffs against the current set. */
+  dependencies: z.array(z.string()).optional(),
+})
+export type IssueUpdateBody = z.infer<typeof IssueUpdateBody>

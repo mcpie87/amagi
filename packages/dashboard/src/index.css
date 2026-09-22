@@ -1,1 +1,623 @@
 @import "tailwindcss";
+
+/* Every color in the dashboard resolves through these tokens: the Tailwind
+   utilities in the tsx (bg-surface, text-fg-muted, ring-red-edge) and the
+   plain CSS below read the same variables, so a theme swap cannot leave one
+   of them behind. Dark is the baseline; the light block further down only
+   restates what differs. */
+@theme {
+  --color-app: #0e0e11;
+  --color-sidebar: #09090b;
+  --color-sunken: #09090b;
+  --color-surface: #18181b;
+  --color-raised: #27272a;
+  --color-raised-strong: #3f3f46;
+  --color-line: #27272a;
+  --color-line-strong: #3f3f46;
+
+  --color-fg-strong: #fafafa;
+  --color-fg: #e4e4e7;
+  --color-fg-muted: #a1a1aa;
+  --color-fg-faint: #71717a;
+  --color-fg-dim: #52525b;
+  /* label on a filled accent button, dark in both themes */
+  --color-on-solid: #09090b;
+  --color-accent: #0ea5e9;
+
+  --color-neutral-soft: rgb(113 113 122 / 0.15);
+  --color-neutral-edge: rgb(113 113 122 / 0.3);
+  --color-neutral-ink: #d4d4d8;
+
+  --color-sky-soft: rgb(14 165 233 / 0.15);
+  --color-sky-edge: rgb(14 165 233 / 0.3);
+  --color-sky-ink: #7dd3fc;
+
+  --color-blue-soft: rgb(59 130 246 / 0.15);
+  --color-blue-edge: rgb(59 130 246 / 0.3);
+  --color-blue-ink: #93c5fd;
+
+  --color-amber-soft: rgb(245 158 11 / 0.15);
+  --color-amber-soft-hover: rgb(245 158 11 / 0.28);
+  --color-amber-edge: rgb(245 158 11 / 0.3);
+  --color-amber-ink: #fcd34d;
+
+  --color-violet-soft: rgb(139 92 246 / 0.15);
+  --color-violet-edge: rgb(139 92 246 / 0.3);
+  --color-violet-ink: #c4b5fd;
+
+  --color-cyan-soft: rgb(6 182 212 / 0.15);
+  --color-cyan-edge: rgb(6 182 212 / 0.3);
+  --color-cyan-ink: #67e8f9;
+
+  --color-orange-soft: rgb(249 115 22 / 0.15);
+  --color-orange-soft-hover: rgb(249 115 22 / 0.28);
+  --color-orange-edge: rgb(249 115 22 / 0.3);
+  --color-orange-ink: #fdba74;
+
+  --color-emerald-soft: rgb(16 185 129 / 0.15);
+  --color-emerald-soft-hover: rgb(16 185 129 / 0.28);
+  --color-emerald-edge: rgb(16 185 129 / 0.3);
+  --color-emerald-ink: #6ee7b7;
+
+  --color-red-soft: rgb(239 68 68 / 0.15);
+  --color-red-soft-hover: rgb(239 68 68 / 0.28);
+  --color-red-edge: rgb(239 68 68 / 0.3);
+  --color-red-ink: #fca5a5;
+
+  --color-teal-soft: rgb(20 184 166 / 0.15);
+  --color-teal-edge: rgb(20 184 166 / 0.3);
+  --color-teal-ink: #5eead4;
+}
+
+:root {
+  color-scheme: dark;
+  --selection-bg: #075985;
+  --selection-fg: #f0f9ff;
+  --code-bg: rgb(0 0 0 / 0.35);
+  --shadow-color: rgb(0 0 0 / 0.5);
+}
+
+/* Light theme. Tailwind emits the tokens above inside its theme layer, so an
+   unlayered override here wins regardless of the theme layer's order. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-app: #f7f7f8;
+  --color-sidebar: #ffffff;
+  --color-sunken: #f4f4f5;
+  --color-surface: #ffffff;
+  --color-raised: #e4e4e7;
+  --color-raised-strong: #d4d4d8;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d4d4d8;
+
+  --color-fg-strong: #09090b;
+  --color-fg: #27272a;
+  --color-fg-muted: #52525b;
+  --color-fg-faint: #71717a;
+  --color-fg-dim: #a1a1aa;
+  --color-accent: #0284c7;
+
+  --color-neutral-soft: rgb(113 113 122 / 0.12);
+  --color-neutral-ink: #3f3f46;
+  --color-sky-ink: #0369a1;
+  --color-blue-ink: #1d4ed8;
+  --color-amber-soft: rgb(245 158 11 / 0.18);
+  --color-amber-soft-hover: rgb(245 158 11 / 0.3);
+  --color-amber-ink: #b45309;
+  --color-violet-ink: #6d28d9;
+  --color-cyan-ink: #0e7490;
+  --color-orange-soft: rgb(249 115 22 / 0.18);
+  --color-orange-soft-hover: rgb(249 115 22 / 0.3);
+  --color-orange-ink: #c2410c;
+  --color-emerald-soft-hover: rgb(16 185 129 / 0.25);
+  --color-emerald-ink: #047857;
+  --color-red-soft-hover: rgb(239 68 68 / 0.25);
+  --color-red-ink: #b91c1c;
+  --color-teal-ink: #0f766e;
+
+  --selection-bg: #bae6fd;
+  --selection-fg: #082f49;
+  --code-bg: rgb(24 24 27 / 0.06);
+  --shadow-color: rgb(24 24 27 / 0.16);
+}
+
+body {
+  background: var(--color-app);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: var(--color-line-strong);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fg-dim);
+  background-clip: content-box;
+}
+
+/* One focus treatment for every control, instead of the per-input mix of
+   none, a border tint, and the browser default. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+button:not(:disabled) {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-fg-faint);
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-fg-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+}
+.connection-dot.bg-emerald-500 {
+  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
+  animation: connection-pulse 2s infinite;
+}
+@keyframes connection-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 5px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+.runner-status {
+  color: var(--color-fg-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--color-app) 85%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  width: 232px;
+  flex-shrink: 0;
+  height: 100vh;
+  border-right: 1px solid var(--color-line);
+  background: var(--color-sidebar);
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 2px 0;
+  border-radius: 8px;
+  color: var(--color-fg-muted);
+  font-size: 14px;
+}
+.nav-link:hover {
+  color: var(--color-fg);
+  background: var(--color-surface);
+}
+.nav-link.is-active {
+  color: var(--color-fg-strong);
+  background: var(--color-raised);
+  font-weight: 500;
+}
+
+.workspace {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-menu-button {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-surface);
+  color: var(--color-fg);
+}
+.mobile-menu-button:hover {
+  background: var(--color-raised);
+}
+
+@media (max-width: 767px) {
+  .mobile-menu-button {
+    display: inline-flex;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 60;
+    transform: translateX(-100%);
+    visibility: hidden;
+    /* visibility flips immediately on open (so it can take focus at once) but
+       stays visible through the slide-out on close, which needs the delay */
+    transition:
+      transform 0.2s ease,
+      visibility 0s linear 0.2s;
+    box-shadow: 12px 0 32px var(--shadow-color);
+  }
+  .sidebar.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    transition:
+      transform 0.2s ease,
+      visibility 0s;
+  }
+}
+
+.command-palette {
+  width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--color-line-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-fg);
+  padding: 0;
+  overflow: hidden;
+  box-shadow: 0 20px 50px var(--shadow-color);
+}
+.command-palette::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+.watcher-dialog {
+  width: min(520px, calc(100vw - 32px));
+  border: 1px solid var(--color-line-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-fg);
+  padding: 0;
+  overflow: hidden;
+  box-shadow: 0 20px 50px var(--shadow-color);
+}
+.watcher-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+.command-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-line);
+  color: var(--color-fg-muted);
+}
+.command-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--color-fg);
+  font-size: 15px;
+}
+.command-empty {
+  padding: 22px 16px;
+  color: var(--color-fg-muted);
+  font-size: 13px;
+}
+.command-results {
+  list-style: none;
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 6px;
+}
+.command-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--color-fg);
+  font-size: 14px;
+  text-align: left;
+}
+.command-result.is-active {
+  background: var(--color-raised);
+}
+.command-hint {
+  display: block;
+  margin-top: 1px;
+  color: var(--color-fg-muted);
+  font-size: 11px;
+}
+.command-arrow {
+  color: var(--color-fg-muted);
+  font-size: 13px;
+}
+.command-footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--color-line);
+  color: var(--color-fg-faint);
+  font-size: 11px;
+}
+
+@media (max-width: 500px) {
+  .connection-status,
+  .runner-status {
+    font-size: 10px;
+  }
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 44px 24px;
+  border: 1px dashed var(--color-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-surface) 50%, transparent);
+}
+.empty-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--color-line);
+  border-radius: 13px;
+  background: var(--color-surface);
+  color: var(--color-fg-faint);
+  margin-bottom: 14px;
+}
+.empty-state h3 {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-fg);
+}
+.empty-state p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-fg-muted);
+  max-width: 340px;
+  margin-top: 6px;
+}
+
+/* Matches the sibling Reclaim/Retry/Requeue buttons; without the explicit
+   border-width the Tailwind reset would collapse this to a borderless box. */
+.stop-button {
+  padding: 4px 12px;
+  border: 1px solid var(--color-red-edge);
+  border-radius: 4px;
+  background: var(--color-red-soft);
+  color: var(--color-red-ink);
+  font-size: 14px;
+}
+.stop-button:hover:not(:disabled) {
+  background: var(--color-red-soft-hover);
+}
+.stop-button:disabled {
+  opacity: 0.5;
+}
+.run-button-error {
+  margin: 4px 0 0;
+  color: var(--color-red-ink);
+  font-size: 12px;
+}
+
+.restart-run {
+  position: relative;
+}
+.restart-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: 280px;
+  background: var(--color-surface);
+  color: var(--color-red-ink);
+  border: 1px solid var(--color-red-edge);
+  border-radius: 5px;
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px var(--shadow-color);
+}
+
+.agent-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--color-line);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  font-size: 11px;
+  background: var(--color-surface);
+  color: var(--color-fg-muted);
+}
+.agent-log-last {
+  margin-left: 12px;
+  color: var(--color-fg);
+}
+.agent-log-header button {
+  background: var(--color-raised);
+  color: var(--color-fg);
+  border: 1px solid var(--color-line-strong);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.agent-log-header button:hover {
+  background: var(--color-raised-strong);
+  color: var(--color-fg-strong);
+}
+.agent-log-scroll {
+  height: 460px;
+  overflow: auto;
+  border: 1px solid var(--color-line);
+  border-radius: 0 0 8px 8px;
+  background: var(--color-sunken);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* Hover affordance for the rows and cards that are whole click targets. */
+.metric,
+.issue-card,
+.check-result {
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+.issue-card:hover {
+  border-color: var(--color-line-strong);
+}
+.run-row:hover,
+.attention-row:hover,
+.activity-item:hover,
+.issue-list-row:hover {
+  background: color-mix(in srgb, var(--color-raised) 45%, transparent);
+}
+
+.summary-markdown {
+  font-size: 13px;
+  color: var(--color-fg);
+  line-height: 1.6;
+}
+.summary-markdown > :first-child {
+  margin-top: 0;
+}
+.summary-markdown > :last-child {
+  margin-bottom: 0;
+}
+.summary-markdown p {
+  margin: 8px 0;
+}
+.summary-markdown ul,
+.summary-markdown ol {
+  margin: 8px 0;
+  padding-left: 22px;
+  list-style: revert;
+}
+.summary-markdown li {
+  margin: 3px 0;
+}
+.summary-markdown pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--code-bg);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.summary-markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  font-family: ui-monospace, monospace;
+  font-size: 0.92em;
+}
+.summary-markdown pre code {
+  padding: 0;
+  background: none;
+}
+.summary-markdown a {
+  color: var(--color-sky-ink);
+  text-decoration: underline;
+}
+.summary-markdown h1,
+.summary-markdown h2,
+.summary-markdown h3,
+.summary-markdown h4,
+.summary-markdown h5,
+.summary-markdown h6 {
+  margin: 12px 0 5px;
+  font-weight: 600;
+}
+.summary-markdown h1 {
+  font-size: 16px;
+}
+.summary-markdown h2 {
+  font-size: 15px;
+}
+.summary-markdown h3 {
+  font-size: 14px;
+}
+.summary-markdown h4,
+.summary-markdown h5,
+.summary-markdown h6 {
+  font-size: 13px;
+}
+.summary-markdown blockquote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--color-amber-ink);
+  color: var(--color-fg-muted);
+}
+.summary-markdown hr {
+  margin: 10px 0;
+  border-color: var(--color-line);
+}
