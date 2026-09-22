@@ -201,7 +201,18 @@ export const Config = z.object({
       maxCostUsd: z.number().min(0).default(0),
     })
     .prefault({}),
-  checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
+  checks: z
+    .object({
+      commands: z.array(z.string()).default([]),
+      /**
+       * Mandatory pre-commit gate, run before `commands`: the auto-fix formatter
+       * (writes the worktree) and the read-only lint check. Null disables a
+       * step; both default on so a PR can never be pushed unformatted.
+       */
+      format: z.string().nullable().default('just fmt'),
+      lint: z.string().nullable().default('just lint'),
+    })
+    .prefault({}),
   difficulty: DifficultyConfig.prefault({}),
   notify: z
     .object({

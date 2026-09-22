@@ -221,11 +221,12 @@ let repo: string
 let wtRoot: string
 let store: Store
 
-const config = (over: Record<string, unknown> = {}) =>
+const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    checks: { commands: [] },
-    ...over,
+    // No formatter/lint tooling in the fake worktrees, so the mandatory gate is off.
+    checks: { commands: [], format: null, lint: null, ...(checks as Record<string, unknown>) },
+    ...rest,
   })
 
 const makeRunner = (
@@ -799,6 +800,33 @@ describe('Runner.runOnce', () => {
 
     const finished = store.events({ taskId: TASK.id }).find((e) => e.type === 'checks.finished')
     expect(finished?.type === 'checks.finished' && finished.results).toHaveLength(1)
+  })
+
+  test('the mandatory format+lint gate runs first and a failing lint is handed back to the agent', async () => {
+    const harness = new FakeHarness([
+      { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n') },
+      { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'good\n') },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        checks: {
+          commands: ['grep -q good flag'],
+          format: 'touch formatted',
+          lint: 'grep -q good flag',
+        },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    // format ran first, so its side effect is in the committed worktree
+    const wt = store.task(TASK.id)?.worktree
+    expect(wt !== undefined && wt !== null && existsSync(join(wt, 'formatted'))).toBe(true)
+    // the failing lint was handed back to the same session to fix in place
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('grep -q good flag')
+    expect(harness.calls[1]?.prompt).toContain('checks failed')
   })
 
   test('a crashing agent still leaves an auditable trail', async () => {

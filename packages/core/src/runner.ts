@@ -1024,7 +1024,11 @@ export class Runner {
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
     const results: CheckResult[] = []
-    for (const command of this.deps.config.checks.commands) {
+    const { format, lint, commands } = this.deps.config.checks
+    // The mandatory gate always runs before the configured commands, so a PR
+    // cannot be pushed until the worktree is formatted and lint-clean.
+    const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+    for (const command of [...gate, ...commands]) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,
