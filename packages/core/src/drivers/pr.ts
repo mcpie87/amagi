@@ -61,7 +61,7 @@ export type PrDriver = {
 }
 
 const GH_FIELDS =
-  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
+  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /**
  * Github PRs through `gh`, with Chise's token and an Amagi-owned GH_CONFIG_DIR
@@ -377,6 +377,7 @@ function forgejoPr(exec: Exec): PrDriver {
       return (items as Array<Record<string, unknown>>).map((item) => ({
         number: Number(item.number ?? 0),
         title: typeof item.title === 'string' ? item.title : '',
+        body: typeof item.body === 'string' ? item.body : '',
         url: typeof item.html_url === 'string' ? item.html_url : '',
         headRefName: refName(item.head),
         baseRefName: refName(item.base),

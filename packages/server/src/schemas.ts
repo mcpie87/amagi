@@ -48,11 +48,6 @@ export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
 })
 
-export const TaskQuestionParam = z.object({
-  id: z.string().min(1),
-  questionId: z.string().min(1),
-})
-
 export const AskBody = z.object({
   question: z.string().min(1),
   options: z.array(z.string()).default([]),
@@ -116,11 +111,6 @@ export const AwaitQuery = z.object({
   deadlineMs: z.coerce.number().int().min(1).default(540_000),
 })
 export type AwaitQuery = z.infer<typeof AwaitQuery>
-
-export const ApiError = z.object({ error: z.string() })
-export type ApiError = z.infer<typeof ApiError>
-
-export const IssueIdParam = z.object({ id: z.string().min(1) })
 
 export const IssueCreateBody = z.object({
   title: z.string().trim().min(1).max(500),

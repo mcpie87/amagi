@@ -181,6 +181,7 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
       {
         number: 1,
         title: 'Ready',
+        body: '',
         url: 'https://github.com/owner/repo/pull/1',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',
@@ -193,6 +194,7 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
       {
         number: 2,
         title: 'Conflicted',
+        body: '',
         url: 'https://github.com/owner/repo/pull/2',
         headRefName: 'amagi/am-2',
         baseRefName: 'main',
@@ -205,6 +207,7 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
       {
         number: 3,
         title: 'Unknown',
+        body: '',
         url: 'https://github.com/owner/repo/pull/3',
         headRefName: 'amagi/am-3',
         baseRefName: 'main',
@@ -217,6 +220,7 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
       {
         number: 4,
         title: 'Clean via status',
+        body: '',
         url: 'https://github.com/owner/repo/pull/4',
         headRefName: 'amagi/am-4',
         baseRefName: 'main',

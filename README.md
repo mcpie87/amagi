@@ -286,7 +286,7 @@ commands = ["just check"]
 | --- | --- |
 | `GH_TOKEN` / `GITHUB_TOKEN` | The bot's GitHub token, exported into the Amagi process environment. Used for the `github` tracker/forge: `gh` runs against an Amagi-owned `GH_CONFIG_DIR` with this token (no `gh auth` state) and the remote is rewritten to push/fetch over HTTPS so an unattended run never prompts for an SSH passphrase. |
 | `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step) and uses it for the direct Forgejo PR API client. `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
-| `AMAGI_DB` | Overrides the SQLite store path (default `$XDG_STATE_HOME/amagi/amagi.db`). Mainly for tests and running multiple isolated instances. |
+| `AMAGI_DB` | Overrides the SQLite store path (default: one per repo under `$XDG_STATE_HOME/amagi/repos/`). Mainly for tests and running multiple isolated instances. |
 | `AMAGI_TASK_TOKEN` | Set by the runner in the harness's environment; `amagi ask` uses it to authenticate its request to the server. Not meant to be set by hand. |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Standard XDG overrides that relocate the global config, the SQLite store, and the default worktree root, respectively. |
 
