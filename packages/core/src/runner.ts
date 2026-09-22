@@ -7,6 +7,7 @@ import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/type
 import { errMsg } from './errors.ts'
 import {
   type AgentEvent,
+  type AgentRole,
   type CheckResult,
   isTerminal,
   type StoredEvent,
@@ -23,6 +24,8 @@ import {
   implementSystemPrompt,
   prTitle,
   reclaimPrompt,
+  verifyViabilityPrompt,
+  verifyViabilitySystemPrompt,
   whyNoChangesPrompt,
   withRestartHandoff,
 } from './prompt.ts'
@@ -127,6 +130,27 @@ function taskCost(events: StoredEvent[]): { costUsd: number; costSeen: boolean }
     }
   }
   return { costUsd, costSeen }
+}
+
+/** Best-effort JSON extraction of the viability decision; anything else is a null. */
+function parseViabilityDecision(reply: string): { viable: boolean; reason: string } | null {
+  const text = reply
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/, '')
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end === -1 || end <= start) return null
+  try {
+    const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const viable = (parsed as { viable?: unknown }).viable
+    if (typeof viable !== 'boolean') return null
+    const reason = (parsed as { reason?: unknown }).reason
+    return { viable, reason: typeof reason === 'string' ? reason : '' }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -475,6 +499,14 @@ export class Runner {
     this.throwIfCancelled(task.id)
     this.throwIfBudgetExhausted(task.id, budget)
     this.transition(task.id, 'implementing')
+    // A fresh run first verifies the task is still viable against the current
+    // repository, so a task already satisfied on the base branch is stopped
+    // before the implement agent writes anything or a no-op PR is opened. A
+    // resumed run skips the check: its worktree already holds in-progress work.
+    if (!resume) {
+      const viable = await this.verifyViability(task, cwd, branch, budget)
+      if (!viable) return
+    }
     const first = await this.runAgentWithRetry(
       task.id,
       null,
@@ -604,6 +636,62 @@ export class Runner {
     this.transition(task.id, 'committed')
     await this.openPullRequest(task, cwd, branch, current.model, current.effort, current.summary)
     this.throwIfCancelled(task.id)
+  }
+
+  /**
+   * Pre-implement viability check: a read-only agent pass decides whether the
+   * task is still needed in the current repository. Returns false when the
+   * task is not viable, in which case it is reported inside the task (a
+   * tracker comment) and parked in `no_pr` before any code is written. Any
+   * failure to check defaults to viable: a broken check must never kill a
+   * task, only a clear not-viable verdict does.
+   */
+  private async verifyViability(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    budget: TaskBudget,
+  ): Promise<boolean> {
+    const { store, config } = this.deps
+    const run = await this.runAgent(
+      task.id,
+      null,
+      {
+        cwd,
+        prompt: verifyViabilityPrompt({ task, worktree: cwd, branch, askCommand: null }),
+        systemPrompt: verifyViabilitySystemPrompt(),
+        ...harnessStartOpts(config.harness.implement),
+      },
+      'verify',
+      budget,
+      'verify',
+    )
+    if (!run.ok) {
+      // A cancel mid-check must stop the run, not fall through to implement.
+      this.throwIfCancelled(task.id)
+      return true
+    }
+    const decision = run.summary === null ? null : parseViabilityDecision(run.summary)
+    if (decision === null || decision.viable) return true
+
+    const reason =
+      decision.reason.trim() !== ''
+        ? decision.reason
+        : 'the task is not viable against the current repository'
+    try {
+      await this.deps.tracker.comment(
+        task.id,
+        `amagi: task ${task.id} skipped as no longer viable - ${reason}`,
+      )
+    } catch (err) {
+      store.append(task.id, {
+        type: 'error',
+        message: `viability comment ${task.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        fatal: false,
+      })
+    }
+    this.transition(task.id, 'no_pr', reason)
+    return false
   }
 
   /**
@@ -760,6 +848,7 @@ export class Runner {
     opts: Parameters<Harness['start']>[0],
     phase: string,
     budget: TaskBudget,
+    role: AgentRole = 'implement',
   ): Promise<{
     sessionId: string | null
     ok: boolean
@@ -808,7 +897,7 @@ export class Runner {
           started = true
           store.append(taskId, {
             type: 'agent.started',
-            role: 'implement',
+            role,
             harness: harness.kind,
             model,
             effort,
@@ -831,7 +920,7 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        store.append(taskId, { type: 'agent.stream', role: 'implement', event })
+        store.append(taskId, { type: 'agent.stream', role, event })
         if (this.observeContext(taskId, event)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true
@@ -855,7 +944,7 @@ export class Runner {
       const outcome = await proc.done
       store.append(taskId, {
         type: 'agent.exited',
-        role: 'implement',
+        role,
         exitCode: outcome.exitCode,
         sessionId: outcome.sessionId,
       })

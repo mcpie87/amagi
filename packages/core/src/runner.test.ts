@@ -48,6 +48,7 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   heartbeats = 0
   leaseAlive = true
+  comments: { id: string; body: string }[] = []
   /** Returned by get() in place of the null default, to simulate a re-read. */
   freshTask: TrackerTask | null = null
 
@@ -73,7 +74,9 @@ class FakeTracker implements Tracker {
     this.heartbeats++
     return this.leaseAlive
   }
-  async comment(): Promise<void> {}
+  async comment(id: string, body: string): Promise<void> {
+    this.comments.push({ id, body })
+  }
   async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
   async release(_id: string): Promise<void> {}
   async close(): Promise<void> {}
@@ -94,16 +97,39 @@ type Turn = {
   effort?: string | null
 }
 
+/**
+ * What the harness answers to a viability-check run. Most tests do not care
+ * about the check, so it defaults to viable; a test can pin a not-viable
+ * verdict or a failure with the constructor's second argument.
+ */
+type VerifyTurn = 'viable' | 'not-viable' | Turn
+
 class FakeHarness implements Harness {
   readonly kind: string
   readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+  /** Viability-check runs are recorded here, separate from implementation calls. */
+  readonly verifyCalls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+  private readonly verifyResponse: Turn
   kills = 0
 
   constructor(
     private readonly turns: Turn[],
+    verify: VerifyTurn = 'viable',
     kind = 'fake',
   ) {
     this.kind = kind
+    this.verifyResponse =
+      verify === 'viable'
+        ? {
+            events: [{ kind: 'text', text: 'checking viability: task still needed' }],
+            outcome: { summary: '{"viable": true, "reason": "still needed"}' },
+          }
+        : verify === 'not-viable'
+          ? {
+              events: [{ kind: 'text', text: 'checking viability: already done on base' }],
+              outcome: { summary: '{"viable": false, "reason": "already done on base"}' },
+            }
+          : verify
   }
 
   start(opts: AgentStartOptions): AgentProcess {
@@ -120,8 +146,10 @@ class FakeHarness implements Harness {
   }
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
-    this.calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
-    const turn = this.turns.shift() ?? {}
+    const verify = opts.systemPrompt?.includes('viability checker') === true
+    const calls = verify ? this.verifyCalls : this.calls
+    calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
+    const turn = verify ? this.verifyResponse : (this.turns.shift() ?? {})
     turn.effect?.(opts.cwd)
 
     const queue = new AsyncQueue<AgentEvent>()
@@ -413,6 +441,9 @@ describe('Runner.runOnce', () => {
       'agent.started',
       'agent.stream',
       'agent.exited',
+      'agent.started',
+      'agent.stream',
+      'agent.exited',
       'task.state',
       'checks.finished',
       'commit.created',
@@ -430,9 +461,99 @@ describe('Runner.runOnce', () => {
 
     const started = store
       .events({ taskId: TASK.id, limit: 999 })
-      .find((e): e is Extract<StoredEvent, { type: 'agent.started' }> => e.type === 'agent.started')
+      .find(
+        (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
+          e.type === 'agent.started' && e.role === 'implement',
+      )
     expect(started?.model).toBe('claude-sonnet-5')
     expect(started?.effort).toBe('high')
+  })
+
+  test('a not-viable task parks in no_pr before the implement agent runs and reports inside the task', async () => {
+    const tracker = new FakeTracker([TASK])
+    const harness = new FakeHarness([writesAFile], 'not-viable')
+    const pr = new FakePr()
+    const result = await makeRunner(tracker, harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(stateReason(TASK.id)).toContain('already done on base')
+    // The implement agent never runs, so nothing is written and no PR is opened.
+    expect(harness.verifyCalls).toHaveLength(1)
+    expect(harness.calls).toHaveLength(0)
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(pr.calls).toHaveLength(0)
+    // The verdict is reported inside the task as a tracker comment.
+    expect(tracker.comments).toHaveLength(1)
+    expect(tracker.comments[0]?.body).toContain('already done on base')
+    // The check itself is recorded under the verify role.
+    const started = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e): e is Extract<StoredEvent, { type: 'agent.started' }> => e.type === 'agent.started')
+    expect(started?.role).toBe('verify')
+  })
+
+  test('a viable task runs the check first, then the implement agent', async () => {
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.verifyCalls).toHaveLength(1)
+    expect(harness.verifyCalls[0]?.prompt).toContain('still needs work')
+    expect(harness.calls).toHaveLength(1)
+    expect(harness.calls[0]?.prompt).toContain('Implement this task')
+  })
+
+  test('a failed viability check defaults to continuing the task', async () => {
+    const harness = new FakeHarness([writesAFile], {
+      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' },
+    })
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.verifyCalls).toHaveLength(1)
+    expect(harness.calls).toHaveLength(1)
+  })
+
+  test('an unparseable viability verdict defaults to continuing the task', async () => {
+    const harness = new FakeHarness([writesAFile], { outcome: { summary: 'I think it is fine' } })
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.verifyCalls).toHaveLength(1)
+    expect(harness.calls).toHaveLength(1)
+  })
+
+  test('a resumed run skips the viability check', async () => {
+    const wtPath = join(wtRoot, 'resume-worktree')
+    const branch = 'amagi/bd-a1b2-add-a-greeting-file'
+    await execOk(exec, ['git', 'worktree', 'add', '-b', branch, wtPath, 'main'], { cwd: repo })
+
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    store.append(TASK.id, { type: 'worktree.created', path: wtPath, branch })
+    store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(TASK.id, { type: 'task.reclaimed' })
+
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.verifyCalls).toHaveLength(0)
+    expect(harness.calls[0]?.prompt).toContain('resumed')
+  })
+
+  test('a not-viable verdict on a task with no session leaves a usable no_pr reason', async () => {
+    const tracker = new FakeTracker([TASK])
+    const harness = new FakeHarness([], {
+      outcome: { summary: '{"viable": false}', sessionId: null },
+    })
+    const result = await makeRunner(tracker, harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(stateReason(TASK.id)).toContain('not viable against the current repository')
+    expect(tracker.comments).toHaveLength(1)
+    expect(harness.calls).toHaveLength(0)
   })
 
   test('opens the pull request with the task title and base branch', async () => {
@@ -760,6 +881,10 @@ describe('Runner.runOnce', () => {
     expect(types(TASK.id)).not.toContain('needs_human')
     // The claim was already reclaimed, so the runner must not release it again.
     expect(released).toEqual([])
+    // Let the harness's reclaim/completion timers fire while this test's store
+    // is still live; otherwise the 100ms timer leaks into the next test's
+    // store and corrupts it with a spurious task.reclaimed event.
+    await new Promise((resolve) => setTimeout(resolve, 350))
   })
 
   test('a task deferred in retrying is picked up after its retry time, reusing the worktree', async () => {
@@ -1465,7 +1590,11 @@ describe('Runner context budget', () => {
   })
 
   test('per-harness overrides win over the loop defaults', async () => {
-    const harness = new FakeHarness([{ ...writesAFile, events: [usage(180_000)] }], 'codex')
+    const harness = new FakeHarness(
+      [{ ...writesAFile, events: [usage(180_000)] }],
+      'viable',
+      'codex',
+    )
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
