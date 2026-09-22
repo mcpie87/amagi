@@ -22,7 +22,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { AsyncQueue, loadConfig } from '@amagi/core'
+import { AsyncQueue, BeadsTracker, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -181,14 +181,15 @@ describe('GET /api/repos/:repo/issues', () => {
   })
 })
 
-class FakeIssueTracker implements Tracker {
-  readonly kind = 'fake'
-  readonly leaseTtlMs = 300_000
-  readonly capabilities: TrackerCapabilities = { create: true, edit: true, dependencies: true }
+class FakeIssueTracker extends BeadsTracker {
   readonly created: CreateTrackerTask[] = []
   readonly updated: { id: string; input: UpdateTrackerTask }[] = []
   issues = new Map<string, BeadsIssue>()
   private seq = 0
+
+  constructor() {
+    super({ cwd: '/repo' })
+  }
 
   seed(partial: Partial<BeadsIssue>): BeadsIssue {
     const issue: BeadsIssue = {
@@ -204,30 +205,31 @@ class FakeIssueTracker implements Tracker {
       labels: [],
       parent: null,
       dependencies: [],
+      childCount: 0,
       ...partial,
     }
     this.issues.set(issue.id, issue)
     return issue
   }
 
-  list(): BeadsIssue[] {
+  override async list(): Promise<BeadsIssue[]> {
     return [...this.issues.values()]
   }
 
-  getIssue(id: string): BeadsIssue | null {
+  override async getIssue(id: string): Promise<BeadsIssue | null> {
     return this.issues.get(id) ?? null
   }
 
-  async ready(): Promise<TrackerTask[]> {
+  override async ready(): Promise<TrackerTask[]> {
     return [...this.issues.values()]
   }
-  async claim(): Promise<TrackerTask | null> {
+  override async claim(): Promise<TrackerTask | null> {
     return null
   }
-  async get(id: string): Promise<TrackerTask | null> {
+  override async get(id: string): Promise<TrackerTask | null> {
     return this.issues.get(id) ?? null
   }
-  async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+  override async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
     this.created.push(input)
     const blocker = (id: string): TrackerTask & { labels: string[] } => ({
       id,
@@ -248,7 +250,7 @@ class FakeIssueTracker implements Tracker {
       dependencies: input.dependencies.map(blocker),
     })
   }
-  async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
+  override async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
     this.updated.push({ id, input })
     const issue = this.issues.get(id)
     if (issue === undefined) throw new Error(`unknown issue ${id}`)
@@ -277,20 +279,20 @@ class FakeIssueTracker implements Tracker {
     this.issues.set(id, next)
     return next
   }
-  async heartbeat(): Promise<boolean> {
+  override async heartbeat(): Promise<boolean> {
     return true
   }
-  async comment(): Promise<void> {}
-  async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
-  async release(): Promise<void> {}
-  async close(): Promise<void> {}
-  async openGate(_id: string, _q: Question): Promise<GateRef> {
+  override async comment(): Promise<void> {}
+  override async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
+  override async release(): Promise<void> {}
+  override async close(): Promise<void> {}
+  override async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'g', advisory: false }
   }
-  async gateResolved(): Promise<boolean> {
+  override async gateResolved(): Promise<boolean> {
     return false
   }
-  async resolveGate(): Promise<void> {}
+  override async resolveGate(): Promise<void> {}
 }
 
 function issueApp(tracker: Tracker) {
@@ -428,7 +430,25 @@ describe('issue mutations', () => {
   })
 })
 
-class FakeEpicTracker extends FakeGateTracker {
+describe('GET /api/repos/:repo/ready-queue', () => {
+  test('returns the tracker-ready queue in its given order', async () => {
+    const tracker = new FakeIssueTracker()
+    const a = tracker.seed({ id: 'bd-old', title: 'oldest' })
+    const b = tracker.seed({ id: 'bd-new', title: 'newest' })
+    app = issueApp(tracker)
+    const res = await app.request('/api/repos/repo1/ready-queue')
+    expect(res.status).toBe(200)
+    expect((await res.json()) as TrackerTask[]).toEqual([a, b])
+  })
+
+  test('404s on an unknown repository', async () => {
+    app = issueApp(new FakeIssueTracker())
+    const res = await app.request('/api/repos/nope/ready-queue')
+    expect(res.status).toBe(404)
+  })
+})
+
+class FakeEpicTracker extends FakeIssueTracker {
   readonly eligible = new Map<string, EpicCloseEligible>()
   readonly closedReasons: { id: string; reason: string }[] = []
   private epicSeq = 0
@@ -446,11 +466,11 @@ class FakeEpicTracker extends FakeGateTracker {
     return epic
   }
 
-  async eligibleEpics(): Promise<EpicCloseEligible[]> {
+  override async eligibleEpics(): Promise<EpicCloseEligible[]> {
     return [...this.eligible.values()]
   }
 
-  async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
+  override async closeEligibleEpics(reason: string): Promise<EpicCloseResult> {
     const closed = [...this.eligible.keys()]
     this.eligible.clear()
     this.closedReasons.push({ id: closed.join(','), reason })
@@ -605,6 +625,115 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/repos/:repo/tasks/:id/retry', () => {
+  let tracker: FakeGateTracker
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const deferred = (id: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 60_000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    store.append(id, { type: 'task.state', from: 'implementing', to: 'retrying' })
+  }
+
+  test('wakes a deferred retry on the runner and reports the task id', async () => {
+    const retried: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: ['bd-1'],
+          startedAt: {},
+          resources: {},
+          autoQueue: false,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: () => {},
+        retryNow: async (id) => {
+          retried.push(id)
+          return { ok: true, taskId: id }
+        },
+        setAutoQueue: () => {},
+      },
+    })
+    deferred('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ taskId: 'bd-1' })
+    expect(retried).toEqual(['bd-1'])
+  })
+
+  test('409s when the task is not deferring a retry', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/repos/repo1/tasks/nope/retry', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('is 501 without a runner service', async () => {
+    deferred('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
+    expect(res.status).toBe(501)
+  })
+})
+
+describe('POST /api/tasks/:id/stop', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const running = (id: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+  }
+
+  test('parks a running task in cancelled', async () => {
+    running('bd-1')
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(body.task.state).toBe('cancelled')
+    expect(store.task('bd-1')?.state).toBe('cancelled')
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/tasks/nope/stop', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('409s on an already terminal task', async () => {
+    running('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
+    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/close', () => {
   let tracker: FakeGateTracker
 
@@ -689,7 +818,9 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           available: true,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async (id) => {
@@ -699,6 +830,8 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           return { ok: true, taskId: id }
         },
         setMaxParallel: () => {},
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setAutoQueue: () => {},
       },
     })
     claim('bd-1')
@@ -727,6 +860,52 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     expect(res.status).toBe(200)
     expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
+  })
+
+  test('abandons a deferred retry, stopping the backoff and retiring the task', async () => {
+    const stopped: string[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: ['bd-1'],
+          startedAt: {},
+          resources: {},
+          autoQueue: false,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async (id) => {
+          stopped.push(id)
+          // Mirror the real stop: a sleeping backoff parks in cancelled.
+          store.append(id, { type: 'task.state', from: 'retrying', to: 'cancelled' })
+          return { ok: true, taskId: id }
+        },
+        setMaxParallel: () => {},
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setAutoQueue: () => {},
+      },
+    })
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append('bd-1', {
+      type: 'retry.scheduled',
+      attempt: 1,
+      delayMs: 60_000,
+      reason: 'transient harness failure',
+      detail: 'rate limit exceeded',
+    })
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'retrying' })
+
+    const res = await close('bd-1', 'give up on it')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow }
+    expect(stopped).toEqual(['bd-1'])
+    expect(body.task.state).toBe('abandoned')
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'give up on it' }])
   })
 
   test('404s on an unknown task', async () => {
@@ -907,11 +1086,15 @@ describe('runner endpoints', () => {
       available: true,
       capacity: 1,
       running: [],
+      startedAt: {},
       resources: {},
+      autoQueue: false,
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
     setMaxParallel: () => {},
+    retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+    setAutoQueue: () => {},
     ...over,
   })
   const post = (path: string, body?: string) =>
@@ -936,7 +1119,9 @@ describe('runner endpoints', () => {
           available: false,
           capacity: 1,
           running: ['bd-1'],
+          startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+          autoQueue: false,
         }),
       }),
     })
@@ -947,7 +1132,9 @@ describe('runner endpoints', () => {
       available: false,
       capacity: 1,
       running: ['bd-1'],
+      startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
+      autoQueue: false,
     })
   })
 
@@ -962,8 +1149,10 @@ describe('runner endpoints', () => {
           lastRunAt: 1720000000000,
           ok: true,
           error: null,
-          prsScanned: 2,
-          mentionsResponded: 1,
+          counters: [
+            { label: 'scanned', value: 2 },
+            { label: 'responded', value: 1 },
+          ],
         },
       ],
     })
@@ -977,8 +1166,10 @@ describe('runner endpoints', () => {
         lastRunAt: 1720000000000,
         ok: true,
         error: null,
-        prsScanned: 2,
-        mentionsResponded: 1,
+        counters: [
+          { label: 'scanned', value: 2 },
+          { label: 'responded', value: 1 },
+        ],
       },
     ])
   })
@@ -1071,29 +1262,67 @@ describe('repo settings endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET returns the current worker count', async () => {
+  test('GET returns the current worker count and auto-queue state', async () => {
     const res = await app.request('/api/repos/repo1/settings')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 1 })
+    expect(await res.json()).toEqual({ maxParallel: 1, autoQueue: false })
   })
 
   test('PATCH persists, updates the workspace config, and is re-readable', async () => {
     const res = await patch('repo1', '{"maxParallel":4}')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 4 })
+    expect(await res.json()).toEqual({ maxParallel: 4, autoQueue: false })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       maxParallel: 4,
+      autoQueue: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
   })
 
-  test('PATCH rejects worker counts outside the range', async () => {
+  test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
+    const applied: boolean[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          resources: {},
+          startedAt: {},
+          autoQueue: true,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setMaxParallel: () => {},
+        setAutoQueue: (enabled) => applied.push(enabled),
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+      },
+      runnerRepo: 'repo1',
+    })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(applied).toEqual([true])
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
+      maxParallel: 1,
+      autoQueue: true,
+    })
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+    // the toggle only reaches the runner bound to this repo
+    expect((await patch('repo2', '{"autoQueue":false}')).status).toBe(200)
+    expect(applied).toEqual([true])
+  })
+
+  test('PATCH rejects worker counts outside the range and an empty body', async () => {
     for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
       const res = await patch('repo1', JSON.stringify({ maxParallel }))
       expect(res.status).toBe(400)
     }
+    expect((await patch('repo1', '{}')).status).toBe(400)
   })
 
   test('PATCH live-applies the runner only for the repo it serves', async () => {
@@ -1106,11 +1335,15 @@ describe('repo settings endpoints', () => {
           available: true,
           capacity: 1,
           running: [],
+          startedAt: {},
           resources: {},
+          autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         setMaxParallel: (n) => applied.push(n),
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setAutoQueue: () => {},
       },
       runnerRepo: 'repo1',
     })
@@ -1460,6 +1693,26 @@ describe('POST /api/repos/:repo/run', () => {
     ws = testWorkspaces(['repo1'])
     app = createApp({ workspaces: ws.workspaces })
     expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
+  })
+})
+
+describe('POST /api/repos/:repo/triage', () => {
+  test('starts a triage pass in the background for the repo', async () => {
+    const tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('/api/repos/repo1/triage', { method: 'POST' })
+    expect(res.status).toBe(202)
+    await Bun.sleep(20)
+    // the fake tracker is not triage-capable, so the pass ends without a claim
+    expect(tracker.released).toEqual([])
+  })
+
+  test('404s for an unknown repo', async () => {
+    ws = testWorkspaces(['repo1'])
+    app = createApp({ workspaces: ws.workspaces })
+    expect((await app.request('/api/repos/nope/triage', { method: 'POST' })).status).toBe(404)
   })
 })
 

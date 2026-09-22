@@ -1,5 +1,5 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite'
-import type { CheckResult, EventBody, StoredEvent, TaskState } from '../events.ts'
+import type { CheckResult, EventBody, MergeStatus, StoredEvent, TaskState } from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -26,9 +26,11 @@ type RawTask = {
   session_id: string | null
   pr_url: string | null
   pr_number: number | null
+  pr_merge_status: string | null
   status_reason: string | null
   last_error: string | null
   retry_count: number
+  retry_at: number | null
   last_commit_sha: string | null
   last_commit_subject: string | null
   checks: string | null
@@ -60,9 +62,11 @@ const toTask = (r: RawTask): ProjectedTask => ({
   sessionId: r.session_id,
   prUrl: r.pr_url,
   prNumber: r.pr_number,
+  prMergeStatus: r.pr_merge_status as MergeStatus | null,
   statusReason: r.status_reason,
   lastError: r.last_error,
   retryCount: r.retry_count,
+  retryAt: r.retry_at,
   lastCommit:
     r.last_commit_sha === null
       ? null
@@ -101,9 +105,11 @@ const taskRow = (t: ProjectedTask): Row => ({
   session_id: t.sessionId,
   pr_url: t.prUrl,
   pr_number: t.prNumber,
+  pr_merge_status: t.prMergeStatus,
   status_reason: t.statusReason,
   last_error: t.lastError,
   retry_count: t.retryCount,
+  retry_at: t.retryAt,
   created_at: t.createdAt,
   updated_at: t.updatedAt,
   last_commit_sha: t.lastCommit?.sha ?? null,
@@ -284,6 +290,23 @@ export class Store {
     ) as { seq: number; ts: number; task_id: string | null; body: string }[]
 
     return rows.map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
+  /**
+   * The most recent events for one task, oldest first, for windowed analysis
+   * (e.g. the doom-loop guard). Reads from the tail so a long-lived task's
+   * early history is never re-read.
+   */
+  recentEvents(taskId: string, limit: number): StoredEvent[] {
+    const rows = this.db
+      .query('select * from events where task_id = ? order by seq desc limit ?')
+      .all(taskId, limit) as { seq: number; ts: number; task_id: string | null; body: string }[]
+    return rows.reverse().map((r) => ({
       seq: r.seq,
       ts: r.ts,
       taskId: r.task_id,

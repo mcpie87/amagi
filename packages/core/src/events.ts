@@ -1,5 +1,10 @@
 import * as z from 'zod'
 
+/** Whether an open PR can merge, normalized across forges (GitHub and Forgejo report different vocabularies). */
+export const MERGE_STATUSES = ['mergeable', 'conflicted', 'unknown'] as const
+export const MergeStatus = z.enum(MERGE_STATUSES)
+export type MergeStatus = z.infer<typeof MergeStatus>
+
 export const TASK_STATES = [
   'claimed',
   'worktree_ready',
@@ -71,8 +76,12 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat'])
 export type AgentRole = z.infer<typeof AgentRole>
+
+/** What the triage worker decides to do with an unclaimed task. */
+export const TriageAction = z.enum(['implement', 'decompose', 'close', 'ask', 'skip'])
+export type TriageAction = z.infer<typeof TriageAction>
 
 /** One harness dialect normalized into a single shape. */
 export const AgentEvent = z.discriminatedUnion('kind', [
@@ -129,6 +138,12 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string().optional(),
   }),
   z.object({ type: z.literal('task.reclaimed'), reason: z.string().optional() }),
+  z.object({
+    type: z.literal('doom.detected'),
+    /** Which heuristic tripped: repeated tool calls, identical check failures, static diff. */
+    kind: z.enum(['tool_repeat', 'check_repeat', 'diff_static']),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
   z.object({
@@ -157,6 +172,7 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
+  z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),
@@ -181,6 +197,17 @@ export const EventBody = z.discriminatedUnion('type', [
     detail: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('triage.decision'),
+    action: TriageAction,
+    reason: z.string(),
+    /** Titles of the subtasks a decompose decision created. */
+    subtasks: z.array(z.string()).optional(),
+    /** The question text when the action was ask. */
+    question: z.string().optional(),
+    /** The question id when the action was ask, so an answer can be matched back. */
+    questionId: z.string().optional(),
+  }),
   z.object({ type: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 ])
 export type EventBody = z.infer<typeof EventBody>

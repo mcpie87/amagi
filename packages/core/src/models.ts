@@ -94,6 +94,8 @@ export async function listModelsCached(
   list: () => Promise<string[]>,
   cacheDir = join(cacheHome(), 'amagi', 'models'),
 ): Promise<string[]> {
+  // Curated kinds are instant and offline already; a disk cache can only serve stale names.
+  if (kind in HARDCODED_MODELS) return list()
   const file = join(cacheDir, `${kind}.json`)
   const read = (): CacheEntry | null => {
     if (!existsSync(file)) return null

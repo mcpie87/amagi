@@ -41,8 +41,17 @@ describe('loadConfig', () => {
     expect(config.loop.maxParallel).toBe(1)
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
+    expect(config.loop.mentionWatchIntervalSec).toBe(300)
+    expect(config.loop.prCheckIntervalSec).toBe(300)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
+    expect(config.loop.doomEnabled).toBe(true)
+    expect(config.loop.doomToolWindowSec).toBe(600)
+    expect(config.loop.doomToolRepeat).toBe(20)
+    expect(config.loop.doomCheckRounds).toBe(3)
+    expect(config.loop.doomDiffWindowSec).toBe(1800)
+    expect(config.loop.maxRunMinutes).toBe(0)
+    expect(config.loop.maxCostUsd).toBe(0)
   })
 
   test('the question timeout stays under the 600s harness Bash cap', () => {
@@ -108,6 +117,11 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
   })
 
+  test('accepts a per-harness tool allowlist', () => {
+    writeRepo('[harness.implement]\nkind = "claude"\nallowedTools = ["Read", "Bash"]\n')
+    expect(loadConfig(repo).config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
@@ -128,6 +142,30 @@ describe('loadConfig', () => {
     const config = loadConfig(repo).config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
     expect(config.loop.stallTimeoutSec).toBe(7200)
+  })
+
+  test('pr check interval is overridable', () => {
+    writeRepo('[loop]\nprCheckIntervalSec = 120\n')
+    expect(loadConfig(repo).config.loop.prCheckIntervalSec).toBe(120)
+  })
+
+  test('doom guard keys are overridable and can be disabled', () => {
+    writeRepo(
+      '[loop]\ndoomEnabled = false\ndoomToolWindowSec = 60\ndoomToolRepeat = 5\ndoomCheckRounds = 2\ndoomDiffWindowSec = 120\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.loop.doomEnabled).toBe(false)
+    expect(config.loop.doomToolWindowSec).toBe(60)
+    expect(config.loop.doomToolRepeat).toBe(5)
+    expect(config.loop.doomCheckRounds).toBe(2)
+    expect(config.loop.doomDiffWindowSec).toBe(120)
+  })
+
+  test('per-task budget keys are overridable', () => {
+    writeRepo('[loop]\nmaxRunMinutes = 90\nmaxCostUsd = 4.5\n')
+    const config = loadConfig(repo).config
+    expect(config.loop.maxRunMinutes).toBe(90)
+    expect(config.loop.maxCostUsd).toBe(4.5)
   })
 })
 

@@ -1,8 +1,10 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
+import { errMsg } from '@amagi/core'
 import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
+import { type PrConflictWatcher, startPrConflictWatcher } from './pr-conflict-watcher.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
 import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
 
@@ -14,6 +16,7 @@ export type ServeOptions = {
   gatePollIntervalMs?: number
   prPollIntervalMs?: number
   mentionWatchIntervalMs?: number
+  prConflictWatchIntervalMs?: number
   stallWatchIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
@@ -55,11 +58,13 @@ function startRepoPollers(
     gateIntervalMs,
     prIntervalMs,
     mentionIntervalMs,
+    prConflictIntervalMs,
     stallIntervalMs,
   }: {
     gateIntervalMs?: number
     prIntervalMs?: number
     mentionIntervalMs?: number
+    prConflictIntervalMs?: number
     stallIntervalMs?: number
   },
 ) {
@@ -69,6 +74,7 @@ function startRepoPollers(
       gate: GatePoller
       pr: PrPoller | null
       mention: MentionWatcher | null
+      conflict: PrConflictWatcher | null
       stall: StallWatcher
     }
   >()
@@ -81,6 +87,7 @@ function startRepoPollers(
       p?.gate.stop()
       p?.pr?.stop()
       p?.mention?.stop()
+      p?.conflict?.stop()
       p?.stall.stop()
       pollers.delete(key)
     }
@@ -90,9 +97,7 @@ function startRepoPollers(
       try {
         ws = workspaces.get(key)
       } catch (err) {
-        console.warn(
-          `repo ${key}: pollers skipped: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        console.warn(`repo ${key}: pollers skipped: ${errMsg(err)}`)
         continue
       }
       if (!ws) continue
@@ -125,12 +130,32 @@ function startRepoPollers(
                 tracker: ws.tracker,
                 intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
               }),
+        conflict:
+          forge === null
+            ? null
+            : startPrConflictWatcher({
+                repo: ws.key,
+                root: ws.root,
+                repoName: ws.name,
+                config: ws.config,
+                intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
+              }),
         stall: startStallWatcher({
           repo: ws.key,
           store: ws.store,
           tracker: ws.tracker,
           timeoutMs: ws.config.loop.stallTimeoutSec * 1000,
           intervalMs: stallIntervalMs ?? ws.config.loop.stallWatchIntervalSec * 1000,
+          ...(ws.config.loop.doomEnabled
+            ? {
+                doom: {
+                  toolWindowMs: ws.config.loop.doomToolWindowSec * 1000,
+                  toolRepeat: ws.config.loop.doomToolRepeat,
+                  checkRounds: ws.config.loop.doomCheckRounds,
+                  diffWindowMs: ws.config.loop.doomDiffWindowSec * 1000,
+                },
+              }
+            : {}),
         }),
       })
     }
@@ -141,6 +166,7 @@ function startRepoPollers(
   const workers = (): WorkerActivity[] =>
     [...pollers.values()].flatMap((p) => [
       ...(p.mention ? [p.mention.activity()] : []),
+      ...(p.conflict ? [p.conflict.activity()] : []),
       p.stall.activity(),
     ])
   return {
@@ -151,6 +177,7 @@ function startRepoPollers(
         p.gate.stop()
         p.pr?.stop()
         p.mention?.stop()
+        p.conflict?.stop()
         p.stall.stop()
       }
       pollers.clear()
@@ -166,6 +193,7 @@ export function serve({
   gatePollIntervalMs,
   prPollIntervalMs,
   mentionWatchIntervalMs,
+  prConflictWatchIntervalMs,
   stallWatchIntervalMs,
   staticDir,
   runner,
@@ -175,6 +203,9 @@ export function serve({
     ...(gatePollIntervalMs === undefined ? {} : { gateIntervalMs: gatePollIntervalMs }),
     ...(prPollIntervalMs === undefined ? {} : { prIntervalMs: prPollIntervalMs }),
     ...(mentionWatchIntervalMs === undefined ? {} : { mentionIntervalMs: mentionWatchIntervalMs }),
+    ...(prConflictWatchIntervalMs === undefined
+      ? {}
+      : { prConflictIntervalMs: prConflictWatchIntervalMs }),
     ...(stallWatchIntervalMs === undefined ? {} : { stallIntervalMs: stallWatchIntervalMs }),
   })
   const app = createApp({
@@ -200,6 +231,7 @@ export function serve({
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
       repoPollers.stop()
+      runner?.dispose?.()
       return server.stop(closeActiveConnections)
     },
   }

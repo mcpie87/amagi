@@ -4,6 +4,7 @@ import {
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
+  relTime,
   type StoredEvent,
   type TaskState,
   type TaskView,
@@ -11,7 +12,6 @@ import {
 import { Box, Text, useApp, useInput } from 'ink'
 import { useMemo, useState, useSyncExternalStore } from 'react'
 import { fetchTaskToken, submitAnswer } from './answer.ts'
-import { relTime } from './format.ts'
 import { useDashboardStream } from './useDashboardStream.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {
@@ -273,6 +273,24 @@ function TaskDetail({
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow label="PR" value={task.prUrl} />
+        {task.prMergeStatus !== null && (
+          <Box gap={1}>
+            <Box width={10}>
+              <Text dimColor>pr status</Text>
+            </Box>
+            <Text
+              color={
+                task.prMergeStatus === 'conflicted'
+                  ? 'red'
+                  : task.prMergeStatus === 'mergeable'
+                    ? 'green'
+                    : 'gray'
+              }
+            >
+              {task.prMergeStatus === 'conflicted' ? 'merge conflict' : task.prMergeStatus}
+            </Text>
+          </Box>
+        )}
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"
