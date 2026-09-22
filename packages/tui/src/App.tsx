@@ -2,17 +2,22 @@ import {
   activeTasks,
   agentLogStore,
   type DashboardState,
+  isTerminal,
   openQuestionsFor,
   type QuestionView,
   relTime,
   type StoredEvent,
   type TaskState,
   type TaskView,
+  tasksNeedingAttention,
 } from '@amagi/core'
+import type { TrackerTask } from '@amagi/core/drivers/types'
+import type { RunnerStatus } from '@amagi/core/run-service'
 import { Box, Text, useApp, useInput } from 'ink'
 import { useMemo, useState, useSyncExternalStore } from 'react'
 import { fetchTaskToken, submitAnswer } from './answer.ts'
 import { useDashboardStream } from './useDashboardStream.ts'
+import { useOverview } from './useOverview.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
@@ -24,14 +29,32 @@ function Badge({ state }: { state: TaskState }) {
   return <Text color={STATE_COLOR[state] ?? 'gray'}>{state}</Text>
 }
 
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = n
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`
+}
+
+function fmtCpu(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s'
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
 export type AppProps = { baseUrl: string; repo: string }
 
-type Screen = { name: 'queue' } | { name: 'detail'; taskId: string }
+type Screen = { name: 'overview' } | { name: 'queue' } | { name: 'detail'; taskId: string }
 
 export function App({ baseUrl, repo }: AppProps) {
   const { exit } = useApp()
   const state = useDashboardStream(baseUrl, repo)
-  const [screen, setScreen] = useState<Screen>({ name: 'queue' })
+  const overview = useOverview(baseUrl, repo)
+  const [screen, setScreen] = useState<Screen>({ name: 'overview' })
   const [showAll, setShowAll] = useState(false)
 
   const tasks = useMemo(
@@ -54,12 +77,25 @@ export function App({ baseUrl, repo }: AppProps) {
     )
   }
 
+  if (screen.name === 'overview') {
+    return (
+      <OverviewScreen
+        state={state}
+        runner={overview.runner}
+        ready={overview.ready}
+        onQueue={() => setScreen({ name: 'queue' })}
+        onQuit={() => exit()}
+      />
+    )
+  }
+
   return (
     <QueueScreen
       tasks={tasks}
       showAll={showAll}
       onToggleAll={() => setShowAll((v) => !v)}
       onSelect={(taskId) => setScreen({ name: 'detail', taskId })}
+      onToOverview={() => setScreen({ name: 'overview' })}
       onQuit={() => exit()}
     />
   )
@@ -70,12 +106,14 @@ function QueueScreen({
   showAll,
   onToggleAll,
   onSelect,
+  onToOverview,
   onQuit,
 }: {
   tasks: TaskView[]
   showAll: boolean
   onToggleAll: () => void
   onSelect: (taskId: string) => void
+  onToOverview: () => void
   onQuit: () => void
 }) {
   const [index, setIndex] = useState(0)
@@ -84,6 +122,10 @@ function QueueScreen({
   useInput((input, key) => {
     if (input === 'q' || key.ctrl) {
       if (input === 'q') onQuit()
+      return
+    }
+    if (key.tab || input === 'o') {
+      onToOverview()
       return
     }
     if (key.upArrow || input === 'k') setIndex((i) => Math.max(0, i - 1))
@@ -115,7 +157,146 @@ function QueueScreen({
         </Box>
       )}
       <Box marginTop={1}>
-        <Text dimColor>↑/↓ move · enter open · a all/active · q quit</Text>
+        <Text dimColor>↑/↓ move · enter open · a all/active · tab overview · q quit</Text>
+      </Box>
+    </Box>
+  )
+}
+
+function OverviewScreen({
+  state,
+  runner,
+  ready,
+  onQueue,
+  onQuit,
+}: {
+  state: DashboardState
+  runner: RunnerStatus | null
+  ready: TrackerTask[]
+  onQueue: () => void
+  onQuit: () => void
+}) {
+  useInput((input, key) => {
+    if (key.tab || input === 'o') onQueue()
+    else if (input === 'q') onQuit()
+  })
+
+  const running = runner?.running ?? []
+  const openPrs = Object.values(state.tasks)
+    .filter((t) => t.prUrl !== null && !isTerminal(t.state))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+  const attention = tasksNeedingAttention(state)
+  const resources = running.reduce(
+    (acc, id) => {
+      const r = runner?.resources[id]
+      if (r === undefined) return acc
+      return {
+        processes: acc.processes + r.processes,
+        rssBytes: acc.rssBytes + r.rssBytes,
+        cpuMs: acc.cpuMs + r.cpuMs,
+      }
+    },
+    { processes: 0, rssBytes: 0, cpuMs: 0 },
+  )
+
+  return (
+    <Box flexDirection="column">
+      <Text bold>amagi overview</Text>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold>runner</Text>
+        {runner === null ? (
+          <Text dimColor>offline</Text>
+        ) : (
+          <Text>
+            {runner.available ? 'available' : 'busy'} · {running.length}/{runner.capacity} workers ·
+            auto-queue {runner.autoQueue ? 'on' : 'off'}
+          </Text>
+        )}
+        {resources.processes > 0 && (
+          <Text dimColor>
+            rss {fmtBytes(resources.rssBytes)} · cpu {fmtCpu(resources.cpuMs)} · procs{' '}
+            {resources.processes}
+          </Text>
+        )}
+      </Box>
+
+      {running.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>running</Text>
+          {running.map((id) => {
+            const task = state.tasks[id]
+            return <Text key={id}>{task !== undefined ? `${task.title} (${id})` : id}</Text>
+          })}
+        </Box>
+      )}
+
+      {runner?.workers !== undefined && runner.workers.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>watchers</Text>
+          {runner.workers.map((w) => (
+            <Text key={`${w.repo}/${w.name}`} {...(w.error !== null ? { color: 'red' } : {})}>
+              {w.name} · {w.repo} · last run {w.lastRunAt === 0 ? 'never' : relTime(w.lastRunAt)}
+              {w.error === null
+                ? w.detail !== null && w.detail !== undefined
+                  ? ` · ${w.detail}`
+                  : w.counters.map((c) => ` · ${c.label} ${c.value}`).join('')
+                : ` · ${w.error}`}
+            </Text>
+          ))}
+        </Box>
+      )}
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold>claimable {ready.length > 0 ? `(${ready.length})` : ''}</Text>
+        {ready.length === 0 ? (
+          <Text dimColor>none</Text>
+        ) : (
+          ready.map((t) => (
+            <Text key={t.id}>
+              {t.id} {t.title}
+            </Text>
+          ))
+        )}
+      </Box>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold>open PRs {openPrs.length > 0 ? `(${openPrs.length})` : ''}</Text>
+        {openPrs.length === 0 ? (
+          <Text dimColor>none</Text>
+        ) : (
+          openPrs.map((t) => (
+            <Text key={t.id}>
+              {t.prMergeStatus === 'conflicted' ? (
+                <Text color="red">conflict</Text>
+              ) : t.prMergeStatus === 'mergeable' ? (
+                <Text color="green">mergeable</Text>
+              ) : (
+                <Text color="gray">unknown</Text>
+              )}{' '}
+              {t.title} ({t.id})
+            </Text>
+          ))
+        )}
+      </Box>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold {...(attention.length > 0 ? { color: 'yellow' } : {})}>
+          needs attention {attention.length > 0 ? `(${attention.length})` : ''}
+        </Text>
+        {attention.length === 0 ? (
+          <Text dimColor>none</Text>
+        ) : (
+          attention.map((t) => (
+            <Text key={t.id}>
+              <Badge state={t.state} /> {t.title} ({t.id})
+            </Text>
+          ))
+        )}
+      </Box>
+
+      <Box marginTop={1}>
+        <Text dimColor>tab queue · q quit</Text>
       </Box>
     </Box>
   )
