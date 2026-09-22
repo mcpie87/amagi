@@ -224,7 +224,8 @@ describe('parseMentionKind', () => {
   test('falls back to ambiguous for anything unrecognised', () => {
     expect(parseMentionKind('')).toBe('ambiguous')
     expect(parseMentionKind('sure, go ahead')).toBe('ambiguous')
-    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('fix-pr')
+    expect(parseMentionKind('I would classify this as: fix-pr')).toBe('ambiguous')
+    expect(parseMentionKind('not fix-pr, this is explain')).toBe('ambiguous')
   })
 })
 
