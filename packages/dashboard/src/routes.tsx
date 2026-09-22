@@ -10,7 +10,7 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
-import { fmtTokens } from '@amagi/core/format'
+import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -22,6 +22,8 @@ import {
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
+  runHealth,
+  runHealthNearLimit,
   type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core/view'
@@ -38,6 +40,7 @@ import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -49,6 +52,7 @@ import { SessionsView } from './SessionsView.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
+  type RunOptions,
   useConnection,
   useDashboard,
   useReadyQueue,
@@ -109,12 +113,12 @@ function CommandPalette() {
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const open = () => {
+  const open = useCallback(() => {
     setQuery('')
     setIndex(0)
     dialogRef.current?.showModal()
     inputRef.current?.focus()
-  }
+  }, [])
   const close = () => dialogRef.current?.close()
 
   useEffect(() => {
@@ -126,7 +130,7 @@ function CommandPalette() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [open])
 
   const q = query.trim().toLowerCase()
   const taskMatches =
@@ -506,7 +510,7 @@ function RootLayout() {
   const firstRender = useRef(true)
 
   const openNav = () => setNavOpen(true)
-  const closeNav = () => setNavOpen(false)
+  const closeNav = useCallback(() => setNavOpen(false), [])
 
   // Move focus into the open navigation (and back to its trigger on close)
   // only after the DOM has committed the is-open state and the inert flag has
@@ -527,7 +531,7 @@ function RootLayout() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navOpen])
+  }, [navOpen, closeNav])
 
   return (
     <RunnerProvider>
@@ -931,6 +935,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     if (repoRef.current !== selected) {
       repoRef.current = selected
       setIssues([])
@@ -953,6 +958,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
@@ -1221,12 +1227,14 @@ function RunButton() {
   const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
 
-  const run = async () => {
+  const run = async (opts?: RunOptions) => {
     setBusy(true)
     setMessage(null)
-    const res = await start()
+    const res = await start(undefined, opts)
     setBusy(false)
+    setOpen(false)
     setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
@@ -1236,11 +1244,151 @@ function RunButton() {
       <button
         type="button"
         disabled={busy}
-        onClick={() => void run()}
+        onClick={() => setOpen(true)}
         className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
         Run next
       </button>
+      {open && <RunPicker onClose={() => setOpen(false)} onRun={run} />}
+    </div>
+  )
+}
+
+/**
+ * Lets the operator pick harness/model/effort before "Run next" dispatches.
+ * Every field defaults to "use the configured value": leaving the harness at
+ * default sends no overrides, so the server's config.harness.implement wins.
+ */
+function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunOptions) => void }) {
+  const { options } = useRunner()
+  const harnesses = options?.harnesses ?? []
+  const [harness, setHarness] = useState('')
+  const [model, setModel] = useState('')
+  const [customModel, setCustomModel] = useState('')
+  const [effort, setEffort] = useState('')
+
+  const selected = harnesses.find((h) => h.name === harness)
+  const kind = selected?.kind
+  const models = kind === undefined ? [] : (options?.models[kind] ?? [])
+  const efforts = kind === undefined ? [] : (options?.efforts[kind] ?? [])
+
+  const switchHarness = (value: string) => {
+    setHarness(value)
+    setModel('')
+    setCustomModel('')
+    setEffort('')
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const effectiveModel = model === 'custom' ? customModel.trim() : model
+    onRun({
+      ...(harness === '' ? {} : { harness }),
+      ...(effectiveModel === '' ? {} : { model: effectiveModel }),
+      ...(effort === '' ? {} : { effort }),
+    })
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-md rounded-lg border border-line-strong bg-surface p-4"
+      >
+        <h2 className="mb-3 text-lg font-semibold">Run next task</h2>
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="run-harness">
+              Harness
+            </label>
+            <select
+              id="run-harness"
+              value={harness}
+              onChange={(e) => switchHarness(e.target.value)}
+              className={input}
+            >
+              <option value="">default ({options?.default?.kind ?? 'config'})</option>
+              {harnesses.map((h) => (
+                <option key={h.name} value={h.name}>
+                  {h.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={label} htmlFor="run-model">
+              Model
+            </label>
+            <select
+              id="run-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.model === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.model})`}
+              </option>
+              {models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              <option value="custom">(custom model)</option>
+            </select>
+            {model === 'custom' && (
+              <input
+                value={customModel}
+                onChange={(e) => setCustomModel(e.target.value)}
+                placeholder="model id"
+                className={`${input} mt-1`}
+              />
+            )}
+          </div>
+          <div>
+            <label className={label} htmlFor="run-effort">
+              Effort
+            </label>
+            <select
+              id="run-effort"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.effort === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.effort})`}
+              </option>
+              {efforts.map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-line-strong px-3 py-1 text-sm text-fg-muted hover:bg-raised"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
+          >
+            Run
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -1283,6 +1431,8 @@ function WorkerSlot({
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
   const usage = currentUsageFor(state, taskId)
+  const health = runHealth(state, taskId, now)
+  const nearLimit = runHealthNearLimit(health)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1292,6 +1442,14 @@ function WorkerSlot({
           </span>
         )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
+        {nearLimit && (
+          <span
+            className="shrink-0 rounded bg-amber-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-ink ring-1 ring-inset ring-amber-edge"
+            title={health.warnings.join('\n') || 'run is nearing a guard limit'}
+          >
+            near limit
+          </span>
+        )}
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
@@ -1428,6 +1586,7 @@ function WorkersPanel() {
       <div className="space-y-2">
         {Array.from({ length: status.capacity }, (_, i) => (
           <WorkerSlot
+            // biome-ignore lint/suspicious/noArrayIndexKey: slots are fixed positions, the index is their identity
             key={i}
             taskId={running[i] ?? null}
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
@@ -1845,7 +2004,7 @@ function DetailRow({ label, value }: { label: string; value: string | ReactNode 
   return (
     <div className="flex gap-2 py-1">
       <dt className="w-28 shrink-0 text-fg-faint">{label}</dt>
-      <dd className="min-w-0 break-all">{value}</dd>
+      <dd className="min-w-0 break-all whitespace-pre-wrap">{value}</dd>
     </div>
   )
 }
@@ -2597,6 +2756,9 @@ const escapeHtml = (s: string) =>
 
 // Raw HTML from the agent is escaped, not rendered, so a prompt-injected tag cannot run.
 const markdown = new Marked({
+  // Keep single newlines (soft breaks) as line breaks: the LLM-authored
+  // summary/reason text is multi-line and must not flatten into one line.
+  breaks: true,
   renderer: {
     html({ text }) {
       return escapeHtml(text)
@@ -2606,6 +2768,7 @@ const markdown = new Marked({
 
 function Markdown({ text }: { text: string }) {
   return (
+    // biome-ignore lint/security/noDangerouslySetInnerHtml: the Marked renderer escapes raw HTML
     <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
   )
 }
@@ -2615,6 +2778,9 @@ function Markdown({ text }: { text: string }) {
  * criteria, priority, type, assignee, labels, parent, dependencies - fetched
  * on first expand and kept for the session.
  */
+/** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
+const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
+
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
   const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
@@ -2656,7 +2822,11 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
             <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
-                value={issue.priority === null ? null : `P${issue.priority}`}
+                value={
+                  issue.priority === null
+                    ? null
+                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+                }
               />
               <DetailRow label="type" value={issue.type} />
               <DetailRow label="assignee" value={issue.assignee} />
@@ -2725,7 +2895,7 @@ function RetryPanel({ task }: { task: TaskView }) {
         No human action is needed; use Retry now to skip the wait, or Close to abandon.
       </p>
       {task.lastError !== null && (
-        <p className="mt-1 text-sm text-fg-muted">
+        <p className="mt-1 whitespace-pre-wrap text-sm text-fg-muted">
           Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
         </p>
       )}
@@ -2827,6 +2997,12 @@ function TaskDetailView() {
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const [tab, setTab] = useState<DetailTab>('log')
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const health = runHealth(state, id, now)
   const usageEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
@@ -2925,6 +3101,34 @@ function TaskDetailView() {
         <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
         <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
+        <DetailRow
+          label="context"
+          value={
+            health.contextTokens === null
+              ? 'no usage reported yet'
+              : health.contextWarnTokens === null
+                ? fmtTokens(health.contextTokens)
+                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn · ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+          }
+        />
+        <DetailRow
+          label="cost"
+          value={
+            !health.costSeen
+              ? 'not reported by harness'
+              : health.maxCostUsd > 0
+                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                : `$${health.costUsd.toFixed(2)}`
+          }
+        />
+        <DetailRow
+          label="elapsed"
+          value={
+            health.maxRunMs === null
+              ? fmtDuration(health.elapsedMs)
+              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+          }
+        />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow
@@ -2947,6 +3151,22 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      {health.warnings.length > 0 && (
+        <div className="mt-4 rounded-lg border border-amber-edge bg-amber-soft px-4 py-3">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
+            Guard warnings
+          </h2>
+          <ul className="space-y-1">
+            {health.warnings.map((w, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
+              <li key={i} className="font-mono text-xs text-fg">
+                {w}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
@@ -3278,6 +3498,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           ts: event.ts,
           taskId: event.taskId,
           text: `retry #${event.attempt} in ${(event.delayMs / 1000).toFixed(0)}s`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
+      case 'run.restarted':
+        items.push({
+          key: `rr${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `context restart #${event.restart} (peak ${fmtTokens(event.contextTokens)})`,
           icon: 'refresh',
           tone: 'amber',
         })
