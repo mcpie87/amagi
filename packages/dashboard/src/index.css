@@ -326,8 +326,11 @@ textarea::placeholder {
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(2px);
 }
+/* Preflight's universal `margin: 0` kills the UA's `margin: auto` that centers
+   a modal dialog; without this the dialog pins to the top-left corner. */
 .watcher-dialog {
   width: min(520px, calc(100vw - 32px));
+  margin: auto;
   border: 1px solid var(--color-line-strong);
   border-radius: 12px;
   background: var(--color-surface);
@@ -336,9 +339,12 @@ textarea::placeholder {
   overflow: hidden;
   box-shadow: 0 20px 50px var(--shadow-color);
 }
+/* Block the native light-dismiss on backdrop click: this dialog closes only
+   via Esc (cancel) or the Close button. */
 .watcher-dialog::backdrop {
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(2px);
+  pointer-events: none;
 }
 .command-input-row {
   display: flex;
