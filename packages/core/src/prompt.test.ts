@@ -8,6 +8,34 @@ import {
   prTitle,
 } from './prompt.ts'
 
+const TASK: TrackerTask = {
+  id: 'am-1',
+  title: 'Add a greeting file',
+  description: 'Write hello.txt',
+  status: 'in_progress',
+  priority: 1,
+  type: 'task',
+  url: null,
+}
+
+describe('commitMessage', () => {
+  test('renders the title, task and a bullet-point summary of changes', () => {
+    const message = commitMessage(TASK, [
+      { path: 'hello.txt', additions: 1, deletions: 0 },
+      { path: 'image.png', additions: Number.NaN, deletions: Number.NaN },
+    ])
+
+    expect(message).toBe(
+      'Add a greeting file\n\nTask: am-1\n\nChanges:\n- `hello.txt` +1 -0\n- `image.png` binary\n',
+    )
+  })
+
+  test('omits the changes section when nothing changed', () => {
+    const message = commitMessage(TASK)
+    expect(message).toBe('Add a greeting file\n\nTask: am-1\n')
+  })
+})
+
 const task = (title: string): TrackerTask => ({
   id: 'am-544',
   title,
@@ -31,12 +59,6 @@ describe('prTitle', () => {
 
   test('drops a milestone-style prefix', () => {
     expect(prTitle(task('M5: forge drivers'))).toBe('am-544: forge drivers')
-  })
-})
-
-describe('commitMessage', () => {
-  test('subject starts with the bracketed task id, then the title', () => {
-    expect(commitMessage(task('Add a greeting file'))).toBe('[am-544] Add a greeting file\n')
   })
 })
 

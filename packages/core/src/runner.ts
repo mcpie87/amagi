@@ -1262,7 +1262,8 @@ export class Runner {
     const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
     if (status.stdout.trim() !== '') {
       await this.exec(['git', 'add', '-A'], { cwd })
-      const message = commitMessage(task)
+      const changes = await changesSinceBase(this.exec, cwd, this.deps.config.repo.baseBranch, true)
+      const message = commitMessage(task, changes)
       const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
       if (commit.exitCode !== 0) {
         throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)

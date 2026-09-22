@@ -20,9 +20,15 @@ export async function diffBase(run: Exec, cwd: string, base: string): Promise<st
   return r.exitCode === 0 ? remote : base
 }
 
-export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
+export async function changesSinceBase(
+  run: Exec,
+  cwd: string,
+  base: string,
+  workingTree = false,
+): Promise<PrChange[]> {
   const ref = await diffBase(run, cwd, base)
-  const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
+  const range = workingTree ? ref : `${ref}...HEAD`
+  const r = await run(['git', 'diff', '--numstat', range], { cwd })
   return r.stdout
     .split('\n')
     .filter(Boolean)
