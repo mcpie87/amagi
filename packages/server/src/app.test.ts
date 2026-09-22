@@ -6,11 +6,17 @@ import type {
   AgentProcess,
   AgentStartOptions,
   BeadsIssue,
+  CreatePrOptions,
   CreateTrackerTask,
   EpicCloseEligible,
   EpicCloseResult,
   GateRef,
   Harness,
+  OpenPr,
+  PrComment,
+  PrDriver,
+  PrState,
+  PullRequest,
   Question,
   QuestionRow,
   RunOptions,
@@ -130,6 +136,94 @@ describe('GET /api/repos/:repo/tasks', () => {
 
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/tasks')).status).toBe(404)
+  })
+})
+
+class FakeMergePrDriver implements PrDriver {
+  open: OpenPr[] = []
+  async listOpenPrs(): Promise<OpenPr[]> {
+    return this.open
+  }
+  async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
+    throw new Error('unused')
+  }
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async addLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+  async removeLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+}
+
+describe('GET /api/repos/:repo/mergeable-prs', () => {
+  let forge: FakeMergePrDriver
+  beforeEach(() => {
+    forge = new FakeMergePrDriver()
+    ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('returns only the PRs the forge reports as mergeable', async () => {
+    forge.open = [
+      {
+        number: 1,
+        title: 'Ready',
+        url: 'https://github.com/owner/repo/pull/1',
+        headRefName: 'amagi/am-1',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      {
+        number: 2,
+        title: 'Conflicted',
+        url: 'https://github.com/owner/repo/pull/2',
+        headRefName: 'amagi/am-2',
+        baseRefName: 'main',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+      },
+      {
+        number: 3,
+        title: 'Unknown',
+        url: 'https://github.com/owner/repo/pull/3',
+        headRefName: 'amagi/am-3',
+        baseRefName: 'main',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'UNKNOWN',
+      },
+      {
+        number: 4,
+        title: 'Clean via status',
+        url: 'https://github.com/owner/repo/pull/4',
+        headRefName: 'amagi/am-4',
+        baseRefName: 'main',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'CLEAN',
+      },
+    ]
+    const res = await app.request('/api/repos/repo1/mergeable-prs')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { prs: OpenPr[] }
+    expect(body.prs.map((p) => p.number)).toEqual([1, 4])
+  })
+
+  test('404s for an unknown repo', async () => {
+    expect((await app.request('/api/repos/nope/mergeable-prs')).status).toBe(404)
+  })
+
+  test('501s when the repo has no forge driver', async () => {
+    const noForge = testWorkspaces(['repo1'], { forgeFor: () => null })
+    const noForgeApp = createApp({ workspaces: noForge.workspaces })
+    const res = await noForgeApp.request('/api/repos/repo1/mergeable-prs')
+    expect(res.status).toBe(501)
+    noForge.cleanup()
   })
 })
 

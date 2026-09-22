@@ -339,6 +339,20 @@ export function createApp({
       return c.json(await ws.tracker.ready())
     })
 
+    .get('/api/repos/:repo/mergeable-prs', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The driver reports the forge's own flags (gh wording on both drivers),
+      // so one filter is all it takes to find the PRs that can merge now.
+      const open = await ws.forge.listOpenPrs(ws.root)
+      return c.json({
+        prs: open.filter((p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN'),
+      })
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)

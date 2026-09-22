@@ -7,6 +7,7 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -66,6 +67,9 @@ class FakePr implements PrDriver {
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
+  }
+  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
+    return []
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
