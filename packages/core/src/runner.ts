@@ -1,8 +1,10 @@
+import { existsSync } from 'node:fs'
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
+import { errMsg } from './errors.ts'
 import {
   type AgentEvent,
   type CheckResult,
@@ -43,6 +45,27 @@ export type RunOnceResult = {
   task: TaskRow
   state: TaskState
 } | null
+
+/**
+ * The session, summary, model and effort an agent run leaves behind. Every
+ * agent phase produces one of these and later phases merge into it.
+ */
+type AgentRun = {
+  sessionId: string | null
+  summary: string | null
+  model: string | null
+  effort: string | null
+}
+
+/** Merge a newer run into the accumulated state, keeping the earlier value where the newer run is null. */
+function mergeAgentRuns(prev: AgentRun, next: AgentRun): AgentRun {
+  return {
+    sessionId: next.sessionId,
+    summary: next.summary ?? prev.summary,
+    model: next.model ?? prev.model,
+    effort: next.effort ?? prev.effort,
+  }
+}
 
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
@@ -182,7 +205,9 @@ class Lease {
 
 export class Runner {
   private readonly exec: Exec
+  /** Set once the store flips the task to `cancelled`; guards the unwind. */
   private cancelled = false
+  private retryNowRequested = false
   private currentProcess: AgentProcess | null = null
   /** Running peak input context (input + cached tokens) for the current task run. */
   private peakContext = 0
@@ -202,6 +227,15 @@ export class Runner {
     if (this.currentProcess !== null) void this.currentProcess.kill()
   }
 
+  /**
+   * Wake a task sleeping out its retry backoff so the next attempt starts
+   * immediately instead of waiting out the full delay. No-op while the agent
+   * is live or the task is not deferring a retry.
+   */
+  retryNow(): void {
+    this.retryNowRequested = true
+  }
+
   /** The pid of the live agent process, or null between agent phases. */
   currentPid(): number | null {
     return this.currentProcess?.pid ?? null
@@ -216,17 +250,23 @@ export class Runner {
     if (spent !== null) throw new BudgetExhaustedError(taskId, spent)
   }
 
-  /** Claims one ready task and drives it as far as the current milestone goes. */
-  async runOnce(): Promise<RunOnceResult> {
+  /**
+   * Claims the next ready task (or the given one, for `amagi continue`) and
+   * drives it as far as the current milestone goes.
+   */
+  async runOnce(taskId?: string): Promise<RunOnceResult> {
     const { store, tracker, config } = this.deps
-    const task = await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
-      store.append(null, {
-        type: 'claim.rejected',
-        title: skipped.title,
-        difficulty: skipped.difficulty ?? null,
-        reason,
-      })
-    })
+    const task =
+      taskId === undefined
+        ? await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+            store.append(null, {
+              type: 'claim.rejected',
+              title: skipped.title,
+              difficulty: skipped.difficulty ?? null,
+              reason,
+            })
+          })
+        : await tracker.claim(taskId)
     if (task === null) return null
     return this.runClaimed(task)
   }
@@ -258,7 +298,7 @@ export class Runner {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
       } else {
-        const message = err instanceof Error ? err.message : String(err)
+        const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
         this.transition(task.id, 'needs_human', message)
       }
@@ -288,7 +328,7 @@ export class Runner {
     try {
       await tracker.release(taskId)
     } catch (err) {
-      console.warn(`release ${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`release ${taskId}: ${errMsg(err)}`)
     }
   }
 
@@ -308,6 +348,11 @@ export class Runner {
     })
   }
 
+  /** Whether the operator interrupted the run via the store's `cancelled` state. */
+  private isCancelled(taskId: string): boolean {
+    return this.cancelled || this.deps.store.task(taskId)?.state === 'cancelled'
+  }
+
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
@@ -323,14 +368,18 @@ export class Runner {
     // A reclaimed task already has its worktree and branch recorded in the
     // store; reuse them instead of creating a fresh worktree.
     const recorded = store.task(task.id)
-    const resume = recorded !== null && recorded.worktree !== null && recorded.branch !== null
+    const recordedWorktree =
+      recorded !== null && recorded.worktree !== null && recorded.branch !== null
+        ? { path: recorded.worktree, branch: recorded.branch }
+        : null
+    // Reuse only what still exists on disk: a reboot that cleared the worktree
+    // root must fall back to a fresh worktree, not run the agent in a dir that
+    // is gone.
+    const resume = recordedWorktree !== null && existsSync(recordedWorktree.path)
 
     let worktree: WorktreeSpec
-    if (resume) {
-      worktree = {
-        path: recorded.worktree as string,
-        branch: recorded.branch as string,
-      }
+    if (recordedWorktree !== null && resume) {
+      worktree = recordedWorktree
     } else {
       // With a token present, base the worktree on a fresh origin fetch over
       // https; without one, fall back to the local base branch so git never
@@ -404,19 +453,18 @@ export class Runner {
       budget,
     )
     if (first.stopped) return
-    let sessionId = first.sessionId
-    let summary = first.summary
-    let model = first.model
-    let effort = first.effort
+    let current: AgentRun = {
+      sessionId: first.sessionId,
+      summary: first.summary,
+      model: first.model,
+      effort: first.effort,
+    }
 
     if (lease.isLost) throw new LeaseLostError(task.id)
 
-    const parked = await this.parkAndResume(task.id, sessionId, cwd, lease, budget)
+    const parked = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
     if (parked === null) return
-    sessionId = parked.sessionId
-    summary = parked.summary ?? summary
-    model = parked.model ?? model
-    effort = parked.effort ?? effort
+    current = mergeAgentRuns(current, parked)
 
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
@@ -431,7 +479,7 @@ export class Runner {
         this.transition(task.id, 'needs_human', 'project checks still failing')
         return
       }
-      if (sessionId === null) {
+      if (current.sessionId === null) {
         this.transition(
           task.id,
           'needs_human',
@@ -443,7 +491,7 @@ export class Runner {
       this.transition(task.id, 'implementing')
       const fix = await this.runAgentWithRetry(
         task.id,
-        sessionId,
+        current.sessionId,
         {
           cwd,
           prompt: fixChecksPrompt(results),
@@ -455,28 +503,22 @@ export class Runner {
         budget,
       )
       if (fix.stopped) return
-      sessionId = fix.sessionId
-      summary = fix.summary
-      model = fix.model
-      effort = fix.effort
+      current = mergeAgentRuns(current, fix)
       if (lease.isLost) throw new LeaseLostError(task.id)
 
-      const resumed = await this.parkAndResume(task.id, sessionId, cwd, lease, budget)
+      const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
       if (resumed === null) return
-      sessionId = resumed.sessionId
-      summary = resumed.summary ?? summary
-      model = resumed.model ?? model
-      effort = resumed.effort ?? effort
+      current = mergeAgentRuns(current, resumed)
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch)
     if (!committed) {
-      let reason = summary?.trim() !== '' ? summary : null
-      if (reason === null && sessionId !== null) {
+      let reason = current.summary?.trim() !== '' ? current.summary : null
+      if (reason === null && current.sessionId !== null) {
         this.transition(task.id, 'implementing')
         const why = await this.runAgentWithRetry(
           task.id,
-          sessionId,
+          current.sessionId,
           {
             cwd,
             prompt: whyNoChangesPrompt(task),
@@ -500,7 +542,7 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, model, effort)
+    await this.openPullRequest(task, cwd, branch, current.model, current.effort, current.summary)
     this.throwIfCancelled(task.id)
   }
 
@@ -515,10 +557,25 @@ export class Runner {
     branch: string,
     model: string | null,
     effort: string | null,
+    summary: string | null,
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    if (changes.length === 0) {
+      // The worktree was dirty and a commit was made, yet the three-dot diff
+      // against the base is empty: the agent re-applied change already on the
+      // base. Nothing to push, so no PR. Distinct from the 'produced no
+      // changes' reason: that agent did nothing, this one duplicated existing
+      // work.
+      this.transition(
+        task.id,
+        'no_pr',
+        `the agent committed, but the diff against ${config.repo.baseBranch} is empty; ` +
+          `the work is probably already on ${config.repo.baseBranch}`,
+      )
+      return
+    }
     // The agent may have appended a how-to-use section to the task description
     // while implementing; re-read it so the PR body is not built from the stale
     // claim. Best effort: a failed re-read falls back to the claimed task.
@@ -534,11 +591,16 @@ export class Runner {
       base: config.repo.baseBranch,
       remote: config.forge.remote,
       title: prTitle(current),
-      body: formatPrBody(current, changes, {
-        harness: this.deps.harness.kind,
-        model,
-        effort,
-      }),
+      body: formatPrBody(
+        current,
+        changes,
+        {
+          harness: this.deps.harness.kind,
+          model,
+          effort,
+        },
+        summary,
+      ),
       labels: amagiLabels(current.type),
     }
     try {
@@ -546,7 +608,7 @@ export class Runner {
       store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
       this.transition(task.id, 'pr_open')
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
         ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
@@ -574,12 +636,7 @@ export class Runner {
     cwd: string,
     lease: Lease,
     budget: TaskBudget,
-  ): Promise<{
-    sessionId: string | null
-    summary: string | null
-    model: string | null
-    effort: string | null
-  } | null> {
+  ): Promise<AgentRun | null> {
     const { store, config } = this.deps
     if (store.task(taskId)?.state !== 'awaiting_answer') {
       return { sessionId, summary: null, model: null, effort: null }
@@ -594,6 +651,7 @@ export class Runner {
       this.throwIfCancelled(taskId)
       this.throwIfBudgetExhausted(taskId, budget)
       if (lease.isLost) throw new LeaseLostError(taskId)
+      if (this.isCancelled(taskId)) return null
       const q = store.question(question.id)
       if (q !== null && q.answer !== null) {
         this.transition(taskId, 'implementing')
@@ -657,6 +715,16 @@ export class Runner {
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
 
+    // The store is the shared interrupt channel: `amagi stop` or the API parks
+    // the task in `cancelled`, and this poll kills the agent process so a hung
+    // harness is stopped without reaching into the runner process.
+    const cancelWatch = setInterval(() => {
+      if (store.task(taskId)?.state !== 'cancelled') return
+      this.cancelled = true
+      clearInterval(cancelWatch)
+      void proc.kill()
+    }, 500)
+
     // The stream is persisted anyway, so a failure is mined from what the
     // agent actually said or did instead of a bare exit code.
     let lastText: string | null = null
@@ -719,6 +787,8 @@ export class Runner {
         }
       }
 
+      clearInterval(cancelWatch)
+
       const outcome = await proc.done
       store.append(taskId, {
         type: 'agent.exited',
@@ -750,6 +820,7 @@ export class Runner {
       }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
+      clearInterval(cancelWatch)
     }
   }
 
@@ -804,13 +875,7 @@ export class Runner {
     phase: string,
     lease: Lease,
     budget: TaskBudget,
-  ): Promise<{
-    sessionId: string | null
-    stopped: boolean
-    summary: string | null
-    model: string | null
-    effort: string | null
-  }> {
+  ): Promise<AgentRun & { stopped: boolean }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
     let summary: string | null = null
@@ -854,10 +919,13 @@ export class Runner {
       // cannot be resumed; the retry starts a fresh session in the same worktree.
       if (isSessionLimit(run.detail ?? '')) sessionId = null
       this.transition(taskId, 'retrying')
-      // Polled so a stop interrupts the backoff instead of waiting it out.
+      // Polled so a stop interrupts the backoff instead of waiting it out,
+      // and a retry-now request skips the wait for an immediate retry.
+      this.retryNowRequested = false
       const deadline = Date.now() + delayMs
       while (Date.now() < deadline) {
         this.throwIfCancelled(taskId)
+        if (this.retryNowRequested) break
         await Bun.sleep(Math.min(100, deadline - Date.now()))
       }
       if (lease.isLost) throw new LeaseLostError(taskId)

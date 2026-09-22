@@ -31,7 +31,7 @@ to the API at `http://127.0.0.1:7777`.
 
 The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search workspace** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
 
-- **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button.
+- **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button. An **Auto queue** toggle turns automatic dispatch on or off (when on, free slots are filled as tasks become claimable).
 - **Tasks** browses the tracker's issues in board or list view (the choice is remembered), with a search box, a status filter, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
 - **Inbox** collects everything that needs a human: every open question (with one-tap options and a free-text answer) and the tasks needing attention.
 - **Activity** is a feed of everything that happened across runs - claims, state changes, checks, commits, PRs, questions, retries, and errors - newest first, linked to the task.
@@ -50,6 +50,9 @@ bun run packages/cli/src/index.ts <command>
 | Command | Description |
 | --- | --- |
 | `run` | Claim the next ready task and work it in its own worktree. `--harness <name>`, `--model <name>` and `--effort <level>` pin the harness, model and reasoning effort; without them, a TTY run prompts for all three (see [Harness and model selection](#harness-and-model-selection)) |
+| `triage` | Pick an unclaimed task the runner skips (epics, milestones, blocked, orphaned) and decide what to do with it: implement, decompose, close, ask the operator, or skip with a recorded reason. `--harness`, `--model` and `--effort` pin the decision harness (defaults to `harness.triage`) |
+| `continue <task-id>` | Resume a task in its recorded worktree. `--harness`/`--model` restart it with a different harness or model |
+| `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
@@ -102,7 +105,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, lease lost, PR creation failed, agent crash, etc.) | — |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
-| `cancelled` | Terminal: the operator stopped the run from the dashboard; the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path | — |
+| `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. The review loop (a reviewer that inspects the PR and a fixing pass that addresses its findings) is not built yet; a task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
@@ -136,6 +139,31 @@ unlike stop, which preserves the worktree for the reclaim path.
 Capacity is enforced per server process: each `amagi serve` owns the runs it
 launches. Launching the same task from a second server or from the CLI (`amagi
 run`) relies on the tracker's atomic claim to avoid double-claiming.
+
+## The triage worker
+
+The runner only claims the next ready task, so everything not directly
+claimable is invisible to it: epics and milestones sit open, finished
+containers stay open, blocked and orphaned tasks go untouched. The **triage
+worker** (`packages/core/src/triage.ts`, `amagi triage`) is a separate decision
+role that picks one unclaimed task a worker is not currently holding and asks a
+harness to decide what to do with it:
+
+- **implement**: the task is concrete ready work: claim it and hand it to the
+  implementation runner (the triage role never writes code itself).
+- **decompose**: the task is a container (epic/milestone) with no concrete
+  children: break it into implementable subtasks under it.
+- **close**: all children are done, or the work is already satisfied.
+- **ask**: genuinely ambiguous: post a question on the task (surfaced in the
+  dashboard inbox) and park it; once the operator answers, the next pass acts
+  on that answer.
+- **skip**: not for amagi to do: record the reason as a comment on the task.
+
+Every decision is recorded as a `triage.decision` event in the store. Leaf
+tasks are triaged once; a decomposed container is re-triaged only once all its
+children have closed, so a finished epic gets closed instead of re-decomposed.
+`amagi serve` also exposes `POST /api/repos/:repo/triage` to trigger a pass for
+a repo through the dashboard.
 
 A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
 runs inside `amagi serve`. Every worker process records a liveness heartbeat
@@ -192,6 +220,16 @@ Every key is optional; the table below is the complete schema with its default.
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
+| `harness.review.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"codex"` | Harness that reviews the PR. Reserved for the review loop (see [state machine](#the-task-state-machine)); not invoked by the runner yet. |
+| `harness.review.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
+| `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
+| `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
+| `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
+| `harness.triage.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that decides what to do with unclaimed tasks the runner skips. It reads task context and reports a structured decision; it never touches the repository. |
+| `harness.triage.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
+| `harness.triage.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
+| `harness.triage.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
+| `harness.triage.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
 | `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
 | `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
@@ -209,6 +247,8 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.contextMaxTokens` | integer >= 0 | `200000` | Input context at which a run is stopped: crossing it kills the current agent process and routes the task to `needs_human` instead of letting the harness degrade. |
 | `loop.contextOverrides.<harness>.warnTokens` | integer >= 0 | *(falls back to `loop.contextWarnTokens`)* | Per-harness soft limit, keyed by harness kind (`claude`/`codex`/`opencode`), for harnesses whose context window differs. |
 | `loop.contextOverrides.<harness>.maxTokens` | integer >= 0 | *(falls back to `loop.contextMaxTokens`)* | Per-harness hard limit, keyed by harness kind, for harnesses whose context window differs. |
+| `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
+| `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
 | `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |
@@ -284,6 +324,23 @@ permissions = "bypass"
 kind = "claude"
 model = "claude-opus-5"
 ```
+
+### Interrupting and restarting a task
+
+A task that hangs (the harness process stops producing output, the machine
+froze, the runner died) is not stranded: interrupt it, then start it again in
+the same worktree, optionally with a different harness or model.
+
+```bash
+amagi stop bd-1234        # park the run in `cancelled`; a live runner kills its agent process
+amagi continue bd-1234    # resume in the recorded worktree with the configured harness
+amagi continue bd-1234 --harness opencode --model local/...   # same worktree, different harness/model
+```
+
+`amagi continue` re-claims the task and drives it in the worktree and branch
+already recorded for it, so no work is lost. The same stop/restart flow is
+available over the API (`POST /api/tasks/:id/stop` and
+`POST /api/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 

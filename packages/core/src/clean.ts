@@ -58,7 +58,10 @@ export async function cleanTerminalWorktrees(
 ): Promise<CleanPlan[]> {
   const plans: CleanPlan[] = []
 
-  for (const task of store.tasks({ states: TERMINAL_STATES, limit: 10_000 })) {
+  // `cancelled` tasks keep their worktree: `amagi continue` resumes in it, so
+  // a stop must not be undone by a routine clean.
+  const cleanable = TERMINAL_STATES.filter((s) => s !== 'cancelled')
+  for (const task of store.tasks({ states: cleanable, limit: 10_000 })) {
     if (task.worktree === null) continue
     const plan: CleanPlan = { taskId: task.id, path: task.worktree, branch: task.branch }
     plans.push(plan)

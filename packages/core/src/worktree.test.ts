@@ -83,6 +83,15 @@ describe('createWorktree', () => {
     expect(existsSync(wt.path)).toBe(true)
   })
 
+  test('re-adds after the worktree dir is wiped and prunes the stale registration', async () => {
+    const first = await create()
+    rmSync(first.path, { recursive: true, force: true })
+    const second = await create()
+    expect(second).toEqual(first)
+    expect(existsSync(first.path)).toBe(true)
+    expect((await listWorktrees(repo)).map((w) => w.path)).toContain(first.path)
+  })
+
   test('runs the setup command inside the worktree, not the repo', async () => {
     const wt = await createWorktree({
       repoRoot: repo,
