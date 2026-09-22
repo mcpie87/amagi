@@ -39,11 +39,11 @@ export function isTerminal(state: TaskState): boolean {
 
 /**
  * Any state may fall to a terminal state, so those edges are implicit rather
- * than listed here. Only forward progress is enumerated — except the two
- * parked states, which an operator settles as abandoned or, when the work
- * was already satisfied, as done.
+ * than listed here. Only forward progress is enumerated; the operator-settled
+ * exits of the parked/stopped states are special-cased in canTransition, not
+ * listed here.
  */
-const FORWARD: Record<TaskState, readonly TaskState[]> = {
+const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   claimed: ['worktree_ready'],
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
@@ -55,11 +55,6 @@ const FORWARD: Record<TaskState, readonly TaskState[]> = {
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
   pr_flagged: ['pr_open'],
-  done: [],
-  no_pr: ['abandoned', 'done'],
-  needs_human: ['abandoned', 'done'],
-  abandoned: [],
-  cancelled: [],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
@@ -77,7 +72,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   }
   if (isTerminal(from)) return false
   if (isTerminal(to)) return true
-  return FORWARD[from].includes(to)
+  return FORWARD[from]?.includes(to) ?? false
 }
 
 export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat', 'verify'])
