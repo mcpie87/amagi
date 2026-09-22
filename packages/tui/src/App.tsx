@@ -2,15 +2,19 @@ import {
   activeTasks,
   agentLogStore,
   type DashboardState,
+  fmtDuration,
+  fmtTokens,
   openQuestionsFor,
   type QuestionView,
   relTime,
+  runHealth,
+  runHealthNearLimit,
   type StoredEvent,
   type TaskState,
   type TaskView,
 } from '@amagi/core'
 import { Box, Text, useApp, useInput } from 'ink'
-import { useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { fetchTaskToken, submitAnswer } from './answer.ts'
 import { useDashboardStream } from './useDashboardStream.ts'
 
@@ -33,6 +37,13 @@ export function App({ baseUrl, repo }: AppProps) {
   const state = useDashboardStream(baseUrl, repo)
   const [screen, setScreen] = useState<Screen>({ name: 'queue' })
   const [showAll, setShowAll] = useState(false)
+  // One wall-clock snapshot per second so elapsed-vs-budget stays live between
+  // stream events.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   const tasks = useMemo(
     () =>
@@ -49,6 +60,7 @@ export function App({ baseUrl, repo }: AppProps) {
         repo={repo}
         state={state}
         taskId={screen.taskId}
+        now={now}
         onBack={() => setScreen({ name: 'queue' })}
       />
     )
@@ -57,6 +69,8 @@ export function App({ baseUrl, repo }: AppProps) {
   return (
     <QueueScreen
       tasks={tasks}
+      state={state}
+      now={now}
       showAll={showAll}
       onToggleAll={() => setShowAll((v) => !v)}
       onSelect={(taskId) => setScreen({ name: 'detail', taskId })}
@@ -67,12 +81,16 @@ export function App({ baseUrl, repo }: AppProps) {
 
 function QueueScreen({
   tasks,
+  state,
+  now,
   showAll,
   onToggleAll,
   onSelect,
   onQuit,
 }: {
   tasks: TaskView[]
+  state: DashboardState
+  now: number
   showAll: boolean
   onToggleAll: () => void
   onSelect: (taskId: string) => void
@@ -102,16 +120,20 @@ function QueueScreen({
         <Text dimColor>no {showAll ? '' : 'active '}tasks</Text>
       ) : (
         <Box flexDirection="column" marginTop={1}>
-          {tasks.map((task, i) => (
-            <Box key={task.id} gap={1}>
-              {i === selected ? <Text color="cyan">{'>'}</Text> : <Text> </Text>}
-              <Badge state={task.state} />
-              <Text wrap="truncate">{task.title}</Text>
-              <Text dimColor>
-                {task.id} {relTime(task.updatedAt)}
-              </Text>
-            </Box>
-          ))}
+          {tasks.map((task, i) => {
+            const nearLimit = runHealthNearLimit(runHealth(state, task.id, now))
+            return (
+              <Box key={task.id} gap={1}>
+                {i === selected ? <Text color="cyan">{'>'}</Text> : <Text> </Text>}
+                <Badge state={task.state} />
+                {nearLimit && <Text color="yellow">!</Text>}
+                <Text wrap="truncate">{task.title}</Text>
+                <Text dimColor>
+                  {task.id} {relTime(task.updatedAt)}
+                </Text>
+              </Box>
+            )
+          })}
         </Box>
       )}
       <Box marginTop={1}>
@@ -144,12 +166,14 @@ function TaskDetail({
   repo,
   state,
   taskId,
+  now,
   onBack,
 }: {
   baseUrl: string
   repo: string
   state: DashboardState
   taskId: string
+  now: number
   onBack: () => void
 }) {
   const task = state.tasks[taskId]
@@ -157,6 +181,7 @@ function TaskDetail({
   const [qIndex, setQIndex] = useState(0)
   const [mode, setMode] = useState<AnswerMode>({ kind: 'browse' })
   const logKey = `${repo}/${taskId}`
+  const health = runHealth(state, taskId, now)
 
   const version = useSyncExternalStore(
     (listener) => agentLogStore.subscribe(logKey, listener),
@@ -299,7 +324,48 @@ function TaskDetail({
         )}
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
+        <DetailRow
+          label="context"
+          value={
+            health.contextTokens === null
+              ? null
+              : health.contextWarnTokens === null
+                ? fmtTokens(health.contextTokens)
+                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn / ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+          }
+        />
+        <DetailRow
+          label="cost"
+          value={
+            !health.costSeen
+              ? null
+              : health.maxCostUsd > 0
+                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                : `$${health.costUsd.toFixed(2)}`
+          }
+        />
+        <DetailRow
+          label="elapsed"
+          value={
+            health.maxRunMs === null
+              ? fmtDuration(health.elapsedMs)
+              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+          }
+        />
       </Box>
+
+      {health.warnings.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="yellow">
+            guard warnings
+          </Text>
+          {health.warnings.map((w, i) => (
+            <Text key={i} wrap="truncate">
+              {w}
+            </Text>
+          ))}
+        </Box>
+      )}
 
       {tail.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
