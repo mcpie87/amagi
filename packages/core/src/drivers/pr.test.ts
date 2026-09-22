@@ -249,6 +249,13 @@ describe('githubPr', () => {
     expect(calls).toContainEqual(['<stdin>', 'explanation'])
   })
 
+  test('closes the pr with the reason as the closing comment', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await makePrDriver('github', exec).closePr('/repo', 7, 'pointless')
+
+    expect(calls).toContainEqual(['gh', 'pr', 'close', '7', '--comment', 'pointless'])
+  })
+
   test('adds and removes a label on an existing pr', async () => {
     const { exec, calls } = fake(() => undefined)
     const driver = makePrDriver('github', exec)
@@ -419,6 +426,24 @@ describe('forgejoPr', () => {
         () => makePrDriver('forgejo', exec).postComment('/wt', 3, 'hi'),
       ),
     ).rejects.toThrow(/FORGEJO_TOKEN/)
+  })
+
+  test('closes the pr through the forgejo api', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    let patched = false
+    await withFetch(
+      (path, method, body) => {
+        if (path === 'repos/owner/repo/pulls/3' && method === 'PATCH') {
+          patched = true
+          expect(body).toEqual({ state: 'closed' })
+          return new Response(JSON.stringify({ state: 'closed' }), { status: 200 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+      () => makePrDriver('forgejo', exec).closePr('/wt', 3, 'pointless'),
+    )
+    expect(patched).toBe(true)
   })
 
   test('adds and removes a label on an existing pull request', async () => {

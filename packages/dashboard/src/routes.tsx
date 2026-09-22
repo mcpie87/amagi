@@ -2469,15 +2469,19 @@ function CloseButton({
         title={
           target === 'done'
             ? 'marks the task done when the work already existed elsewhere'
-            : 'closes the task as abandoned'
+            : state === 'pr_flagged'
+              ? 'closes the pointless pull request on the forge and retires the task'
+              : 'closes the task as abandoned'
         }
         className={
           target === 'done'
             ? 'rounded border border-emerald-edge bg-emerald-soft px-3 py-1 text-sm text-emerald-ink hover:bg-emerald-soft-hover disabled:opacity-50'
-            : 'rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50'
+            : state === 'pr_flagged'
+              ? 'rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50'
+              : 'rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50'
         }
       >
-        {target === 'done' ? 'Mark done' : 'Close'}
+        {target === 'done' ? 'Mark done' : state === 'pr_flagged' ? 'Close PR' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
       {target === 'done' && open && (
@@ -2547,10 +2551,17 @@ function CloseButton({
 
 /** The two operator retire actions: close as abandoned, or mark done when the work already existed. */
 function CloseButtons({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  // A pr_open task's PR is live: closing would abandon the task and leave the
+  // pull request dangling open on the forge, so only a flagged (pointless) PR
+  // gets a close action.
+  if (state === 'pr_open') return null
   if (!closable(state)) return null
+  // Only a parked no_pr/needs_human task can be marked done; the server rejects
+  // it otherwise, so don't offer a button that always errors.
+  const canMarkDone = state === 'needs_human' || state === 'no_pr'
   return (
     <div className="ml-auto flex gap-2">
-      <CloseButton repo={repo} taskId={taskId} state={state} target="done" />
+      {canMarkDone && <CloseButton repo={repo} taskId={taskId} state={state} target="done" />}
       <CloseButton repo={repo} taskId={taskId} state={state} target="abandoned" />
     </div>
   )

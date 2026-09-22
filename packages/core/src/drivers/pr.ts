@@ -65,6 +65,8 @@ export type PrDriver = {
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
   postComment(cwd: string, number: number, body: string): Promise<void>
+  /** Close a pull request, recording the operator's reason on the forge. */
+  closePr(cwd: string, number: number, reason: string): Promise<void>
   /** Add a label to an existing pull request. */
   addLabel(cwd: string, number: number, label: string): Promise<void>
   /** Remove a label from an existing pull request. */
@@ -207,6 +209,12 @@ function githubPr(exec: Exec): PrDriver {
       await execOk(exec, ['gh', 'pr', 'comment', String(number), '--body-file', '-'], {
         cwd,
         stdin: body,
+        env: ghEnv(),
+      })
+    },
+    async closePr(cwd, number, reason) {
+      await execOk(exec, ['gh', 'pr', 'close', String(number), '--comment', reason], {
+        cwd,
         env: ghEnv(),
       })
     },
@@ -389,6 +397,11 @@ function forgejoPr(exec: Exec): PrDriver {
     async postComment(cwd, number, body) {
       await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/issues/${number}/comments`, {
         body,
+      })
+    },
+    async closePr(cwd, number, _reason) {
+      await api(cwd, 'PATCH', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`, {
+        state: 'closed',
       })
     },
     async addLabel(cwd, number, label) {

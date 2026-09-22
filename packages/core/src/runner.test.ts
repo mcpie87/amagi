@@ -224,6 +224,7 @@ class FakePr implements PrDriver {
   }
 
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
 }
