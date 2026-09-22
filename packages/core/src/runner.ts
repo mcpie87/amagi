@@ -7,6 +7,7 @@ import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/type
 import { errMsg } from './errors.ts'
 import {
   type AgentEvent,
+  type AgentRole,
   type CheckResult,
   isTerminal,
   type StoredEvent,
@@ -23,6 +24,8 @@ import {
   implementSystemPrompt,
   prTitle,
   reclaimPrompt,
+  verifyViabilityPrompt,
+  verifyViabilitySystemPrompt,
   whyNoChangesPrompt,
   withRestartHandoff,
 } from './prompt.ts'
@@ -127,6 +130,27 @@ function taskCost(events: StoredEvent[]): { costUsd: number; costSeen: boolean }
     }
   }
   return { costUsd, costSeen }
+}
+
+/** Best-effort JSON extraction of the viability decision; anything else is a null. */
+function parseViabilityDecision(reply: string): { viable: boolean; reason: string } | null {
+  const text = reply
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/, '')
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end === -1 || end <= start) return null
+  try {
+    const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const viable = (parsed as { viable?: unknown }).viable
+    if (typeof viable !== 'boolean') return null
+    const reason = (parsed as { reason?: unknown }).reason
+    return { viable, reason: typeof reason === 'string' ? reason : '' }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -475,6 +499,14 @@ export class Runner {
     this.throwIfCancelled(task.id)
     this.throwIfBudgetExhausted(task.id, budget)
     this.transition(task.id, 'implementing')
+    // A fresh run first verifies the task is still viable against the current
+    // repository, so a task already satisfied on the base branch is stopped
+    // before the implement agent writes anything or a no-op PR is opened. A
+    // resumed run skips the check: its worktree already holds in-progress work.
+    if (!resume) {
+      const viable = await this.verifyViability(task, cwd, branch, budget)
+      if (!viable) return
+    }
     const first = await this.runAgentWithRetry(
       task.id,
       null,
@@ -502,6 +534,8 @@ export class Runner {
     if (parked === null) return
     current = mergeAgentRuns(current, parked)
 
+    let recoveryGiven = false
+    let recoveryRetry = false
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
       this.transition(task.id, 'checks')
@@ -511,16 +545,36 @@ export class Runner {
       store.append(task.id, { type: 'checks.finished', ok, results })
 
       if (ok) break
-      if (round === config.loop.maxCheckRounds) {
+      // The fix rounds are spent, or nothing is left to resume. Rather than
+      // parking the task silently (a stale worktree makes checks fail that a
+      // fresh base passes), ask the operator once how to proceed and apply it.
+      if (round === config.loop.maxCheckRounds || (current.sessionId === null && !recoveryRetry)) {
+        if (!recoveryGiven) {
+          recoveryGiven = true
+          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
+          if (action === null) return
+          if (action === 'park') {
+            this.transition(task.id, 'needs_human', 'project checks still failing')
+            return
+          }
+          if (action === 'rebase') {
+            const rebased = await this.updateFromBase(cwd)
+            if (!rebased) {
+              this.transition(
+                task.id,
+                'needs_human',
+                'project checks still failing; updating the worktree to the latest base failed',
+              )
+              return
+            }
+          }
+          // 'retry' or a successful 'rebase': give the fix rounds another full
+          // pass, resuming the recorded session or starting a fresh one.
+          recoveryRetry = true
+          round = -1
+          continue
+        }
         this.transition(task.id, 'needs_human', 'project checks still failing')
-        return
-      }
-      if (current.sessionId === null) {
-        this.transition(
-          task.id,
-          'needs_human',
-          'checks failed and the agent left no session to resume',
-        )
         return
       }
 
@@ -585,6 +639,62 @@ export class Runner {
   }
 
   /**
+   * Pre-implement viability check: a read-only agent pass decides whether the
+   * task is still needed in the current repository. Returns false when the
+   * task is not viable, in which case it is reported inside the task (a
+   * tracker comment) and parked in `no_pr` before any code is written. Any
+   * failure to check defaults to viable: a broken check must never kill a
+   * task, only a clear not-viable verdict does.
+   */
+  private async verifyViability(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    budget: TaskBudget,
+  ): Promise<boolean> {
+    const { store, config } = this.deps
+    const run = await this.runAgent(
+      task.id,
+      null,
+      {
+        cwd,
+        prompt: verifyViabilityPrompt({ task, worktree: cwd, branch, askCommand: null }),
+        systemPrompt: verifyViabilitySystemPrompt(),
+        ...harnessStartOpts(config.harness.implement),
+      },
+      'verify',
+      budget,
+      'verify',
+    )
+    if (!run.ok) {
+      // A cancel mid-check must stop the run, not fall through to implement.
+      this.throwIfCancelled(task.id)
+      return true
+    }
+    const decision = run.summary === null ? null : parseViabilityDecision(run.summary)
+    if (decision === null || decision.viable) return true
+
+    const reason =
+      decision.reason.trim() !== ''
+        ? decision.reason
+        : 'the task is not viable against the current repository'
+    try {
+      await this.deps.tracker.comment(
+        task.id,
+        `amagi: task ${task.id} skipped as no longer viable - ${reason}`,
+      )
+    } catch (err) {
+      store.append(task.id, {
+        type: 'error',
+        message: `viability comment ${task.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        fatal: false,
+      })
+    }
+    this.transition(task.id, 'no_pr', reason)
+    return false
+  }
+
+  /**
    * Pushes the worktree branch and opens a pull request. A failed PR (gh not
    * authenticated, remote gone) leaves the commit in place and escalates, so
    * the operator can push and open it by hand.
@@ -634,8 +744,11 @@ export class Runner {
         changes,
         {
           harness: this.deps.harness.kind,
-          model,
-          effort,
+          // Fall back to the configured implement model/effort when the run
+          // reports none (fix/resume rounds do not carry one), mirroring the
+          // comment footer so the PR body always carries the same provenance.
+          model: model ?? config.harness.implement.model ?? null,
+          effort: effort ?? config.harness.implement.effort ?? null,
         },
         fallbackSummary,
       ),
@@ -735,6 +848,7 @@ export class Runner {
     opts: Parameters<Harness['start']>[0],
     phase: string,
     budget: TaskBudget,
+    role: AgentRole = 'implement',
   ): Promise<{
     sessionId: string | null
     ok: boolean
@@ -783,7 +897,7 @@ export class Runner {
           started = true
           store.append(taskId, {
             type: 'agent.started',
-            role: 'implement',
+            role,
             harness: harness.kind,
             model,
             effort,
@@ -806,7 +920,7 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        store.append(taskId, { type: 'agent.stream', role: 'implement', event })
+        store.append(taskId, { type: 'agent.stream', role, event })
         if (this.observeContext(taskId, event)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true
@@ -830,7 +944,7 @@ export class Runner {
       const outcome = await proc.done
       store.append(taskId, {
         type: 'agent.exited',
-        role: 'implement',
+        role,
         exitCode: outcome.exitCode,
         sessionId: outcome.sessionId,
       })
@@ -1024,7 +1138,11 @@ export class Runner {
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
     const results: CheckResult[] = []
-    for (const command of this.deps.config.checks.commands) {
+    const { format, lint, commands } = this.deps.config.checks
+    // The mandatory gate always runs before the configured commands, so a PR
+    // cannot be pushed until the worktree is formatted and lint-clean.
+    const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+    for (const command of [...gate, ...commands]) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,
@@ -1034,6 +1152,99 @@ export class Runner {
       if (r.exitCode !== 0) break
     }
     return results
+  }
+
+  /**
+   * Checks failed at the end of the fix rounds. Instead of parking the task
+   * silently, ask the operator how to proceed and apply the answer. Returns
+   * the chosen action, or null when the run must stop (cancelled, budget
+   * spent, or no answer within the parking window).
+   */
+  private async recoverFailingChecks(
+    taskId: string,
+    results: CheckResult[],
+    lease: Lease,
+    budget: TaskBudget,
+  ): Promise<'retry' | 'rebase' | 'park' | null> {
+    const { store, config } = this.deps
+    const failed = results.filter((r) => r.exitCode !== 0)
+    const detail = failed
+      .map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
+      .join('\n')
+    const question = [
+      'Project checks still failing. The agent could not fix them.',
+      '',
+      detail,
+      '',
+      'How should I proceed?',
+    ].join('\n')
+    const options = [
+      'retry: run another fix round',
+      'rebase: update the worktree from the latest base and retry',
+      'park: park the task for manual attention',
+    ]
+
+    const questionId = crypto.randomUUID()
+    this.transition(taskId, 'implementing')
+    store.append(taskId, { type: 'question.asked', questionId, question, options, gateRef: null })
+    this.transition(taskId, 'awaiting_answer')
+
+    const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
+    while (Date.now() < deadline) {
+      this.throwIfCancelled(taskId)
+      this.throwIfBudgetExhausted(taskId, budget)
+      if (lease.isLost) throw new LeaseLostError(taskId)
+      if (this.isCancelled(taskId)) return null
+      const q = store.question(questionId)
+      if (q !== null && q.answer !== null) {
+        this.transition(taskId, 'implementing')
+        if (/^rebase\b/.test(q.answer)) return 'rebase'
+        if (/^retry\b/.test(q.answer)) return 'retry'
+        return 'park'
+      }
+      await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
+    }
+
+    this.transition(taskId, 'needs_human', 'no answer within the parking window')
+    return null
+  }
+
+  /**
+   * Brings the worktree up to date with the latest base branch, preserving the
+   * agent's uncommitted changes. A stale worktree (checks that pass on a fresh
+   * base, or a recipe the base added after this worktree was created) is the
+   * usual reason checks fail that a fresh base would pass. False when anything
+   * fails (network, conflicts), leaving the worktree untouched.
+   */
+  private async updateFromBase(cwd: string): Promise<boolean> {
+    const { config } = this.deps
+    const tokenCfg = await gitTokenConfig(
+      this.exec,
+      this.deps.repoRoot,
+      config.forge.remote,
+      forgeToken(config.forge.kind),
+    )
+    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+      cwd,
+    })
+    if (fetch.exitCode !== 0) return false
+
+    const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
+    const stashed =
+      dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
+    if (dirty && !stashed) return false
+
+    const rebase = await this.exec(['git', 'rebase', `origin/${config.repo.baseBranch}`], { cwd })
+    if (rebase.exitCode !== 0) {
+      await this.exec(['git', 'rebase', '--abort'], { cwd })
+      if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
+      return false
+    }
+    if (stashed) {
+      const pop = await this.exec(['git', 'stash', 'pop'], { cwd })
+      if (pop.exitCode !== 0) return false
+    }
+    return true
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
@@ -1059,7 +1270,7 @@ export class Runner {
     this.deps.store.append(task.id, {
       type: 'commit.created',
       sha,
-      subject: task.title,
+      subject: `[${task.id}] ${task.title}`,
     })
     return true
   }

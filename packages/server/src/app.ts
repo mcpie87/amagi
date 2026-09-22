@@ -14,6 +14,7 @@ import {
   type RegistryEntry,
   Runner,
   type RunServiceApi,
+  reconcilePr,
   removeWorktree,
   type Store,
   type Tracker,
@@ -339,6 +340,20 @@ export function createApp({
       return c.json(await ws.tracker.ready())
     })
 
+    .get('/api/repos/:repo/mergeable-prs', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The driver reports the forge's own flags (gh wording on both drivers),
+      // so one filter is all it takes to find the PRs that can merge now.
+      const open = await ws.forge.listOpenPrs(ws.root)
+      return c.json({
+        prs: open.filter((p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN'),
+      })
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -457,6 +472,31 @@ export function createApp({
       return c.json({ taskId: result.taskId })
     })
 
+    .post('/api/repos/:repo/tasks/:id/recheck', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      // Only a task parked on its pull request has anything to re-check; the
+      // sweep these states otherwise wait for is what this endpoint short-cuts.
+      if (task.state !== 'pr_open' && task.state !== 'pr_flagged') {
+        return c.json(
+          { error: `task ${id} is not waiting on a pull request (state ${task.state})` },
+          409,
+        )
+      }
+      if (task.prNumber === null) {
+        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
+      }
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The reconcile writes events the dashboard already streams, so the
+      // caller's live state picks up a merge/close without a page reload.
+      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, task)
+      return c.json({ task: ws.store.task(id) })
+    })
+
     .post(
       '/api/repos/:repo/tasks/:id/close',
       valid('param', RepoTaskIdParam),
@@ -481,6 +521,28 @@ export function createApp({
         // left no changes because the work was already satisfied.
         if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
           return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
+        }
+        // Closing a pr_flagged task retires its pointless pull request too: the
+        // watcher parked it because the diff is empty and a human is the only
+        // one who closes it. This is the one step that must not be best effort,
+        // else the task retires with the PR still open on the forge.
+        if (task.state === 'pr_flagged') {
+          if (ws.forge === null) {
+            return c.json(
+              {
+                error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
+              },
+              501,
+            )
+          }
+          if (task.prNumber === null) {
+            return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
+          }
+          try {
+            await ws.forge.closePr(ws.root, task.prNumber, reason)
+          } catch (err) {
+            return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
+          }
         }
         // Shut the worker down first: stop() kills the owned agent process and
         // parks a live run in cancelled, releasing the tracker claim, so the

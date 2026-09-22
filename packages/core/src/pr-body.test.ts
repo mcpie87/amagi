@@ -95,6 +95,19 @@ describe('formatPrBody', () => {
     expect(body).toContain('- `image.png` binary')
   })
 
+  test('renders the task creation date as a relative-time stamp when known', () => {
+    const body = formatPrBody({ ...TASK, createdAt: Date.parse('2026-09-20T14:02:53Z') }, [])
+
+    expect(body).toContain(
+      '**Task:** `am-1` · created <relative-time datetime="2026-09-20T14:02:53.000Z">2026-09-20</relative-time>',
+    )
+  })
+
+  test('omits the creation date when the tracker did not report one', () => {
+    expect(formatPrBody(TASK, [])).toContain('**Task:** `am-1`')
+    expect(formatPrBody({ ...TASK, createdAt: null }, [])).not.toContain('relative-time')
+  })
+
   test('omits the changes section when nothing changed', () => {
     const body = formatPrBody(TASK, [])
     expect(body).toContain('## ✨ Add a greeting file')

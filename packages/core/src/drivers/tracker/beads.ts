@@ -25,6 +25,7 @@ type BdIssue = {
   notes?: string
   comments?: Array<{ text: string }>
   dependent_count?: number
+  created_at?: string
   metadata?: Record<string, string>
 }
 
@@ -88,6 +89,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 
 function toTask(issue: BdIssue): TrackerTask {
   const difficulty = issue.metadata?.difficulty
+  const created = issue.created_at === undefined ? null : Date.parse(issue.created_at)
   const task: TrackerTask = {
     id: issue.id,
     title: issue.title,
@@ -97,6 +99,7 @@ function toTask(issue: BdIssue): TrackerTask {
     type: issue.issue_type ?? null,
     url: null,
     ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
+    ...(created !== null && !Number.isNaN(created) ? { createdAt: created } : {}),
   }
   const notes = issue.notes?.trim()
   if (notes) task.notes = notes
@@ -280,6 +283,10 @@ export class BeadsTracker implements Tracker {
   }
 
   async release(id: string): Promise<void> {
+    // A closed issue has no claim to release: bd unclaim exits 1 on it, so
+    // treat it as already released rather than let callers trip on the error.
+    const issue = await this.get(id)
+    if (issue !== null && issue.status === 'closed') return
     await this.bd(['unclaim', id])
   }
 

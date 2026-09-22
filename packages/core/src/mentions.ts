@@ -250,6 +250,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       baseBranch: opts.config.repo.baseBranch,
       checks: opts.config.checks.commands,
+      conflicted: wt.conflicted,
     }),
     respondToMentionSystemPrompt({
       pr: opts.pr,
@@ -258,6 +259,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       baseBranch: opts.config.repo.baseBranch,
       checks: opts.config.checks.commands,
+      conflicted: wt.conflicted,
     }),
   )
   const outcome = await p.agent(proc, 'fixing in worktree')
@@ -298,6 +300,7 @@ async function respondToExplain(
         mention: opts.mention,
         diff,
         outPath,
+        conflicted: wt.conflicted,
       }),
       explainMentionSystemPrompt(),
     )
@@ -421,6 +424,7 @@ async function respondToTakeDown(
         pr: opts.pr,
         mention: opts.mention,
         outPath,
+        conflicted: wt.conflicted,
       }),
       takeDownSystemPrompt(),
     )

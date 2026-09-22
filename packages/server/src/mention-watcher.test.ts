@@ -7,6 +7,7 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -58,6 +59,9 @@ class FakePr implements PrDriver {
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
+  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
+    return []
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     this.listCalls++
     return this.comments
@@ -69,6 +73,7 @@ class FakePr implements PrDriver {
     }
     this.posted.push(body)
   }
+  async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
 }
@@ -153,6 +158,11 @@ test('scans open PRs once and responds to each unhandled mention exactly once', 
   expect(counter(w, 'scanned')).toBe(1)
   expect(counter(w, 'responded')).toBe(1)
   expect(stateFile()['7']).toBe('2026-09-21T10:00:00Z')
+  expect(activity.runs).toBeGreaterThanOrEqual(1)
+  expect(activity.successes).toBe(activity.runs)
+  expect(activity.failures).toBe(0)
+  expect(activity.status).toBe('active')
+  expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
 test('skips re-scanning PRs whose updatedAt has not changed', async () => {
@@ -245,6 +255,20 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   expect(driver.posted).toHaveLength(1)
   expect(counter(w, 'responded')).toBe(1)
   expect(stateFile()['7']).toBeDefined()
+})
+
+test('a tick that throws is counted as a failure and keeps run totals consistent', async () => {
+  const exec: Exec = async () => {
+    throw new Error('boom')
+  }
+  const w = start(new FakePr(), exec)
+
+  await Bun.sleep(30)
+  const a = w.activity()
+  expect(a.ok).toBe(false)
+  expect(a.failures).toBeGreaterThanOrEqual(1)
+  expect(a.runs).toBeGreaterThanOrEqual(a.failures)
+  expect(a.successes + a.failures).toBe(a.runs)
 })
 
 test('records classification outcomes as mention.classified events when a store is wired', async () => {

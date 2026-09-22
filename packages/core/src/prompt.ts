@@ -21,6 +21,10 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
+    '- Before finishing, run the project formatter then its lint check on your',
+    '  changes (e.g. `just fmt` then `just lint`) and fix every failure. The',
+    '  orchestrator runs the same commands as a mandatory gate and blocks the',
+    '  pull request on them.',
     '- Never pipe check or lint output through head/tail: it aborts the tool',
     '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
     '- If your changes add a user-facing feature (new CLI command or flag, new config',
@@ -204,12 +208,16 @@ export type MentionPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  /** True when the base branch does not merge cleanly into the PR head. */
+  conflicted: boolean
 }
 
 export type TakeDownMentionContext = {
   pr: { number: number; title: string; url: string }
   mention: { user: string; body: string }
   outPath: string
+  /** True when the base branch does not merge cleanly into the PR head. */
+  conflicted: boolean
 }
 
 export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string {
@@ -225,6 +233,11 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
     '- Commit your changes. Do not push; the dispatcher pushes.',
   ]
+  if (ctx.conflicted) {
+    lines.push(
+      '- The base branch does not merge cleanly into this PR. Resolve the conflicts before making your change.',
+    )
+  }
   return lines.join('\n')
 }
 
@@ -234,6 +247,13 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
     '',
     ctx.mention.body.trim(),
   ]
+  if (ctx.conflicted) {
+    parts.push(
+      '',
+      `Note: the base branch ${ctx.baseBranch} does not merge cleanly into this PR.`,
+      'Resolve the merge conflicts first, then address the feedback.',
+    )
+  }
   if (ctx.checks.length > 0) {
     parts.push(
       '',
@@ -253,6 +273,8 @@ export type ExplainMentionContext = {
   mention: { user: string; body: string }
   diff: string
   outPath: string
+  /** True when the base branch does not merge cleanly into the PR head. */
+  conflicted: boolean
 }
 
 export function explainMentionSystemPrompt(): string {
@@ -295,20 +317,30 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
 }
 
 export function explainMentionPrompt(ctx: ExplainMentionContext): string {
-  return [
+  const parts = [
     `A human (@${ctx.mention.user}) asked about PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
     `Write your explanation to this file: ${ctx.outPath}`,
     'It will be posted as a comment on the PR. Be concrete: what the changes do, why they were made, and how they fit together.',
+  ]
+  if (ctx.conflicted) {
+    parts.push(
+      '',
+      'The base branch does not merge cleanly into this PR: the change has drifted from',
+      'base. Report this conflict as evidence of that drift in your explanation.',
+    )
+  }
+  parts.push(
     '',
     'Pull request diff:',
     '',
     ctx.diff,
     '',
     'Write the explanation to the file and stop.',
-  ].join('\n')
+  )
+  return parts.join('\n')
 }
 
 export function takeDownSystemPrompt(): string {
@@ -320,7 +352,7 @@ export function takeDownSystemPrompt(): string {
 }
 
 export function takeDownPrompt(ctx: TakeDownMentionContext): string {
-  return [
+  const parts = [
     `A human (@${ctx.mention.user}) asked to take down PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
@@ -332,7 +364,15 @@ export function takeDownPrompt(ctx: TakeDownMentionContext): string {
     '- `KEEP` when it does not, followed by a short explanation.',
     '',
     'The reason is posted as a comment on the task issue, so keep it concise and direct.',
-  ].join('\n')
+  ]
+  if (ctx.conflicted) {
+    parts.push(
+      '',
+      'The base branch does not merge cleanly into this PR, a sign the change is drifting',
+      'from the repository. Weigh this in your verdict.',
+    )
+  }
+  return parts.join('\n')
 }
 
 export type DifficultyClassifyContext = {
@@ -376,6 +416,47 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
   parts.push(...trackerContext(task))
+  return parts.join('\n')
+}
+
+/**
+ * Pre-implement viability check: a read-only agent pass that catches tasks
+ * already satisfied by the current repository before the full implement run
+ * starts. The goal is to avoid launching a worker that produces a no-op PR.
+ */
+export function verifyViabilitySystemPrompt(): string {
+  return [
+    'You are a viability checker for an autonomous coding agent (amagi).',
+    'You decide whether a task still needs work in the current repository, before any',
+    'code is written.',
+    '',
+    'Rules:',
+    '- You are read-only: inspect the repository freely, but do not modify, create or',
+    '  delete any files, and do not run writing git commands (commit, push, add, checkout).',
+    '- Check the code and git history for evidence the task is already done or no longer',
+    '  needed: the feature already exists, the fix is already applied, or the work is',
+    '  superseded.',
+    '- Set viable to false only when the task is clearly already satisfied. When in',
+    '  doubt, set viable to true: the check only stops tasks that are obviously done.',
+    '',
+    'Reply with exactly one JSON object and nothing else:',
+    '{',
+    '  "viable": true | false,',
+    '  "reason": "one short sentence justifying the decision"',
+    '}',
+  ].join('\n')
+}
+
+export function verifyViabilityPrompt(ctx: PromptContext): string {
+  const parts = [
+    `Decide whether task ${ctx.task.id}: ${ctx.task.title} still needs work in this repository.`,
+    '',
+    'The current directory is a worktree based on the base branch; the repository state',
+    'here is what the task would be implemented against. Inspect it and report whether the',
+    'task is still viable.',
+  ]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push('', 'Reply with the JSON object only.')
   return parts.join('\n')
 }
 

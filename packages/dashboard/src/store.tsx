@@ -169,6 +169,7 @@ function RepoStream({
     // Resync resumes from the last event the client already folded in, so a
     // reconnection only replays what the stale connection missed. The first
     // connect replays everything (latestSeq is 0).
+    void resync
     const source = new EventSource(
       `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}`,
     )
@@ -257,12 +258,12 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<RunnerStatus | null>(null)
   const [options, setOptions] = useState<RunOptionsInfo | null>(null)
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     fetch(`${base}/api/runner`)
       .then((r) => (r.ok ? (r.json() as Promise<RunnerStatus>) : null))
       .then(setStatus)
       .catch(() => setStatus(null))
-  }
+  }, [])
 
   useEffect(() => {
     refresh()
@@ -272,7 +273,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       .catch(() => setOptions(null))
     const timer = setInterval(refresh, 4000)
     return () => clearInterval(timer)
-  }, [base])
+  }, [refresh])
 
   const start = async (
     taskId?: string,

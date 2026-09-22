@@ -80,7 +80,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat', 'verify'])
 export type AgentRole = z.infer<typeof AgentRole>
 
 /** What the triage worker decides to do with an unclaimed task. */

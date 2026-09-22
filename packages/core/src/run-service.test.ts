@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
+import type {
+  CreatePrOptions,
+  OpenPr,
+  PrComment,
+  PrDriver,
+  PrState,
+  PullRequest,
+} from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -175,6 +182,47 @@ class BlockingHarness implements Harness {
   }
 }
 
+/** Emits one stream event so the runner records agent.started, then stays alive. */
+class ModelHarness implements Harness {
+  readonly kind = 'fake'
+
+  start(): AgentProcess {
+    const queue = new AsyncQueue<AgentEvent>()
+    queue.push({ kind: 'text', text: 'working' })
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    return {
+      pid: 12346,
+      events: () => queue,
+      done,
+      kill: async () => {
+        queue.close()
+        resolveDone({
+          exitCode: 130,
+          ok: false,
+          sessionId: null,
+          summary: null,
+          usage: null,
+          stderr: 'killed',
+        })
+      },
+      model: 'fake-model',
+      effort: 'high',
+    }
+  }
+  resume(): AgentProcess {
+    throw new Error('no resume in run-service tests')
+  }
+  async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+}
+
 class FakePr implements PrDriver {
   async createPr(opts: CreatePrOptions): Promise<PullRequest> {
     return { url: `https://example.com/pull/${opts.branch}`, number: 1 }
@@ -185,10 +233,14 @@ class FakePr implements PrDriver {
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
+  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
+    return []
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
 }
@@ -200,7 +252,7 @@ let store: Store
 const config = (over: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
     ...over,
   })
 
@@ -261,6 +313,7 @@ describe('RunService', () => {
       running: [],
       startedAt: {},
       resources: {},
+      tasks: {},
       autoQueue: false,
     })
     service.dispose()
@@ -307,6 +360,40 @@ describe('RunService', () => {
     await Bun.sleep(100)
     expect((await service.status()).running).toEqual([])
     service.dispose()
+  })
+
+  test('status carries each running task title and live agent', async () => {
+    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1)
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+
+    const status = await service.status()
+    expect(status.tasks[TASK.id]).toEqual({
+      title: 'Add a greeting file',
+      harness: 'fake',
+      model: null,
+      effort: null,
+    })
+
+    await service.stop(TASK.id)
+  })
+
+  test('status carries the model once the agent run reports it', async () => {
+    const service = makeService(new FakeTracker([TASK]), new ModelHarness(), 1)
+    const started = await service.start()
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+
+    const status = await service.status()
+    expect(status.tasks[TASK.id]).toEqual({
+      title: 'Add a greeting file',
+      harness: 'fake',
+      model: 'fake-model',
+      effort: 'high',
+    })
+
+    await service.stop(TASK.id)
   })
 
   test('setMaxParallel changes capacity live without touching running runs', async () => {
