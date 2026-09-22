@@ -9,6 +9,8 @@ import {
   initialDashboardState,
   openQuestionsFor,
   reduceState,
+  runHealth,
+  runHealthNearLimit,
   tasksNeedingAttention,
 } from './view.ts'
 
@@ -452,5 +454,151 @@ describe('dashboard state reducer', () => {
     // automatic retry waits on its backoff, not on the operator.
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-2'])
     expect(state.tasks['am-1']?.state).toBe('retrying')
+  })
+})
+
+describe('run health', () => {
+  const healthEvents = (): StoredEvent[] => [
+    ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+    ev(2, 'am-1', 1100, {
+      type: 'run.limits',
+      contextWarnTokens: 150_000,
+      contextMaxTokens: 200_000,
+      maxRunMs: 3_600_000,
+      maxCostUsd: 5,
+    }),
+    ev(3, 'am-1', 1200, {
+      type: 'agent.started',
+      role: 'implement',
+      harness: 'claude',
+      model: 'm',
+      effort: null,
+      cwd: '/tmp/am-1',
+      resumed: false,
+    }),
+    ev(4, 'am-1', 1300, {
+      type: 'agent.stream',
+      role: 'implement',
+      event: {
+        kind: 'usage',
+        inputTokens: 100_000,
+        outputTokens: 10,
+        cachedTokens: 20_000,
+        costUsd: 1.5,
+      },
+    }),
+    ev(5, 'am-1', 1400, { type: 'run.context', contextTokens: 120_000 }),
+  ]
+
+  test('folds limits, peak context, cost, elapsed and warnings from the stream', () => {
+    const state = [...healthEvents()].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 2000)
+    expect(health).toMatchObject({
+      contextTokens: 120_000,
+      contextWarnTokens: 150_000,
+      contextMaxTokens: 200_000,
+      costUsd: 1.5,
+      costSeen: true,
+      maxCostUsd: 5,
+      elapsedMs: 1000,
+      maxRunMs: 3_600_000,
+      warnings: [],
+    })
+  })
+
+  test('last run.context wins as the peak and a zero maxRunMs means unbounded', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'run.limits',
+        contextWarnTokens: 150_000,
+        contextMaxTokens: 200_000,
+        maxRunMs: 0,
+        maxCostUsd: 0,
+      }),
+      ev(3, 'am-1', 1200, { type: 'run.context', contextTokens: 50 }),
+      ev(4, 'am-1', 1300, { type: 'run.context', contextTokens: 80 }),
+    ].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 1400)
+    expect(health.contextTokens).toBe(80)
+    expect(health.maxRunMs).toBeNull()
+    expect(health.maxCostUsd).toBe(0)
+    expect(runHealthNearLimit(health)).toBe(false)
+  })
+
+  test('chat usage cost is outside the task budget', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'run.limits',
+        contextWarnTokens: 150_000,
+        contextMaxTokens: 200_000,
+        maxRunMs: 0,
+        maxCostUsd: 5,
+      }),
+      ev(3, 'am-1', 1200, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 2 },
+      }),
+      ev(4, 'am-1', 1300, {
+        type: 'agent.stream',
+        role: 'chat',
+        event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 99 },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 1400)
+    expect(health.costUsd).toBe(2)
+  })
+
+  test('collects doom-loop and context guard warnings', () => {
+    const state = [
+      ...healthEvents(),
+      ev(6, 'am-1', 1500, {
+        type: 'doom.detected',
+        kind: 'tool_repeat',
+        detail: 'repeated the same command 21 times',
+      }),
+      ev(7, 'am-1', 1600, { type: 'run.context', contextTokens: 160_000 }),
+      ev(8, 'am-1', 1700, { type: 'context.warn', contextTokens: 160_000, limit: 150_000 }),
+    ].reduce(reduceState, initialDashboardState())
+    const health = runHealth(state, 'am-1', 1800)
+    expect(health.warnings).toEqual([
+      'doom loop: repeated the same command 21 times',
+      'context warning: 160000/150000 tokens',
+    ])
+    expect(runHealthNearLimit(health)).toBe(true)
+  })
+
+  test('flags a run nearing the soft context limit', () => {
+    const events = [
+      ...healthEvents(),
+      ev(9, 'am-1', 1500, { type: 'run.context', contextTokens: 150_000 }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(runHealthNearLimit(runHealth(events, 'am-1', 1600))).toBe(true)
+  })
+
+  test('flags a run past 80% of the time budget', () => {
+    const events = [
+      ...healthEvents(),
+      ev(9, 'am-1', 1500, { type: 'run.context', contextTokens: 10 }),
+    ].reduce(reduceState, initialDashboardState())
+    // 1000ms claimed at t=1000; 3_600_000ms budget; 80% at 2_890_000ms in.
+    const now = 1000 + 3_600_000 * 0.8
+    expect(runHealthNearLimit(runHealth(events, 'am-1', now))).toBe(true)
+  })
+
+  test('flags a run past 80% of the cost budget', () => {
+    const events = [
+      ...healthEvents(),
+      ev(9, 'am-1', 1500, { type: 'run.context', contextTokens: 10 }),
+      ev(10, 'am-1', 1600, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: 4.2 },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    // 1.5 + 4.2 = 5.7 >= 80% of the $5 budget.
+    expect(runHealthNearLimit(runHealth(events, 'am-1', 1700))).toBe(true)
   })
 })

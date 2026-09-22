@@ -379,6 +379,7 @@ describe('Runner.runOnce', () => {
     expect(result?.state).toBe('pr_open')
     expect(types(TASK.id)).toEqual([
       'task.claimed',
+      'run.limits',
       'worktree.created',
       'task.state',
       'task.state',
@@ -1260,6 +1261,36 @@ describe('Runner context budget', () => {
       )
     expect(exceeded).toHaveLength(1)
     expect(exceeded[0]?.limit).toBe(170_000)
+  })
+
+  test('claiming a task records the effective run limits up front', async () => {
+    const harness = new FakeHarness([writesAFile], 'codex')
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        loop: {
+          contextWarnTokens: 160_000,
+          contextMaxTokens: 200_000,
+          contextOverrides: { codex: { warnTokens: 120_000, maxTokens: 140_000 } },
+          maxRunMinutes: 45,
+          maxCostUsd: 3,
+        },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    const limits = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'run.limits' }> => e.type === 'run.limits')
+    expect(limits).toHaveLength(1)
+    // Per-harness overrides win over the loop defaults; budgets come from loop.
+    expect(limits[0]).toMatchObject({
+      contextWarnTokens: 120_000,
+      contextMaxTokens: 140_000,
+      maxRunMs: 45 * 60_000,
+      maxCostUsd: 3,
+    })
   })
 })
 
