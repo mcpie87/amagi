@@ -56,6 +56,65 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
 }
 
+/** Label counting how many times a conflicting PR has been re-resolved. */
+export const ITERATION_LABEL_PREFIX = 'amagi/iterations:'
+
+export function iterationLabel(n: number): string {
+  return `${ITERATION_LABEL_PREFIX}${n}`
+}
+
+/** The amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
+export function iterationsFromLabels(labels: readonly string[] | undefined): number {
+  if (labels === undefined) return 0
+  const hit = labels.find((l) => l.startsWith(ITERATION_LABEL_PREFIX))
+  if (hit === undefined) return 0
+  const n = Number(hit.slice(ITERATION_LABEL_PREFIX.length))
+  return Number.isInteger(n) && n > 0 ? n : 0
+}
+
+/** The task id an amagi PR's head branch encodes (`amagi/<id>-...`), null for non-amagi PRs. */
+export function taskIdFromAmagiBranch(branch: string): string | null {
+  return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
+}
+
+export type StampedIteration = {
+  taskId: string
+  iteration: number
+}
+
+/**
+ * Bumps a conflicting amagi PR's resolution counter: reads the current
+ * amagi/iterations:N label (0 when absent), stamps amagi/iterations:N+1 on the
+ * PR, and reports the new count so the caller can mirror it onto the linked
+ * bead. Returns null for non-amagi PRs, which carry no iteration label.
+ */
+export async function stampIterationLabel(opts: {
+  cwd: string
+  pr: PrInfo
+  exec?: Exec
+}): Promise<StampedIteration | null> {
+  const run = opts.exec ?? defaultExec
+  const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
+  if (taskId === null) return null
+  const current = iterationsFromLabels(opts.pr.labels)
+  const iteration = current + 1
+  await execOk(run, ['gh', 'label', 'create', iterationLabel(iteration), '--force'], {
+    cwd: opts.cwd,
+    env: ghEnv(),
+  })
+  const edit = [
+    'gh',
+    'pr',
+    'edit',
+    String(opts.pr.number),
+    '--add-label',
+    iterationLabel(iteration),
+  ]
+  if (current > 0) edit.push('--remove-label', iterationLabel(current))
+  await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
+  return { taskId, iteration }
+}
+
 export type FetchPullHeadsOptions = {
   repoRoot: string
   /** Last seen PR head SHAs keyed by ref (refs/pull/N/head), so the fetch is skipped when none moved. */

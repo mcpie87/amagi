@@ -472,6 +472,21 @@ describe('BeadsTracker', () => {
     expect(returned).toHaveLength(1)
   })
 
+  test('setMetadata sets each key on the issue', async () => {
+    const { exec, calls } = fake(() => ok(''))
+    await new BeadsTracker({ cwd: '/repo', exec }).setMetadata('tst-1', {
+      iterations: '2',
+      difficulty: 'high',
+    })
+
+    const call = calls[0]
+    expect(call?.slice(0, 2)).toEqual(['bd', 'update'])
+    expect(call).toContain('tst-1')
+    expect(call).toContain('--set-metadata')
+    expect(call).toContain('iterations=2')
+    expect(call).toContain('difficulty=high')
+  })
+
   test('children surfaces the child issues of a container', async () => {
     const { exec, calls } = fake((c) =>
       c.includes('children') ? ok(SHOW_WITH_DEPS_JSON) : undefined,
