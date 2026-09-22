@@ -14,6 +14,7 @@ import {
   type RegistryEntry,
   Runner,
   type RunServiceApi,
+  reconcilePr,
   removeWorktree,
   type Store,
   type Tracker,
@@ -469,6 +470,31 @@ export function createApp({
       const result = await runner.retryNow(id)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/recheck', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      // Only a task parked on its pull request has anything to re-check; the
+      // sweep these states otherwise wait for is what this endpoint short-cuts.
+      if (task.state !== 'pr_open' && task.state !== 'pr_flagged') {
+        return c.json(
+          { error: `task ${id} is not waiting on a pull request (state ${task.state})` },
+          409,
+        )
+      }
+      if (task.prNumber === null) {
+        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
+      }
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      // The reconcile writes events the dashboard already streams, so the
+      // caller's live state picks up a merge/close without a page reload.
+      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, task)
+      return c.json({ task: ws.store.task(id) })
     })
 
     .post(

@@ -49,6 +49,7 @@ class FakeGateTracker implements Tracker {
   readonly resolved: string[] = []
   readonly released: string[] = []
   readonly closed: { id: string; reason: string | undefined }[] = []
+  readonly statuses: { id: string; status: TrackerStatus }[] = []
   releaseError: Error | null = null
 
   async ready(): Promise<TrackerTask[]> {
@@ -70,7 +71,9 @@ class FakeGateTracker implements Tracker {
     return true
   }
   async comment(): Promise<void> {}
-  async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
+  async setStatus(id: string, status: TrackerStatus): Promise<void> {
+    this.statuses.push({ id, status })
+  }
   async release(id: string): Promise<void> {
     this.released.push(id)
     if (this.releaseError !== null) throw this.releaseError
@@ -805,6 +808,109 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
     deferred('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/retry', { method: 'POST' })
     expect(res.status).toBe(501)
+  })
+})
+
+describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
+  let tracker: FakeGateTracker
+  let forge: FakeMergePrDriver
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    forge = new FakeMergePrDriver()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker, forgeFor: () => forge })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const parked = (id: string, state: 'pr_open' | 'pr_flagged' = 'pr_open') => {
+    claim(id)
+    store.append(id, {
+      type: 'pr.created',
+      url: 'https://example.com/demo/pull/7',
+      number: 7,
+    })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append(id, { type: 'task.state', from: null, to })
+    }
+    if (state === 'pr_flagged') {
+      store.append(id, { type: 'task.state', from: 'pr_open', to: 'pr_flagged' })
+    }
+  }
+
+  test('settles a merged pr as done and closes the tracker issue', async () => {
+    parked('bd-1')
+    forge.getPr = async () => 'merged'
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('done')
+    expect(tracker.closed.map((c) => c.id)).toEqual(['bd-1'])
+  })
+
+  test('marks a closed pr abandoned', async () => {
+    parked('bd-1')
+    forge.getPr = async () => 'closed'
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(tracker.statuses).toEqual([{ id: 'bd-1', status: 'closed' }])
+  })
+
+  test('an open pr keeps the task parked and records merge status', async () => {
+    parked('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('pr_open')
+    expect(store.task('bd-1')?.prMergeStatus).toBe('mergeable')
+  })
+
+  test('rechecks a flagged task too', async () => {
+    parked('bd-1', 'pr_flagged')
+    forge.getPr = async () => 'merged'
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('done')
+  })
+
+  test('409s when the task is not parked on a pull request', async () => {
+    claim('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/repos/repo1/tasks/nope/recheck', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+
+  test('501s when the repo has no forge driver', async () => {
+    const noForge = testWorkspaces(['repo1'], { trackerFor: () => tracker, forgeFor: () => null })
+    const noForgeApp = createApp({ workspaces: noForge.workspaces })
+    const noForgeStore = noForge.store('repo1')
+    noForgeStore.append('bd-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+    noForgeStore.append('bd-1', {
+      type: 'pr.created',
+      url: 'https://example.com/demo/pull/7',
+      number: 7,
+    })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      noForgeStore.append('bd-1', { type: 'task.state', from: null, to })
+    }
+    const res = await noForgeApp.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
+    expect(res.status).toBe(501)
+    noForge.cleanup()
   })
 })
 
