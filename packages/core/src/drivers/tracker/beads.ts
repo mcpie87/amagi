@@ -22,6 +22,8 @@ type BdIssue = {
   labels?: string[]
   parent?: string
   dependencies?: BdIssue[]
+  notes?: string
+  comments?: Array<{ text: string }>
   dependent_count?: number
   metadata?: Record<string, string>
 }
@@ -86,7 +88,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 
 function toTask(issue: BdIssue): TrackerTask {
   const difficulty = issue.metadata?.difficulty
-  return {
+  const task: TrackerTask = {
     id: issue.id,
     title: issue.title,
     description: issue.description ?? '',
@@ -96,6 +98,11 @@ function toTask(issue: BdIssue): TrackerTask {
     url: null,
     ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
   }
+  const notes = issue.notes?.trim()
+  if (notes) task.notes = notes
+  const comments = (issue.comments ?? []).map((c) => c.text).filter((c) => c.trim() !== '')
+  if (comments.length > 0) task.comments = comments
+  return task
 }
 
 function toIssue(issue: BdIssue): BeadsIssue {
@@ -167,12 +174,17 @@ export class BeadsTracker implements Tracker {
     )
   }
 
+  /** Full detail view: notes are always present, comments need the flag. */
+  private async show(id: string): Promise<string> {
+    return this.bd(['show', id, '--json', '--include-comments'])
+  }
+
   async children(id: string): Promise<BeadsIssue[]> {
     return parseIssues(await this.bd(['children', id, '--json'])).map(toIssue)
   }
 
   async getIssue(id: string): Promise<BeadsIssue | null> {
-    const issues = parseIssues(await this.bd(['show', id, '--json']))
+    const issues = parseIssues(await this.show(id))
     return issues.length > 0 && issues[0] ? toIssue(issues[0]) : null
   }
 
@@ -206,8 +218,7 @@ export class BeadsTracker implements Tracker {
   }
 
   async get(id: string): Promise<TrackerTask | null> {
-    const out = await this.bd(['show', id, '--json'])
-    const issues = parseIssues(out)
+    const issues = parseIssues(await this.show(id))
     return issues.length > 0 && issues[0] ? toTask(issues[0]) : null
   }
 
