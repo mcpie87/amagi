@@ -1,5 +1,6 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
+import { errMsg } from '@amagi/core'
 import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
@@ -96,9 +97,7 @@ function startRepoPollers(
       try {
         ws = workspaces.get(key)
       } catch (err) {
-        console.warn(
-          `repo ${key}: pollers skipped: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        console.warn(`repo ${key}: pollers skipped: ${errMsg(err)}`)
         continue
       }
       if (!ws) continue
@@ -139,6 +138,9 @@ function startRepoPollers(
                 root: ws.root,
                 repoName: ws.name,
                 config: ws.config,
+                store: ws.store,
+                tracker: ws.tracker,
+                driver: forge,
                 intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
               }),
         stall: startStallWatcher({

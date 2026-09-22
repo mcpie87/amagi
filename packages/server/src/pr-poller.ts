@@ -1,4 +1,4 @@
-import { type PrDriver, reconcilePrs, type Store, type Tracker } from '@amagi/core'
+import { errMsg, type PrDriver, reconcilePrs, type Store, type Tracker } from '@amagi/core'
 import { startPoller } from './poller.ts'
 
 export type PrPollerOptions = {
@@ -33,7 +33,7 @@ export function startPrPoller({
     try {
       await reconcilePrs(store, forge, tracker, cwd)
     } catch (err) {
-      console.warn(`pr reconcile: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`pr reconcile: ${errMsg(err)}`)
     }
   })
 }

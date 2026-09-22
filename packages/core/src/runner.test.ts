@@ -88,10 +88,16 @@ type Turn = {
 }
 
 class FakeHarness implements Harness {
-  readonly kind = 'fake'
+  readonly kind: string
   readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+  kills = 0
 
-  constructor(private readonly turns: Turn[]) {}
+  constructor(
+    private readonly turns: Turn[],
+    kind = 'fake',
+  ) {
+    this.kind = kind
+  }
 
   start(opts: AgentStartOptions): AgentProcess {
     return this.run(null, opts)
@@ -128,7 +134,9 @@ class FakeHarness implements Harness {
       pid: -1,
       events: () => queue,
       done: Promise.resolve(outcome),
-      kill: async () => {},
+      kill: async () => {
+        this.kills++
+      },
       model: turn.model ?? null,
       effort: turn.effort ?? null,
     }
@@ -205,6 +213,8 @@ class FakePr implements PrDriver {
   }
 
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async addLabel(): Promise<void> {}
+  async removeLabel(): Promise<void> {}
 }
 
 let repo: string
@@ -224,6 +234,7 @@ const makeRunner = (
   cfg = config(),
   forge = new FakePr(),
   runExec: Exec = exec,
+  leaseHeartbeatMs?: number,
 ) =>
   new Runner({
     store,
@@ -234,6 +245,7 @@ const makeRunner = (
     repoName: 'demo',
     forge,
     exec: runExec,
+    ...(leaseHeartbeatMs === undefined ? {} : { leaseHeartbeatMs }),
   })
 
 const types = (taskId: string): EventType[] =>
@@ -440,6 +452,52 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
+  test('renders the agent-authored conclusion after the changed-files list', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = {
+      ...TASK,
+      description: 'Write hello.txt\n\n### Conclusion\n\nAdded hello.txt with a greeting.',
+    }
+    const pr = new FakePr()
+    await makeRunner(tracker, new FakeHarness([writesAFile]), config(), pr).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body.indexOf('### 🛠️ What changed')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Added `hello.txt` with a greeting.')
+  })
+
+  test('falls back to the run summary when the agent wrote no conclusion', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([
+        { ...writesAFile, outcome: { summary: 'wrote hello.txt, fixed the greeting' } },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('wrote `hello.txt`, fixed the greeting')
+  })
+
+  test('a task with no description still gets a summary section from the agent run summary', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([{ ...TASK, description: '' }]),
+      new FakeHarness([
+        { ...writesAFile, outcome: { summary: 'Dedup by exact comment id, not by watermark' } },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(pr.calls[0]?.body).toContain('### 📝 Summary')
+    expect(pr.calls[0]?.body).toContain('Dedup by exact comment id, not by watermark')
+  })
+
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')
@@ -588,6 +646,65 @@ describe('Runner.runOnce', () => {
     expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
   })
 
+  test('a reclaimed lease stops the run without parking the task in needs_human', async () => {
+    // The stall watcher (or bd reclaim) takes the claim back mid-run: the
+    // tracker heartbeat goes dead and the runner must stop before colliding
+    // with the new owner, leaving the task in the claimed state the reclaim
+    // parked it in instead of escalating to needs_human.
+    const tracker = new FakeTracker([TASK])
+    tracker.leaseAlive = false
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    const agent: AgentProcess = {
+      pid: 9,
+      events: () => queue,
+      done,
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const harness: Harness = {
+      kind: 'fake',
+      start: () => {
+        queue.push({ kind: 'text', text: 'working...' })
+        // The stall watcher reclaims the claim while the agent is still running.
+        setTimeout(() => store.append(TASK.id, { type: 'task.reclaimed' }), 100)
+        setTimeout(() => {
+          queue.close()
+          resolveDone({
+            exitCode: 0,
+            ok: true,
+            sessionId: 'sess-1',
+            summary: 'done',
+            usage: null,
+            stderr: '',
+          })
+        }, 300)
+        return agent
+      },
+      resume: () => agent,
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+
+    const result = await makeRunner(tracker, harness, config(), new FakePr(), exec, 50).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(store.task(TASK.id)?.state).toBe('claimed')
+    expect(store.task(TASK.id)?.lastError).toContain('claim lease was reclaimed')
+    expect(types(TASK.id)).not.toContain('needs_human')
+    // The claim was already reclaimed, so the runner must not release it again.
+    expect(released).toEqual([])
+  })
+
   test('a task deferred in retrying is picked up after its retry time, reusing the worktree', async () => {
     const wtPath = join(wtRoot, 'resume-worktree')
     const branch = 'amagi/bd-a1b2-add-a-greeting-file'
@@ -704,15 +821,21 @@ describe('Runner.runOnce', () => {
         events: [
           { kind: 'text', text: 'working on it' },
           { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
-          { kind: 'result', ok: false, summary: 'the build broke' },
+          { kind: 'result', ok: false, summary: 'registry unreachable' },
         ],
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
     ])
-    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    // "hit the turn limit" is a session-limit pattern, so without disabling
+    // retries the run would back off instead of escalating to needs_human.
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { maxRetries: 0 } }),
+    ).runOnce()
 
     expect(result?.state).toBe('needs_human')
-    expect(stateReason(TASK.id)).toContain('the build broke')
+    expect(stateReason(TASK.id)).toContain('registry unreachable')
   })
 
   test('a failed agent falls back to the failing tool output when there is no result or text', async () => {
@@ -1025,6 +1148,121 @@ describe('Runner.runOnce', () => {
   })
 })
 
+describe('Runner context budget', () => {
+  const usage = (inputTokens: number, cachedTokens = 0, outputTokens = 10): AgentEvent => ({
+    kind: 'usage',
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+  })
+
+  test('crossing the soft limit warns but the run completes', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        events: [{ kind: 'text', text: 'wrote hello.txt' }, usage(180_000, 10_000)],
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 300_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.kills).toBe(0)
+    const warns = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'context.warn' }> => e.type === 'context.warn')
+    expect(warns).toHaveLength(1)
+    expect(warns[0]?.contextTokens).toBe(190_000)
+    expect(warns[0]?.limit).toBe(150_000)
+    expect(types(TASK.id)).not.toContain('context.exceeded')
+  })
+
+  test('the warning fires once on the peak, not on every usage event', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        events: [usage(80_000, 20_000), usage(100_000, 50_000), usage(120_000, 60_000)],
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 300_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    const warns = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'context.warn' }> => e.type === 'context.warn')
+    expect(warns).toHaveLength(1)
+    const peaks = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'run.context' }> => e.type === 'run.context')
+      .map((e) => e.contextTokens)
+    // Peak grows 100k -> 150k -> 180k; only new peaks are recorded.
+    expect(peaks).toEqual([100_000, 150_000, 180_000])
+  })
+
+  test('crossing the hard limit kills the agent and routes the task to needs_human', async () => {
+    const harness = new FakeHarness([{ ...writesAFile, events: [usage(190_000, 15_000)] }])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 200_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(store.task(TASK.id)?.state).toBe('needs_human')
+    expect(harness.kills).toBe(1)
+    expect(harness.calls).toHaveLength(1)
+    const exceeded = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'context.exceeded' }> =>
+          e.type === 'context.exceeded',
+      )
+    expect(exceeded).toHaveLength(1)
+    expect(exceeded[0]?.contextTokens).toBe(205_000)
+    expect(exceeded[0]?.limit).toBe(200_000)
+    expect(types(TASK.id)).toContain('context.warn')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    // A guard kill is a deliberate stop, not an agent failure: no error event.
+    const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
+    expect(errors.some((e) => e.type === 'error' && e.message.includes('agent failed'))).toBe(false)
+  })
+
+  test('per-harness overrides win over the loop defaults', async () => {
+    const harness = new FakeHarness([{ ...writesAFile, events: [usage(180_000)] }], 'codex')
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        loop: {
+          // Loop defaults are far above the emitted usage, so only the
+          // codex override can trip the guard here.
+          contextWarnTokens: 1_000_000,
+          contextMaxTokens: 1_000_000,
+          contextOverrides: { codex: { warnTokens: 150_000, maxTokens: 170_000 } },
+        },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.kills).toBe(1)
+    const exceeded = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'context.exceeded' }> =>
+          e.type === 'context.exceeded',
+      )
+    expect(exceeded).toHaveLength(1)
+    expect(exceeded[0]?.limit).toBe(170_000)
+  })
+})
+
 describe('Runner.cancel', () => {
   test('kills the agent process, releases the lease, and parks the task in cancelled', async () => {
     const harness = new BlockingHarness()
@@ -1087,5 +1325,30 @@ describe('Runner.cancel', () => {
 
     expect(result?.state).toBe('cancelled')
     expect(released).toEqual([TASK.id])
+  })
+
+  test('retryNow wakes a deferred retry so the next attempt runs immediately', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      writesAFile,
+    ])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { retryBaseMs: 60_000, retryMaxMs: 60_000 } }),
+    )
+    const pending = runner.runOnce()
+
+    // The task parks in retrying for a 60s backoff; retryNow skips the wait.
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'retry.scheduled'))
+    expect(store.task(TASK.id)?.state).toBe('retrying')
+    const started = Date.now()
+    runner.retryNow()
+    const result = await pending
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    // The run completed well inside the 60s backoff, so it cannot have slept it out.
+    expect(Date.now() - started).toBeLessThan(10_000)
   })
 })

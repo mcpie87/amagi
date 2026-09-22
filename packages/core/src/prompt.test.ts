@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
-import { implementSystemPrompt, prTitle } from './prompt.ts'
+import { classifyMentionPrompt, implementSystemPrompt, prTitle } from './prompt.ts'
 
 const task = (title: string): TrackerTask => ({
   id: 'am-544',
@@ -40,5 +40,26 @@ describe('implementSystemPrompt', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('Never pipe check or lint output through head/tail')
     expect(prompt).toContain('Redirect to a file instead')
+  })
+
+  test('tells the agent to append a mandatory conclusion written against the real diff', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('### Conclusion')
+    expect(prompt).toContain('git diff <base>...HEAD')
+    expect(prompt).toContain('file by file')
+    expect(prompt).toContain('mandatory')
+    expect(prompt).toContain('deviations from')
+  })
+})
+
+describe('classifyMentionPrompt', () => {
+  test('maps questions about a change still being relevant to explain, not ambiguous', () => {
+    const prompt = classifyMentionPrompt({
+      pr: { number: 102, title: 'Revert PR #36', url: 'https://github.com/owner/repo/pull/102' },
+      mention: { user: 'mcpie87', body: '@chise-maru is this change still relevant?' },
+    })
+    expect(prompt).toContain('explain: the human is asking anything about the PR')
+    expect(prompt).toContain('still relevant')
+    expect(prompt).toContain('never ambiguous')
   })
 })

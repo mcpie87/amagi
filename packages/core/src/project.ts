@@ -38,6 +38,8 @@ export type ProjectedTask = {
   statusReason: string | null
   lastError: string | null
   retryCount: number
+  /** Epoch ms when the current deferred automatic retry fires; null when none is scheduled. */
+  retryAt: number | null
   lastCommit: { sha: string; subject: string } | null
   checks: CheckResult[] | null
   checksOk: boolean | null
@@ -102,6 +104,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
             statusReason: null,
             lastError: null,
             retryCount: 0,
+            retryAt: null,
             lastCommit: null,
             checks: null,
             checksOk: null,
@@ -201,6 +204,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         tasks[event.taskId] = {
           ...current,
           retryCount: current.retryCount + 1,
+          retryAt: event.ts + event.delayMs,
           updatedAt: event.ts,
         }
       }

@@ -1,6 +1,7 @@
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
+import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
   isTerminal,
@@ -8,6 +9,7 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
+import { fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -46,6 +48,7 @@ import { SessionsView } from './SessionsView.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
+  type RunOptions,
   useConnection,
   useDashboard,
   useReadyQueue,
@@ -283,6 +286,15 @@ const EPIC_CLOSE_REASONS = [
   '__other',
 ]
 
+/** Preset reasons offered when marking a task done; '__other' falls back to free text. */
+const TASK_DONE_REASONS = [
+  'completed',
+  'already done elsewhere',
+  'duplicate / superseded',
+  'out of scope',
+  '__other',
+]
+
 const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
 
 const columnHeader: Record<Issue['status'], string> = {
@@ -311,6 +323,7 @@ const stateBadge: Record<TaskState, string> = {
   committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
+  pr_flagged: 'bg-amber-soft text-amber-ink ring-amber-edge',
   done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
   no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
   needs_human: 'bg-red-soft text-red-ink ring-red-edge',
@@ -935,7 +948,7 @@ function IssuesView() {
           current === null ? null : (items.find((i) => i.id === current.id) ?? null),
         )
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setError(errMsg(err)))
   }, [selected, refresh])
 
   useEffect(() => {
@@ -1208,12 +1221,14 @@ function RunButton() {
   const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
 
-  const run = async () => {
+  const run = async (opts?: RunOptions) => {
     setBusy(true)
     setMessage(null)
-    const res = await start()
+    const res = await start(undefined, opts)
     setBusy(false)
+    setOpen(false)
     setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
@@ -1223,11 +1238,151 @@ function RunButton() {
       <button
         type="button"
         disabled={busy}
-        onClick={() => void run()}
+        onClick={() => setOpen(true)}
         className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
         Run next
       </button>
+      {open && <RunPicker onClose={() => setOpen(false)} onRun={run} />}
+    </div>
+  )
+}
+
+/**
+ * Lets the operator pick harness/model/effort before "Run next" dispatches.
+ * Every field defaults to "use the configured value": leaving the harness at
+ * default sends no overrides, so the server's config.harness.implement wins.
+ */
+function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunOptions) => void }) {
+  const { options } = useRunner()
+  const harnesses = options?.harnesses ?? []
+  const [harness, setHarness] = useState('')
+  const [model, setModel] = useState('')
+  const [customModel, setCustomModel] = useState('')
+  const [effort, setEffort] = useState('')
+
+  const selected = harnesses.find((h) => h.name === harness)
+  const kind = selected?.kind
+  const models = kind === undefined ? [] : (options?.models[kind] ?? [])
+  const efforts = kind === undefined ? [] : (options?.efforts[kind] ?? [])
+
+  const switchHarness = (value: string) => {
+    setHarness(value)
+    setModel('')
+    setCustomModel('')
+    setEffort('')
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const effectiveModel = model === 'custom' ? customModel.trim() : model
+    onRun({
+      ...(harness === '' ? {} : { harness }),
+      ...(effectiveModel === '' ? {} : { model: effectiveModel }),
+      ...(effort === '' ? {} : { effort }),
+    })
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={submit}
+        className="w-full max-w-md rounded-lg border border-line-strong bg-surface p-4"
+      >
+        <h2 className="mb-3 text-lg font-semibold">Run next task</h2>
+        <div className="space-y-3">
+          <div>
+            <label className={label} htmlFor="run-harness">
+              Harness
+            </label>
+            <select
+              id="run-harness"
+              value={harness}
+              onChange={(e) => switchHarness(e.target.value)}
+              className={input}
+            >
+              <option value="">default ({options?.default?.kind ?? 'config'})</option>
+              {harnesses.map((h) => (
+                <option key={h.name} value={h.name}>
+                  {h.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={label} htmlFor="run-model">
+              Model
+            </label>
+            <select
+              id="run-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.model === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.model})`}
+              </option>
+              {models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+              <option value="custom">(custom model)</option>
+            </select>
+            {model === 'custom' && (
+              <input
+                value={customModel}
+                onChange={(e) => setCustomModel(e.target.value)}
+                placeholder="model id"
+                className={`${input} mt-1`}
+              />
+            )}
+          </div>
+          <div>
+            <label className={label} htmlFor="run-effort">
+              Effort
+            </label>
+            <select
+              id="run-effort"
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+              className={input}
+            >
+              <option value="">
+                {selected?.effort === undefined
+                  ? 'default (harness)'
+                  : `default (${selected.effort})`}
+              </option>
+              {efforts.map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-line-strong px-3 py-1 text-sm text-fg-muted hover:bg-raised"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
+          >
+            Run
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -1473,7 +1628,13 @@ const KANBAN_COLUMNS: KanbanColumn[] = [
     key: 'implementing',
     title: 'In progress',
     accent: 'bg-blue-600',
-    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks', 'retrying'],
+    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks'],
+  },
+  {
+    key: 'retrying',
+    title: 'Retrying',
+    accent: 'bg-orange-600',
+    states: ['retrying'],
   },
   {
     key: 'needs_human',
@@ -1560,6 +1721,14 @@ function QueueView() {
                                 {task.statusReason}
                               </span>
                             )}
+                          {column.key === 'retrying' && (
+                            <span className="mt-1 block truncate text-xs text-orange-300">
+                              {task.retryAt !== null
+                                ? `retries in ${fmtRetryIn(task.retryAt)}`
+                                : 'retry pending'}
+                              {task.lastError !== null && ` · ${task.lastError}`}
+                            </span>
+                          )}
                           {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
                             <span
                               className={`mt-1 block truncate text-xs ${
@@ -1721,6 +1890,12 @@ function RunList({
               <span className="block truncate text-xs text-fg-faint">{task.id}</span>
               {showReason && task.statusReason !== null && (
                 <span className="block truncate text-xs text-fg-muted">{task.statusReason}</span>
+              )}
+              {task.state === 'retrying' && (
+                <span className="block truncate text-xs text-orange-ink">
+                  {task.retryAt !== null ? `retrying in ${fmtRetryIn(task.retryAt)}` : 'retrying'}
+                  {task.lastError !== null && ` · ${task.lastError}`}
+                </span>
               )}
             </span>
           </Link>
@@ -1953,7 +2128,9 @@ function ReclaimButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (worktree === null || isTerminal(state)) return null
+  // A retrying task is still owned by its runner, which will retry on its own;
+  // reclaiming it here would hand the tracker claim to a second worker.
+  if (worktree === null || isTerminal(state) || state === 'retrying') return null
 
   const reclaim = async () => {
     setBusy(true)
@@ -2003,22 +2180,27 @@ function CloseButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(TASK_DONE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
+  const { resyncStream } = useDashboard()
   if (target === 'done' && state !== 'needs_human' && state !== 'no_pr') return null
 
-  const close = async () => {
-    const reason = window.prompt(
-      target === 'done' ? 'Reason for marking this task done' : 'Reason for closing this task',
-    )
-    if (reason === null || reason.trim() === '') return
+  const close = async (finalReason: string) => {
     setBusy(true)
     setError(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/close`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim(), to: target }),
+        body: JSON.stringify({ reason: finalReason, to: target }),
       })
+      // The state change lands in the store server-side; if the event stream
+      // is stale the completed task keeps its old state until a page refresh,
+      // so force a resync instead of waiting for the operator to reload.
+      resyncStream()
       if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else setOpen(false)
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2026,12 +2208,33 @@ function CloseButton({
     }
   }
 
+  const onMarkDone = () => {
+    setOpen(true)
+  }
+
+  const submit = () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    void close(finalReason)
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
   return (
     <div>
       <button
         type="button"
         disabled={busy}
-        onClick={() => void close()}
+        onClick={() => {
+          if (target === 'done') onMarkDone()
+          else {
+            const reason = window.prompt(`Reason for closing ${taskId}`)
+            if (reason === null || reason.trim() === '') return
+            void close(reason.trim())
+          }
+        }}
         title={
           target === 'done'
             ? 'marks the task done when the work already existed elsewhere'
@@ -2046,6 +2249,67 @@ function CloseButton({
         {target === 'done' ? 'Mark done' : 'Close'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {target === 'done' && open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Mark done {taskId}</h2>
+            <div className="space-y-3">
+              <div>
+                <label className={label} htmlFor="task-done-reason">
+                  Reason for marking this task done
+                </label>
+                <select
+                  id="task-done-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {TASK_DONE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor="task-done-custom">
+                    Custom reason
+                  </label>
+                  <input
+                    id="task-done-custom"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                Mark done
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
@@ -2199,6 +2463,112 @@ function RequeueButton({
   )
 }
 
+/**
+ * Restart a run that has no worktree recorded yet, so the runner starts fresh.
+ * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
+ * need the worktree path; done and abandoned runs have no path back, so the
+ * button is hidden for them.
+ */
+function RestartRunButton({
+  repo,
+  taskId,
+  state,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (worktree !== null || state === 'done' || state === 'abandoned') return null
+
+  const restart = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+      }
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="restart-run">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void restart()}
+        className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
+      >
+        <Icon name="refresh" size={15} />
+        {busy ? 'Restarting...' : 'Restart run'}
+      </button>
+      {error !== null && (
+        <p className="restart-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Skip a deferred automatic retry's backoff and run it now, only meaningful
+ * while the task sits in retrying (the runner owns it and is sleeping).
+ */
+function RetryNowButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'retrying') return null
+
+  const retryNow = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/retry`, {
+        method: 'POST',
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void retryNow()}
+        className="rounded border border-orange-edge bg-orange-soft px-3 py-1 text-sm text-orange-ink hover:bg-orange-soft-hover disabled:opacity-50"
+      >
+        Retry now
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -2224,10 +2594,6 @@ function StopButton({ taskId }: { taskId: string }) {
 }
 
 type AgentStreamEvent = Extract<StoredEvent, { type: 'agent.stream' }>
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-}
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
@@ -2278,7 +2644,28 @@ function fmtAgo(ts: number): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
-const ATTENTION_STATES: readonly TaskState[] = ['no_pr', 'needs_human', 'abandoned', 'cancelled']
+/** How long until a scheduled retry fires, e.g. "in 45s". */
+function fmtRetryIn(ts: number): string {
+  const s = Math.max(0, Math.round((ts - Date.now()) / 1000))
+  if (s <= 0) return 'now'
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
+}
+
+// States whose summary/verdict stays visible after the task settles: the
+// parked states for attention, plus `done` so marking a no_pr/needs_human task
+// complete does not erase the verdict the operator just recorded.
+const VERDICT_STATES: readonly TaskState[] = [
+  'no_pr',
+  'needs_human',
+  'pr_flagged',
+  'abandoned',
+  'cancelled',
+  'done',
+]
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -2321,7 +2708,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
           return res.json() as Promise<Issue>
         })
         .then(setIssue)
-        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => setError(errMsg(err)))
     }
   }
 
@@ -2377,23 +2764,51 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: TaskView }) {
   const needsHuman = task.state === 'needs_human'
-  if (!needsHuman && (task.statusReason === null || !ATTENTION_STATES.includes(task.state))) {
+  const done = task.state === 'done'
+  if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
     return null
   }
   return (
     <div
       className={`mt-6 rounded-lg border px-4 py-3 ${
-        needsHuman ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
+        needsHuman
+          ? 'border-red-edge bg-red-soft'
+          : done
+            ? 'border-line bg-surface'
+            : 'border-amber-edge bg-amber-soft'
       }`}
     >
       <h2
         className={`text-sm font-semibold uppercase tracking-wide ${
-          needsHuman ? 'text-red-ink' : 'text-amber-ink'
+          needsHuman ? 'text-red-ink' : done ? 'text-fg-muted' : 'text-amber-ink'
         }`}
       >
-        {needsHuman ? 'Needs human attention' : 'Summary'}
+        {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
       {task.statusReason !== null && <Markdown text={task.statusReason} />}
+    </div>
+  )
+}
+
+/** A task deferring an automatic retry: when it fires and why, plus the reason. */
+function RetryPanel({ task }: { task: TaskView }) {
+  if (task.state !== 'retrying') return null
+  return (
+    <div className="mt-6 rounded-lg border border-orange-edge bg-orange-soft px-4 py-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-orange-ink">
+        Deferred automatic retry
+      </h2>
+      <p className="mt-1 text-sm text-fg">
+        {task.retryAt !== null
+          ? `Retrying in ${fmtRetryIn(task.retryAt)} (attempt ${task.retryCount}).`
+          : `Retry pending (attempt ${task.retryCount}).`}{' '}
+        No human action is needed; use Retry now to skip the wait, or Close to abandon.
+      </p>
+      {task.lastError !== null && (
+        <p className="mt-1 text-sm text-fg-muted">
+          Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
+        </p>
+      )}
     </div>
   )
 }
@@ -2402,11 +2817,21 @@ function SummaryPanel({ task }: { task: TaskView }) {
  * Operator/worker chat on a parked no_pr task. Each message resumes the task's
  * recorded session in its worktree; the answer streams in through the repo
  * event stream, so this component only renders what chatTurns folds from it.
+ * A settled task (e.g. marked done) keeps the conversation read-only so it is
+ * not lost on completion, while the send form only shows while the task is a
+ * chattable no_pr run with a session and worktree to resume.
  */
 function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const { state } = useDashboard()
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const task = state.tasks[taskId]
+  const interactive =
+    task !== undefined &&
+    task.state === 'no_pr' &&
+    task.statusReason !== null &&
+    task.sessionId !== null &&
+    task.worktree !== null
   const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
   const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -2418,7 +2843,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const send = async (event: FormEvent) => {
     event.preventDefault()
     const message = text.trim()
-    if (message === '' || responding) return
+    if (message === '' || responding || !interactive) return
     setError(null)
     setText('')
     try {
@@ -2442,7 +2867,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
         ref={scrollRef}
         className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-line bg-sunken p-3"
       >
-        {messages.length === 0 && (
+        {messages.length === 0 && interactive && (
           <p className="text-sm text-fg-faint">Ask the worker about why there is no PR.</p>
         )}
         {messages.map((m) => (
@@ -2462,22 +2887,26 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
           </div>
         ))}
       </div>
-      <form onSubmit={send} className="flex gap-2">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={responding}
-          placeholder={responding ? 'worker is responding...' : 'ask the worker'}
-          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
-        />
-        <button
-          type="submit"
-          disabled={responding || text.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-        >
-          Send
-        </button>
-      </form>
+      {interactive ? (
+        <form onSubmit={send} className="flex gap-2">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            disabled={responding}
+            placeholder={responding ? 'worker is responding...' : 'ask the worker'}
+            className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={responding || text.trim() === ''}
+            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+          >
+            Send
+          </button>
+        </form>
+      ) : (
+        <p className="text-xs text-fg-faint">Conversation preserved; the task is settled.</p>
+      )}
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
@@ -2523,6 +2952,16 @@ function TaskDetailView() {
       : []),
   ]
 
+  // The chat is live while the task is a chattable no_pr run; a settled task
+  // keeps the panel only when a conversation was actually recorded, so the
+  // operator does not lose it by completing the task.
+  const chatAvailable =
+    (task.state === 'no_pr' &&
+      task.statusReason !== null &&
+      task.sessionId !== null &&
+      task.worktree !== null) ||
+    state.events.some((e) => e.taskId === task.id && e.type === 'chat.message')
+
   return (
     <section>
       <Link to="/" className="text-sm text-sky-ink hover:underline">
@@ -2555,6 +2994,17 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
+        {selected !== null && (
+          <RestartRunButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            worktree={task.worktree}
+          />
+        )}
+        {selected !== null && (
+          <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
+        )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
@@ -2562,11 +3012,9 @@ function TaskDetailView() {
 
       <SummaryPanel task={task} />
 
-      {selected !== null &&
-        task.state === 'no_pr' &&
-        task.statusReason !== null &&
-        task.sessionId !== null &&
-        task.worktree !== null && <ChatPanel repo={selected} taskId={task.id} />}
+      <RetryPanel task={task} />
+
+      {selected !== null && chatAvailable && <ChatPanel repo={selected} taskId={task.id} />}
 
       <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
         <DetailRow label="tracker" value={task.tracker} />

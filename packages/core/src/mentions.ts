@@ -6,6 +6,7 @@ import { classifyDifficulty } from './difficulty.ts'
 import { ghEnv } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
+import { agentFailure } from './errors.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
@@ -32,13 +33,10 @@ const MENTION_KINDS: readonly MentionKind[] = [
   'ambiguous',
 ]
 
-/** Best-effort parse of the classifier's reply; anything unrecognised is ambiguous. */
+/** Parse of the classifier's reply; only an exact known kind matches, anything else is ambiguous. */
 export function parseMentionKind(reply: string): MentionKind {
-  const lower = reply.toLowerCase()
-  for (const k of MENTION_KINDS) {
-    if (lower.includes(k)) return k
-  }
-  return 'ambiguous'
+  const kind = reply.trim().toLowerCase()
+  return MENTION_KINDS.includes(kind as MentionKind) ? (kind as MentionKind) : 'ambiguous'
 }
 
 export function mentionsPath(repoName: string): string {
@@ -83,8 +81,8 @@ export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrCom
   return comments.filter((c) => isAgentMention(c, opts.handle))
 }
 
-/** Last-seen comment per open PR, so the watcher skips PRs that have not changed. */
-export type MentionWatchState = Record<string, { updatedAt: string; lastCommentId: number }>
+/** Last-seen updatedAt per open PR, so the watcher skips PRs that have not changed. */
+export type MentionWatchState = Record<string, string>
 
 export function mentionWatchPath(repoName: string): string {
   return join(cacheHome(), 'amagi', 'mentions', `${repoName}.watch.json`)
@@ -256,9 +254,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
   )
   const outcome = await p.agent(proc, 'fixing in worktree')
   if (!outcome.ok) {
-    throw new Error(
-      `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-    )
+    throw new Error(`agent failed: ${agentFailure(outcome)}`)
   }
   p.phase('pushing fix')
   await pushConflictFix({
@@ -299,9 +295,7 @@ async function respondToExplain(
     )
     const outcome = await p.agent(proc, 'explaining')
     if (!outcome.ok) {
-      throw new Error(
-        `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-      )
+      throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }
     const explanation = readFileSync(outPath, 'utf8').trim()
     if (explanation === '') throw new Error('agent produced no explanation')
@@ -341,9 +335,7 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   )
   const outcome = await p.agent(proc, 'classifying')
   if (!outcome.ok) {
-    throw new Error(
-      `classifier failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-    )
+    throw new Error(`classifier failed: ${agentFailure(outcome)}`)
   }
   return parseMentionKind(outcome.summary ?? '')
 }
