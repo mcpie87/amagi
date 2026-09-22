@@ -5,7 +5,14 @@ import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { errMsg } from './errors.ts'
-import { type CheckResult, isTerminal, type StoredEvent, type TaskState } from './events.ts'
+import {
+  type AgentEvent,
+  type AgentRole,
+  type CheckResult,
+  isTerminal,
+  type StoredEvent,
+  type TaskState,
+} from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
 import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
@@ -17,7 +24,10 @@ import {
   implementSystemPrompt,
   prTitle,
   reclaimPrompt,
+  verifyViabilityPrompt,
+  verifyViabilitySystemPrompt,
   whyNoChangesPrompt,
+  withRestartHandoff,
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
@@ -33,6 +43,8 @@ export type RunnerDeps = {
   exec?: Exec
   /** Overridable so tests do not need gh installed. Defaults to the configured forge driver. */
   forge?: PrDriver
+  /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
+  leaseHeartbeatMs?: number
 }
 
 export type RunOnceResult = {
@@ -120,6 +132,27 @@ function taskCost(events: StoredEvent[]): { costUsd: number; costSeen: boolean }
   return { costUsd, costSeen }
 }
 
+/** Best-effort JSON extraction of the viability decision; anything else is a null. */
+function parseViabilityDecision(reply: string): { viable: boolean; reason: string } | null {
+  const text = reply
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/, '')
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end === -1 || end <= start) return null
+  try {
+    const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const viable = (parsed as { viable?: unknown }).viable
+    if (typeof viable !== 'boolean') return null
+    const reason = (parsed as { reason?: unknown }).reason
+    return { viable, reason: typeof reason === 'string' ? reason : '' }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Per-task wall-clock and cost ceiling, cumulative across every round and
  * reclaim. A value of 0 for a limit means unbounded. The cost budget is only
@@ -171,10 +204,11 @@ class Lease {
     private readonly tracker: Tracker,
     private readonly store: Store,
     private readonly taskId: string,
+    private readonly heartbeatMs?: number,
   ) {}
 
   start(): void {
-    const period = Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
+    const period = this.heartbeatMs ?? Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
     this.timer = setInterval(() => {
       void this.tracker.heartbeat(this.taskId).then((alive) => {
         if (!alive) this.lost = true
@@ -203,6 +237,12 @@ export class Runner {
   private cancelled = false
   private retryNowRequested = false
   private currentProcess: AgentProcess | null = null
+  /** Running peak input context (input + cached tokens) for the current task run. */
+  private peakContext = 0
+  /** Whether the soft context limit has been flagged for the current task run. */
+  private contextWarned = false
+  /** Fresh-context restarts already spent on the current task run, across all phases. */
+  private contextRestarts = 0
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -267,6 +307,9 @@ export class Runner {
    */
   async runClaimed(task: TrackerTask): Promise<RunOnceResult> {
     const { store } = this.deps
+    this.peakContext = 0
+    this.contextWarned = false
+    this.contextRestarts = 0
     store.append(task.id, {
       type: 'task.claimed',
       title: task.title,
@@ -279,12 +322,27 @@ export class Runner {
         ? {}
         : { difficulty: task.difficulty }),
     })
+    const { warnTokens, maxTokens } = this.contextLimits()
+    store.append(task.id, {
+      type: 'run.limits',
+      contextWarnTokens: warnTokens,
+      contextMaxTokens: maxTokens,
+      maxRunMs: this.deps.config.loop.maxRunMinutes * 60_000,
+      maxCostUsd: this.deps.config.loop.maxCostUsd,
+    })
 
     try {
       await this.drive(task)
     } catch (err) {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
+      } else if (err instanceof LeaseLostError) {
+        // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
+        // or another worker took over). Stop before colliding with the new
+        // owner and leave the task where the reclaim parked it: either the new
+        // worker drives it, or the next one resumes it from `claimed`, so no
+        // human attention is needed.
+        store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
       } else {
         const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
@@ -404,7 +462,7 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
-    const lease = new Lease(this.deps.tracker, this.deps.store, task.id)
+    const lease = new Lease(this.deps.tracker, this.deps.store, task.id, this.deps.leaseHeartbeatMs)
     lease.start()
     try {
       await this.implementAndCheck(task, worktree.path, worktree.branch, lease, budget, resume)
@@ -422,11 +480,33 @@ export class Runner {
     resume = false,
   ): Promise<void> {
     const { store, config } = this.deps
-    const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
+    // The claimed task is a lite ready row without notes or comments; re-read the
+    // full issue so the agent sees the tracker context (and never needs bd inside
+    // the worktree, where it has no database). Best effort, like the PR-body re-read.
+    let currentTask = task
+    try {
+      currentTask = (await this.deps.tracker.get(task.id)) ?? task
+    } catch {
+      currentTask = task
+    }
+    const promptCtx = {
+      task: currentTask,
+      worktree: cwd,
+      branch,
+      askCommand: 'amagi ask "<question>"',
+    }
 
     this.throwIfCancelled(task.id)
     this.throwIfBudgetExhausted(task.id, budget)
     this.transition(task.id, 'implementing')
+    // A fresh run first verifies the task is still viable against the current
+    // repository, so a task already satisfied on the base branch is stopped
+    // before the implement agent writes anything or a no-op PR is opened. A
+    // resumed run skips the check: its worktree already holds in-progress work.
+    if (!resume) {
+      const viable = await this.verifyViability(task, cwd, branch, budget)
+      if (!viable) return
+    }
     const first = await this.runAgentWithRetry(
       task.id,
       null,
@@ -454,6 +534,8 @@ export class Runner {
     if (parked === null) return
     current = mergeAgentRuns(current, parked)
 
+    let recoveryGiven = false
+    let recoveryRetry = false
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
       this.transition(task.id, 'checks')
@@ -463,16 +545,36 @@ export class Runner {
       store.append(task.id, { type: 'checks.finished', ok, results })
 
       if (ok) break
-      if (round === config.loop.maxCheckRounds) {
+      // The fix rounds are spent, or nothing is left to resume. Rather than
+      // parking the task silently (a stale worktree makes checks fail that a
+      // fresh base passes), ask the operator once how to proceed and apply it.
+      if (round === config.loop.maxCheckRounds || (current.sessionId === null && !recoveryRetry)) {
+        if (!recoveryGiven) {
+          recoveryGiven = true
+          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
+          if (action === null) return
+          if (action === 'park') {
+            this.transition(task.id, 'needs_human', 'project checks still failing')
+            return
+          }
+          if (action === 'rebase') {
+            const rebased = await this.updateFromBase(cwd)
+            if (!rebased) {
+              this.transition(
+                task.id,
+                'needs_human',
+                'project checks still failing; updating the worktree to the latest base failed',
+              )
+              return
+            }
+          }
+          // 'retry' or a successful 'rebase': give the fix rounds another full
+          // pass, resuming the recorded session or starting a fresh one.
+          recoveryRetry = true
+          round = -1
+          continue
+        }
         this.transition(task.id, 'needs_human', 'project checks still failing')
-        return
-      }
-      if (current.sessionId === null) {
-        this.transition(
-          task.id,
-          'needs_human',
-          'checks failed and the agent left no session to resume',
-        )
         return
       }
 
@@ -509,7 +611,7 @@ export class Runner {
           current.sessionId,
           {
             cwd,
-            prompt: whyNoChangesPrompt(task),
+            prompt: whyNoChangesPrompt(currentTask),
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
@@ -520,18 +622,76 @@ export class Runner {
         if (why.stopped) return
         reason = why.summary?.trim() !== '' ? why.summary : null
       }
+      // No changes AND no agent-written explanation: never read as "already done".
       this.transition(
         task.id,
         'no_pr',
         reason ??
-          'the agent produced no changes; the task may already be done or need no PR — ' +
-            'verify and close it explicitly, it will not be closed automatically',
+          'the agent produced no changes and wrote no summary explaining why; treat ' +
+            'this as unverified rather than done — investigate before closing, it will ' +
+            'not be closed automatically',
       )
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, current.model, current.effort)
+    await this.openPullRequest(task, cwd, branch, current.model, current.effort, current.summary)
     this.throwIfCancelled(task.id)
+  }
+
+  /**
+   * Pre-implement viability check: a read-only agent pass decides whether the
+   * task is still needed in the current repository. Returns false when the
+   * task is not viable, in which case it is reported inside the task (a
+   * tracker comment) and parked in `no_pr` before any code is written. Any
+   * failure to check defaults to viable: a broken check must never kill a
+   * task, only a clear not-viable verdict does.
+   */
+  private async verifyViability(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    budget: TaskBudget,
+  ): Promise<boolean> {
+    const { store, config } = this.deps
+    const run = await this.runAgent(
+      task.id,
+      null,
+      {
+        cwd,
+        prompt: verifyViabilityPrompt({ task, worktree: cwd, branch, askCommand: null }),
+        systemPrompt: verifyViabilitySystemPrompt(),
+        ...harnessStartOpts(config.harness.implement),
+      },
+      'verify',
+      budget,
+      'verify',
+    )
+    if (!run.ok) {
+      // A cancel mid-check must stop the run, not fall through to implement.
+      this.throwIfCancelled(task.id)
+      return true
+    }
+    const decision = run.summary === null ? null : parseViabilityDecision(run.summary)
+    if (decision === null || decision.viable) return true
+
+    const reason =
+      decision.reason.trim() !== ''
+        ? decision.reason
+        : 'the task is not viable against the current repository'
+    try {
+      await this.deps.tracker.comment(
+        task.id,
+        `amagi: task ${task.id} skipped as no longer viable - ${reason}`,
+      )
+    } catch (err) {
+      store.append(task.id, {
+        type: 'error',
+        message: `viability comment ${task.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        fatal: false,
+      })
+    }
+    this.transition(task.id, 'no_pr', reason)
+    return false
   }
 
   /**
@@ -545,6 +705,7 @@ export class Runner {
     branch: string,
     model: string | null,
     effort: string | null,
+    fallbackSummary?: string | null,
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
@@ -578,11 +739,19 @@ export class Runner {
       base: config.repo.baseBranch,
       remote: config.forge.remote,
       title: prTitle(current),
-      body: formatPrBody(current, changes, {
-        harness: this.deps.harness.kind,
-        model,
-        effort,
-      }),
+      body: formatPrBody(
+        current,
+        changes,
+        {
+          harness: this.deps.harness.kind,
+          // Fall back to the configured implement model/effort when the run
+          // reports none (fix/resume rounds do not carry one), mirroring the
+          // comment footer so the PR body always carries the same provenance.
+          model: model ?? config.harness.implement.model ?? null,
+          effort: effort ?? config.harness.implement.effort ?? null,
+        },
+        fallbackSummary,
+      ),
       labels: amagiLabels(current.type),
     }
     try {
@@ -679,7 +848,16 @@ export class Runner {
     opts: Parameters<Harness['start']>[0],
     phase: string,
     budget: TaskBudget,
-  ): Promise<AgentRun & { ok: boolean; detail: string | null }> {
+    role: AgentRole = 'implement',
+  ): Promise<{
+    sessionId: string | null
+    ok: boolean
+    detail: string | null
+    summary: string | null
+    model: string | null
+    effort: string | null
+    contextExceeded: boolean
+  }> {
     const { store, harness } = this.deps
     const spawn = {
       ...opts,
@@ -713,12 +891,13 @@ export class Runner {
       const model = proc.model ?? opts.model ?? null
       const effort = proc.effort ?? null
       let started = false
+      let contextExceeded = false
       for await (const event of proc.events()) {
         if (!started) {
           started = true
           store.append(taskId, {
             type: 'agent.started',
-            role: 'implement',
+            role,
             harness: harness.kind,
             model,
             effort,
@@ -741,7 +920,13 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        store.append(taskId, { type: 'agent.stream', role: 'implement', event })
+        store.append(taskId, { type: 'agent.stream', role, event })
+        if (this.observeContext(taskId, event)) {
+          // Hard limit reached: stop the agent now rather than let it degrade.
+          contextExceeded = true
+          await proc.kill()
+          break
+        }
         const spent = budget.spentReason()
         if (spent !== null) {
           budgetSpent = spent
@@ -759,14 +944,14 @@ export class Runner {
       const outcome = await proc.done
       store.append(taskId, {
         type: 'agent.exited',
-        role: 'implement',
+        role,
         exitCode: outcome.exitCode,
         sessionId: outcome.sessionId,
       })
       if (budgetSpent !== null) throw new BudgetExhaustedError(taskId, budgetSpent)
 
       let detail: string | null = null
-      if (!outcome.ok && !this.cancelled) {
+      if (!outcome.ok && !this.cancelled && !contextExceeded) {
         detail =
           outcome.stderr.trim() ||
           resultSummary ||
@@ -783,11 +968,80 @@ export class Runner {
         summary: outcome.summary,
         model,
         effort,
+        contextExceeded,
       }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
     }
+  }
+
+  /**
+   * Effective context budget for the active harness: per-harness overrides win
+   * over the loop defaults, since context windows differ between harnesses.
+   */
+  private contextLimits(): { warnTokens: number; maxTokens: number } {
+    const { config, harness } = this.deps
+    const overrides = config.loop.contextOverrides[harness.kind] ?? {}
+    return {
+      warnTokens: overrides.warnTokens ?? config.loop.contextWarnTokens,
+      maxTokens: overrides.maxTokens ?? config.loop.contextMaxTokens,
+    }
+  }
+
+  /**
+   * Folds a streamed usage event into the run's peak context and enforces the
+   * budget. Returns true when the hard limit was crossed, signalling the
+   * caller to kill the agent.
+   */
+  private observeContext(taskId: string, event: AgentEvent): boolean {
+    if (event.kind !== 'usage') return false
+    const { store } = this.deps
+    const { warnTokens, maxTokens } = this.contextLimits()
+    const context = event.inputTokens + (event.cachedTokens ?? 0)
+    if (context <= this.peakContext) return false
+    this.peakContext = context
+    store.append(taskId, { type: 'run.context', contextTokens: context })
+    if (!this.contextWarned && context >= warnTokens) {
+      this.contextWarned = true
+      store.append(taskId, { type: 'context.warn', contextTokens: context, limit: warnTokens })
+    }
+    if (context >= maxTokens) {
+      store.append(taskId, { type: 'context.exceeded', contextTokens: context, limit: maxTokens })
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Synthesizes a short handoff of what a killed session did, for the fresh
+   * session replacing it: the last thing the agent reported (text or result
+   * summary) plus the files its work left in the worktree. The new session
+   * reads this instead of the dead session's context, so it can pick up the
+   * work without redoing it.
+   */
+  private async handoffSummary(taskId: string, cwd: string): Promise<string> {
+    const lines: string[] = []
+    const events = this.deps.store.recentEvents(taskId, 200)
+    for (const event of events.slice().reverse()) {
+      if (event.type !== 'agent.stream') continue
+      if (event.event.kind === 'text' && event.event.text.trim() !== '') {
+        lines.push(`Last reported by the agent: ${event.event.text.trim()}`)
+        break
+      }
+      if (event.event.kind === 'result' && event.event.summary?.trim()) {
+        lines.push(`Reported by the agent: ${event.event.summary.trim()}`)
+        break
+      }
+    }
+    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
+    const dirty = status.stdout.trim()
+    lines.push(
+      dirty === ''
+        ? 'No uncommitted changes in the worktree.'
+        : `Files changed in the worktree:\n${dirty}`,
+    )
+    return lines.join('\n\n')
   }
 
   /**
@@ -810,14 +1064,45 @@ export class Runner {
     let summary: string | null = null
     let model: string | null = null
     let effort: string | null = null
+    let runOpts = opts
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, opts, phase, budget)
+      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
       summary = run.summary
       model = run.model
       effort = run.effort
+      if (run.contextExceeded) {
+        // Checked before ok: a hard kill must stop the run even when the
+        // process happens to report a clean exit.
+        if (this.contextRestarts >= config.loop.contextMaxRestarts) {
+          this.transition(
+            taskId,
+            'needs_human',
+            `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+          )
+          return { sessionId, stopped: true, summary, model, effort }
+        }
+        // Fresh-context restart: keep the worktree and claim, and hand the new
+        // session a synthesized handoff of what the killed one did so the
+        // work already in the worktree is not redone.
+        this.contextRestarts++
+        const handoff = await this.handoffSummary(taskId, runOpts.cwd)
+        store.append(taskId, {
+          type: 'run.restarted',
+          phase,
+          restart: this.contextRestarts,
+          contextTokens: this.peakContext,
+          summary: handoff,
+        })
+        sessionId = null
+        this.peakContext = 0
+        this.contextWarned = false
+        runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
+        this.transition(taskId, 'implementing')
+        continue
+      }
       if (run.ok) return { sessionId, stopped: false, summary, model, effort }
       if (lease.isLost) throw new LeaseLostError(taskId)
 
@@ -853,7 +1138,11 @@ export class Runner {
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
     const results: CheckResult[] = []
-    for (const command of this.deps.config.checks.commands) {
+    const { format, lint, commands } = this.deps.config.checks
+    // The mandatory gate always runs before the configured commands, so a PR
+    // cannot be pushed until the worktree is formatted and lint-clean.
+    const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+    for (const command of [...gate, ...commands]) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,
@@ -863,6 +1152,99 @@ export class Runner {
       if (r.exitCode !== 0) break
     }
     return results
+  }
+
+  /**
+   * Checks failed at the end of the fix rounds. Instead of parking the task
+   * silently, ask the operator how to proceed and apply the answer. Returns
+   * the chosen action, or null when the run must stop (cancelled, budget
+   * spent, or no answer within the parking window).
+   */
+  private async recoverFailingChecks(
+    taskId: string,
+    results: CheckResult[],
+    lease: Lease,
+    budget: TaskBudget,
+  ): Promise<'retry' | 'rebase' | 'park' | null> {
+    const { store, config } = this.deps
+    const failed = results.filter((r) => r.exitCode !== 0)
+    const detail = failed
+      .map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
+      .join('\n')
+    const question = [
+      'Project checks still failing. The agent could not fix them.',
+      '',
+      detail,
+      '',
+      'How should I proceed?',
+    ].join('\n')
+    const options = [
+      'retry: run another fix round',
+      'rebase: update the worktree from the latest base and retry',
+      'park: park the task for manual attention',
+    ]
+
+    const questionId = crypto.randomUUID()
+    this.transition(taskId, 'implementing')
+    store.append(taskId, { type: 'question.asked', questionId, question, options, gateRef: null })
+    this.transition(taskId, 'awaiting_answer')
+
+    const deadline = Date.now() + config.loop.questionParkTimeoutSec * 1000
+    while (Date.now() < deadline) {
+      this.throwIfCancelled(taskId)
+      this.throwIfBudgetExhausted(taskId, budget)
+      if (lease.isLost) throw new LeaseLostError(taskId)
+      if (this.isCancelled(taskId)) return null
+      const q = store.question(questionId)
+      if (q !== null && q.answer !== null) {
+        this.transition(taskId, 'implementing')
+        if (/^rebase\b/.test(q.answer)) return 'rebase'
+        if (/^retry\b/.test(q.answer)) return 'retry'
+        return 'park'
+      }
+      await new Promise((resolve) => setTimeout(resolve, PARK_POLL_MS))
+    }
+
+    this.transition(taskId, 'needs_human', 'no answer within the parking window')
+    return null
+  }
+
+  /**
+   * Brings the worktree up to date with the latest base branch, preserving the
+   * agent's uncommitted changes. A stale worktree (checks that pass on a fresh
+   * base, or a recipe the base added after this worktree was created) is the
+   * usual reason checks fail that a fresh base would pass. False when anything
+   * fails (network, conflicts), leaving the worktree untouched.
+   */
+  private async updateFromBase(cwd: string): Promise<boolean> {
+    const { config } = this.deps
+    const tokenCfg = await gitTokenConfig(
+      this.exec,
+      this.deps.repoRoot,
+      config.forge.remote,
+      forgeToken(config.forge.kind),
+    )
+    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+      cwd,
+    })
+    if (fetch.exitCode !== 0) return false
+
+    const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
+    const stashed =
+      dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
+    if (dirty && !stashed) return false
+
+    const rebase = await this.exec(['git', 'rebase', `origin/${config.repo.baseBranch}`], { cwd })
+    if (rebase.exitCode !== 0) {
+      await this.exec(['git', 'rebase', '--abort'], { cwd })
+      if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
+      return false
+    }
+    if (stashed) {
+      const pop = await this.exec(['git', 'stash', 'pop'], { cwd })
+      if (pop.exitCode !== 0) return false
+    }
+    return true
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
@@ -887,7 +1269,7 @@ export class Runner {
     this.deps.store.append(task.id, {
       type: 'commit.created',
       sha,
-      subject: task.title,
+      subject: `[${task.id}] ${task.title}`,
     })
     return true
   }

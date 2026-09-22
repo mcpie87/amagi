@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
 import {
+  fetchPullHeads,
   isConflicting,
   listOpenPrs,
   type PrInfo,
@@ -39,6 +40,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'DIRTY',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -71,7 +73,7 @@ describe('listOpenPrs', () => {
       c.includes('list') && c.includes('pr')
         ? ok(
             JSON.stringify([
-              pr(),
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/bug' }] },
               pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
             ]),
           )
@@ -86,10 +88,63 @@ describe('listOpenPrs', () => {
       '--state',
       'open',
       '--json',
-      'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt',
+      'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+    // gh reports labels as objects; listOpenPrs reduces them to names
+    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/bug'])
+    expect(prs[1]?.labels).toEqual([])
+  })
+})
+
+describe('fetchPullHeads', () => {
+  test('skips the fetch when no PR head moved', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote') ? ok('deadbeef\trefs/pull/7/head\n') : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef' },
+      exec,
+    })
+
+    expect(result).toEqual({ fetched: false, heads: { 'refs/pull/7/head': 'deadbeef' } })
+    expect(calls.some((c) => c[0] === 'git' && c[1] === 'fetch')).toBe(false)
+  })
+
+  test('fetches all PR heads in one round trip when a head moved', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote')
+        ? ok('newsha\trefs/pull/7/head\ncafe12\trefs/pull/8/head\n')
+        : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef', 'refs/pull/8/head': 'cafe12' },
+      exec,
+    })
+
+    expect(result.fetched).toBe(true)
+    expect(calls).toContainEqual([
+      'git',
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    ])
+  })
+
+  test('fetches when a PR head disappears so the mirror is pruned', async () => {
+    const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef' },
+      exec,
+    })
+
+    expect(result.fetched).toBe(true)
+    expect(result.heads).toEqual({})
   })
 })
 
@@ -164,6 +219,39 @@ describe('prepareConflictWorktree', () => {
     })
 
     expect(wt.conflicted).toBe(false)
+  })
+
+  test('aborts a stale merge and resets a reused worktree to the PR head', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-wt-'))
+    const path = join(root, 'amagi-pr-7')
+    mkdirSync(path, { recursive: true })
+    try {
+      const { exec, calls } = fake((c) => {
+        if (c.join(' ').includes('merge --abort')) return ok('')
+        if (c.join(' ').includes('reset --hard')) return ok('')
+        if (c.includes('rev-parse')) return fail('')
+        if (c.includes('merge')) return fail('conflict')
+        return undefined
+      })
+      const wt = await prepareConflictWorktree({
+        repoRoot: '/repo',
+        repoName: 'amagi',
+        worktreeRoot: root,
+        baseBranch: 'main',
+        pr: pr(),
+        exec,
+      })
+
+      expect(calls).toContainEqual(['git', 'merge', '--abort'])
+      expect(calls).toContainEqual(['git', 'reset', '--hard', 'origin/amagi/am-1-do-the-thing'])
+      expect(wt).toEqual({
+        path,
+        branch: 'amagi/pr-7-conflict',
+        conflicted: true,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test('scopes the persona to the conflict worktree when configured', async () => {
