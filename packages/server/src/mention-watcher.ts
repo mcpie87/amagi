@@ -1,6 +1,7 @@
 import {
   type Config,
   type Exec,
+  errMsg,
   isAgentMention,
   listOpenPrs,
   type MentionWatchState,
@@ -17,6 +18,7 @@ import {
   type Tracker,
   type WorkerActivity,
 } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type MentionWatcherOptions = {
   /** Repo key, so activity can be attributed across registered repos. */
@@ -39,8 +41,6 @@ export type MentionWatcher = {
 
 const DEFAULT_INTERVAL_MS = 300_000
 
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
-
 /**
  * Continuously scans open PRs for comments and reviews mentioning the agent
  * handle and responds to each exactly once (comment id dedup). Rate-limit
@@ -48,6 +48,11 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
  * last-seen state that skips fetching comments for PRs whose updatedAt has
  * not changed since the last scan. A PR's state only advances once every
  * mention on it was responded to, so a failed response is retried next tick.
+ *
+ * Dedup is by exact comment id through the handled set, never by a numeric
+ * watermark: `listComments` mixes issue comments, reviews and inline review
+ * comments, which have separate id spaces, so comparing ids numerically would
+ * silently drop mentions in a lower-numbered space.
  */
 export function startMentionWatcher({
   repo,
@@ -60,8 +65,6 @@ export function startMentionWatcher({
   exec,
   makeHarnessFn,
 }: MentionWatcherOptions): MentionWatcher {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let scanned = 0
   let responded = 0
@@ -87,7 +90,7 @@ export function startMentionWatcher({
     status: 'idle',
   }
 
-  async function tick(): Promise<void> {
+  const { stop } = startPoller(intervalMs, async () => {
     runs++
     const next: WorkerActivity = {
       ...activity,
@@ -113,7 +116,7 @@ export function startMentionWatcher({
       for (const pr of prs) {
         const key = String(pr.number)
         const seen = state[key]
-        if (seen !== undefined && seen.updatedAt === pr.updatedAt) {
+        if (seen !== undefined && seen === pr.updatedAt) {
           nextState[key] = seen
           continue
         }
@@ -126,13 +129,8 @@ export function startMentionWatcher({
         }
         scanned++
         scannedNow++
-        const maxId = comments.reduce((m, c) => Math.max(m, Number(c.id) || 0), 0)
-        const lastId = seen?.lastCommentId ?? 0
         const mentions = comments.filter(
-          (c) =>
-            Number(c.id) > lastId &&
-            isAgentMention(c, config.forge.agentHandle) &&
-            !handled.has(c.id),
+          (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
         )
         let allOk = true
         for (const mention of mentions) {
@@ -157,7 +155,7 @@ export function startMentionWatcher({
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
           }
         }
-        if (allOk) nextState[key] = { updatedAt: pr.updatedAt, lastCommentId: maxId }
+        if (allOk) nextState[key] = pr.updatedAt
       }
       // Dropping closed PRs from the state keeps the file bounded.
       saveMentionWatch(watchPath, nextState)
@@ -173,15 +171,11 @@ export function startMentionWatcher({
     }
     next.counters = counters()
     activity = next
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
-  }
+  })
 
-  timer = setTimeout(() => void tick(), intervalMs)
   return {
     stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
+      stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,

@@ -20,7 +20,7 @@ import type {
   UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
-import { exec, execOk } from './exec.ts'
+import { type Exec, exec, execOk } from './exec.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -218,7 +218,13 @@ const config = (over: Record<string, unknown> = {}) =>
     ...over,
   })
 
-const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = new FakePr()) =>
+const makeRunner = (
+  tracker: Tracker,
+  harness: Harness,
+  cfg = config(),
+  forge = new FakePr(),
+  runExec: Exec = exec,
+) =>
   new Runner({
     store,
     tracker,
@@ -227,6 +233,7 @@ const makeRunner = (tracker: Tracker, harness: Harness, cfg = config(), forge = 
     repoRoot: repo,
     repoName: 'demo',
     forge,
+    exec: runExec,
   })
 
 const types = (taskId: string): EventType[] =>
@@ -433,6 +440,21 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
+  test('a task with no description still gets a summary section from the agent run summary', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([{ ...TASK, description: '' }]),
+      new FakeHarness([
+        { ...writesAFile, outcome: { summary: 'Dedup by exact comment id, not by watermark' } },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(pr.calls[0]?.body).toContain('### 📝 Summary')
+    expect(pr.calls[0]?.body).toContain('Dedup by exact comment id, not by watermark')
+  })
+
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')
@@ -450,6 +472,33 @@ describe('Runner.runOnce', () => {
     expect(
       errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
     ).toBe(true)
+  })
+
+  test('a committed task whose diff against base is empty goes to no_pr without a PR', async () => {
+    const pr = new FakePr()
+    const emptyDiff: Exec = async (cmd, opts) => {
+      const result = await exec(cmd, opts)
+      if (cmd.includes('--numstat')) return { ...result, stdout: '' }
+      return result
+    }
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config(),
+      pr,
+      emptyDiff,
+    ).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(types(TASK.id)).toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(pr.calls).toHaveLength(0)
+    const stateEvent = store
+      .events({ taskId: TASK.id, limit: 999 })
+      .find((e) => e.type === 'task.state' && e.to === 'no_pr')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
+      'diff against main is empty',
+    )
   })
 
   test('the commit lands in the worktree branch, not the main checkout', async () => {
@@ -670,15 +719,22 @@ describe('Runner.runOnce', () => {
         events: [
           { kind: 'text', text: 'working on it' },
           { kind: 'tool_result', name: 'Bash', ok: false, output: 'disk full' },
-          { kind: 'result', ok: false, summary: 'the build broke' },
+          { kind: 'result', ok: false, summary: 'registry unreachable' },
         ],
         outcome: { ok: false, exitCode: 1, summary: null, stderr: '' },
       },
     ])
-    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      // "hit the turn limit" matches the transient/session-limit patterns and
+      // would retry into a fresh (empty) turn; this test is about which detail
+      // wins over the tool noise, so force immediate escalation.
+      config({ loop: { maxRetries: 0 } }),
+    ).runOnce()
 
     expect(result?.state).toBe('needs_human')
-    expect(stateReason(TASK.id)).toContain('the build broke')
+    expect(stateReason(TASK.id)).toContain('registry unreachable')
   })
 
   test('a failed agent falls back to the failing tool output when there is no result or text', async () => {
@@ -1053,5 +1109,30 @@ describe('Runner.cancel', () => {
 
     expect(result?.state).toBe('cancelled')
     expect(released).toEqual([TASK.id])
+  })
+
+  test('retryNow wakes a deferred retry so the next attempt runs immediately', async () => {
+    const harness = new FakeHarness([
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      writesAFile,
+    ])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { retryBaseMs: 60_000, retryMaxMs: 60_000 } }),
+    )
+    const pending = runner.runOnce()
+
+    // The task parks in retrying for a 60s backoff; retryNow skips the wait.
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'retry.scheduled'))
+    expect(store.task(TASK.id)?.state).toBe('retrying')
+    const started = Date.now()
+    runner.retryNow()
+    const result = await pending
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    // The run completed well inside the 60s backoff, so it cannot have slept it out.
+    expect(Date.now() - started).toBeLessThan(10_000)
   })
 })

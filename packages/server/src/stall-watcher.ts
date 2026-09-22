@@ -4,6 +4,7 @@ import {
   exec as defaultExec,
   detectDoom,
   type Exec,
+  errMsg,
   type Store,
   type TaskRow,
   type TaskState,
@@ -63,8 +64,6 @@ const RECENT_EVENTS_LIMIT = 2000
 /** Cap on the per-tick doom scan; runs are bounded by loop.maxParallel in practice. */
 const DOOM_SCAN_LIMIT = 50
 const GIT_TIMEOUT_MS = 10_000
-
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 function humanMs(ms: number): string {
   const seconds = Math.round(ms / 1000)
