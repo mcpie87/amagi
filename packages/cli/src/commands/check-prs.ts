@@ -4,6 +4,7 @@ import {
   listOpenPrs,
   loadConfig,
   type PrInfo,
+  prMergeStatus,
   repoName,
   repoRoot,
   resolveConflict,
