@@ -334,6 +334,27 @@ describe('BeadsTracker', () => {
     )
   })
 
+  test('release is a no-op for an already-closed issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"closed"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
+  })
+
+  test('release unclaims an in-progress issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    const unclaim = calls.find((c) => c.includes('unclaim'))
+    expect(unclaim).toBeDefined()
+  })
+
   test('a closed gate reads as resolved', async () => {
     const { exec } = fake(() => ok('[{"id":"tst-77h","title":"g","status":"closed"}]'))
     const tracker = new BeadsTracker({ cwd: '/repo', exec })

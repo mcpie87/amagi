@@ -1726,7 +1726,6 @@ function WorkersPanel() {
       <div className="space-y-2">
         {Array.from({ length: status.capacity }, (_, i) => (
           <WorkerSlot
-            // biome-ignore lint/suspicious/noArrayIndexKey: slots are fixed positions, the index is their identity
             key={i}
             taskId={running[i] ?? null}
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
@@ -2825,6 +2824,50 @@ function RetryNowButton({
   )
 }
 
+/** Re-runs the pr reconcile for one parked PR instead of waiting for the sweep. */
+function RecheckPrButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'pr_open' && state !== 'pr_flagged') return null
+
+  const recheck = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/recheck`, {
+        method: 'POST',
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void recheck()}
+        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised disabled:opacity-50"
+      >
+        {busy ? 'Checking…' : 'Check PR status now'}
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
 function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -2959,7 +3002,6 @@ const markdown = new Marked({
 
 function Markdown({ text }: { text: string }) {
   return (
-    // biome-ignore lint/security/noDangerouslySetInnerHtml: the Marked renderer escapes raw HTML
     <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
   )
 }
@@ -3299,6 +3341,9 @@ function TaskDetailView() {
         {selected !== null && (
           <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
         )}
+        {selected !== null && (
+          <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
+        )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
         <StopButton taskId={task.id} />
       </div>
@@ -3383,7 +3428,6 @@ function TaskDetailView() {
           </h2>
           <ul className="space-y-1">
             {health.warnings.map((w, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
               <li key={i} className="font-mono text-xs text-fg">
                 {w}
               </li>

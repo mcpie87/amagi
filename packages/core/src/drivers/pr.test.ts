@@ -175,44 +175,6 @@ describe('githubPr', () => {
     expect(await makePrDriver('github', unknown.exec).getMergeStatus('/repo', 7)).toBe('unknown')
   })
 
-  test('lists open prs from gh with their mergeability flags', async () => {
-    const prs = [
-      {
-        number: 8,
-        title: 'Do the thing',
-        url: 'https://github.com/owner/repo/pull/8',
-        headRefName: 'amagi/am-1',
-        baseRefName: 'main',
-        mergeable: 'MERGEABLE',
-        mergeStateStatus: 'CLEAN',
-      },
-      {
-        number: 9,
-        title: 'Conflicted work',
-        url: 'https://github.com/owner/repo/pull/9',
-        headRefName: 'amagi/am-2',
-        baseRefName: 'main',
-        mergeable: 'CONFLICTING',
-        mergeStateStatus: 'DIRTY',
-      },
-    ]
-    const { exec, calls } = fake((c) =>
-      c.includes('pr') && c.includes('list') ? ok(`${JSON.stringify(prs)}\n`) : undefined,
-    )
-    const open = await makePrDriver('github', exec).listOpenPrs('/repo')
-
-    expect(calls).toContainEqual([
-      'gh',
-      'pr',
-      'list',
-      '--state',
-      'open',
-      '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
-    ])
-    expect(open).toEqual(prs)
-  })
-
   test('collects conversation, review, and inline comments from the api', async () => {
     const { exec, calls } = fake((c) => {
       if (c.includes('repo') && c.includes('view') && c.includes('nameWithOwner')) {
@@ -264,6 +226,93 @@ describe('githubPr', () => {
 
     expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/needs-closing'])
     expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--remove-label', 'amagi/needs-closing'])
+  })
+
+  test('lists open prs with normalized merge status', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('list') && c.includes('pr')) {
+        return ok(
+          JSON.stringify([
+            {
+              number: 7,
+              title: 'Do the thing',
+              url: 'https://github.com/owner/repo/pull/7',
+              headRefName: 'amagi/am-1',
+              baseRefName: 'main',
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+            },
+            {
+              number: 8,
+              title: 'Conflicted',
+              url: 'https://github.com/owner/repo/pull/8',
+              headRefName: 'amagi/am-2',
+              baseRefName: 'main',
+              mergeable: 'CONFLICTING',
+              mergeStateStatus: 'DIRTY',
+            },
+            {
+              number: 9,
+              title: 'Pending',
+              url: 'https://github.com/owner/repo/pull/9',
+              headRefName: 'amagi/am-3',
+              baseRefName: 'main',
+              mergeable: 'UNKNOWN',
+              mergeStateStatus: 'UNKNOWN',
+            },
+          ]) + '\n',
+        )
+      }
+      if (c.includes('view') && c.includes('pr')) {
+        return ok('{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}\n')
+      }
+      return undefined
+    })
+    const prs = await makePrDriver('github', exec).listOpenPrs('/repo')
+
+    expect(calls).toContainEqual([
+      'gh',
+      'pr',
+      'list',
+      '--state',
+      'open',
+      '--json',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
+    ])
+    expect(prs).toEqual([
+      {
+        number: 7,
+        title: 'Do the thing',
+        url: 'https://github.com/owner/repo/pull/7',
+        headRefName: 'amagi/am-1',
+        baseRefName: 'main',
+        mergeStatus: 'mergeable',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      {
+        number: 8,
+        title: 'Conflicted',
+        url: 'https://github.com/owner/repo/pull/8',
+        headRefName: 'amagi/am-2',
+        baseRefName: 'main',
+        mergeStatus: 'conflicted',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+      },
+      {
+        number: 9,
+        title: 'Pending',
+        url: 'https://github.com/owner/repo/pull/9',
+        headRefName: 'amagi/am-3',
+        baseRefName: 'main',
+        mergeStatus: 'mergeable',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'UNKNOWN',
+      },
+    ])
+    // the UNKNOWN entry forced a per-PR merge-status query
+    expect(calls).toContainEqual(['gh', 'pr', 'view', '9', '--json', 'mergeable,mergeStateStatus'])
   })
 })
 
@@ -361,27 +410,39 @@ describe('forgejoPr', () => {
     expect(conflicted).toBe('conflicted')
   })
 
-  test('lists open prs from the forgejo api with normalized mergeability', async () => {
+  test('throws a clear error without a token', async () => {
+    const { exec } = remote()
+    await expect(
+      withFetch(
+        () => new Response('{}', { status: 200 }),
+        () => makePrDriver('forgejo', exec).postComment('/wt', 3, 'hi'),
+      ),
+    ).rejects.toThrow(/FORGEJO_TOKEN/)
+  })
+
+  test('lists open prs with normalized merge status', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
     const prs = await withFetch(
       (path) => {
-        if (path.startsWith('repos/owner/repo/pulls?state=open')) {
+        if (path === 'repos/owner/repo/pulls?state=open') {
           return new Response(
             JSON.stringify([
               {
-                number: 5,
+                number: 3,
+                index: 3,
                 title: 'Do the thing',
-                html_url: 'https://git.example.com/owner/repo/pulls/5',
+                html_url: 'https://git.example.com/owner/repo/pulls/3',
                 head: { ref: 'amagi/am-1' },
                 base: { ref: 'main' },
                 mergeable: true,
                 mergeable_state: 'clean',
               },
               {
-                number: 6,
-                title: 'Conflicted work',
-                html_url: 'https://git.example.com/owner/repo/pulls/6',
+                number: 4,
+                index: 4,
+                title: 'Conflicted',
+                html_url: 'https://git.example.com/owner/repo/pulls/4',
                 head: { ref: 'amagi/am-2' },
                 base: { ref: 'main' },
                 mergeable: false,
@@ -391,41 +452,32 @@ describe('forgejoPr', () => {
             { status: 200 },
           )
         }
-        return new Response('[]', { status: 200 })
+        return new Response('{}', { status: 200 })
       },
       () => makePrDriver('forgejo', exec).listOpenPrs('/wt'),
     )
-
     expect(prs).toEqual([
       {
-        number: 5,
+        number: 3,
         title: 'Do the thing',
-        url: 'https://git.example.com/owner/repo/pulls/5',
+        url: 'https://git.example.com/owner/repo/pulls/3',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',
+        mergeStatus: 'mergeable',
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
       },
       {
-        number: 6,
-        title: 'Conflicted work',
-        url: 'https://git.example.com/owner/repo/pulls/6',
+        number: 4,
+        title: 'Conflicted',
+        url: 'https://git.example.com/owner/repo/pulls/4',
         headRefName: 'amagi/am-2',
         baseRefName: 'main',
+        mergeStatus: 'conflicted',
         mergeable: 'CONFLICTING',
         mergeStateStatus: 'DIRTY',
       },
     ])
-  })
-
-  test('throws a clear error without a token', async () => {
-    const { exec } = remote()
-    await expect(
-      withFetch(
-        () => new Response('{}', { status: 200 }),
-        () => makePrDriver('forgejo', exec).postComment('/wt', 3, 'hi'),
-      ),
-    ).rejects.toThrow(/FORGEJO_TOKEN/)
   })
 
   test('closes the pr through the forgejo api', async () => {

@@ -1623,7 +1623,7 @@ describe('Runner context budget', () => {
   })
 
   test('claiming a task records the effective run limits up front', async () => {
-    const harness = new FakeHarness([writesAFile], undefined, 'codex')
+    const harness = new FakeHarness([writesAFile], 'viable', 'codex')
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
