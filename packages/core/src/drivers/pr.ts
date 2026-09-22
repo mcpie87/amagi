@@ -5,6 +5,22 @@ import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
 
+/**
+ * One open PR as the forge reports it, with mergeability already computed by
+ * the forge so the mergeable-PRs view does not have to query per-PR.
+ * `mergeable`/`mergeStateStatus` use gh's wording on both drivers so the
+ * consumer filters one way regardless of forge.
+ */
+export type OpenPr = {
+  number: number
+  title: string
+  url: string
+  headRefName: string
+  baseRefName: string
+  mergeable: string
+  mergeStateStatus: string
+}
+
 /** Remote lifecycle of a pull request, for reconciling parked tasks. */
 export type PrState = 'open' | 'closed' | 'merged'
 
@@ -43,6 +59,8 @@ export type PrDriver = {
   getPr(cwd: string, number: number): Promise<PrState>
   /** Whether an open PR can merge, normalized to mergeable/conflicted/unknown. */
   getMergeStatus(cwd: string, number: number): Promise<MergeStatus>
+  /** Every open PR in the repo, with the forge's own mergeability flags. */
+  listOpenPrs(cwd: string): Promise<OpenPr[]>
   /** Every conversation comment, review summary, and inline review comment on a PR. */
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
@@ -143,6 +161,22 @@ function githubPr(exec: Exec): PrDriver {
         if (attempt < 4) await Bun.sleep(1000)
       }
       return 'unknown'
+    },
+    async listOpenPrs(cwd) {
+      const out = await execOk(
+        exec,
+        [
+          'gh',
+          'pr',
+          'list',
+          '--state',
+          'open',
+          '--json',
+          'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
+        ],
+        { cwd, env: ghEnv() },
+      )
+      return JSON.parse(out) as OpenPr[]
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -303,6 +337,39 @@ function forgejoPr(exec: Exec): PrDriver {
       if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
       if (pr.mergeable === true) return 'mergeable'
       return 'unknown'
+    },
+    async listOpenPrs(cwd) {
+      const r = await forge(cwd)
+      const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/pulls?state=open`)
+      const items = Array.isArray(raw) ? raw : []
+      return (items as Array<Record<string, unknown>>).map((pr) => {
+        const head = pr.head as { ref?: string } | null | undefined
+        const base = pr.base as { ref?: string } | null | undefined
+        const number = Number(pr.number ?? pr.index ?? 0)
+        return {
+          number,
+          title: typeof pr.title === 'string' ? pr.title : '',
+          url:
+            typeof pr.html_url === 'string'
+              ? pr.html_url
+              : `${r.base}/${r.ownerRepo}/pulls/${number}`,
+          headRefName: head?.ref ?? '',
+          baseRefName: base?.ref ?? '',
+          // The forgejo state names map onto gh's so one filter works for both.
+          mergeable:
+            pr.mergeable_state === 'has_conflicts'
+              ? 'CONFLICTING'
+              : pr.mergeable === true
+                ? 'MERGEABLE'
+                : 'UNKNOWN',
+          mergeStateStatus:
+            pr.mergeable_state === 'clean'
+              ? 'CLEAN'
+              : pr.mergeable_state === 'has_conflicts'
+                ? 'DIRTY'
+                : 'UNKNOWN',
+        } as OpenPr
+      })
     },
     async listComments(cwd, number) {
       const r = await forge(cwd)

@@ -7,6 +7,7 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -66,6 +67,9 @@ class FakePr implements PrDriver {
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
+  }
+  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
+    return []
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -214,6 +218,11 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(counter(w, 'resolved')).toBe(1)
   expect(started).toBe(1)
   expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(activity.runs).toBeGreaterThanOrEqual(1)
+  expect(activity.successes).toBe(activity.runs)
+  expect(activity.failures).toBe(0)
+  expect(activity.status).toBe('active')
+  expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {

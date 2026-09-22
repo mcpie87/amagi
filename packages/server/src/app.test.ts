@@ -6,17 +6,20 @@ import type {
   AgentProcess,
   AgentStartOptions,
   BeadsIssue,
+  CreatePrOptions,
   CreateTrackerTask,
   EpicCloseEligible,
   EpicCloseResult,
   GateRef,
   Harness,
+  OpenPr,
   PrComment,
   PrDriver,
   PrState,
   PullRequest,
   Question,
   QuestionRow,
+  RunOptions,
   RunServiceApi,
   Store,
   TaskRow,
@@ -133,6 +136,95 @@ describe('GET /api/repos/:repo/tasks', () => {
 
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/tasks')).status).toBe(404)
+  })
+})
+
+class FakeMergePrDriver implements PrDriver {
+  open: OpenPr[] = []
+  async listOpenPrs(): Promise<OpenPr[]> {
+    return this.open
+  }
+  async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
+    throw new Error('unused')
+  }
+  async getPr(_cwd: string, _number: number): Promise<PrState> {
+    return 'open'
+  }
+  async getMergeStatus(_cwd: string, _number: number) {
+    return 'mergeable' as const
+  }
+  async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
+    return []
+  }
+  async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {}
+  async addLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+  async removeLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+}
+
+describe('GET /api/repos/:repo/mergeable-prs', () => {
+  let forge: FakeMergePrDriver
+  beforeEach(() => {
+    forge = new FakeMergePrDriver()
+    ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('returns only the PRs the forge reports as mergeable', async () => {
+    forge.open = [
+      {
+        number: 1,
+        title: 'Ready',
+        url: 'https://github.com/owner/repo/pull/1',
+        headRefName: 'amagi/am-1',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+      {
+        number: 2,
+        title: 'Conflicted',
+        url: 'https://github.com/owner/repo/pull/2',
+        headRefName: 'amagi/am-2',
+        baseRefName: 'main',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+      },
+      {
+        number: 3,
+        title: 'Unknown',
+        url: 'https://github.com/owner/repo/pull/3',
+        headRefName: 'amagi/am-3',
+        baseRefName: 'main',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'UNKNOWN',
+      },
+      {
+        number: 4,
+        title: 'Clean via status',
+        url: 'https://github.com/owner/repo/pull/4',
+        headRefName: 'amagi/am-4',
+        baseRefName: 'main',
+        mergeable: 'UNKNOWN',
+        mergeStateStatus: 'CLEAN',
+      },
+    ]
+    const res = await app.request('/api/repos/repo1/mergeable-prs')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { prs: OpenPr[] }
+    expect(body.prs.map((p) => p.number)).toEqual([1, 4])
+  })
+
+  test('404s for an unknown repo', async () => {
+    expect((await app.request('/api/repos/nope/mergeable-prs')).status).toBe(404)
+  })
+
+  test('501s when the repo has no forge driver', async () => {
+    const noForge = testWorkspaces(['repo1'], { forgeFor: () => null })
+    const noForgeApp = createApp({ workspaces: noForge.workspaces })
+    const res = await noForgeApp.request('/api/repos/repo1/mergeable-prs')
+    expect(res.status).toBe(501)
+    noForge.cleanup()
   })
 })
 
@@ -979,6 +1071,9 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     async getMergeStatus() {
       return 'mergeable' as const
     }
+    async listOpenPrs(): Promise<OpenPr[]> {
+      return []
+    }
     async listComments(): Promise<PrComment[]> {
       return []
     }
@@ -1271,6 +1366,13 @@ describe('runner endpoints', () => {
             { label: 'scanned', value: 2 },
             { label: 'responded', value: 1 },
           ],
+          detail: 'scanned 2 PRs, responded to 1 mention(s)',
+          runs: 1,
+          successes: 1,
+          failures: 0,
+          nextRunAt: 1720000300000,
+          intervalMs: 300000,
+          status: 'active',
         },
       ],
     })
@@ -1288,6 +1390,13 @@ describe('runner endpoints', () => {
           { label: 'scanned', value: 2 },
           { label: 'responded', value: 1 },
         ],
+        detail: 'scanned 2 PRs, responded to 1 mention(s)',
+        runs: 1,
+        successes: 1,
+        failures: 0,
+        nextRunAt: 1720000300000,
+        intervalMs: 300000,
+        status: 'active',
       },
     ])
   })
@@ -1330,6 +1439,69 @@ describe('runner endpoints', () => {
     expect(specific.status).toBe(201)
     expect(started).toEqual(['bd-9'])
     expect((await post('/api/runs', '{"taskId":123}')).status).toBe(400)
+  })
+
+  test('POST /api/runs forwards harness/model/effort overrides', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    const res = await post(
+      '/api/runs',
+      '{"taskId":"bd-1","harness":"fast","model":"gpt-5.6-luna","effort":"high"}',
+    )
+    expect(res.status).toBe(201)
+    expect(received).toEqual([
+      { taskId: 'bd-1', opts: { harness: 'fast', model: 'gpt-5.6-luna', effort: 'high' } },
+    ])
+  })
+
+  test('POST /api/runs sends no opts when the body omits them', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    expect((await post('/api/runs', '{}')).status).toBe(201)
+    expect(received).toEqual([{ taskId: undefined, opts: {} }])
+  })
+
+  test('GET /api/runner/options lists harnesses, models, efforts and the default', async () => {
+    app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
+    const res = await app.request('/api/runner/options')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      harnesses: { name: string; kind: string }[]
+      default: { kind: string } | null
+    }
+    expect(body.harnesses).toEqual([
+      { name: 'claude', kind: 'claude' },
+      { name: 'codex', kind: 'codex' },
+      { name: 'opencode', kind: 'opencode' },
+    ])
+    // The default mirrors the host's global config, so only its shape is asserted.
+    const dflt = body.default
+    expect(dflt).not.toBeNull()
+    if (dflt !== null) {
+      expect(['claude', 'codex', 'opencode']).toContain(dflt.kind)
+    }
+  })
+
+  test('GET /api/runner/options is empty without a runner', async () => {
+    const res = await app.request('/api/runner/options')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ harnesses: [], models: {}, efforts: {}, default: null })
   })
 
   test('POST /api/runs propagates a launch failure', async () => {

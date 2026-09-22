@@ -37,6 +37,8 @@ export type WorkspacesOptions = {
   storeFor?: (key: string) => Store
   /** Overridable so tests can inject a fake tracker. */
   trackerFor?: (config: Config, path: string) => Tracker
+  /** Overridable so tests can inject a fake forge driver. */
+  forgeFor?: (config: Config, path: string) => PrDriver | null
 }
 
 /**
@@ -72,13 +74,17 @@ export class Workspaces {
     const store = (this.opts.storeFor ?? defaultStoreFor)(entry.key)
     const tracker = (this.opts.trackerFor ?? makeTracker)(config, entry.path)
     let forge: PrDriver | null
-    try {
-      forge = makePrDriver(config.forge.kind)
-    } catch (err) {
-      console.warn(
-        `workspace ${entry.key}: forge driver ${config.forge.kind} unavailable: ${errMsg(err)}`,
-      )
-      forge = null
+    if (this.opts.forgeFor !== undefined) {
+      forge = this.opts.forgeFor(config, entry.path)
+    } else {
+      try {
+        forge = makePrDriver(config.forge.kind)
+      } catch (err) {
+        console.warn(
+          `workspace ${entry.key}: forge driver ${config.forge.kind} unavailable: ${errMsg(err)}`,
+        )
+        forge = null
+      }
     }
     return {
       key: entry.key,
