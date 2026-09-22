@@ -270,6 +270,19 @@ describe('isAgentMention', () => {
     ).toBe(false)
     expect(isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru')).toBe(false)
   })
+
+  test('matches the PR #102 relevance question, which is a mention but not a fix request', () => {
+    expect(
+      isAgentMention(
+        {
+          id: '5768283300',
+          user: 'mcpie87',
+          body: '@chise-maru is still change still relevant compared to current repo state?',
+        },
+        'chise-maru',
+      ),
+    ).toBe(true)
+  })
 })
 
 describe('listPrMentions', () => {
