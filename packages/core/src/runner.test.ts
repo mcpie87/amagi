@@ -4,14 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
-import type {
-  CreatePrOptions,
-  OpenPr,
-  PrComment,
-  PrDriver,
-  PrState,
-  PullRequest,
-} from './drivers/pr.ts'
+import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
   AgentProcess,
@@ -28,6 +21,7 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { type Exec, exec, execOk } from './exec.ts'
+import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -239,12 +233,16 @@ class FakePr implements PrDriver {
     return 'open'
   }
 
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return []
+  }
+
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
 
-  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
-    return []
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
 
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
@@ -712,6 +710,11 @@ describe('Runner.runOnce', () => {
 
     const log = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: row?.worktree ?? '' })
     expect(log).toContain('Add a greeting file')
+    const body = await execOk(exec, ['git', 'log', '-1', '--format=%b'], {
+      cwd: row?.worktree ?? '',
+    })
+    expect(body).toContain('Changes:')
+    expect(body).toContain('- `hello.txt` +1 -0')
     const mainLog = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: repo })
     expect(mainLog).toContain('init')
   })

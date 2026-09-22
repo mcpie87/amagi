@@ -1,14 +1,20 @@
 import {
   type Config,
-  errMsg,
+  harnessStartOpts,
   isConflicting,
-  listOpenPrs,
   loadConfig,
+  makeHarness,
+  makePrDriver,
+  makeTracker,
+  type PrDriver,
   type PrInfo,
-  prMergeStatus,
+  prepareConflictWorktree,
+  pushConflictFix,
   repoName,
   repoRoot,
-  resolveConflict,
+  resolveConflictPrompt,
+  resolveConflictSystemPrompt,
+  stampIterationLabel,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
@@ -19,33 +25,102 @@ function mergeLabel(p: PrInfo, baseBranch: string): string {
   return 'CLEAN'
 }
 
-/** gh pr list reports UNKNOWN until GitHub computes mergeability; resolve per-PR. */
-async function resolveMergeStatuses(root: string, prs: PrInfo[]): Promise<PrInfo[]> {
+/** A bulk PR list reports UNKNOWN until the forge computes mergeability; resolve per-PR. */
+async function resolveMergeStatuses(
+  root: string,
+  prs: PrInfo[],
+  driver: PrDriver,
+): Promise<PrInfo[]> {
   return Promise.all(
     prs.map(async (p) => {
       if (p.mergeable !== 'UNKNOWN' && p.mergeStateStatus !== 'UNKNOWN') return p
-      return { ...p, ...(await prMergeStatus(root, p.number)) }
+      const status = await driver.getMergeStatus(root, p.number)
+      const mergeable =
+        status === 'conflicted' ? 'CONFLICTING' : status === 'mergeable' ? 'MERGEABLE' : 'UNKNOWN'
+      const mergeStateStatus =
+        status === 'conflicted' ? 'DIRTY' : status === 'mergeable' ? 'CLEAN' : 'UNKNOWN'
+      return { ...p, mergeable, mergeStateStatus }
     }),
   )
 }
 
-async function resolveOne(pr: PrInfo, root: string, config: Config): Promise<void> {
+async function resolveOne(
+  pr: PrInfo,
+  root: string,
+  config: Config,
+  driver: PrDriver,
+): Promise<void> {
   console.log(`\n${bold(`#${pr.number}`)}  ${pr.title}`)
   console.log(dim(`  ${pr.url}`))
-  const { ok, message } = await resolveConflict({
-    repoRoot: root,
-    repoName: repoName(root),
-    pr,
-    config,
-    onLog(level, text) {
-      if (level === 'agent') printBlock(text)
-      else if (level === 'error') console.log(red(`  ${text}`))
-      else if (level === 'ok') console.log(green(`  ${text}`))
-      else if (level === 'warn') console.log(yellow(`  ${text}`))
-      else console.log(dim(`  ${text}`))
-    },
-  })
-  if (!ok) console.log(red(`  ${message}`))
+  try {
+    const wt = await prepareConflictWorktree({
+      repoRoot: root,
+      repoName: repoName(root),
+      worktreeRoot: config.repo.worktreeRoot,
+      baseBranch: config.repo.baseBranch,
+      pr,
+      persona: config.repo.persona,
+    })
+    console.log(dim(`  worktree: ${wt.path}`))
+
+    if (!wt.conflicted) {
+      await pushConflictFix({
+        cwd: wt.path,
+        branch: wt.branch,
+        headRef: pr.headRefName,
+        remote: config.forge.remote,
+      })
+      console.log(green('  base merges cleanly; pushed the merge to update the PR'))
+      return
+    }
+
+    const ctx = {
+      pr,
+      worktree: wt.path,
+      branch: wt.branch,
+      baseBranch: config.repo.baseBranch,
+      checks: config.checks.commands,
+    }
+    const harness = makeHarness(config.harness.implement)
+    const proc = harness.start({
+      cwd: wt.path,
+      prompt: resolveConflictPrompt(ctx),
+      systemPrompt: resolveConflictSystemPrompt(ctx),
+      ...harnessStartOpts(config.harness.implement),
+    })
+    console.log(dim(`  agent: ${harness.kind} (${wt.branch})`))
+
+    for await (const event of proc.events()) {
+      if (event.kind === 'tool_use') console.log(dim(`  ${event.name}`))
+      if (event.kind === 'text' && event.text.trim()) printBlock(event.text)
+      if (event.kind === 'error') console.log(red(`  ${event.message}`))
+    }
+    const outcome = await proc.done
+    if (!outcome.ok) {
+      console.log(
+        red(
+          `  agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
+        ),
+      )
+      return
+    }
+
+    await pushConflictFix({
+      cwd: wt.path,
+      branch: wt.branch,
+      headRef: pr.headRefName,
+      remote: config.forge.remote,
+    })
+    const status = await driver.getMergeStatus(root, pr.number)
+    const ok = status === 'mergeable'
+    console.log(
+      ok
+        ? green('  resolved and pushed; PR is mergeable')
+        : yellow(`  pushed; GitHub reports ${status}`),
+    )
+  } catch (err) {
+    console.log(red(`  ${err instanceof Error ? err.message : String(err)}`))
+  }
 }
 
 export const checkPrsCommand = defineCommand({
@@ -64,12 +139,17 @@ export const checkPrsCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
+    const driver = makePrDriver(config.forge.kind)
 
     let prs: PrInfo[]
     try {
-      prs = await listOpenPrs({ cwd: root })
+      prs = await driver.listOpenPrs(root)
     } catch (err) {
-      console.log(red(`failed to list PRs: ${errMsg(err)} (is gh installed and authenticated?)`))
+      console.log(
+        red(
+          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is the forge CLI installed and authenticated?)`,
+        ),
+      )
       return
     }
     if (prs.length === 0) {
@@ -78,7 +158,7 @@ export const checkPrsCommand = defineCommand({
     }
 
     const base = config.repo.baseBranch
-    const resolved = await resolveMergeStatuses(root, prs)
+    const resolved = await resolveMergeStatuses(root, prs, driver)
     const header = ['PR', 'MERGE', 'BASE', 'HEAD', 'TITLE']
     const rows = resolved.map((p) => [
       `#${p.number}`,
@@ -110,8 +190,20 @@ export const checkPrsCommand = defineCommand({
     console.log(
       `\n${yellow(`${conflicts.length} conflicting PR(s), dispatching resolution agents:`)}`,
     )
+    const tracker = makeTracker(config, root)
     for (const pr of conflicts) {
-      await resolveOne(pr, root, config)
+      try {
+        const stamped = await stampIterationLabel({ cwd: root, pr })
+        if (stamped !== null) {
+          await tracker.setMetadata?.(stamped.taskId, { iterations: String(stamped.iteration) })
+          console.log(dim(`  iteration ${stamped.iteration} for #${pr.number} (${stamped.taskId})`))
+        }
+      } catch (err) {
+        console.log(
+          red(`  iteration bump failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+      }
+      await resolveOne(pr, root, config, driver)
     }
   },
 })

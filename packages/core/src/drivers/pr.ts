@@ -1,25 +1,10 @@
 import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
+import type { PrInfo, PrMergeStatus } from '../pr-check.ts'
 import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
-
-/**
- * One open PR, with its merge status normalized across forges plus the forge's
- * own mergeability flags. `mergeable`/`mergeStateStatus` use gh's wording on
- * both drivers so consumers filter one way regardless of forge.
- */
-export type OpenPr = {
-  number: number
-  title: string
-  url: string
-  headRefName: string
-  baseRefName: string
-  mergeStatus: MergeStatus
-  mergeable: string
-  mergeStateStatus: string
-}
 
 /** Remote lifecycle of a pull request, for reconciling parked tasks. */
 export type PrState = 'open' | 'closed' | 'merged'
@@ -57,10 +42,12 @@ export type PrDriver = {
   createPr(opts: CreatePrOptions): Promise<PullRequest>
   /** Resolve the remote state of a PR, run from `cwd` so the forge CLI finds the repo. */
   getPr(cwd: string, number: number): Promise<PrState>
+  /** Every open PR in the repo the `cwd` belongs to. */
+  listOpenPrs(cwd: string): Promise<PrInfo[]>
   /** Whether an open PR can merge, normalized to mergeable/conflicted/unknown. */
   getMergeStatus(cwd: string, number: number): Promise<MergeStatus>
-  /** Every open PR in the repo, with a per-PR normalized merge status. */
-  listOpenPrs(cwd: string): Promise<OpenPr[]>
+  /** The PR's full diff text, for explain responses. */
+  getPrDiff(cwd: string, number: number): Promise<string>
   /** Every conversation comment, review summary, and inline review comment on a PR. */
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
@@ -72,6 +59,9 @@ export type PrDriver = {
   /** Remove a label from an existing pull request. */
   removeLabel(cwd: string, number: number, label: string): Promise<void>
 }
+
+const GH_FIELDS =
+  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /**
  * Github PRs through `gh`, with Chise's token and an Amagi-owned GH_CONFIG_DIR
@@ -92,29 +82,6 @@ function githubPr(exec: Exec): PrDriver {
       ).trim()
     }
     return ownerRepo
-  }
-
-  function ghMergeStatus(mergeable: string, mergeStateStatus: string): MergeStatus {
-    if (mergeable === 'CONFLICTING' || mergeStateStatus === 'DIRTY') return 'conflicted'
-    if (mergeable === 'MERGEABLE' || mergeStateStatus === 'CLEAN') return 'mergeable'
-    return 'unknown'
-  }
-
-  // GitHub computes mergeability asynchronously, so a fresh PR may report
-  // UNKNOWN until a single-PR query has forced the check.
-  async function ghMergeStatusResolved(cwd: string, number: number): Promise<MergeStatus> {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const out = await execOk(
-        exec,
-        ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-        { cwd, env: ghEnv() },
-      )
-      const status = JSON.parse(out) as { mergeable: string; mergeStateStatus: string }
-      const resolved = ghMergeStatus(status.mergeable, status.mergeStateStatus)
-      if (resolved !== 'unknown') return resolved
-      if (attempt < 4) await Bun.sleep(1000)
-    }
-    return 'unknown'
   }
 
   return {
@@ -165,49 +132,39 @@ function githubPr(exec: Exec): PrDriver {
           return 'open'
       }
     },
-    async getMergeStatus(cwd, number) {
-      return ghMergeStatusResolved(cwd, number)
-    },
     async listOpenPrs(cwd) {
-      const out = await execOk(
-        exec,
-        [
-          'gh',
-          'pr',
-          'list',
-          '--state',
-          'open',
-          '--json',
-          'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
-        ],
-        { cwd, env: ghEnv() },
-      )
-      const raw = JSON.parse(out) as Array<{
-        number: number
-        title: string
-        url: string
-        headRefName: string
-        baseRefName: string
-        mergeable: string
-        mergeStateStatus: string
-      }>
-      return Promise.all(
-        raw.map(async (p) => {
-          // gh pr list reports UNKNOWN until mergeability has been computed,
-          // so a single-PR query forces the check for those.
-          const status = ghMergeStatus(p.mergeable, p.mergeStateStatus)
-          return {
-            number: p.number,
-            title: p.title,
-            url: p.url,
-            headRefName: p.headRefName,
-            baseRefName: p.baseRefName,
-            mergeStatus: status === 'unknown' ? await ghMergeStatusResolved(cwd, p.number) : status,
-            mergeable: p.mergeable,
-            mergeStateStatus: p.mergeStateStatus,
-          }
-        }),
-      )
+      const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
+        cwd,
+        env: ghEnv(),
+      })
+      const raw = JSON.parse(out) as Array<
+        Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
+      >
+      // gh reports labels as objects; the pass only needs the names.
+      return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
+    },
+    // GitHub computes mergeability asynchronously: bulk queries report UNKNOWN
+    // until a single-PR query triggers it, so retry briefly until it resolves.
+    async getMergeStatus(cwd, number) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const out = await execOk(
+          exec,
+          ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
+          { cwd, env: ghEnv() },
+        )
+        const status = JSON.parse(out) as { mergeable: string; mergeStateStatus: string }
+        if (status.mergeable === 'CONFLICTING' || status.mergeStateStatus === 'DIRTY') {
+          return 'conflicted'
+        }
+        if (status.mergeable === 'MERGEABLE' || status.mergeStateStatus === 'CLEAN') {
+          return 'mergeable'
+        }
+        if (attempt < 4) await Bun.sleep(1000)
+      }
+      return 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      return execOk(exec, ['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv() })
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -284,16 +241,25 @@ function forgejoPr(exec: Exec): PrDriver {
     return remote
   }
 
-  async function api(cwd: string, method: string, path: string, body?: unknown) {
-    const r = await forge(cwd)
-    const token = forgeToken('forgejo')
-    if (token === null) {
+  async function forgeTokenOrThrow(): Promise<string> {
+    const t = forgeToken('forgejo')
+    if (t === null) {
       throw new Error('forgejo token missing: set FORGEJO_TOKEN in the amagi process environment')
     }
+    return t
+  }
+
+  async function request(
+    cwd: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Response> {
+    const r = await forge(cwd)
     const res = await fetch(`${r.base}/api/v1/${path}`, {
       method,
       headers: {
-        authorization: `token ${token}`,
+        authorization: `token ${await forgeTokenOrThrow()}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -303,19 +269,49 @@ function forgejoPr(exec: Exec): PrDriver {
         `forgejo api ${method} ${path}: ${res.status} ${(await res.text()).slice(0, 300)}`,
       )
     }
+    return res
+  }
+
+  async function api(
+    cwd: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Record<string, unknown>> {
+    const res = await request(cwd, method, path, body)
     if (res.status === 204) return {}
     return (await res.json()) as Record<string, unknown>
   }
 
-  function fjMergeStatus(pr: Record<string, unknown>): MergeStatus {
-    if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
-    if (pr.mergeable === true) return 'mergeable'
-    return 'unknown'
+  /** Forgejo endpoints like the `.diff` suffix return text, not JSON. */
+  async function rawApi(cwd: string, path: string): Promise<string> {
+    const res = await request(cwd, 'GET', path)
+    return await res.text()
   }
 
-  async function fjMergeStatusResolved(cwd: string, number: number): Promise<MergeStatus> {
-    const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
-    return fjMergeStatus(pr)
+  const refName = (branch: unknown): string => {
+    if (typeof branch !== 'object' || branch === null) return ''
+    const ref = (branch as { ref?: unknown }).ref
+    return typeof ref === 'string' ? ref : ''
+  }
+
+  const headOid = (branch: unknown): string | null => {
+    if (typeof branch !== 'object' || branch === null) return null
+    const sha = (branch as { sha?: unknown }).sha
+    return typeof sha === 'string' ? sha : null
+  }
+
+  /** Maps Forgejo's bool mergeable + mergeable_state onto the shared shape. */
+  function mergeFields(item: Record<string, unknown>): PrMergeStatus {
+    const mergeable = item.mergeable
+    const state = typeof item.mergeable_state === 'string' ? item.mergeable_state : ''
+    if (mergeable === false || state === 'dirty') {
+      return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+    }
+    if (mergeable !== true || state === '' || state === 'unknown') {
+      return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+    }
+    return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
   }
 
   // The Forgejo issue-labels API keys on numeric label ids, so a name must be
@@ -374,45 +370,34 @@ function forgejoPr(exec: Exec): PrDriver {
       if (pr.state === 'closed') return 'closed'
       return 'open'
     },
-    async getMergeStatus(cwd, number) {
-      return fjMergeStatusResolved(cwd, number)
-    },
     async listOpenPrs(cwd) {
       const r = await forge(cwd)
       const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/pulls?state=open`)
       const items = Array.isArray(raw) ? raw : []
-      return Promise.all(
-        (items as Array<Record<string, unknown>>).map(async (p) => {
-          const head = p.head as { ref?: string } | null | undefined
-          const base = p.base as { ref?: string } | null | undefined
-          const number = Number(p.number ?? p.index ?? 0)
-          const status = fjMergeStatus(p)
-          return {
-            number,
-            title: String(p.title ?? ''),
-            url:
-              typeof p.html_url === 'string'
-                ? p.html_url
-                : `${r.base}/${r.ownerRepo}/pulls/${number}`,
-            headRefName: head?.ref ?? '',
-            baseRefName: base?.ref ?? '',
-            mergeStatus: status === 'unknown' ? await fjMergeStatusResolved(cwd, number) : status,
-            // The forgejo state names map onto gh's so one filter works for both.
-            mergeable:
-              p.mergeable_state === 'has_conflicts'
-                ? 'CONFLICTING'
-                : p.mergeable === true
-                  ? 'MERGEABLE'
-                  : 'UNKNOWN',
-            mergeStateStatus:
-              p.mergeable_state === 'clean'
-                ? 'CLEAN'
-                : p.mergeable_state === 'has_conflicts'
-                  ? 'DIRTY'
-                  : 'UNKNOWN',
-          }
-        }),
-      )
+      return (items as Array<Record<string, unknown>>).map((item) => ({
+        number: Number(item.number ?? 0),
+        title: typeof item.title === 'string' ? item.title : '',
+        body: typeof item.body === 'string' ? item.body : '',
+        url: typeof item.html_url === 'string' ? item.html_url : '',
+        headRefName: refName(item.head),
+        baseRefName: refName(item.base),
+        headRefOid: headOid(item.head),
+        ...mergeFields(item),
+        updatedAt: typeof item.updated_at === 'string' ? item.updated_at : '',
+        labels: ((item.labels as Array<{ name?: string }> | undefined) ?? []).map(
+          (l) => l.name ?? '',
+        ),
+      }))
+    },
+    async getMergeStatus(cwd, number) {
+      const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
+      if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
+      if (pr.mergeable === true) return 'mergeable'
+      return 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      const r = await forge(cwd)
+      return rawApi(cwd, `repos/${r.ownerRepo}/pulls/${number}.diff`)
     },
     async listComments(cwd, number) {
       const r = await forge(cwd)

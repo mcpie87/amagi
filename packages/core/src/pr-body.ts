@@ -20,9 +20,15 @@ export async function diffBase(run: Exec, cwd: string, base: string): Promise<st
   return r.exitCode === 0 ? remote : base
 }
 
-export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
+export async function changesSinceBase(
+  run: Exec,
+  cwd: string,
+  base: string,
+  workingTree = false,
+): Promise<PrChange[]> {
   const ref = await diffBase(run, cwd, base)
-  const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
+  const range = workingTree ? ref : `${ref}...HEAD`
+  const r = await run(['git', 'diff', '--numstat', range], { cwd })
   return r.stdout
     .split('\n')
     .filter(Boolean)
@@ -87,6 +93,33 @@ export type PrBodyMeta = {
   effort: string | null
 }
 
+/**
+ * Key of the machine-readable trailer that links a PR back to its tracker
+ * task, in the same spirit as a `Co-Authored-By:` git trailer: a plain
+ * `key: value` line a regex can find regardless of how the surrounding
+ * markdown evolves. branchName (worktree.ts) encodes the same id in the
+ * branch name, but splitting it back out of a slug is ambiguous; the trailer
+ * is unambiguous because the id is on its own line.
+ */
+export const TASK_TRAILER_KEY = 'amagi-task'
+
+/** Reads the `amagi-task:` trailer back off a PR body, or null if absent. */
+export function taskIdFromPrBody(body: string): string | null {
+  const re = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
+  return body.match(re)?.[1] ?? null
+}
+
+/**
+ * The task's age as a relative-time stamp for the Task line. GitHub and
+ * Forgejo render `<relative-time datetime>` as a live relative age; the
+ * element's text content is the plain-date fallback when they do not.
+ */
+function createdAgo(createdAt: number | null | undefined): string | null {
+  if (createdAt === null || createdAt === undefined || Number.isNaN(createdAt)) return null
+  const iso = new Date(createdAt).toISOString()
+  return `created <relative-time datetime="${iso}">${iso.slice(0, 10)}</relative-time>`
+}
+
 export function formatPrBody(
   task: TrackerTask,
   changes: readonly PrChange[],
@@ -94,7 +127,12 @@ export function formatPrBody(
   /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
   fallbackSummary?: string | null,
 ): string {
-  const lines = [`## ✨ ${task.title}`, '', `**Task:** \`${task.id}\``]
+  const created = createdAgo(task.createdAt)
+  const lines = [
+    `## ✨ ${task.title}`,
+    '',
+    `**Task:** \`${task.id}\`${created === null ? '' : ` · ${created}`}`,
+  ]
   const { summary, howToUse, conclusion } = splitDescription(task.description)
   const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
   lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
@@ -113,5 +151,5 @@ export function formatPrBody(
     lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
-  return lines.join('\n') + footer
+  return `${lines.join('\n')}${footer}\n\n${TASK_TRAILER_KEY}: ${task.id}`
 }

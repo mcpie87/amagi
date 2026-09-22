@@ -35,6 +35,17 @@ const READY_WITH_DIFFICULTY_JSON = `[
   }
 ]`
 
+const READY_WITHOUT_CREATED_AT_JSON = `[
+  {
+    "id": "tst-noc",
+    "title": "No creation stamp",
+    "description": "Tracker omitted the date",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task"
+  }
+]`
+
 const CLAIMED_JSON = `[
   {
     "id": "tst-lmc",
@@ -185,6 +196,7 @@ describe('BeadsTracker', () => {
       priority: 1,
       type: 'task',
       url: null,
+      createdAt: Date.parse('2026-09-20T14:02:53Z'),
     })
     expect(calls[0]).toContain('--json')
     expect(calls[0]?.[calls[0].indexOf('--sort') + 1]).toBe('oldest')
@@ -194,6 +206,14 @@ describe('BeadsTracker', () => {
     const { exec } = fake((c) => (c.includes('ready') ? ok(READY_WITH_DIFFICULTY_JSON) : undefined))
     const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
     expect(tasks[0]?.difficulty).toBe('high')
+  })
+
+  test('leaves createdAt absent when bd omits the stamp', async () => {
+    const { exec } = fake((c) =>
+      c.includes('ready') ? ok(READY_WITHOUT_CREATED_AT_JSON) : undefined,
+    )
+    const tasks = await new BeadsTracker({ cwd: '/repo', exec }).ready()
+    expect(tasks[0]?.createdAt).toBeUndefined()
   })
 
   test('an empty queue is an empty array, not an error', async () => {
@@ -280,6 +300,13 @@ describe('BeadsTracker', () => {
     }
     await new BeadsTracker({ cwd: '/repo', exec }).comment('tst-lmc', '--not-a-flag\n"quoted"')
     expect(seenStdin).toBe('--not-a-flag\n"quoted"')
+  })
+
+  test('openIds lists without --all, so closed issues are excluded', async () => {
+    const { exec, calls } = fake((c) => (c.includes('list') ? ok(READY_JSON) : undefined))
+    const ids = await new BeadsTracker({ cwd: '/repo', exec }).openIds()
+    expect(ids).toEqual(['tst-lmc'])
+    expect(calls[0]).not.toContain('--all')
   })
 
   test('gate id comes from a tagged lookup, not from parsing prose', async () => {
@@ -443,6 +470,21 @@ describe('BeadsTracker', () => {
     expect(remove).toContain('tst-old')
     const returned = calls.filter((c) => c.includes('show'))
     expect(returned).toHaveLength(1)
+  })
+
+  test('setMetadata sets each key on the issue', async () => {
+    const { exec, calls } = fake(() => ok(''))
+    await new BeadsTracker({ cwd: '/repo', exec }).setMetadata('tst-1', {
+      iterations: '2',
+      difficulty: 'high',
+    })
+
+    const call = calls[0]
+    expect(call?.slice(0, 2)).toEqual(['bd', 'update'])
+    expect(call).toContain('tst-1')
+    expect(call).toContain('--set-metadata')
+    expect(call).toContain('iterations=2')
+    expect(call).toContain('difficulty=high')
   })
 
   test('children surfaces the child issues of a container', async () => {

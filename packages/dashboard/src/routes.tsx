@@ -1,4 +1,4 @@
-import type { OpenPr } from '@amagi/core'
+import type { PrInfo } from '@amagi/core'
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -21,10 +21,10 @@ import {
   currentUsageFor,
   type DashboardState,
   openQuestionsFor,
-  type QuestionView,
+  type ProjectedQuestion,
+  type ProjectedTask,
   runHealth,
   runHealthNearLimit,
-  type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core/view'
 import {
@@ -1869,7 +1869,7 @@ function QueueView() {
                         <ReadyCard task={task} />
                       </li>
                     ))
-                  : (tasks as TaskView[]).map((task) => (
+                  : (tasks as ProjectedTask[]).map((task) => (
                       <li key={task.id}>
                         <Link
                           to="/tasks/$id"
@@ -1947,7 +1947,7 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
  */
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
-  const [prs, setPrs] = useState<OpenPr[] | null>(null)
+  const [prs, setPrs] = useState<PrInfo[] | null>(null)
 
   useEffect(() => {
     if (selected === null) return
@@ -1958,7 +1958,7 @@ function MergeablePrsPanel() {
           // A repo without a forge driver simply has no mergeable PRs to show.
           if (res.status === 501) return []
           if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return (await res.json()).prs as OpenPr[]
+          return (await res.json()).prs as PrInfo[]
         })
         .then((list) => {
           if (alive) setPrs(list)
@@ -2079,7 +2079,7 @@ function OverviewView() {
             {...(selected === null
               ? {}
               : {
-                  action: (task: TaskView) => (
+                  action: (task: ProjectedTask) => (
                     <CloseButtons repo={selected} taskId={task.id} state={task.state} />
                   ),
                 })}
@@ -2114,9 +2114,9 @@ function RunList({
   action,
   rowClass = 'run-row',
 }: {
-  tasks: TaskView[]
+  tasks: ProjectedTask[]
   showReason: boolean
-  action?: (task: TaskView) => ReactNode
+  action?: (task: ProjectedTask) => ReactNode
   rowClass?: string
 }) {
   return (
@@ -2260,7 +2260,7 @@ function AnswerBox({
 }: {
   repo: string
   taskId: string
-  question: QuestionView
+  question: ProjectedQuestion
 }) {
   const [token, setToken] = useState<string | null>(null)
   const [text, setText] = useState('')
@@ -2370,6 +2370,7 @@ function ReclaimButton({
   state: TaskState
   worktree: string | null
 }) {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // A retrying task is still owned by its runner, which will retry on its own;
@@ -2383,7 +2384,13 @@ function ReclaimButton({
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
         method: 'POST',
       })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      if (!res.ok) {
+        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Reclaim only releases the tracker claim; actually restart the run.
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2397,6 +2404,7 @@ function ReclaimButton({
         type="button"
         disabled={busy}
         onClick={() => void reclaim()}
+        title="releases the tracker claim and immediately restarts the run, resuming its worktree"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Reclaim
@@ -2709,6 +2717,73 @@ function RequeueButton({
       >
         runner: {availability}
       </p>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The error-task retry path for a task parked at needs_human: file the recorded
+ * error as its own tracker task, block this task on it, and release the claim
+ * so it reruns once the error task is resolved. Unlike Retry/Requeue this does
+ * not resume the same work blindly; it hands the root cause to a human first.
+ */
+function FileAsErrorButton({
+  repo,
+  taskId,
+  state,
+  statusReason,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  statusReason: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (state !== 'needs_human' || statusReason === null) return null
+
+  const file = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/filed-as-error`, {
+        method: 'POST',
+      })
+      const body = (await res.json().catch(() => null)) as {
+        error?: string
+        errorTask?: { id: string }
+      } | null
+      if (!res.ok) {
+        setResult({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
+        return
+      }
+      setResult({
+        kind: 'ok',
+        text: `filed as ${body?.errorTask?.id ?? 'error task'}; reruns once that task is resolved`,
+      })
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void file()}
+        title="files this task's error as its own task, blocks this task on it, and reruns it once the error task is resolved"
+        className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
+      >
+        File as error task
+      </button>
       {result !== null && (
         <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
           {result.text}
@@ -3090,7 +3165,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
 }
 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
-function SummaryPanel({ task }: { task: TaskView }) {
+function SummaryPanel({ task }: { task: ProjectedTask }) {
   const needsHuman = task.state === 'needs_human'
   const done = task.state === 'done'
   if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
@@ -3119,7 +3194,7 @@ function SummaryPanel({ task }: { task: TaskView }) {
 }
 
 /** A task deferring an automatic retry: when it fires and why, plus the reason. */
-function RetryPanel({ task }: { task: TaskView }) {
+function RetryPanel({ task }: { task: ProjectedTask }) {
   if (task.state !== 'retrying') return null
   return (
     <div className="mt-6 rounded-lg border border-orange-edge bg-orange-soft px-4 py-3">
@@ -3246,7 +3321,7 @@ function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state, selected } = useDashboard()
   const { status } = useRunner()
-  const task: TaskView | undefined = state.tasks[id]
+  const task: ProjectedTask | undefined = state.tasks[id]
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const runnerTask = status?.tasks?.[id]
@@ -3328,6 +3403,14 @@ function TaskDetailView() {
             taskId={task.id}
             state={task.state}
             worktree={task.worktree}
+          />
+        )}
+        {selected !== null && (
+          <FileAsErrorButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            statusReason={task.statusReason}
           />
         )}
         {selected !== null && (
@@ -3569,7 +3652,7 @@ function InboxView() {
             {...(selected === null
               ? {}
               : {
-                  action: (task: TaskView) => (
+                  action: (task: ProjectedTask) => (
                     <CloseButtons repo={selected} taskId={task.id} state={task.state} />
                   ),
                 })}
@@ -3766,6 +3849,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           ts: event.ts,
           taskId: event.taskId,
           text: `retry #${event.attempt} in ${(event.delayMs / 1000).toFixed(0)}s`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
+      case 'retry.filed_as_error':
+        items.push({
+          key: `y${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `error filed as task ${event.errorTaskId}`,
           icon: 'refresh',
           tone: 'amber',
         })

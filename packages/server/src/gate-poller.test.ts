@@ -3,8 +3,8 @@ import {
   type CreateTrackerTask,
   type GateRef,
   openDatabase,
+  type ProjectedQuestion,
   type Question,
-  type QuestionRow,
   Store,
   type Tracker,
   type TrackerCapabilities,
@@ -168,7 +168,7 @@ test('await unblocks within one poll interval after the gate resolves', async ()
 
   const res = await pending
   expect(res.status).toBe(200)
-  const body = (await res.json()) as { question: QuestionRow }
+  const body = (await res.json()) as { question: ProjectedQuestion }
   expect(body.question.answer).toBe('')
   expect(body.question.answeredVia).toBe('gate')
   ws.cleanup()

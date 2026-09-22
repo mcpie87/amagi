@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -15,6 +15,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
+import { runStateDir } from './paths.ts'
 import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
@@ -30,7 +31,7 @@ import {
   withRestartHandoff,
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
-import type { Store, TaskRow } from './store/store.ts'
+import type { ProjectedTask, Store } from './store/store.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 export type RunnerDeps = {
@@ -48,7 +49,7 @@ export type RunnerDeps = {
 }
 
 export type RunOnceResult = {
-  task: TaskRow
+  task: ProjectedTask
   state: TaskState
 } | null
 
@@ -859,9 +860,18 @@ export class Runner {
     contextExceeded: boolean
   }> {
     const { store, harness } = this.deps
+    const runState = runStateDir(taskId)
+    mkdirSync(runState, { recursive: true })
     const spawn = {
       ...opts,
-      env: { AMAGI_TASK_TOKEN: store.token(taskId) },
+      env: {
+        AMAGI_TASK_TOKEN: store.token(taskId),
+        // The git shim scopes itself to the task worktree and the main
+        // checkout, and logs rejected calls into the run state dir.
+        AMAGI_WORKTREE: opts.cwd,
+        AMAGI_REPO_ROOT: this.deps.repoRoot,
+        AMAGI_RUN_STATE: runState,
+      },
     }
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
@@ -1252,7 +1262,8 @@ export class Runner {
     const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
     if (status.stdout.trim() !== '') {
       await this.exec(['git', 'add', '-A'], { cwd })
-      const message = commitMessage(task)
+      const changes = await changesSinceBase(this.exec, cwd, this.deps.config.repo.baseBranch, true)
+      const message = commitMessage(task, changes)
       const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
       if (commit.exitCode !== 0) {
         throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)

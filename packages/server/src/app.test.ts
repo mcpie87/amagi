@@ -12,17 +12,17 @@ import type {
   EpicCloseResult,
   GateRef,
   Harness,
-  OpenPr,
   PrComment,
   PrDriver,
+  PrInfo,
+  ProjectedQuestion,
+  ProjectedTask,
   PrState,
   PullRequest,
   Question,
-  QuestionRow,
   RunOptions,
   RunServiceApi,
   Store,
-  TaskRow,
   Tracker,
   TrackerCapabilities,
   TrackerStatus,
@@ -109,7 +109,7 @@ describe('GET /api/repos/:repo/tasks', () => {
     claim('bd-2')
     const res = await app.request('/api/repos/repo1/tasks')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as TaskRow[]
+    const body = (await res.json()) as ProjectedTask[]
     expect(body.map((t) => t.id)).toEqual(['bd-2', 'bd-1'])
     expect(body[0]?.state).toBe('claimed')
   })
@@ -120,10 +120,13 @@ describe('GET /api/repos/:repo/tasks', () => {
     store.append('bd-2', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
 
     const repeated = await app.request('/api/repos/repo1/tasks?state=claimed&state=worktree_ready')
-    expect(((await repeated.json()) as TaskRow[]).map((t) => t.id).sort()).toEqual(['bd-1', 'bd-2'])
+    expect(((await repeated.json()) as ProjectedTask[]).map((t) => t.id).sort()).toEqual([
+      'bd-1',
+      'bd-2',
+    ])
 
     const csv = await app.request('/api/repos/repo1/tasks?state=worktree_ready')
-    expect(((await csv.json()) as TaskRow[]).map((t) => t.id)).toEqual(['bd-2'])
+    expect(((await csv.json()) as ProjectedTask[]).map((t) => t.id)).toEqual(['bd-2'])
   })
 
   test('rejects an unknown state with a 400 and a readable error', async () => {
@@ -143,8 +146,8 @@ describe('GET /api/repos/:repo/tasks', () => {
 })
 
 class FakeMergePrDriver implements PrDriver {
-  open: OpenPr[] = []
-  async listOpenPrs(): Promise<OpenPr[]> {
+  open: PrInfo[] = []
+  async listOpenPrs(): Promise<PrInfo[]> {
     return this.open
   }
   async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
@@ -155,6 +158,9 @@ class FakeMergePrDriver implements PrDriver {
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
+  }
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -178,47 +184,59 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
       {
         number: 1,
         title: 'Ready',
+        body: '',
         url: 'https://github.com/owner/repo/pull/1',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',
-        mergeStatus: 'mergeable',
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
       {
         number: 2,
         title: 'Conflicted',
+        body: '',
         url: 'https://github.com/owner/repo/pull/2',
         headRefName: 'amagi/am-2',
         baseRefName: 'main',
-        mergeStatus: 'conflicted',
         mergeable: 'CONFLICTING',
         mergeStateStatus: 'DIRTY',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
       {
         number: 3,
         title: 'Unknown',
+        body: '',
         url: 'https://github.com/owner/repo/pull/3',
         headRefName: 'amagi/am-3',
         baseRefName: 'main',
-        mergeStatus: 'unknown',
         mergeable: 'UNKNOWN',
         mergeStateStatus: 'UNKNOWN',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
       {
         number: 4,
         title: 'Clean via status',
+        body: '',
         url: 'https://github.com/owner/repo/pull/4',
         headRefName: 'amagi/am-4',
         baseRefName: 'main',
-        mergeStatus: 'mergeable',
         mergeable: 'UNKNOWN',
         mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
     ]
     const res = await app.request('/api/repos/repo1/mergeable-prs')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { prs: OpenPr[] }
+    const body = (await res.json()) as { prs: PrInfo[] }
     expect(body.prs.map((p) => p.number)).toEqual([1, 4])
   })
 
@@ -248,14 +266,14 @@ describe('identical issue ids across repos do not collide', () => {
     two.append('42', { type: 'task.claimed', title: 'repo two issue', tracker: 'beads' })
 
     const body = (await (await app.request('/api/repos/repo1/tasks/42')).json()) as {
-      task: TaskRow
+      task: ProjectedTask
     }
     expect(body.task.title).toBe('repo one issue')
     expect(one.token('42')).not.toBe(two.token('42'))
 
-    const list1 = (await (await app.request('/api/repos/repo1/tasks')).json()) as TaskRow[]
+    const list1 = (await (await app.request('/api/repos/repo1/tasks')).json()) as ProjectedTask[]
     expect(list1).toHaveLength(1)
-    const list2 = (await (await app.request('/api/repos/repo2/tasks')).json()) as TaskRow[]
+    const list2 = (await (await app.request('/api/repos/repo2/tasks')).json()) as ProjectedTask[]
     expect(list2).toHaveLength(1)
   })
 
@@ -287,6 +305,7 @@ describe('GET /api/repos/:repo/issues', () => {
 class FakeIssueTracker extends BeadsTracker {
   readonly created: CreateTrackerTask[] = []
   readonly updated: { id: string; input: UpdateTrackerTask }[] = []
+  readonly released: string[] = []
   issues = new Map<string, BeadsIssue>()
   private seq = 0
 
@@ -387,7 +406,9 @@ class FakeIssueTracker extends BeadsTracker {
   }
   override async comment(): Promise<void> {}
   override async setStatus(_id: string, _s: TrackerStatus): Promise<void> {}
-  override async release(): Promise<void> {}
+  override async release(id: string): Promise<void> {
+    this.released.push(id)
+  }
   override async close(): Promise<void> {}
   override async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'g', advisory: false }
@@ -661,7 +682,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     stuckTask('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('claimed')
     expect(body.task.worktree).toBe('/tmp/wt/bd-1')
     expect(body.task.branch).toBe('amagi/bd-1-x')
@@ -673,7 +694,9 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     stuckTask('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
-    expect((await res.json()) as { task: TaskRow }).toMatchObject({ task: { state: 'claimed' } })
+    expect((await res.json()) as { task: ProjectedTask }).toMatchObject({
+      task: { state: 'claimed' },
+    })
   })
 
   test('404s on an unknown task', async () => {
@@ -689,7 +712,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     claim('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('claimed')
     expect(body.task.worktree).toBeNull()
     expect(tracker.released).toEqual(['bd-1'])
@@ -711,7 +734,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('claimed')
     expect(body.task.worktree).toBe('/tmp/wt/bd-1')
     expect(tracker.released).toEqual(['bd-1'])
@@ -728,12 +751,86 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
       store.append('bd-1', { type: 'task.state', from: 'implementing', to: state })
       const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
       expect(res.status).toBe(200)
-      const body = (await res.json()) as { task: TaskRow }
+      const body = (await res.json()) as { task: ProjectedTask }
       expect(body.task.state).toBe('claimed')
       expect(body.task.worktree).toBe('/tmp/wt/bd-1')
       expect(tracker.released).toEqual(['bd-1'])
     },
   )
+})
+
+describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
+  const parkedError = (id: string, reason: string) => {
+    claim(id)
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'task.state', from: 'implementing', to: 'needs_human', reason })
+  }
+  const file = (id: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/filed-as-error`, {
+      method: 'POST',
+    })
+
+  test('files the error as a human task, blocks the original on it and releases it', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', title: 'work on bd-1' })
+    app = issueApp(tracker)
+    parkedError('bd-1', 'agent failed: model quota exhausted')
+
+    const res = await file('bd-1')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { task: TaskRow; errorTask: BeadsIssue }
+
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]).toMatchObject({
+      title: 'Error: work on bd-1',
+      labels: ['human'],
+    })
+    expect(tracker.created[0]?.description).toContain('agent failed: model quota exhausted')
+    expect(tracker.updated).toHaveLength(1)
+    expect(tracker.updated[0]?.input).toEqual({
+      dependencies: { add: [body.errorTask.id], remove: [] },
+    })
+    expect(tracker.released).toEqual(['bd-1'])
+    expect(body.errorTask.labels).toEqual(['human'])
+    const event = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'retry.filed_as_error')
+    expect(event).toMatchObject({
+      type: 'retry.filed_as_error',
+      errorTaskId: body.errorTask.id,
+      reason: 'agent failed: model quota exhausted',
+    })
+  })
+
+  test('404s on an unknown task', async () => {
+    app = issueApp(new FakeIssueTracker())
+    expect((await file('nope')).status).toBe(404)
+  })
+
+  test('409s when the task is not parked for human attention', async () => {
+    app = issueApp(new FakeIssueTracker())
+    claim('bd-1')
+    const res = await file('bd-1')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toContain(
+      'not waiting for human attention',
+    )
+  })
+
+  test('409s when the task has no recorded error to carry', async () => {
+    app = issueApp(new FakeIssueTracker())
+    parkedError('bd-1', '  ')
+    const res = await file('bd-1')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toContain('no recorded error')
+  })
+
+  test('501s on a tracker without create or dependency support', async () => {
+    app = issueApp(new FakeGateTracker())
+    parkedError('bd-1', 'agent failed')
+    const res = await file('bd-1')
+    expect(res.status).toBe(501)
+    expect(((await res.json()) as { error: string }).error).toContain('does not support')
+  })
 })
 
 describe('POST /api/repos/:repo/tasks/:id/retry', () => {
@@ -849,7 +946,7 @@ describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
     forge.getPr = async () => 'merged'
     const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
     expect(res.status).toBe(200)
-    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('done')
+    expect(((await res.json()) as { task: ProjectedTask }).task.state).toBe('done')
     expect(tracker.closed.map((c) => c.id)).toEqual(['bd-1'])
   })
 
@@ -858,7 +955,7 @@ describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
     forge.getPr = async () => 'closed'
     const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
     expect(res.status).toBe(200)
-    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(((await res.json()) as { task: ProjectedTask }).task.state).toBe('abandoned')
     expect(tracker.statuses).toEqual([{ id: 'bd-1', status: 'closed' }])
   })
 
@@ -866,7 +963,7 @@ describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
     parked('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
     expect(res.status).toBe(200)
-    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('pr_open')
+    expect(((await res.json()) as { task: ProjectedTask }).task.state).toBe('pr_open')
     expect(store.task('bd-1')?.prMergeStatus).toBe('mergeable')
   })
 
@@ -875,7 +972,7 @@ describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
     forge.getPr = async () => 'merged'
     const res = await app.request('/api/repos/repo1/tasks/bd-1/recheck', { method: 'POST' })
     expect(res.status).toBe(200)
-    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('done')
+    expect(((await res.json()) as { task: ProjectedTask }).task.state).toBe('done')
   })
 
   test('409s when the task is not parked on a pull request', async () => {
@@ -931,7 +1028,7 @@ describe('POST /api/tasks/:id/stop', () => {
     running('bd-1')
     const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('cancelled')
     expect(store.task('bd-1')?.state).toBe('cancelled')
   })
@@ -976,7 +1073,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     parked('bd-1', 'needs_human')
     const res = await close('bd-1', 'operator says done')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('operator says done')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'operator says done' }])
@@ -988,7 +1085,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
       parked('bd-1', state)
       const res = await close('bd-1', 'not needed')
       expect(res.status).toBe(200)
-      const body = (await res.json()) as { task: TaskRow }
+      const body = (await res.json()) as { task: ProjectedTask }
       expect(body.task.state).toBe('abandoned')
       expect(body.task.statusReason).toBe('not needed')
     },
@@ -1004,7 +1101,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
         body: JSON.stringify({ reason: 'already implemented elsewhere', to: 'done' }),
       })
       expect(res.status).toBe(200)
-      const body = (await res.json()) as { task: TaskRow }
+      const body = (await res.json()) as { task: ProjectedTask }
       expect(body.task.state).toBe('done')
       expect(body.task.statusReason).toBe('already implemented elsewhere')
       expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'already implemented elsewhere' }])
@@ -1060,7 +1157,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
     const res = await close('bd-1', 'kill it')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(stopped).toEqual(['bd-1'])
     expect(body.task.state).toBe('abandoned')
     // The recorded worktree is dropped from the projection.
@@ -1074,7 +1171,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
     const res = await close('bd-1', 'kill it')
     expect(res.status).toBe(200)
-    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(((await res.json()) as { task: ProjectedTask }).task.state).toBe('abandoned')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'kill it' }])
   })
 
@@ -1119,7 +1216,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
     const res = await close('bd-1', 'give up on it')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(stopped).toEqual(['bd-1'])
     expect(body.task.state).toBe('abandoned')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'give up on it' }])
@@ -1167,7 +1264,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     parked('bd-1', 'no_pr')
     const res = await close('bd-1', 'wont run')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('wont run')
   })
@@ -1184,7 +1281,10 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     async getMergeStatus() {
       return 'mergeable' as const
     }
-    async listOpenPrs(): Promise<OpenPr[]> {
+    async getPrDiff(): Promise<string> {
+      return ''
+    }
+    async listOpenPrs(): Promise<PrInfo[]> {
       return []
     }
     async listComments(): Promise<PrComment[]> {
@@ -1232,7 +1332,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const res = await close('bd-1', 'agree, nothing to merge')
     expect(res.status).toBe(200)
     expect(forge.closed).toEqual([{ number: 7, reason: 'agree, nothing to merge' }])
-    const body = (await res.json()) as { task: TaskRow }
+    const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('agree, nothing to merge')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'agree, nothing to merge' }])
@@ -1256,7 +1356,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const res = await close('bd-1', 'abandoning anyway')
     expect(res.status).toBe(200)
     expect(forge.closed).toEqual([])
-    expect(((await res.json()) as { task: TaskRow }).task.state).toBe('abandoned')
+    expect(((await res.json()) as { task: ProjectedTask }).task.state).toBe('abandoned')
   })
 
   test('refuses to close a pr_flagged task without a forge driver', async () => {
@@ -1783,7 +1883,11 @@ describe('GET /api/repos/:repo/tasks/:id', () => {
       gateRef: null,
     })
     const res = await app.request('/api/repos/repo1/tasks/bd-1')
-    const body = (await res.json()) as { task: TaskRow; token: string; questions: QuestionRow[] }
+    const body = (await res.json()) as {
+      task: ProjectedTask
+      token: string
+      questions: ProjectedQuestion[]
+    }
     expect(body.task.id).toBe('bd-1')
     expect(body.token).toBe(store.token('bd-1'))
     expect(body.questions).toHaveLength(1)
@@ -1842,7 +1946,7 @@ describe('GET /api/repos/:repo/questions', () => {
     }
     store.append('bd-1', { type: 'question.answered', questionId: 'q1', answer: 'yes', via: 'web' })
     const res = await app.request('/api/repos/repo1/questions')
-    const body = (await res.json()) as QuestionRow[]
+    const body = (await res.json()) as ProjectedQuestion[]
     expect(body.map((q) => q.id)).toEqual(['q2'])
   })
 })
@@ -1889,7 +1993,7 @@ describe('question channel', () => {
     implementing('bd-1')
     const res = await ask('bd-1', 'which registry?', ['npm', 'nexus'])
     expect(res.status).toBe(201)
-    const body = (await res.json()) as { task: TaskRow; question: QuestionRow }
+    const body = (await res.json()) as { task: ProjectedTask; question: ProjectedQuestion }
     expect(body.task.state).toBe('awaiting_answer')
     expect(body.question.question).toBe('which registry?')
     expect(store.task('bd-1')?.state).toBe('awaiting_answer')
@@ -1905,7 +2009,7 @@ describe('question channel', () => {
     claim('bd-2')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
-    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const q = ((await asked.json()) as { question: ProjectedQuestion }).question
 
     const spied = await awaitQ('bd-1', q.id, token('bd-2'))
     expect(spied.status).toBe(401)
@@ -1923,12 +2027,12 @@ describe('question channel', () => {
     claim('bd-1')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
-    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const q = ((await asked.json()) as { question: ProjectedQuestion }).question
     await answer('bd-1', q.id, 'npm', token('bd-1'))
 
     const res = await awaitQ('bd-1', q.id, token('bd-1'))
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { question: QuestionRow }
+    const body = (await res.json()) as { question: ProjectedQuestion }
     expect(body.question.answer).toBe('npm')
     expect(body.question.resolvedAt).not.toBeNull()
   })
@@ -1937,7 +2041,7 @@ describe('question channel', () => {
     claim('bd-1')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
-    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const q = ((await asked.json()) as { question: ProjectedQuestion }).question
 
     const pending = awaitQ('bd-1', q.id, token('bd-1'))
     const answered = await answer('bd-1', q.id, 'npm', token('bd-1'))
@@ -1945,7 +2049,7 @@ describe('question channel', () => {
 
     const res = await pending
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { question: QuestionRow }
+    const body = (await res.json()) as { question: ProjectedQuestion }
     expect(body.question.answer).toBe('npm')
     expect(store.task('bd-1')?.state).toBe('implementing')
   })
@@ -1954,10 +2058,10 @@ describe('question channel', () => {
     claim('bd-1')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
-    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const q = ((await asked.json()) as { question: ProjectedQuestion }).question
     const res = await awaitQ('bd-1', q.id, token('bd-1'), 20)
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { question: QuestionRow }
+    const body = (await res.json()) as { question: ProjectedQuestion }
     expect(body.question.resolvedAt).not.toBeNull()
     expect(store.question(q.id)?.answer).toBeNull()
   })
@@ -1966,7 +2070,7 @@ describe('question channel', () => {
     claim('bd-1')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
-    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const q = ((await asked.json()) as { question: ProjectedQuestion }).question
     await awaitQ('bd-1', q.id, token('bd-1'), 20)
     expect(store.question(q.id)?.resolvedAt).not.toBeNull()
 
@@ -2018,7 +2122,7 @@ describe('question channel', () => {
     implementing('bd-1')
     const res = await ask('bd-1', 'which registry?', ['npm', 'nexus'])
     expect(res.status).toBe(201)
-    const body = (await res.json()) as { question: QuestionRow }
+    const body = (await res.json()) as { question: ProjectedQuestion }
 
     expect(tracker.opened).toHaveLength(1)
     expect(tracker.opened[0]?.id).toBe(body.question.id)
@@ -2030,7 +2134,7 @@ describe('question channel', () => {
     claim('bd-1')
     implementing('bd-1')
     const asked = await ask('bd-1', 'which registry?')
-    const q = ((await asked.json()) as { question: QuestionRow }).question
+    const q = ((await asked.json()) as { question: ProjectedQuestion }).question
 
     const res = await answer('bd-1', q.id, 'npm', token('bd-1'))
     expect(res.status).toBe(200)
@@ -2146,13 +2250,13 @@ test('hono/client infers the store projections', async () => {
 
   const tasks = await client.api.repos[':repo'].tasks.$get({ param: { repo: 'repo1' }, query: {} })
   if (tasks.status !== 200) throw new Error('expected 200')
-  const rows: TaskRow[] = await tasks.json()
+  const rows: ProjectedTask[] = await tasks.json()
   expect(rows[0]?.id).toBe('bd-1')
 
   const detail = await client.api.repos[':repo'].tasks[':id'].$get({
     param: { repo: 'repo1', id: 'bd-1' },
   })
   if (detail.status !== 200) throw new Error('expected 200')
-  const body: { task: TaskRow; questions: QuestionRow[] } = await detail.json()
+  const body: { task: ProjectedTask; questions: ProjectedQuestion[] } = await detail.json()
   expect(body.task.title).toBe('work on bd-1')
 })

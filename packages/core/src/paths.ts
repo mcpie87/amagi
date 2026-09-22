@@ -19,13 +19,6 @@ export const cacheHome = (): string => xdg('XDG_CACHE_HOME', '.cache')
 export const globalConfigPath = (): string => join(configHome(), 'amagi', 'config.toml')
 export const repoConfigPath = (repoRoot: string): string => join(repoRoot, '.amagi', 'config.toml')
 
-/** Overridable so tests and parallel runs do not share one database. */
-export function dbPath(): string {
-  const override = process.env.AMAGI_DB
-  if (override) return resolve(expandTilde(override))
-  return join(stateHome(), 'amagi', 'amagi.db')
-}
-
 /**
  * One database per registered repository, so identical issue ids in different
  * repos never collide and every repo's store, tokens, logs and streams stay
@@ -42,4 +35,13 @@ export function registryPath(): string {
   const override = process.env.AMAGI_REGISTRY
   if (override) return resolve(expandTilde(override))
   return join(stateHome(), 'amagi', 'registry.json')
+}
+
+/**
+ * Per-run scratch dir under the state home. The git shim appends rejected
+ * agent calls to `rejected-git.jsonl` here; the channel task drains that into
+ * task events.
+ */
+export function runStateDir(taskId: string): string {
+  return join(stateHome(), 'amagi', 'runs', taskId)
 }

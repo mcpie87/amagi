@@ -25,6 +25,7 @@ type BdIssue = {
   notes?: string
   comments?: Array<{ text: string }>
   dependent_count?: number
+  created_at?: string
   metadata?: Record<string, string>
 }
 
@@ -88,6 +89,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 
 function toTask(issue: BdIssue): TrackerTask {
   const difficulty = issue.metadata?.difficulty
+  const created = issue.created_at === undefined ? null : Date.parse(issue.created_at)
   const task: TrackerTask = {
     id: issue.id,
     title: issue.title,
@@ -97,6 +99,7 @@ function toTask(issue: BdIssue): TrackerTask {
     type: issue.issue_type ?? null,
     url: null,
     ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
+    ...(created !== null && !Number.isNaN(created) ? { createdAt: created } : {}),
   }
   const notes = issue.notes?.trim()
   if (notes) task.notes = notes
@@ -174,6 +177,14 @@ export class BeadsTracker implements Tracker {
     )
   }
 
+  /** `bd list` without `--all` excludes closed issues, which is exactly "open" here. */
+  async openIds(limit = 500): Promise<string[]> {
+    const issues = parseIssues(
+      await this.bd(['list', '--brief', '--json', '--limit', String(limit)]),
+    )
+    return issues.map((i) => i.id)
+  }
+
   /** Full detail view: notes are always present, comments need the flag. */
   private async show(id: string): Promise<string> {
     return this.bd(['show', id, '--json', '--include-comments'])
@@ -242,6 +253,15 @@ export class BeadsTracker implements Tracker {
     const created = issues[0]
     if (created === undefined) throw new Error('bd create returned no issue')
     return toTask(created)
+  }
+
+  /** Set or replace metadata keys (e.g. difficulty, iterations), keeping the rest. */
+  async setMetadata(id: string, metadata: Record<string, string>): Promise<void> {
+    const pairs = Object.entries(metadata).flatMap(([key, value]) => [
+      '--set-metadata',
+      `${key}=${value}`,
+    ])
+    await this.bd(['update', id, ...pairs])
   }
 
   async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {

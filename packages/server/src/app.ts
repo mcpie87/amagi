@@ -7,6 +7,7 @@ import {
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HarnessKind,
+  HUMAN_ONLY_LABEL,
   isTerminal,
   makeHarness,
   type Notifier,
@@ -496,6 +497,62 @@ export function createApp({
       await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, task)
       return c.json({ task: ws.store.task(id) })
     })
+
+    .post(
+      '/api/repos/:repo/tasks/:id/filed-as-error',
+      valid('param', RepoTaskIdParam),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        // The error-task retry path applies to a task parked for attention with
+        // an error to carry; a bare park (e.g. no_pr) has nothing to rerun from.
+        if (task.state !== 'needs_human') {
+          return c.json({ error: `task ${id} is not waiting for human attention` }, 409)
+        }
+        const reason = task.statusReason
+        if (reason === null || reason.trim() === '') {
+          return c.json({ error: `task ${id} has no recorded error to file` }, 409)
+        }
+        const createCap = capabilityError(ws.tracker, 'create')
+        if (createCap !== null) return c.json({ error: createCap }, 501)
+        const depCap = capabilityError(ws.tracker, 'dependencies')
+        if (depCap !== null) return c.json({ error: depCap }, 501)
+        const errorTask = await ws.tracker.createTask({
+          title: `Error: ${task.title}`,
+          description:
+            `The task ${id} errored out while the agent was implementing it.\n\n` +
+            `${reason}\n\n` +
+            `Resolve this task to rerun ${id} once its root cause is fixed.`,
+          acceptanceCriteria: null,
+          priority: null,
+          // The error task is the operator's to resolve, not the agent's.
+          labels: [HUMAN_ONLY_LABEL],
+          dependencies: [],
+          parent: null,
+        })
+        // The original blocks on the error task, so the runner skips it until
+        // the error task resolves, then reruns it from its preserved worktree.
+        await ws.tracker.updateTask(id, { dependencies: { add: [errorTask.id], remove: [] } })
+        // Best effort: release the tracker claim so the unblocked task re-enters
+        // the ready queue once the error task is closed and the auto-pick loop
+        // reruns it. A hiccup here only delays the rerun, never loses the work.
+        try {
+          await ws.tracker.release(id)
+        } catch (err) {
+          console.warn(
+            `release on filed-as-error ${id}: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+        ws.store.append(id, {
+          type: 'retry.filed_as_error',
+          errorTaskId: errorTask.id,
+          reason,
+        })
+        return c.json({ task: ws.store.task(id), errorTask })
+      },
+    )
 
     .post(
       '/api/repos/:repo/tasks/:id/close',
