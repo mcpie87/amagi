@@ -80,7 +80,7 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return FORWARD[from].includes(to)
 }
 
-export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat'])
+export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat', 'verify'])
 export type AgentRole = z.infer<typeof AgentRole>
 
 /** What the triage worker decides to do with an unclaimed task. */
@@ -179,6 +179,18 @@ export const EventBody = z.discriminatedUnion('type', [
    * is its peak context.
    */
   z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
+  /**
+   * The effective run-health ceilings for the active harness, appended once per
+   * claim so clients can render context/cost/elapsed against them before any
+   * guard trips. A maxRunMs or maxCostUsd of 0 means that budget is unbounded.
+   */
+  z.object({
+    type: z.literal('run.limits'),
+    contextWarnTokens: z.number().int(),
+    contextMaxTokens: z.number().int(),
+    maxRunMs: z.number().int(),
+    maxCostUsd: z.number(),
+  }),
   /** Logged once when the run's peak context crosses the soft limit. */
   z.object({
     type: z.literal('context.warn'),
@@ -190,6 +202,18 @@ export const EventBody = z.discriminatedUnion('type', [
     type: z.literal('context.exceeded'),
     contextTokens: z.number().int(),
     limit: z.number().int(),
+  }),
+  /**
+   * A run that crossed the hard context limit was restarted with a fresh
+   * session in the same worktree; `summary` is the handoff of what the killed
+   * session did, handed to the new one as context. `restart` is 1-based.
+   */
+  z.object({
+    type: z.literal('run.restarted'),
+    phase: z.string(),
+    restart: z.number().int().positive(),
+    contextTokens: z.number().int(),
+    summary: z.string(),
   }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
@@ -219,6 +243,17 @@ export const EventBody = z.discriminatedUnion('type', [
     detail: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('mention.classified'),
+    /** Which response path the classifier chose for the mention. */
+    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
+    /** The raw classifier reply; when the parse is wrong this is all that explains why. */
+    reply: z.string(),
+    /** The PR the mention was on. */
+    prNumber: z.number().int(),
+    /** The comment id of the mention. */
+    mentionId: z.string(),
+  }),
   z.object({
     type: z.literal('triage.decision'),
     action: TriageAction,

@@ -82,6 +82,10 @@ const SHOW_WITH_DEPS_JSON = `[
     "priority": 2,
     "issue_type": "feature",
     "labels": ["x"],
+    "notes": "root cause already found here",
+    "comments": [
+      { "id": "c1", "issue_id": "tst-1", "author": "someone", "text": "try the fix", "created_at": "2026-09-20T14:02:53Z" }
+    ],
     "dependencies": [
       {
         "id": "tst-abc",
@@ -310,6 +314,27 @@ describe('BeadsTracker', () => {
     )
   })
 
+  test('release is a no-op for an already-closed issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"closed"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
+  })
+
+  test('release unclaims an in-progress issue', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    const unclaim = calls.find((c) => c.includes('unclaim'))
+    expect(unclaim).toBeDefined()
+  })
+
   test('a closed gate reads as resolved', async () => {
     const { exec } = fake(() => ok('[{"id":"tst-77h","title":"g","status":"closed"}]'))
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
@@ -458,6 +483,16 @@ describe('BeadsTracker', () => {
         labels: ['human'],
       },
     ])
+  })
+
+  test('get surfaces notes and comments and asks for them', async () => {
+    const { exec, calls } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
+    const task = await new BeadsTracker({ cwd: '/repo', exec }).get('tst-1')
+
+    expect(task?.notes).toBe('root cause already found here')
+    expect(task?.comments).toEqual(['try the fix'])
+    const show = calls.find((c) => c.includes('show'))
+    expect(show).toContain('--include-comments')
   })
 
   test('eligibleEpics previews only the eligible epics from the dry-run', async () => {

@@ -100,13 +100,13 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     })
   }
 
+  const { commands, format, lint } = config.checks
+  const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+  const total = commands.length + gate.length
   checks.push({
     name: 'checks',
-    ok: config.checks.commands.length > 0,
-    detail:
-      config.checks.commands.length === 0
-        ? 'none configured'
-        : `${config.checks.commands.length} command(s)`,
+    ok: total > 0,
+    detail: total === 0 ? 'none configured' : `${total} step(s)`,
   })
 
   return Promise.resolve(checks)

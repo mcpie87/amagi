@@ -50,18 +50,19 @@ function splitDescription(description: string): {
   howToUse: string | null
   conclusion: string | null
 } {
+  // The regex requires the group, so a matched row always has index and name.
   const headings = [...description.matchAll(SECTION_HEADING)].map((m) => ({
-    index: m.index!,
-    name: m[1]!,
+    index: m.index ?? 0,
+    name: m[1] ?? '',
   }))
   let summary = description.trim()
   let howToUse: string | null = null
   let conclusion: string | null = null
-  for (let i = 0; i < headings.length; i++) {
-    const start = headings[i]!.index
+  for (const [i, heading] of headings.entries()) {
+    const start = heading.index
     const end = headings[i + 1]?.index ?? description.length
     const body = description.slice(start, end).replace(SECTION_HEADING, '').trim()
-    if (headings[i]!.name === 'How to use') howToUse = body === '' ? null : body
+    if (heading.name === 'How to use') howToUse = body === '' ? null : body
     else conclusion = body === '' ? null : body
     if (i === 0) summary = description.slice(0, start).trim()
   }

@@ -114,6 +114,12 @@ export type MentionProgress = {
   tool: string | null
 }
 
+/** The classifier's choice plus its raw reply, for the watcher to record as an event. */
+export type MentionClassified = {
+  kind: MentionKind
+  reply: string
+}
+
 export type RespondToMentionOptions = {
   root: string
   repoName: string
@@ -128,6 +134,8 @@ export type RespondToMentionOptions = {
   makeHarnessFn?: typeof makeHarness
   /** Called with live progress while a response is produced, for a status line. */
   onProgress?: (progress: MentionProgress) => void
+  /** Called once classification settles, with the chosen kind and the raw reply. */
+  onClassified?: (classified: MentionClassified) => void
 }
 
 /**
@@ -241,6 +249,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       baseBranch: opts.config.repo.baseBranch,
       checks: opts.config.checks.commands,
+      conflicted: wt.conflicted,
     }),
     respondToMentionSystemPrompt({
       pr: opts.pr,
@@ -249,6 +258,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       baseBranch: opts.config.repo.baseBranch,
       checks: opts.config.checks.commands,
+      conflicted: wt.conflicted,
     }),
   )
   const outcome = await p.agent(proc, 'fixing in worktree')
@@ -286,6 +296,7 @@ async function respondToExplain(
         mention: opts.mention,
         diff,
         outPath,
+        conflicted: wt.conflicted,
       }),
       explainMentionSystemPrompt(),
     )
@@ -333,7 +344,10 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   if (!outcome.ok) {
     throw new Error(`classifier failed: ${agentFailure(outcome)}`)
   }
-  return parseMentionKind(outcome.summary ?? '')
+  const reply = outcome.summary ?? ''
+  const kind = parseMentionKind(reply)
+  opts.onClassified?.({ kind, reply })
+  return kind
 }
 
 function addTaskTitle(opts: RespondToMentionOptions): string {
@@ -406,6 +420,7 @@ async function respondToTakeDown(
         pr: opts.pr,
         mention: opts.mention,
         outPath,
+        conflicted: wt.conflicted,
       }),
       takeDownSystemPrompt(),
     )
