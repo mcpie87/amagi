@@ -31,7 +31,7 @@ import {
   withRestartHandoff,
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
-import type { Store, TaskRow } from './store/store.ts'
+import type { ProjectedTask, Store } from './store/store.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 export type RunnerDeps = {
@@ -49,7 +49,7 @@ export type RunnerDeps = {
 }
 
 export type RunOnceResult = {
-  task: TaskRow
+  task: ProjectedTask
   state: TaskState
 } | null
 

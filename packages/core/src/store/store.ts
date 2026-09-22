@@ -11,10 +11,6 @@ import {
 export { InvalidTransitionError } from '../project.ts'
 export type { ProjectedQuestion, ProjectedTask, Projection }
 
-/** The SQL projection rows are the very same shape the shared reducer produces. */
-export type TaskRow = ProjectedTask
-export type QuestionRow = ProjectedQuestion
-
 type RawTask = {
   id: string
   title: string
@@ -216,7 +212,7 @@ export class Store {
     return projection
   }
 
-  task(id: string): TaskRow | null {
+  task(id: string): ProjectedTask | null {
     const row = this.db.query('select * from tasks where id = ?').get(id) as RawTask | null
     return row ? toTask(row) : null
   }
@@ -225,7 +221,7 @@ export class Store {
    * `updated_at` is only millisecond resolution, so tasks touched in the same
    * tick need the rowid tie break or the queue view reshuffles between reads.
    */
-  tasks(opts: { states?: readonly TaskState[]; limit?: number } = {}): TaskRow[] {
+  tasks(opts: { states?: readonly TaskState[]; limit?: number } = {}): ProjectedTask[] {
     const limit = opts.limit ?? 200
     const order = 'order by updated_at desc, rowid desc limit ?'
     if (opts.states?.length) {
@@ -313,7 +309,7 @@ export class Store {
     }))
   }
 
-  question(id: string): QuestionRow | null {
+  question(id: string): ProjectedQuestion | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null
   }
@@ -359,7 +355,7 @@ export class Store {
     return token
   }
 
-  openQuestions(taskId?: string): QuestionRow[] {
+  openQuestions(taskId?: string): ProjectedQuestion[] {
     const rows = (
       taskId
         ? this.db
@@ -373,7 +369,7 @@ export class Store {
   }
 
   /** Questions still expecting an answer, including ones whose await poll timed out. */
-  unansweredQuestions(taskId?: string): QuestionRow[] {
+  unansweredQuestions(taskId?: string): ProjectedQuestion[] {
     const rows = (
       taskId
         ? this.db
