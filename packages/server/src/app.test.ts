@@ -1162,6 +1162,13 @@ describe('runner endpoints', () => {
             { label: 'scanned', value: 2 },
             { label: 'responded', value: 1 },
           ],
+          detail: 'scanned 2 PRs, responded to 1 mention(s)',
+          runs: 1,
+          successes: 1,
+          failures: 0,
+          nextRunAt: 1720000300000,
+          intervalMs: 300000,
+          status: 'active',
         },
       ],
     })
@@ -1179,6 +1186,13 @@ describe('runner endpoints', () => {
           { label: 'scanned', value: 2 },
           { label: 'responded', value: 1 },
         ],
+        detail: 'scanned 2 PRs, responded to 1 mention(s)',
+        runs: 1,
+        successes: 1,
+        failures: 0,
+        nextRunAt: 1720000300000,
+        intervalMs: 300000,
+        status: 'active',
       },
     ])
   })

@@ -9,9 +9,9 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
-import { fmtTokens } from '@amagi/core/format'
+import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
-import type { RunnerResource } from '@amagi/core/run-service'
+import type { RunnerResource, WorkerActivity } from '@amagi/core/run-service'
 import {
   activeTasks,
   chatInFlight,
@@ -21,6 +21,8 @@ import {
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
+  runHealth,
+  runHealthNearLimit,
   type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core/view'
@@ -37,6 +39,7 @@ import { Marked } from 'marked'
 import type { FormEvent, ReactNode } from 'react'
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -109,12 +112,12 @@ function CommandPalette() {
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const open = () => {
+  const open = useCallback(() => {
     setQuery('')
     setIndex(0)
     dialogRef.current?.showModal()
     inputRef.current?.focus()
-  }
+  }, [])
   const close = () => dialogRef.current?.close()
 
   useEffect(() => {
@@ -126,7 +129,7 @@ function CommandPalette() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [open])
 
   const q = query.trim().toLowerCase()
   const taskMatches =
@@ -506,7 +509,7 @@ function RootLayout() {
   const firstRender = useRef(true)
 
   const openNav = () => setNavOpen(true)
-  const closeNav = () => setNavOpen(false)
+  const closeNav = useCallback(() => setNavOpen(false), [])
 
   // Move focus into the open navigation (and back to its trigger on close)
   // only after the DOM has committed the is-open state and the inert flag has
@@ -527,7 +530,7 @@ function RootLayout() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navOpen])
+  }, [navOpen, closeNav])
 
   return (
     <RunnerProvider>
@@ -931,6 +934,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     if (repoRef.current !== selected) {
       repoRef.current = selected
       setIssues([])
@@ -953,6 +957,7 @@ function IssuesView() {
 
   useEffect(() => {
     if (selected === null) return
+    void refresh
     fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
@@ -1425,6 +1430,8 @@ function WorkerSlot({
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
   const usage = currentUsageFor(state, taskId)
+  const health = runHealth(state, taskId, now)
+  const nearLimit = runHealthNearLimit(health)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1434,6 +1441,14 @@ function WorkerSlot({
           </span>
         )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
+        {nearLimit && (
+          <span
+            className="shrink-0 rounded bg-amber-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-ink ring-1 ring-inset ring-amber-edge"
+            title={health.warnings.join('\n') || 'run is nearing a guard limit'}
+          >
+            near limit
+          </span>
+        )}
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
@@ -1460,6 +1475,132 @@ function WorkerSlot({
       </div>
       {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
     </div>
+  )
+}
+
+/**
+ * Detail view for one background watcher (mention / pr-conflict / stall),
+ * opened by clicking its slot in the Workers section. The watcher is looked
+ * up live from the polled runner status, so the open dialog stays current.
+ */
+function WatcherDetailDialog({
+  selected,
+  workers,
+  onClose,
+}: {
+  selected: string | null
+  workers: WorkerActivity[]
+  onClose: () => void
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const open = selected !== null
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog === null) return
+    if (open) dialog.showModal()
+    else if (dialog.open) dialog.close()
+  }, [open])
+  if (selected === null) return null
+  const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
+  const statusPill =
+    watcher === null
+      ? PILL
+      : watcher.status === 'active'
+        ? `${PILL} bg-teal-soft text-teal-ink ring-teal-edge`
+        : watcher.status === 'idle'
+          ? `${PILL} bg-raised text-fg-muted ring-line`
+          : `${PILL} bg-red-soft text-red-ink ring-red-edge`
+  return (
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="watcher-dialog"
+    >
+      {watcher === null ? (
+        <p className="px-4 py-6 text-sm text-fg-faint">watcher no longer running</p>
+      ) : (
+        <div className="p-4">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>
+              {watcher.name}
+            </span>
+            <span className="font-medium text-fg">{watcher.repo}</span>
+            <span className={statusPill}>{watcher.status}</span>
+            {watcher.ok ? (
+              <span className="text-xs text-emerald-ink">last tick ok</span>
+            ) : (
+              <span className="text-xs text-red-ink">last tick failed</span>
+            )}
+          </div>
+          {watcher.detail !== null && watcher.detail !== undefined && (
+            <p className="mt-3 text-sm text-fg">{watcher.detail}</p>
+          )}
+          {watcher.error !== null && (
+            <p className="mt-1 break-words rounded border border-red-edge bg-red-soft px-2 py-1 text-xs text-red-ink">
+              {watcher.error}
+            </p>
+          )}
+          <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+              <dt className="text-xs text-fg-faint">Last run</dt>
+              <dd className="mt-0.5 text-fg">
+                {watcher.lastRunAt > 0 ? fmtLastRun(watcher.lastRunAt) : 'never'}
+              </dd>
+              {watcher.lastRunAt > 0 && (
+                <dd className="text-xs tabular-nums text-fg-faint">
+                  {new Date(watcher.lastRunAt).toLocaleString()}
+                </dd>
+              )}
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Next run</dt>
+              <dd className="mt-0.5 text-fg">
+                {watcher.status === 'off'
+                  ? 'stopped'
+                  : watcher.nextRunAt > 0
+                    ? fmtUntil(watcher.nextRunAt)
+                    : 'waiting for the first tick'}
+              </dd>
+              <dd className="text-xs text-fg-faint">every {fmtInterval(watcher.intervalMs)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Total runs</dt>
+              <dd className="mt-0.5 tabular-nums text-fg">{watcher.runs}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-fg-faint">Success / failure</dt>
+              <dd className="mt-0.5 tabular-nums text-fg">
+                {watcher.successes} / {watcher.failures}
+              </dd>
+            </div>
+          </dl>
+          {watcher.counters.length > 0 && (
+            <div className="mt-4">
+              <dt className="text-xs text-fg-faint">What it did</dt>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {watcher.counters.map((c) => (
+                  <span key={c.label} className={`${PILL} bg-raised text-fg-muted ring-line`}>
+                    {c.label} {c.value}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </dialog>
   )
 }
 
@@ -1534,6 +1675,7 @@ function WorkersPanel() {
   const { status } = useRunner()
   const { state, selected } = useDashboard()
   const [now, setNow] = useState(() => Date.now())
+  const [watcherOpen, setWatcherOpen] = useState<string | null>(null)
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
@@ -1570,6 +1712,7 @@ function WorkersPanel() {
       <div className="space-y-2">
         {Array.from({ length: status.capacity }, (_, i) => (
           <WorkerSlot
+            // biome-ignore lint/suspicious/noArrayIndexKey: slots are fixed positions, the index is their identity
             key={i}
             taskId={running[i] ?? null}
             startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
@@ -1583,9 +1726,12 @@ function WorkersPanel() {
       {status.workers !== undefined && status.workers.length > 0 && (
         <div className="mt-2 space-y-2">
           {status.workers.map((w) => (
-            <div
+            <button
               key={`${w.repo}/${w.name}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-xs text-fg-muted"
+              type="button"
+              onClick={() => setWatcherOpen(`${w.repo}/${w.name}`)}
+              title="open watcher detail"
+              className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface/60 px-4 py-2 text-left text-xs text-fg-muted hover:bg-raised"
             >
               <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>{w.name}</span>
               <span className="font-medium text-fg">{w.repo}</span>
@@ -1599,9 +1745,17 @@ function WorkersPanel() {
               ) : (
                 <span className="text-red-ink">error: {w.error}</span>
               )}
-            </div>
+              <span className="ml-auto text-fg-faint">details ›</span>
+            </button>
           ))}
         </div>
+      )}
+      {status.workers !== undefined && (
+        <WatcherDetailDialog
+          selected={watcherOpen}
+          workers={status.workers}
+          onClose={() => setWatcherOpen(null)}
+        />
       )}
     </section>
   )
@@ -1911,7 +2065,7 @@ function DetailRow({ label, value }: { label: string; value: string | ReactNode 
   return (
     <div className="flex gap-2 py-1">
       <dt className="w-28 shrink-0 text-fg-faint">{label}</dt>
-      <dd className="min-w-0 break-all">{value}</dd>
+      <dd className="min-w-0 break-all whitespace-pre-wrap">{value}</dd>
     </div>
   )
 }
@@ -2628,6 +2782,25 @@ function fmtLastRun(epochMs: number): string {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
 }
 
+/** Compact "in x" for a worker's next scheduled tick. */
+function fmtUntil(epochMs: number): string {
+  const s = Math.floor((epochMs - Date.now()) / 1000)
+  if (s <= 0) return 'due now'
+  if (s < 60) return `in ${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `in ${m}m`
+  return `in ${Math.floor(m / 60)}h`
+}
+
+/** Human tick cadence, e.g. 5m for the default watcher interval. */
+function fmtInterval(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m}m`
+  return `${Math.round(m / 60)}h`
+}
+
 function fmtAgo(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000)
   if (s < 10) return 'just now'
@@ -2663,6 +2836,9 @@ const escapeHtml = (s: string) =>
 
 // Raw HTML from the agent is escaped, not rendered, so a prompt-injected tag cannot run.
 const markdown = new Marked({
+  // Keep single newlines (soft breaks) as line breaks: the LLM-authored
+  // summary/reason text is multi-line and must not flatten into one line.
+  breaks: true,
   renderer: {
     html({ text }) {
       return escapeHtml(text)
@@ -2672,6 +2848,7 @@ const markdown = new Marked({
 
 function Markdown({ text }: { text: string }) {
   return (
+    // biome-ignore lint/security/noDangerouslySetInnerHtml: the Marked renderer escapes raw HTML
     <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: markdown.parse(text) }} />
   )
 }
@@ -2681,6 +2858,9 @@ function Markdown({ text }: { text: string }) {
  * criteria, priority, type, assignee, labels, parent, dependencies - fetched
  * on first expand and kept for the session.
  */
+/** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
+const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
+
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
   const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
@@ -2722,7 +2902,11 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
             <dl className="rounded-lg border border-line bg-surface px-4 py-3">
               <DetailRow
                 label="priority"
-                value={issue.priority === null ? null : `P${issue.priority}`}
+                value={
+                  issue.priority === null
+                    ? null
+                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+                }
               />
               <DetailRow label="type" value={issue.type} />
               <DetailRow label="assignee" value={issue.assignee} />
@@ -2791,7 +2975,7 @@ function RetryPanel({ task }: { task: TaskView }) {
         No human action is needed; use Retry now to skip the wait, or Close to abandon.
       </p>
       {task.lastError !== null && (
-        <p className="mt-1 text-sm text-fg-muted">
+        <p className="mt-1 whitespace-pre-wrap text-sm text-fg-muted">
           Reason: {task.lastError.replace(/^agent failed:\s*/, '')}
         </p>
       )}
@@ -2893,6 +3077,12 @@ function TaskDetailView() {
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const [tab, setTab] = useState<DetailTab>('log')
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const health = runHealth(state, id, now)
   const usageEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
@@ -2991,6 +3181,34 @@ function TaskDetailView() {
         <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
         <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
+        <DetailRow
+          label="context"
+          value={
+            health.contextTokens === null
+              ? 'no usage reported yet'
+              : health.contextWarnTokens === null
+                ? fmtTokens(health.contextTokens)
+                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn · ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+          }
+        />
+        <DetailRow
+          label="cost"
+          value={
+            !health.costSeen
+              ? 'not reported by harness'
+              : health.maxCostUsd > 0
+                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                : `$${health.costUsd.toFixed(2)}`
+          }
+        />
+        <DetailRow
+          label="elapsed"
+          value={
+            health.maxRunMs === null
+              ? fmtDuration(health.elapsedMs)
+              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+          }
+        />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow
@@ -3013,6 +3231,22 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      {health.warnings.length > 0 && (
+        <div className="mt-4 rounded-lg border border-amber-edge bg-amber-soft px-4 py-3">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
+            Guard warnings
+          </h2>
+          <ul className="space-y-1">
+            {health.warnings.map((w, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
+              <li key={i} className="font-mono text-xs text-fg">
+                {w}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
@@ -3344,6 +3578,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           ts: event.ts,
           taskId: event.taskId,
           text: `retry #${event.attempt} in ${(event.delayMs / 1000).toFixed(0)}s`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
+      case 'run.restarted':
+        items.push({
+          key: `rr${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `context restart #${event.restart} (peak ${fmtTokens(event.contextTokens)})`,
           icon: 'refresh',
           tone: 'amber',
         })

@@ -150,11 +150,18 @@ export const Config = z.object({
       contextWarnTokens: z.number().int().min(0).default(160_000),
       /**
        * Input context at which a run is stopped: crossing it kills the current
-       * agent process and routes the task to needs_human instead of letting the
-       * harness degrade. Defaults to the claude 200k window; harnesses with a
-       * different window override it via `contextOverrides`.
+       * agent process and restarts it with a fresh session instead of letting
+       * the harness degrade. Defaults to the claude 200k window; harnesses with
+       * a different window override it via `contextOverrides`.
        */
       contextMaxTokens: z.number().int().min(0).default(200_000),
+      /**
+       * How many fresh-context restarts a task gets after a run trips the hard
+       * context limit, before escalating to needs_human. Each restart reuses
+       * the worktree and claim and hands the new session a synthesized handoff
+       * of what was done so far. 0 keeps the historical hard-kill behavior.
+       */
+      contextMaxRestarts: z.number().int().min(0).default(1),
       /**
        * Per-harness context budget overrides, keyed by harness kind
        * (claude/codex/opencode), since context windows differ between them.
@@ -194,7 +201,18 @@ export const Config = z.object({
       maxCostUsd: z.number().min(0).default(0),
     })
     .prefault({}),
-  checks: z.object({ commands: z.array(z.string()).default([]) }).prefault({}),
+  checks: z
+    .object({
+      commands: z.array(z.string()).default([]),
+      /**
+       * Mandatory pre-commit gate, run before `commands`: the auto-fix formatter
+       * (writes the worktree) and the read-only lint check. Null disables a
+       * step; both default on so a PR can never be pushed unformatted.
+       */
+      format: z.string().nullable().default('just fmt'),
+      lint: z.string().nullable().default('just lint'),
+    })
+    .prefault({}),
   difficulty: DifficultyConfig.prefault({}),
   notify: z
     .object({

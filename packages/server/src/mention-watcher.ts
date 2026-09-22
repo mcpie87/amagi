@@ -13,6 +13,7 @@ import {
   readHandledMentions,
   readMentionWatch,
   respondToMention,
+  type Store,
   saveHandledMentions,
   saveMentionWatch,
   type Tracker,
@@ -28,6 +29,8 @@ export type MentionWatcherOptions = {
   config: Config
   driver: PrDriver
   tracker: Tracker
+  /** Event store to record classification outcomes, so a misparse is diagnosable later. */
+  store?: Store
   intervalMs?: number
   /** Test seams, forwarded to the mention responder. */
   exec?: Exec
@@ -61,6 +64,7 @@ export function startMentionWatcher({
   config,
   driver,
   tracker,
+  store,
   intervalMs = DEFAULT_INTERVAL_MS,
   exec,
   makeHarnessFn,
@@ -68,6 +72,8 @@ export function startMentionWatcher({
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let scanned = 0
   let responded = 0
+  let runs = 0
+  let failures = 0
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'responded', value: responded },
@@ -79,10 +85,31 @@ export function startMentionWatcher({
     ok: true,
     error: null,
     counters: counters(),
+    detail: 'waiting for the first scan',
+    runs: 0,
+    successes: 0,
+    failures: 0,
+    nextRunAt: 0,
+    intervalMs,
+    status: 'idle',
   }
 
   const { stop } = startPoller(intervalMs, async () => {
-    const next: WorkerActivity = { ...activity, lastRunAt: Date.now(), ok: true, error: null }
+    runs++
+    const next: WorkerActivity = {
+      ...activity,
+      lastRunAt: Date.now(),
+      ok: true,
+      error: null,
+      runs,
+      successes: runs - failures,
+      failures,
+      nextRunAt: Date.now() + intervalMs,
+      intervalMs,
+      status: 'active',
+    }
+    let scannedNow = 0
+    let respondedNow = 0
     try {
       const handledPath = mentionsPath(repoName)
       const watchPath = mentionWatchPath(repoName)
@@ -105,6 +132,7 @@ export function startMentionWatcher({
           continue
         }
         scanned++
+        scannedNow++
         const mentions = comments.filter(
           (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
         )
@@ -121,10 +149,22 @@ export function startMentionWatcher({
               tracker,
               ...(exec === undefined ? {} : { exec }),
               ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+              ...(store === undefined
+                ? {}
+                : {
+                    onClassified: (c) =>
+                      store.append(null, {
+                        type: 'mention.classified',
+                        prNumber: pr.number,
+                        mentionId: mention.id,
+                        ...c,
+                      }),
+                  }),
             })
             handled.add(mention.id)
             saveHandledMentions(handledPath, handled)
             responded++
+            respondedNow++
           } catch (err) {
             allOk = false
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
@@ -134,9 +174,14 @@ export function startMentionWatcher({
       }
       // Dropping closed PRs from the state keeps the file bounded.
       saveMentionWatch(watchPath, nextState)
+      next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s)`
     } catch (err) {
+      failures++
       next.ok = false
       next.error = errMsg(err)
+      next.failures = failures
+      next.successes = runs - failures
+      next.detail = 'scan failed'
       console.warn(`mention watch: ${next.error}`)
     }
     next.counters = counters()
@@ -144,7 +189,10 @@ export function startMentionWatcher({
   })
 
   return {
-    stop,
+    stop() {
+      stop()
+      activity = { ...activity, status: 'off', nextRunAt: 0 }
+    },
     activity: () => activity,
   }
 }

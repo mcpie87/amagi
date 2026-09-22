@@ -24,6 +24,7 @@ import {
   prTitle,
   reclaimPrompt,
   whyNoChangesPrompt,
+  withRestartHandoff,
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { Store, TaskRow } from './store/store.ts'
@@ -216,6 +217,8 @@ export class Runner {
   private peakContext = 0
   /** Whether the soft context limit has been flagged for the current task run. */
   private contextWarned = false
+  /** Fresh-context restarts already spent on the current task run, across all phases. */
+  private contextRestarts = 0
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -282,6 +285,7 @@ export class Runner {
     const { store } = this.deps
     this.peakContext = 0
     this.contextWarned = false
+    this.contextRestarts = 0
     store.append(task.id, {
       type: 'task.claimed',
       title: task.title,
@@ -293,6 +297,14 @@ export class Runner {
       ...(task.difficulty === undefined || task.difficulty === null
         ? {}
         : { difficulty: task.difficulty }),
+    })
+    const { warnTokens, maxTokens } = this.contextLimits()
+    store.append(task.id, {
+      type: 'run.limits',
+      contextWarnTokens: warnTokens,
+      contextMaxTokens: maxTokens,
+      maxRunMs: this.deps.config.loop.maxRunMinutes * 60_000,
+      maxCostUsd: this.deps.config.loop.maxCostUsd,
     })
 
     try {
@@ -444,7 +456,21 @@ export class Runner {
     resume = false,
   ): Promise<void> {
     const { store, config } = this.deps
-    const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
+    // The claimed task is a lite ready row without notes or comments; re-read the
+    // full issue so the agent sees the tracker context (and never needs bd inside
+    // the worktree, where it has no database). Best effort, like the PR-body re-read.
+    let currentTask = task
+    try {
+      currentTask = (await this.deps.tracker.get(task.id)) ?? task
+    } catch {
+      currentTask = task
+    }
+    const promptCtx = {
+      task: currentTask,
+      worktree: cwd,
+      branch,
+      askCommand: 'amagi ask "<question>"',
+    }
 
     this.throwIfCancelled(task.id)
     this.throwIfBudgetExhausted(task.id, budget)
@@ -531,7 +557,7 @@ export class Runner {
           current.sessionId,
           {
             cwd,
-            prompt: whyNoChangesPrompt(task),
+            prompt: whyNoChangesPrompt(currentTask),
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
@@ -542,12 +568,14 @@ export class Runner {
         if (why.stopped) return
         reason = why.summary?.trim() !== '' ? why.summary : null
       }
+      // No changes AND no agent-written explanation: never read as "already done".
       this.transition(
         task.id,
         'no_pr',
         reason ??
-          'the agent produced no changes; the task may already be done or need no PR — ' +
-            'verify and close it explicitly, it will not be closed automatically',
+          'the agent produced no changes and wrote no summary explaining why; treat ' +
+            'this as unverified rather than done — investigate before closing, it will ' +
+            'not be closed automatically',
       )
       return
     }
@@ -872,6 +900,37 @@ export class Runner {
   }
 
   /**
+   * Synthesizes a short handoff of what a killed session did, for the fresh
+   * session replacing it: the last thing the agent reported (text or result
+   * summary) plus the files its work left in the worktree. The new session
+   * reads this instead of the dead session's context, so it can pick up the
+   * work without redoing it.
+   */
+  private async handoffSummary(taskId: string, cwd: string): Promise<string> {
+    const lines: string[] = []
+    const events = this.deps.store.recentEvents(taskId, 200)
+    for (const event of events.slice().reverse()) {
+      if (event.type !== 'agent.stream') continue
+      if (event.event.kind === 'text' && event.event.text.trim() !== '') {
+        lines.push(`Last reported by the agent: ${event.event.text.trim()}`)
+        break
+      }
+      if (event.event.kind === 'result' && event.event.summary?.trim()) {
+        lines.push(`Reported by the agent: ${event.event.summary.trim()}`)
+        break
+      }
+    }
+    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
+    const dirty = status.stdout.trim()
+    lines.push(
+      dirty === ''
+        ? 'No uncommitted changes in the worktree.'
+        : `Files changed in the worktree:\n${dirty}`,
+    )
+    return lines.join('\n\n')
+  }
+
+  /**
    * Runs the agent, retrying transient failures (quota, rate limit, overloaded
    * model, flaky network) with an exponential backoff until the budget is
    * spent. The task sits in `retrying` between attempts so a crashed run is
@@ -891,9 +950,10 @@ export class Runner {
     let summary: string | null = null
     let model: string | null = null
     let effort: string | null = null
+    let runOpts = opts
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, opts, phase, budget)
+      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
       summary = run.summary
@@ -901,14 +961,33 @@ export class Runner {
       effort = run.effort
       if (run.contextExceeded) {
         // Checked before ok: a hard kill must stop the run even when the
-        // process happens to report a clean exit. Restarting fresh-context is
-        // am-672.4; for now the run stops and the operator resumes it.
-        this.transition(
-          taskId,
-          'needs_human',
-          `context budget exceeded: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
-        )
-        return { sessionId, stopped: true, summary, model, effort }
+        // process happens to report a clean exit.
+        if (this.contextRestarts >= config.loop.contextMaxRestarts) {
+          this.transition(
+            taskId,
+            'needs_human',
+            `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+          )
+          return { sessionId, stopped: true, summary, model, effort }
+        }
+        // Fresh-context restart: keep the worktree and claim, and hand the new
+        // session a synthesized handoff of what the killed one did so the
+        // work already in the worktree is not redone.
+        this.contextRestarts++
+        const handoff = await this.handoffSummary(taskId, runOpts.cwd)
+        store.append(taskId, {
+          type: 'run.restarted',
+          phase,
+          restart: this.contextRestarts,
+          contextTokens: this.peakContext,
+          summary: handoff,
+        })
+        sessionId = null
+        this.peakContext = 0
+        this.contextWarned = false
+        runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
+        this.transition(taskId, 'implementing')
+        continue
       }
       if (run.ok) return { sessionId, stopped: false, summary, model, effort }
       if (lease.isLost) throw new LeaseLostError(taskId)
@@ -945,7 +1024,11 @@ export class Runner {
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
     const results: CheckResult[] = []
-    for (const command of this.deps.config.checks.commands) {
+    const { format, lint, commands } = this.deps.config.checks
+    // The mandatory gate always runs before the configured commands, so a PR
+    // cannot be pushed until the worktree is formatted and lint-clean.
+    const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+    for (const command of [...gate, ...commands]) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,

@@ -20,6 +20,7 @@ import type { Exec, ExecResult } from './exec.ts'
 import {
   isAgentMention,
   listPrMentions,
+  type MentionClassified,
   type MentionProgress,
   mentionsPath,
   mentionWatchPath,
@@ -208,7 +209,7 @@ function fakeHarness(
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
   })
 
 describe('parseMentionKind', () => {
@@ -591,5 +592,46 @@ describe('respondToMention progress', () => {
       expect(p.phaseMs).toBeGreaterThanOrEqual(0)
       expect(p.totalMs).toBeGreaterThanOrEqual(p.phaseMs)
     }
+  })
+
+  test('reports the chosen kind and the raw classifier reply', async () => {
+    const reply = "Hmm, I'd say this is ambiguous, please clarify"
+    const proc = {
+      pid: -1,
+      events: async function* () {},
+      done: Promise.resolve({
+        exitCode: 0,
+        ok: true,
+        sessionId: null,
+        summary: reply,
+        usage: null,
+        stderr: '',
+      } satisfies AgentOutcome),
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const driver = new FakeDriver()
+    const classified: MentionClassified[] = []
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '9', user: 'bob', body: 'what should I do with this?' },
+      config: config(),
+      driver,
+      exec: fake((c) => (c.includes('rev-parse') ? fail('') : undefined)).exec,
+      makeHarnessFn: () => ({
+        kind: 'fake',
+        start: () => proc,
+        resume: () => proc,
+        listModels: async () => [],
+        listEfforts: async () => [],
+      }),
+      onClassified: (c) => classified.push(c),
+    })
+
+    expect(kind).toBe('ambiguous')
+    expect(classified).toEqual([{ kind: 'ambiguous', reply }])
   })
 })

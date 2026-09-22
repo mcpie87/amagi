@@ -200,7 +200,7 @@ let store: Store
 const config = (over: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    checks: { commands: [] },
+    checks: { commands: [], format: null, lint: null },
     ...over,
   })
 

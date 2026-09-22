@@ -47,6 +47,7 @@ export function AgentLogView({ repo, taskId }: { repo: string; taskId: string })
   })
 
   useEffect(() => {
+    void buffer.version
     if (!stickToBottom.current || buffer.length === 0) return
     rowVirtualizer.scrollToIndex(buffer.length - 1, { align: 'end' })
   }, [buffer.version, buffer.length, rowVirtualizer])

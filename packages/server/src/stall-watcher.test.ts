@@ -90,6 +90,11 @@ test('recovers a stalled implementing task, keeping its worktree, and reports it
   expect(task?.statusReason).toContain('recovered by stall watcher')
   expect(watcher.activity().detail).toBe('recovered 1 stalled task')
   expect(watcher.activity().ok).toBe(true)
+  expect(watcher.activity().runs).toBeGreaterThanOrEqual(1)
+  expect(watcher.activity().successes).toBe(watcher.activity().runs)
+  expect(watcher.activity().failures).toBe(0)
+  expect(watcher.activity().status).toBe('active')
+  expect(watcher.activity().nextRunAt).toBeGreaterThan(watcher.activity().lastRunAt)
 })
 
 test('a task with a fresh worker heartbeat is left alone', async () => {

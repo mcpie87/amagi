@@ -221,11 +221,12 @@ let repo: string
 let wtRoot: string
 let store: Store
 
-const config = (over: Record<string, unknown> = {}) =>
+const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    checks: { commands: [] },
-    ...over,
+    // No formatter/lint tooling in the fake worktrees, so the mandatory gate is off.
+    checks: { commands: [], format: null, lint: null, ...(checks as Record<string, unknown>) },
+    ...rest,
   })
 
 const makeRunner = (
@@ -379,6 +380,7 @@ describe('Runner.runOnce', () => {
     expect(result?.state).toBe('pr_open')
     expect(types(TASK.id)).toEqual([
       'task.claimed',
+      'run.limits',
       'worktree.created',
       'task.state',
       'task.state',
@@ -553,6 +555,23 @@ describe('Runner.runOnce', () => {
     expect(log).toContain('Add a greeting file')
     const mainLog = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: repo })
     expect(mainLog).toContain('init')
+  })
+
+  test('the implement prompt embeds the re-fetched notes and comments', async () => {
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = {
+      ...TASK,
+      notes: 'root cause: biome EPIPE panic when piped through head/tail',
+      comments: ['land the prompt rule'],
+    }
+    const harness = new FakeHarness([writesAFile])
+    await makeRunner(tracker, harness).runOnce()
+
+    expect(harness.calls[0]?.prompt).toContain('Issue notes:')
+    expect(harness.calls[0]?.prompt).toContain(
+      'root cause: biome EPIPE panic when piped through head/tail',
+    )
+    expect(harness.calls[0]?.prompt).toContain('- land the prompt rule')
   })
 
   test('an agent that changes nothing lands in no_pr with its summary as the reason', async () => {
@@ -781,6 +800,33 @@ describe('Runner.runOnce', () => {
 
     const finished = store.events({ taskId: TASK.id }).find((e) => e.type === 'checks.finished')
     expect(finished?.type === 'checks.finished' && finished.results).toHaveLength(1)
+  })
+
+  test('the mandatory format+lint gate runs first and a failing lint is handed back to the agent', async () => {
+    const harness = new FakeHarness([
+      { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n') },
+      { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'good\n') },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        checks: {
+          commands: ['grep -q good flag'],
+          format: 'touch formatted',
+          lint: 'grep -q good flag',
+        },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    // format ran first, so its side effect is in the committed worktree
+    const wt = store.task(TASK.id)?.worktree
+    expect(wt !== undefined && wt !== null && existsSync(join(wt, 'formatted'))).toBe(true)
+    // the failing lint was handed back to the same session to fix in place
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('grep -q good flag')
+    expect(harness.calls[1]?.prompt).toContain('checks failed')
   })
 
   test('a crashing agent still leaves an auditable trail', async () => {
@@ -1206,18 +1252,41 @@ describe('Runner context budget', () => {
     expect(peaks).toEqual([100_000, 150_000, 180_000])
   })
 
-  test('crossing the hard limit kills the agent and routes the task to needs_human', async () => {
-    const harness = new FakeHarness([{ ...writesAFile, events: [usage(190_000, 15_000)] }])
+  test('crossing the hard limit kills the agent, restarts it fresh with a handoff, and continues', async () => {
+    const harness = new FakeHarness([
+      { ...writesAFile, events: [usage(190_000, 15_000)] },
+      { effect: (cwd) => writeFileSync(join(cwd, 'second.txt'), 'hi\n') },
+    ])
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
       config({ loop: { contextWarnTokens: 150_000, contextMaxTokens: 200_000 } }),
     ).runOnce()
 
-    expect(result?.state).toBe('needs_human')
-    expect(store.task(TASK.id)?.state).toBe('needs_human')
+    // The restarted session finishes the task; the worktree and claim are reused.
+    expect(result?.state).toBe('pr_open')
     expect(harness.kills).toBe(1)
-    expect(harness.calls).toHaveLength(1)
+    expect(harness.calls).toHaveLength(2)
+    // The restart runs a fresh session (no resume) with the handoff as context.
+    expect(harness.calls[1]?.resumeFrom).toBeNull()
+    expect(harness.calls[1]?.prompt).toContain('context budget')
+    expect(harness.calls[1]?.prompt).toContain('Files changed in the worktree')
+    expect(harness.calls[1]?.prompt).toContain('hello.txt')
+    expect(harness.calls[1]?.cwd).toBe(harness.calls[0]?.cwd)
+    // One worktree for the whole run; the killed session's file survives.
+    expect(
+      store.events({ taskId: TASK.id }).filter((e) => e.type === 'worktree.created'),
+    ).toHaveLength(1)
+    expect(existsSync(join(harness.calls[0]?.cwd ?? '', 'hello.txt'))).toBe(true)
+    const restarted = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'run.restarted' }> => e.type === 'run.restarted',
+      )
+    expect(restarted).toHaveLength(1)
+    expect(restarted[0]?.restart).toBe(1)
+    expect(restarted[0]?.contextTokens).toBe(205_000)
+    expect(restarted[0]?.summary).toContain('hello.txt')
     const exceeded = store
       .events({ taskId: TASK.id })
       .filter(
@@ -1228,10 +1297,53 @@ describe('Runner context budget', () => {
     expect(exceeded[0]?.contextTokens).toBe(205_000)
     expect(exceeded[0]?.limit).toBe(200_000)
     expect(types(TASK.id)).toContain('context.warn')
-    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('needs_human')
     // A guard kill is a deliberate stop, not an agent failure: no error event.
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(errors.some((e) => e.type === 'error' && e.message.includes('agent failed'))).toBe(false)
+  })
+
+  test('the restart budget is spent across phases and escalates to needs_human when exhausted', async () => {
+    const crossing = { ...writesAFile, events: [usage(190_000, 15_000)] }
+    const harness = new FakeHarness([crossing, crossing])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        loop: { contextWarnTokens: 150_000, contextMaxTokens: 200_000, contextMaxRestarts: 1 },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(store.task(TASK.id)?.state).toBe('needs_human')
+    expect(harness.kills).toBe(2)
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBeNull()
+    const restarted = store
+      .events({ taskId: TASK.id })
+      .filter(
+        (e): e is Extract<StoredEvent, { type: 'run.restarted' }> => e.type === 'run.restarted',
+      )
+    expect(restarted).toHaveLength(1)
+    const reason = stateReason(TASK.id)
+    expect(reason).toContain('context budget exceeded after 1 restart')
+    expect(reason).toContain('limit 200000')
+  })
+
+  test('contextMaxRestarts 0 keeps the historical hard-kill to needs_human', async () => {
+    const harness = new FakeHarness([{ ...writesAFile, events: [usage(190_000, 15_000)] }])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        loop: { contextWarnTokens: 150_000, contextMaxTokens: 200_000, contextMaxRestarts: 0 },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.kills).toBe(1)
+    expect(harness.calls).toHaveLength(1)
+    expect(types(TASK.id)).not.toContain('run.restarted')
   })
 
   test('per-harness overrides win over the loop defaults', async () => {
@@ -1245,6 +1357,7 @@ describe('Runner context budget', () => {
           // codex override can trip the guard here.
           contextWarnTokens: 1_000_000,
           contextMaxTokens: 1_000_000,
+          contextMaxRestarts: 0,
           contextOverrides: { codex: { warnTokens: 150_000, maxTokens: 170_000 } },
         },
       }),
@@ -1260,6 +1373,36 @@ describe('Runner context budget', () => {
       )
     expect(exceeded).toHaveLength(1)
     expect(exceeded[0]?.limit).toBe(170_000)
+  })
+
+  test('claiming a task records the effective run limits up front', async () => {
+    const harness = new FakeHarness([writesAFile], 'codex')
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        loop: {
+          contextWarnTokens: 160_000,
+          contextMaxTokens: 200_000,
+          contextOverrides: { codex: { warnTokens: 120_000, maxTokens: 140_000 } },
+          maxRunMinutes: 45,
+          maxCostUsd: 3,
+        },
+      }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    const limits = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'run.limits' }> => e.type === 'run.limits')
+    expect(limits).toHaveLength(1)
+    // Per-harness overrides win over the loop defaults; budgets come from loop.
+    expect(limits[0]).toMatchObject({
+      contextWarnTokens: 120_000,
+      contextMaxTokens: 140_000,
+      maxRunMs: 45 * 60_000,
+      maxCostUsd: 3,
+    })
   })
 })
 
