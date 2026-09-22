@@ -39,6 +39,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeStateStatus: 'DIRTY',
   headRefOid: 'deadbeef',
   updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -71,7 +72,7 @@ describe('listOpenPrs', () => {
       c.includes('list') && c.includes('pr')
         ? ok(
             JSON.stringify([
-              pr(),
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/bug' }] },
               pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
             ]),
           )
@@ -86,10 +87,13 @@ describe('listOpenPrs', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+    // gh reports labels as objects; listOpenPrs reduces them to names
+    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/bug'])
+    expect(prs[1]?.labels).toEqual([])
   })
 })
 

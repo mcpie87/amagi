@@ -219,12 +219,33 @@ export function useReadyQueue(): TrackerTask[] {
 
 export type RunnerApi = {
   status: RunnerStatus | null
-  start: (taskId?: string) => Promise<{ ok: true; taskId: string } | { ok: false; error?: string }>
+  /** Choices for the Run next picker, or null before the first fetch. */
+  options: RunOptionsInfo | null
+  start: (
+    taskId?: string,
+    opts?: RunOptions,
+  ) => Promise<{ ok: true; taskId: string } | { ok: false; error?: string }>
   stop: (taskId: string) => Promise<{ ok: boolean; error?: string }>
+}
+
+/** Per-launch overrides, matching RunBody. Omitted fields use config defaults. */
+export type RunOptions = {
+  harness?: string
+  model?: string
+  effort?: string
+}
+
+export type RunOptionsInfo = {
+  harnesses: { name: string; kind: string; model?: string; effort?: string }[]
+  models: Record<string, string[]>
+  efforts: Record<string, string[]>
+  /** The configured default harness (config.harness.implement), for labeling. */
+  default: { kind: string; model?: string; effort?: string } | null
 }
 
 const RunnerContext = createContext<RunnerApi>({
   status: null,
+  options: null,
   start: async () => ({ ok: false }),
   stop: async () => ({ ok: false }),
 })
@@ -234,6 +255,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   const base = (import.meta.env.VITE_API_BASE ?? '') as string
   const { resyncStream } = useContext(ReposContext)
   const [status, setStatus] = useState<RunnerStatus | null>(null)
+  const [options, setOptions] = useState<RunOptionsInfo | null>(null)
 
   const refresh = () => {
     fetch(`${base}/api/runner`)
@@ -244,18 +266,28 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     refresh()
+    fetch(`${base}/api/runner/options`)
+      .then((r) => (r.ok ? (r.json() as Promise<RunOptionsInfo>) : null))
+      .then(setOptions)
+      .catch(() => setOptions(null))
     const timer = setInterval(refresh, 4000)
     return () => clearInterval(timer)
   }, [base])
 
   const start = async (
     taskId?: string,
+    opts?: RunOptions,
   ): Promise<{ ok: true; taskId: string } | { ok: false; error?: string }> => {
     try {
       const res = await fetch(`${base}/api/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(taskId === undefined ? {} : { taskId }),
+        body: JSON.stringify({
+          ...(taskId === undefined ? {} : { taskId }),
+          ...(opts?.harness === undefined ? {} : { harness: opts.harness }),
+          ...(opts?.model === undefined ? {} : { model: opts.model }),
+          ...(opts?.effort === undefined ? {} : { effort: opts.effort }),
+        }),
       })
       refresh()
       // The launch lands in the store only after this request; if the event
@@ -286,7 +318,11 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  return <RunnerContext.Provider value={{ status, start, stop }}>{children}</RunnerContext.Provider>
+  return (
+    <RunnerContext.Provider value={{ status, options, start, stop }}>
+      {children}
+    </RunnerContext.Provider>
+  )
 }
 
 export function useRunner(): RunnerApi {
