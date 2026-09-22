@@ -9,7 +9,7 @@ import {
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
-import { fmtTokens } from '@amagi/core/format'
+import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { MAX_PARALLEL } from '@amagi/core/limits'
 import type { RunnerResource } from '@amagi/core/run-service'
 import {
@@ -21,6 +21,8 @@ import {
   type DashboardState,
   openQuestionsFor,
   type QuestionView,
+  runHealth,
+  runHealthNearLimit,
   type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core/view'
@@ -1425,6 +1427,8 @@ function WorkerSlot({
   const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
   const usage = currentUsageFor(state, taskId)
+  const health = runHealth(state, taskId, now)
+  const nearLimit = runHealthNearLimit(health)
   return (
     <div className="rounded-lg border border-line-strong bg-surface px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1434,6 +1438,14 @@ function WorkerSlot({
           </span>
         )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
+        {nearLimit && (
+          <span
+            className="shrink-0 rounded bg-amber-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-ink ring-1 ring-inset ring-amber-edge"
+            title={health.warnings.join('\n') || 'run is nearing a guard limit'}
+          >
+            near limit
+          </span>
+        )}
         <Link
           to="/tasks/$id"
           params={{ id: taskId }}
@@ -2903,6 +2915,12 @@ function TaskDetailView() {
   const questions = openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const [tab, setTab] = useState<DetailTab>('log')
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const health = runHealth(state, id, now)
   const usageEvents = state.events
     .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
     .map((e) => e.event)
@@ -3001,6 +3019,34 @@ function TaskDetailView() {
         <DetailRow label="model" value={currentAgent?.model ?? 'unknown'} />
         <DetailRow label="effort" value={currentAgent?.effort ?? 'unknown'} />
         <DetailRow label="usage" value={usage} />
+        <DetailRow
+          label="context"
+          value={
+            health.contextTokens === null
+              ? 'no usage reported yet'
+              : health.contextWarnTokens === null
+                ? fmtTokens(health.contextTokens)
+                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn · ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+          }
+        />
+        <DetailRow
+          label="cost"
+          value={
+            !health.costSeen
+              ? 'not reported by harness'
+              : health.maxCostUsd > 0
+                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                : `$${health.costUsd.toFixed(2)}`
+          }
+        />
+        <DetailRow
+          label="elapsed"
+          value={
+            health.maxRunMs === null
+              ? fmtDuration(health.elapsedMs)
+              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+          }
+        />
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow
@@ -3023,6 +3069,21 @@ function TaskDetailView() {
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
       </dl>
+
+      {health.warnings.length > 0 && (
+        <div className="mt-4 rounded-lg border border-amber-edge bg-amber-soft px-4 py-3">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
+            Guard warnings
+          </h2>
+          <ul className="space-y-1">
+            {health.warnings.map((w, i) => (
+              <li key={i} className="font-mono text-xs text-fg">
+                {w}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 

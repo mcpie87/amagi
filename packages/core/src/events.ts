@@ -179,6 +179,18 @@ export const EventBody = z.discriminatedUnion('type', [
    * is its peak context.
    */
   z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
+  /**
+   * The effective run-health ceilings for the active harness, appended once per
+   * claim so clients can render context/cost/elapsed against them before any
+   * guard trips. A maxRunMs or maxCostUsd of 0 means that budget is unbounded.
+   */
+  z.object({
+    type: z.literal('run.limits'),
+    contextWarnTokens: z.number().int(),
+    contextMaxTokens: z.number().int(),
+    maxRunMs: z.number().int(),
+    maxCostUsd: z.number(),
+  }),
   /** Logged once when the run's peak context crosses the soft limit. */
   z.object({
     type: z.literal('context.warn'),

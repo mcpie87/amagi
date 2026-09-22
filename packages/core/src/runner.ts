@@ -294,6 +294,14 @@ export class Runner {
         ? {}
         : { difficulty: task.difficulty }),
     })
+    const { warnTokens, maxTokens } = this.contextLimits()
+    store.append(task.id, {
+      type: 'run.limits',
+      contextWarnTokens: warnTokens,
+      contextMaxTokens: maxTokens,
+      maxRunMs: this.deps.config.loop.maxRunMinutes * 60_000,
+      maxCostUsd: this.deps.config.loop.maxCostUsd,
+    })
 
     try {
       await this.drive(task)
