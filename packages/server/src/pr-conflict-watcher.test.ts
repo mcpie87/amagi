@@ -7,7 +7,6 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
-  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -25,6 +24,7 @@ const config = (): Config =>
 const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',
@@ -65,11 +65,14 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return []
+  }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
-  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
-    return []
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []

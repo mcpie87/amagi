@@ -43,3 +43,12 @@ export function registryPath(): string {
   if (override) return resolve(expandTilde(override))
   return join(stateHome(), 'amagi', 'registry.json')
 }
+
+/**
+ * Per-run scratch dir under the state home. The git shim appends rejected
+ * agent calls to `rejected-git.jsonl` here; the channel task drains that into
+ * task events.
+ */
+export function runStateDir(taskId: string): string {
+  return join(stateHome(), 'amagi', 'runs', taskId)
+}

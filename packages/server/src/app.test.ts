@@ -12,9 +12,9 @@ import type {
   EpicCloseResult,
   GateRef,
   Harness,
-  OpenPr,
   PrComment,
   PrDriver,
+  PrInfo,
   PrState,
   PullRequest,
   Question,
@@ -143,8 +143,8 @@ describe('GET /api/repos/:repo/tasks', () => {
 })
 
 class FakeMergePrDriver implements PrDriver {
-  open: OpenPr[] = []
-  async listOpenPrs(): Promise<OpenPr[]> {
+  open: PrInfo[] = []
+  async listOpenPrs(): Promise<PrInfo[]> {
     return this.open
   }
   async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
@@ -155,6 +155,9 @@ class FakeMergePrDriver implements PrDriver {
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
+  }
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -178,47 +181,59 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
       {
         number: 1,
         title: 'Ready',
+        body: '',
         url: 'https://github.com/owner/repo/pull/1',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',
-        mergeStatus: 'mergeable',
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
       {
         number: 2,
         title: 'Conflicted',
+        body: '',
         url: 'https://github.com/owner/repo/pull/2',
         headRefName: 'amagi/am-2',
         baseRefName: 'main',
-        mergeStatus: 'conflicted',
         mergeable: 'CONFLICTING',
         mergeStateStatus: 'DIRTY',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
       {
         number: 3,
         title: 'Unknown',
+        body: '',
         url: 'https://github.com/owner/repo/pull/3',
         headRefName: 'amagi/am-3',
         baseRefName: 'main',
-        mergeStatus: 'unknown',
         mergeable: 'UNKNOWN',
         mergeStateStatus: 'UNKNOWN',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
       {
         number: 4,
         title: 'Clean via status',
+        body: '',
         url: 'https://github.com/owner/repo/pull/4',
         headRefName: 'amagi/am-4',
         baseRefName: 'main',
-        mergeStatus: 'mergeable',
         mergeable: 'UNKNOWN',
         mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        updatedAt: '',
+        labels: [],
       },
     ]
     const res = await app.request('/api/repos/repo1/mergeable-prs')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { prs: OpenPr[] }
+    const body = (await res.json()) as { prs: PrInfo[] }
     expect(body.prs.map((p) => p.number)).toEqual([1, 4])
   })
 
@@ -1187,7 +1202,10 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     async getMergeStatus() {
       return 'mergeable' as const
     }
-    async listOpenPrs(): Promise<OpenPr[]> {
+    async getPrDiff(): Promise<string> {
+      return ''
+    }
+    async listOpenPrs(): Promise<PrInfo[]> {
       return []
     }
     async listComments(): Promise<PrComment[]> {

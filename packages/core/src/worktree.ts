@@ -36,6 +36,25 @@ export function branchName(taskId: string, title: string): string {
   return `amagi/${taskId}-${slugify(title)}`
 }
 
+/**
+ * Recovers a task id from a branch built by `branchName`. The id/slug split
+ * is ambiguous from the string alone (task ids can contain hyphens), so this
+ * matches `branch` against `knownIds` instead of guessing at the first
+ * hyphen, preferring the longest id when more than one is a valid prefix.
+ */
+export function taskIdFromBranch(branch: string, knownIds: readonly string[]): string | null {
+  const prefix = 'amagi/'
+  if (!branch.startsWith(prefix)) return null
+  const rest = branch.slice(prefix.length)
+  let best: string | null = null
+  for (const id of knownIds) {
+    if (id === '') continue
+    if (rest !== id && !rest.startsWith(`${id}-`)) continue
+    if (best === null || id.length > best.length) best = id
+  }
+  return best
+}
+
 export function worktreeDirName(repoName: string, taskId: string, title: string): string {
   return `${repoName}-${taskId}-${slugify(title)}`
 }

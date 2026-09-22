@@ -3,7 +3,6 @@ import {
   type CreatePrOptions,
   type CreateTrackerTask,
   type GateRef,
-  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -31,11 +30,14 @@ class FakePr implements PrDriver {
     this.calls.push(number)
     return this.state
   }
+  async listOpenPrs(_cwd: string): Promise<never[]> {
+    return []
+  }
   async getMergeStatus(_cwd: string, _number: number) {
     return this.mergeStatus
   }
-  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
-    return []
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    return ''
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []

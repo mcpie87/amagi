@@ -7,7 +7,6 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
-  type OpenPr,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -25,6 +24,7 @@ const config = (): Config =>
 const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',
@@ -56,11 +56,14 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
+    return []
+  }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
-  async listOpenPrs(_cwd: string): Promise<OpenPr[]> {
-    return []
+  async getPrDiff(_cwd: string, _number: number): Promise<string> {
+    throw new Error('unused')
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     this.listCalls++
@@ -181,8 +184,7 @@ test('skips re-scanning PRs whose updatedAt has not changed', async () => {
 test('only responds to mentions added after the last-seen comment when a PR changes', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
-  const exec = fakeExec([prInfo()])
-  start(driver, exec)
+  start(driver, fakeExec([prInfo()]))
 
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(1)
@@ -211,8 +213,7 @@ test('a later mention in a lower-numbered id space (issue comment) is not skippe
     { id: '1', user: 'bob', body: '@chise-maru hi' },
     { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
   ]
-  const exec = fakeExec([prInfo()])
-  start(driver, exec)
+  start(driver, fakeExec([prInfo()]))
 
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(1)

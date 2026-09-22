@@ -3,14 +3,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
 import { classifyDifficulty } from './difficulty.ts'
-import { ghEnv } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
-import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
 import { cacheHome } from './paths.ts'
+import { taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
   classifyMentionPrompt,
@@ -22,6 +22,7 @@ import {
   takeDownPrompt,
   takeDownSystemPrompt,
 } from './prompt.ts'
+import { taskIdFromBranch } from './worktree.ts'
 
 export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'take-down' | 'ambiguous'
 
@@ -199,6 +200,22 @@ export function taskIdFromPrTitle(title: string): string | null {
   return title.match(/\bam-[a-z0-9.]+\b/i)?.[0] ?? null
 }
 
+/**
+ * Resolves the tracker task id for a PR, most to least reliable: the
+ * `amagi-task:` body trailer set at creation (works for any tracker, and
+ * survives a human editing the title); the branch name matched against the
+ * tracker's open ids (for PRs that predate the trailer); the PR title, as a
+ * last resort for beads ids that happen to still carry the "am-544: " prefix.
+ */
+export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
+  const fromBody = taskIdFromPrBody(pr.body)
+  if (fromBody !== null) return fromBody
+  const knownIds = tracker.openIds ? await tracker.openIds() : []
+  const fromBranch = taskIdFromBranch(pr.headRefName, knownIds)
+  if (fromBranch !== null) return fromBranch
+  return taskIdFromPrTitle(pr.title)
+}
+
 function startImplementHarness(
   mk: typeof makeHarness,
   config: Config['harness']['implement'],
@@ -284,10 +301,7 @@ async function respondToExplain(
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  const diff = await execOk(run, ['gh', 'pr', 'diff', String(opts.pr.number)], {
-    cwd: opts.root,
-    env: ghEnv(),
-  })
+  const diff = await opts.driver.getPrDiff(opts.root, opts.pr.number)
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')
@@ -448,7 +462,7 @@ async function respondToTakeDown(
   if (verdict !== 'TAKE DOWN') return
   if (opts.tracker === undefined) return
 
-  const taskId = taskIdFromPrTitle(opts.pr.title)
+  const taskId = await resolveTaskId(opts.pr, opts.tracker)
   if (taskId === null) return
   const task = await opts.tracker.get(taskId)
   if (task === null) return

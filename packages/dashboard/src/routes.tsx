@@ -1,4 +1,4 @@
-import type { OpenPr } from '@amagi/core'
+import type { PrInfo } from '@amagi/core'
 import { agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -1947,7 +1947,7 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
  */
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
-  const [prs, setPrs] = useState<OpenPr[] | null>(null)
+  const [prs, setPrs] = useState<PrInfo[] | null>(null)
 
   useEffect(() => {
     if (selected === null) return
@@ -1958,7 +1958,7 @@ function MergeablePrsPanel() {
           // A repo without a forge driver simply has no mergeable PRs to show.
           if (res.status === 501) return []
           if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return (await res.json()).prs as OpenPr[]
+          return (await res.json()).prs as PrInfo[]
         })
         .then((list) => {
           if (alive) setPrs(list)
