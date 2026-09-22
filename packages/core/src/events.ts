@@ -237,6 +237,13 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string(),
     detail: z.string(),
   }),
+  z.object({
+    type: z.literal('retry.filed_as_error'),
+    /** The tracker task created to carry the error message. */
+    errorTaskId: z.string(),
+    /** The recorded error the error task carries. */
+    reason: z.string(),
+  }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
   z.object({
     type: z.literal('mention.classified'),

@@ -2727,6 +2727,73 @@ function RequeueButton({
 }
 
 /**
+ * The error-task retry path for a task parked at needs_human: file the recorded
+ * error as its own tracker task, block this task on it, and release the claim
+ * so it reruns once the error task is resolved. Unlike Retry/Requeue this does
+ * not resume the same work blindly; it hands the root cause to a human first.
+ */
+function FileAsErrorButton({
+  repo,
+  taskId,
+  state,
+  statusReason,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+  statusReason: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (state !== 'needs_human' || statusReason === null) return null
+
+  const file = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/filed-as-error`, {
+        method: 'POST',
+      })
+      const body = (await res.json().catch(() => null)) as {
+        error?: string
+        errorTask?: { id: string }
+      } | null
+      if (!res.ok) {
+        setResult({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
+        return
+      }
+      setResult({
+        kind: 'ok',
+        text: `filed as ${body?.errorTask?.id ?? 'error task'}; reruns once that task is resolved`,
+      })
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void file()}
+        title="files this task's error as its own task, blocks this task on it, and reruns it once the error task is resolved"
+        className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
+      >
+        File as error task
+      </button>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
  * Restart a run that has no worktree recorded yet, so the runner starts fresh.
  * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
  * need the worktree path; done and abandoned runs have no path back, so the
@@ -3339,6 +3406,14 @@ function TaskDetailView() {
           />
         )}
         {selected !== null && (
+          <FileAsErrorButton
+            repo={selected}
+            taskId={task.id}
+            state={task.state}
+            statusReason={task.statusReason}
+          />
+        )}
+        {selected !== null && (
           <RestartRunButton
             repo={selected}
             taskId={task.id}
@@ -3774,6 +3849,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           ts: event.ts,
           taskId: event.taskId,
           text: `retry #${event.attempt} in ${(event.delayMs / 1000).toFixed(0)}s`,
+          icon: 'refresh',
+          tone: 'amber',
+        })
+        break
+      case 'retry.filed_as_error':
+        items.push({
+          key: `y${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `error filed as task ${event.errorTaskId}`,
           icon: 'refresh',
           tone: 'amber',
         })
