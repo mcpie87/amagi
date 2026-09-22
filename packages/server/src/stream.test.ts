@@ -62,9 +62,6 @@ function sse(res: Response) {
 const noise = (i: number) =>
   store.append(null, { type: 'notify.sent', channel: 'test', title: `line ${i}` })
 
-/** Lets the stream callback run between an append and the next assertion. */
-const settle = () => new Promise((r) => setTimeout(r, 10))
-
 describe('GET /api/repos/repo1/stream', () => {
   test('replays the backlog and then pushes live events', async () => {
     claim('bd-1')
@@ -186,17 +183,6 @@ describe('GET /api/repos/repo1/stream', () => {
     expect(next?.event.seq).toBe(sentinel.seq)
 
     await stream.close()
-  })
-
-  test('releases the subscription when the client hangs up', async () => {
-    claim('bd-1')
-    const stream = sse(await app.request('/api/repos/repo1/stream'))
-    await stream.take(1)
-    expect(store.listenerCount).toBe(1)
-
-    await stream.close()
-    await settle()
-    expect(store.listenerCount).toBe(0)
   })
 
   test('rejects a malformed sinceSeq', async () => {

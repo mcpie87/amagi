@@ -1,10 +1,9 @@
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { dbPath } from '../paths.ts'
 import { MIGRATIONS } from './migrations.ts'
 
-export function openDatabase(path = dbPath()): Database {
+export function openDatabase(path: string): Database {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new Database(path, { create: true })
   db.exec('pragma journal_mode = WAL')
