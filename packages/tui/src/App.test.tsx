@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import type { StoredEvent } from '@amagi/core'
+import type { StoredEvent, TrackerTask } from '@amagi/core'
 import { render } from 'ink-testing-library'
 import { createElement } from 'react'
 import { App } from './App.tsx'
@@ -27,6 +27,13 @@ function sseResponse(events: StoredEvent[]): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
 }
 
+function json(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now()
   while (!check()) {
@@ -35,10 +42,44 @@ async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
+const RUNNER = {
+  name: 'repo1',
+  available: true,
+  capacity: 2,
+  running: ['am-1'],
+  startedAt: { 'am-1': 1_700_000_000_000 },
+  resources: { 'am-1': { processes: 3, rssBytes: 123_456, cpuMs: 5_000 } },
+  autoQueue: true,
+  workers: [
+    {
+      repo: 'repo1',
+      name: 'mention-watcher',
+      lastRunAt: 1_700_000_000_000,
+      ok: true,
+      error: null,
+      counters: [],
+      detail: 'scanned 3 PRs',
+    },
+  ],
+}
+
+const READY: TrackerTask[] = [
+  {
+    id: 'am-9',
+    title: 'Claimable chore',
+    description: '',
+    status: 'open',
+    priority: 2,
+    type: 'task',
+    url: null,
+  },
+]
+
 const EVENTS: StoredEvent[] = [
   ev(1, 'am-1', { type: 'task.claimed', title: 'Fix the thing', tracker: 'beads' }),
-  ev(2, 'am-1', { type: 'task.state', from: 'claimed', to: 'implementing' }),
-  ev(3, 'am-1', {
+  ev(2, 'am-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+  ev(3, 'am-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+  ev(4, 'am-1', {
     type: 'question.asked',
     questionId: 'q-1',
     question: 'Which registry?',
@@ -47,16 +88,57 @@ const EVENTS: StoredEvent[] = [
   }),
 ]
 
-describe('App', () => {
-  test('renders the queue, opens a task, and shows its pending question', async () => {
-    globalThis.fetch = (async (url: string) => {
-      if (url.toString().includes('/api/stream')) return sseResponse(EVENTS)
-      throw new Error(`unexpected fetch ${url}`)
-    }) as unknown as typeof fetch
+function streamMock(events: StoredEvent[], extra?: (url: string, init?: RequestInit) => Response) {
+  return (async (url: string, init?: RequestInit) => {
+    const href = url.toString()
+    if (href.includes('/api/repos/repo1/stream')) return sseResponse(events)
+    if (href.endsWith('/api/runner')) return json(RUNNER)
+    if (href.endsWith('/api/repos/repo1/ready-queue')) return json(READY)
+    if (extra !== undefined) {
+      const response = extra(href, init)
+      if (response !== undefined) return response
+    }
+    throw new Error(`unexpected fetch ${href}`)
+  }) as unknown as typeof fetch
+}
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
+describe('App', () => {
+  test('overview shows runner, watchers, claimable tasks, open PRs and needs attention', async () => {
+    const events: StoredEvent[] = [
+      ...EVENTS,
+      ev(5, 'am-2', { type: 'task.claimed', title: 'Stuck task', tracker: 'beads' }),
+      ev(6, 'am-2', { type: 'task.state', from: 'claimed', to: 'needs_human' }),
+      ev(7, 'am-1', { type: 'pr.created', url: 'https://example.test/pr/1', number: 1 }),
+      ev(8, 'am-1', { type: 'pr.status', mergeStatus: 'mergeable' }),
+    ]
+    globalThis.fetch = streamMock(events)
+
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
     try {
+      await waitFor(() => (instance.lastFrame() ?? '').includes('1/2 workers'))
+      const frame = instance.lastFrame() ?? ''
+      expect(frame).toContain('1/2 workers')
+      expect(frame).toContain('auto-queue on')
+      expect(frame).toContain('mention-watcher')
+      expect(frame).toContain('Fix the thing')
+      expect(frame).toContain('Claimable chore')
+      expect(frame).toContain('mergeable')
+      expect(frame).toContain('Stuck task')
+      expect(frame).toContain('needs_human')
+    } finally {
+      instance.unmount()
+    }
+  })
+
+  test('renders the queue, opens a task, and shows its pending question', async () => {
+    globalThis.fetch = streamMock(EVENTS)
+
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    try {
+      await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
+      instance.stdin.write('\t')
       await waitFor(() => (instance.lastFrame() ?? '').includes('Fix the thing'))
+      expect(instance.lastFrame()).toContain('amagi queue')
       expect(instance.lastFrame()).toContain('implementing')
 
       instance.stdin.write('\r')
@@ -73,10 +155,8 @@ describe('App', () => {
 
   test('answering an option posts it with the task token', async () => {
     const posted: { url: string; body: unknown }[] = []
-    globalThis.fetch = (async (url: string, init?: RequestInit) => {
-      const href = url.toString()
-      if (href.includes('/api/stream')) return sseResponse(EVENTS)
-      if (href.endsWith('/api/tasks/am-1')) {
+    globalThis.fetch = streamMock(EVENTS, (href, init) => {
+      if (href.endsWith('/api/repos/repo1/tasks/am-1')) {
         return new Response(JSON.stringify({ token: 'secret' }), { status: 200 })
       }
       if (href.includes('/answer')) {
@@ -84,17 +164,21 @@ describe('App', () => {
         return new Response(JSON.stringify({}), { status: 200 })
       }
       throw new Error(`unexpected fetch ${href}`)
-    }) as unknown as typeof fetch
+    })
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
     try {
+      await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
+      instance.stdin.write('\t')
       await waitFor(() => (instance.lastFrame() ?? '').includes('Fix the thing'))
       instance.stdin.write('\r')
       await waitFor(() => (instance.lastFrame() ?? '').includes('Which registry?'))
 
       instance.stdin.write('1')
       await waitFor(() => posted.length > 0)
-      expect(posted[0]?.url).toBe('http://amagi.test/api/tasks/am-1/questions/q-1/answer')
+      expect(posted[0]?.url).toBe(
+        'http://amagi.test/api/repos/repo1/tasks/am-1/questions/q-1/answer',
+      )
       expect(posted[0]?.body).toEqual({ answer: 'npm', via: 'cli' })
     } finally {
       instance.unmount()

@@ -1,6 +1,33 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import modelTable from './models.json' with { type: 'json' }
 import { cacheHome } from './paths.ts'
+
+/**
+ * Curated model and effort options per harness kind, owned by amagi rather
+ * than scraped from each CLI's own listing. A new model ships by editing
+ * models.json, not by parsing `claude model list` or `~/.codex/config.toml`.
+ * Only claude and codex are curated; opencode keeps listing its own models.
+ */
+type HarnessModelTable = Partial<Record<string, readonly string[]>> & {
+  claude: readonly string[]
+  codex: readonly string[]
+}
+
+const parsed = modelTable as {
+  models: HarnessModelTable
+  efforts: HarnessModelTable
+}
+
+export const HARDCODED_MODELS: HarnessModelTable = parsed.models
+
+/**
+ * Discrete reasoning-effort levels each harness accepts, keyed by kind. These
+ * feed the interactive effort prompt in pickRunSelection; a harness with no
+ * entry gets no prompt. Levels match what each CLI accepts: claude's effort
+ * levels and codex's `model_reasoning_effort` values.
+ */
+export const HARDCODED_EFFORTS: HarnessModelTable = parsed.efforts
 
 /** A model name as harnesses print it: provider-qualified or bare, no spaces. */
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._+\-/]*$/
@@ -52,6 +79,22 @@ export function parseModelLines(output: string): string[] {
   return models
 }
 
+/**
+ * claude has no `model list` subcommand; its `/model` slash command works
+ * non-interactively under `-p` and replies with e.g. "Usage: /model <name>.
+ * Available: sonnet, opus, ..., or a full model ID." This pulls the names
+ * out of that reply. The trailing "or a full model ID" is prose, not a
+ * choice, so any comma-split entry containing whitespace is dropped.
+ */
+export function parseClaudeModelHint(output: string): string[] {
+  const match = output.match(/Available:\s*(.+)/)
+  if (!match?.[1]) return []
+  return match[1]
+    .split(',')
+    .map((s) => s.trim().replace(/\.$/, ''))
+    .filter((s) => s !== '' && !/\s/.test(s))
+}
+
 const TTL_MS = 24 * 60 * 60 * 1000
 
 type CacheEntry = { cachedAt: number; models: string[] }
@@ -67,6 +110,8 @@ export async function listModelsCached(
   list: () => Promise<string[]>,
   cacheDir = join(cacheHome(), 'amagi', 'models'),
 ): Promise<string[]> {
+  // Curated kinds are instant and offline already; a disk cache can only serve stale names.
+  if (kind in HARDCODED_MODELS) return list()
   const file = join(cacheDir, `${kind}.json`)
   const read = (): CacheEntry | null => {
     if (!existsSync(file)) return null

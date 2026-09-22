@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
-import { changesSinceBase, formatPrBody } from './pr-body.ts'
+import { backtickFileRefs, changesSinceBase, formatPrBody } from './pr-body.ts'
 
 type Call = readonly string[]
 
@@ -58,6 +58,27 @@ describe('changesSinceBase', () => {
   })
 })
 
+describe('backtickFileRefs', () => {
+  test('wraps file paths and file names in backticks', () => {
+    expect(backtickFileRefs('Write hello.txt, edit src/app.ts and packages/core/pr-body.ts')).toBe(
+      'Write `hello.txt`, edit `src/app.ts` and `packages/core/pr-body.ts`',
+    )
+  })
+
+  test('leaves existing backticks and fenced blocks untouched', () => {
+    const text = 'Run `bun run dev`\n```\ngit status\n```\nthen edit src/app.ts'
+    expect(backtickFileRefs(text)).toBe(
+      'Run `bun run dev`\n```\ngit status\n```\nthen edit `src/app.ts`',
+    )
+  })
+
+  test('leaves plain English prose alone', () => {
+    expect(backtickFileRefs('The summary section is now readable and consistent.')).toBe(
+      'The summary section is now readable and consistent.',
+    )
+  })
+})
+
 describe('formatPrBody', () => {
   test('renders the title, task, description and changes in markdown with emojis', () => {
     const body = formatPrBody(TASK, [
@@ -68,7 +89,7 @@ describe('formatPrBody', () => {
     expect(body).toContain('## ✨ Add a greeting file')
     expect(body).toContain('**Task:** `am-1`')
     expect(body).toContain('### 📝 Summary')
-    expect(body).toContain('Write hello.txt')
+    expect(body).toContain('Write `hello.txt`')
     expect(body).toContain('### 🛠️ What changed')
     expect(body).toContain('- `hello.txt` +1 -0')
     expect(body).toContain('- `image.png` binary')
@@ -78,5 +99,112 @@ describe('formatPrBody', () => {
     const body = formatPrBody(TASK, [])
     expect(body).toContain('## ✨ Add a greeting file')
     expect(body).not.toContain('What changed')
+  })
+
+  test('renders the how-to-use part of the description as its own section', () => {
+    const body = formatPrBody(
+      { ...TASK, description: 'Write hello.txt\n\n### How to use\n\nRun `hello` to greet' },
+      [],
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Write `hello.txt`')
+    expect(body).toContain('### 🚀 How to use')
+    expect(body).toContain('Run `hello` to greet')
+  })
+
+  test('treats a description without a how-to-use heading as a plain summary', () => {
+    const body = formatPrBody({ ...TASK, description: 'Write hello.txt' }, [])
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Write `hello.txt`')
+    expect(body).not.toContain('How to use')
+  })
+
+  test('renders the conclusion after the what-changed list, with the file names ticked', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nAdded hello.txt with a greeting; nothing else touched.',
+      },
+      [{ path: 'hello.txt', additions: 1, deletions: 0 }],
+    )
+
+    expect(body.indexOf('### 🛠️ What changed')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Added `hello.txt` with a greeting; nothing else touched.')
+  })
+
+  test('keeps both agent-authored sections and renders conclusion last', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nChanged hello.txt only.\n\n### How to use\n\nRun `hello`',
+      },
+      [],
+    )
+
+    expect(body.indexOf('### 🚀 How to use')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('Changed `hello.txt` only.')
+    expect(body).toContain('Run `hello`')
+  })
+
+  test('uses the run summary as the conclusion when the agent wrote none', () => {
+    const body = formatPrBody(TASK, [], undefined, 'Wrote hello.txt and removed stale config')
+
+    expect(body).toContain('### 🧠 Conclusion')
+    expect(body).toContain('Wrote `hello.txt` and removed stale config')
+  })
+
+  test('omits the conclusion when neither the description nor the summary has one', () => {
+    const body = formatPrBody(TASK, [], undefined, '  ')
+    expect(body).not.toContain('Conclusion')
+  })
+
+  test('the description conclusion wins over the run summary', () => {
+    const body = formatPrBody(
+      { ...TASK, description: 'Write hello.txt\n\n### Conclusion\n\nFrom the description' },
+      [],
+      undefined,
+      'From the summary',
+    )
+
+    expect(body).toContain('From the description')
+    expect(body).not.toContain('From the summary')
+  })
+
+  test('always renders a summary section, using the agent summary when the description is empty', () => {
+    const body = formatPrBody(
+      { ...TASK, description: '' },
+      [],
+      undefined,
+      'Dedup by exact comment id, not by a numeric watermark.',
+    )
+
+    expect(body).toContain('### 📝 Summary')
+    expect(body).toContain('Dedup by exact comment id, not by a numeric watermark.')
+  })
+
+  test('renders the summary heading even with no description and no agent summary', () => {
+    const body = formatPrBody({ ...TASK, description: '' }, [])
+    expect(body).toContain('### 📝 Summary')
+  })
+
+  test('appends a model/effort footer when metadata is supplied', () => {
+    const body = formatPrBody(TASK, [], {
+      harness: 'opencode',
+      model: 'gemini-2.5-pro',
+      effort: 'high',
+    })
+
+    expect(body).toContain(
+      '<sub>Generated by amagi · opencode · gemini-2.5-pro · effort high</sub>',
+    )
+  })
+
+  test('omits the footer when only the harness is known', () => {
+    const body = formatPrBody(TASK, [], { harness: 'opencode', model: null, effort: null })
+    expect(body).not.toContain('Generated by amagi')
   })
 })

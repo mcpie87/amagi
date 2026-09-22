@@ -1,8 +1,13 @@
 import {
+  errMsg,
+  fmtDuration,
+  fmtTokens,
   listOpenPrs,
   listPrMentions,
   loadConfig,
+  type MentionProgress,
   makePrDriver,
+  makeTracker,
   mentionsPath,
   type PrComment,
   type PrInfo,
@@ -18,7 +23,8 @@ import { bold, dim, green, red } from '../format.ts'
 export const respondToMentionsCommand = defineCommand({
   meta: {
     name: 'respond-to-mentions',
-    description: 'Watch open PRs for @agent mentions and respond (fix, explain, or ask)',
+    description:
+      'Watch open PRs for @agent mentions and have the LLM decide the response (fix, explain, add a task, or ask)',
   },
   args: {
     'dry-run': {
@@ -32,17 +38,15 @@ export const respondToMentionsCommand = defineCommand({
     const { config } = loadConfig(root)
     const name = repoName(root)
     const driver = makePrDriver(config.forge.kind)
+    const tracker = makeTracker(config, root)
     const handle = config.forge.agentHandle
+    const tty = process.stdout.isTTY
 
     let prs: PrInfo[]
     try {
       prs = await listOpenPrs({ cwd: root })
     } catch (err) {
-      console.log(
-        red(
-          `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is gh installed and authenticated?)`,
-        ),
-      )
+      console.log(red(`failed to list PRs: ${errMsg(err)} (is gh installed and authenticated?)`))
       return
     }
     if (prs.length === 0) {
@@ -54,16 +58,23 @@ export const respondToMentionsCommand = defineCommand({
     const handled = readHandledMentions(path)
     let total = 0
 
+    const progressLine = (p: MentionProgress): string => {
+      const parts = [p.phase]
+      if (p.tool) parts.push(p.tool)
+      parts.push(`${fmtDuration(p.phaseMs)} / ${fmtDuration(p.totalMs)}`)
+      if (p.usage) {
+        parts.push(`${fmtTokens(p.usage.inputTokens)} in / ${fmtTokens(p.usage.outputTokens)} out`)
+        if (p.usage.costUsd !== null) parts.push(`$${p.usage.costUsd.toFixed(3)}`)
+      }
+      return `  ${dim(parts.join('  '))}`
+    }
+
     for (const pr of prs) {
       let mentions: PrComment[]
       try {
         mentions = await listPrMentions({ driver, cwd: root, pr, handle })
       } catch (err) {
-        console.log(
-          red(
-            `#${pr.number}: failed to read comments: ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        )
+        console.log(red(`#${pr.number}: failed to read comments: ${errMsg(err)}`))
         continue
       }
       if (mentions.length === 0) continue
@@ -74,13 +85,36 @@ export const respondToMentionsCommand = defineCommand({
         total++
         console.log(`  @${mention.user}: ${mention.body.trim().replace(/\s+/g, ' ').slice(0, 120)}`)
         if (args['dry-run']) continue
+        let lastNonTty = ''
+        const render = (p: MentionProgress) => {
+          const line = progressLine(p)
+          if (tty) process.stdout.write(`\r\x1b[K${line}`)
+          else if (line !== lastNonTty) {
+            lastNonTty = line
+            console.log(line)
+          }
+        }
+        const clearLine = () => {
+          if (tty) process.stdout.write('\r\x1b[K')
+        }
         try {
-          const kind = await respondToMention({ root, repoName: name, pr, mention, config, driver })
+          const kind = await respondToMention({
+            root,
+            repoName: name,
+            pr,
+            mention,
+            config,
+            driver,
+            tracker,
+            onProgress: render,
+          })
+          clearLine()
           handled.add(mention.id)
           saveHandledMentions(path, handled)
           console.log(green(`  responded (${kind})`))
         } catch (err) {
-          console.log(red(`  failed: ${err instanceof Error ? err.message : String(err)}`))
+          clearLine()
+          console.log(red(`  failed: ${errMsg(err)}`))
         }
       }
     }

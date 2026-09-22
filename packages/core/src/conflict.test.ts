@@ -1,0 +1,186 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { Config } from './config.ts'
+import { type ConflictLogLevel, resolveConflict } from './conflict.ts'
+import type { AgentOutcome, AgentStartOptions, Harness } from './drivers/types.ts'
+import type { Exec, ExecResult } from './exec.ts'
+import type { PrInfo } from './pr-check.ts'
+
+type Call = readonly string[]
+
+function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
+  const calls: Call[] = []
+  const exec: Exec = async (cmd) => {
+    calls.push(cmd)
+    const hit = routes(cmd)
+    if (hit) return hit
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  return { exec, calls }
+}
+
+const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
+const fail = (stderr: string): ExecResult => ({ exitCode: 1, stdout: '', stderr })
+
+const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
+  number: 7,
+  title: 'Do the thing',
+  url: 'https://github.com/owner/repo/pull/7',
+  headRefName: 'amagi/am-1-do-the-thing',
+  baseRefName: 'main',
+  mergeable: 'CONFLICTING',
+  mergeStateStatus: 'DIRTY',
+  headRefOid: 'deadbeef',
+  updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
+  ...over,
+})
+
+/** A merge into the PR worktree that always conflicts. */
+const conflicted = (c: Call): ExecResult | undefined => {
+  if (c.includes('rev-parse')) return fail('')
+  if (c.includes('merge')) return fail('conflict')
+  return undefined
+}
+
+const emptyEvents = async function* (): AsyncGenerator<never> {}
+
+function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
+  const outcome: AgentOutcome = {
+    exitCode: 0,
+    ok: true,
+    sessionId: null,
+    summary: 'done',
+    usage: null,
+    stderr: '',
+    ...over,
+  }
+  const process = {
+    pid: -1,
+    events: () => emptyEvents(),
+    done: Promise.resolve(outcome),
+    kill: async () => {},
+    model: null,
+    effort: null,
+  }
+  return {
+    kind: 'fake',
+    start: (_opts: AgentStartOptions) => process,
+    resume: () => process,
+    listModels: async () => [],
+    listEfforts: async () => [],
+  }
+}
+
+const config = () =>
+  Config.parse({
+    repo: { baseBranch: 'main', worktreeRoot: '/wt' },
+    checks: { commands: [], format: null, lint: null },
+  })
+
+beforeEach(() => {
+  delete process.env.GH_TOKEN
+  delete process.env.GITHUB_TOKEN
+})
+
+afterEach(() => {
+  delete process.env.GH_TOKEN
+  delete process.env.GITHUB_TOKEN
+})
+
+describe('resolveConflict', () => {
+  test('pushes the merge when the base merges cleanly, without starting an agent', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return ok('Already up to date')
+      return undefined
+    })
+    const logs: string[] = []
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      exec,
+      makeHarnessFn: () => fakeHarness(),
+      onLog: (_level, text) => logs.push(text),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(calls).toContainEqual([
+      'git',
+      'push',
+      'origin',
+      'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
+    ])
+    expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
+  })
+
+  test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
+    const started: string[] = []
+    const { exec, calls } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return fail('conflict')
+      if (c.includes('gh') && c.includes('view')) {
+        return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
+      }
+      return undefined
+    })
+    const logs: { level: ConflictLogLevel; text: string }[] = []
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      exec,
+      makeHarnessFn: (cfg) => {
+        started.push(cfg.kind)
+        return fakeHarness()
+      },
+      onLog: (level, text) => logs.push({ level, text }),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(started).toEqual(['claude'])
+    expect(calls).toContainEqual([
+      'git',
+      'push',
+      'origin',
+      'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
+    ])
+    expect(calls.some((c) => c.includes('view') && c.includes('7'))).toBe(true)
+    expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
+  })
+
+  test('reports a failed agent without pushing', async () => {
+    const { exec, calls } = fake(conflicted)
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      exec,
+      makeHarnessFn: () => fakeHarness({ ok: false, stderr: 'model overloaded' }),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('model overloaded')
+    expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('catches git failures and returns ok: false', async () => {
+    const { exec } = fake((c) => {
+      if (c.includes('fetch')) return fail('remote gone')
+      return undefined
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      exec,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('remote gone')
+  })
+})

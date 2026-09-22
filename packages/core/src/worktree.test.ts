@@ -3,14 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec, execOk } from './exec.ts'
-import {
-  branchName,
-  createWorktree,
-  listWorktrees,
-  removeWorktree,
-  slugify,
-  worktreeDirName,
-} from './worktree.ts'
+import { listWorktrees, removeWorktree } from './test-util.ts'
+import { branchName, createWorktree, slugify, worktreeDirName } from './worktree.ts'
 
 describe('slugify', () => {
   test('kebabs and truncates to five words', () => {
@@ -87,6 +81,15 @@ describe('createWorktree', () => {
     await execOk(exec, ['git', 'branch', 'amagi/bd-a1b2-add-sse-endpoint'], { cwd: repo })
     const wt = await create()
     expect(existsSync(wt.path)).toBe(true)
+  })
+
+  test('re-adds after the worktree dir is wiped and prunes the stale registration', async () => {
+    const first = await create()
+    rmSync(first.path, { recursive: true, force: true })
+    const second = await create()
+    expect(second).toEqual(first)
+    expect(existsSync(first.path)).toBe(true)
+    expect((await listWorktrees(repo)).map((w) => w.path)).toContain(first.path)
   })
 
   test('runs the setup command inside the worktree, not the repo', async () => {

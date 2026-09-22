@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cleanTerminalWorktrees } from './clean.ts'
+import { cleanTerminalWorktrees, removeWorktree } from './clean.ts'
 import { exec, execOk } from './exec.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
-import { createWorktree, listWorktrees, type WorktreeSpec } from './worktree.ts'
+import { listWorktrees } from './test-util.ts'
+import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 let repo: string
 let wtRoot: string
@@ -105,5 +106,52 @@ describe('cleanTerminalWorktrees', () => {
     store.append('bd-none', { type: 'task.state', from: null, to: 'abandoned' })
 
     expect(await cleanTerminalWorktrees(store, { repoRoot: repo })).toEqual([])
+  })
+
+  test('a cancelled task keeps its worktree for resume', async () => {
+    const cancelled = await makeWorktree('bd-stopped', 'WIP thing')
+    recordTask('bd-stopped', cancelled, 'cancelled')
+
+    const plans = await cleanTerminalWorktrees(store, { repoRoot: repo })
+
+    expect(plans).toEqual([])
+    expect(existsSync(cancelled.path)).toBe(true)
+    expect(store.task('bd-stopped')?.worktree).toBe(cancelled.path)
+  })
+})
+
+describe('removeWorktree', () => {
+  test('removes one task worktree regardless of its state', async () => {
+    const live = await makeWorktree('bd-live', 'WIP thing')
+    recordTask('bd-live', live)
+
+    await removeWorktree(store, 'bd-live', {
+      repoRoot: repo,
+      path: live.path,
+      branch: live.branch,
+    })
+
+    expect(existsSync(live.path)).toBe(false)
+    expect((await listWorktrees(repo)).map((w) => w.branch)).not.toContain(live.branch)
+    expect(store.task('bd-live')?.worktree).toBeNull()
+    expect(store.task('bd-live')?.branch).toBeNull()
+  })
+
+  test('is idempotent when the worktree is already gone', async () => {
+    const live = await makeWorktree('bd-live', 'WIP thing')
+    recordTask('bd-live', live)
+
+    await removeWorktree(store, 'bd-live', {
+      repoRoot: repo,
+      path: live.path,
+      branch: live.branch,
+    })
+    await removeWorktree(store, 'bd-live', {
+      repoRoot: repo,
+      path: live.path,
+      branch: live.branch,
+    })
+
+    expect(store.task('bd-live')?.worktree).toBeNull()
   })
 })

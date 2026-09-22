@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
 import {
+  fetchPullHeads,
   isConflicting,
   listOpenPrs,
   type PrInfo,
   prepareConflictWorktree,
+  prMergeStatus,
   pushConflictFix,
 } from './pr-check.ts'
 
@@ -35,6 +37,9 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   baseRefName: 'main',
   mergeable: 'CONFLICTING',
   mergeStateStatus: 'DIRTY',
+  headRefOid: 'deadbeef',
+  updatedAt: '2026-09-21T10:00:00Z',
+  labels: [],
   ...over,
 })
 
@@ -67,7 +72,7 @@ describe('listOpenPrs', () => {
       c.includes('list') && c.includes('pr')
         ? ok(
             JSON.stringify([
-              pr(),
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/bug' }] },
               pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
             ]),
           )
@@ -82,10 +87,81 @@ describe('listOpenPrs', () => {
       '--state',
       'open',
       '--json',
-      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus',
+      'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
+    // gh reports labels as objects; listOpenPrs reduces them to names
+    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/bug'])
+    expect(prs[1]?.labels).toEqual([])
+  })
+})
+
+describe('fetchPullHeads', () => {
+  test('skips the fetch when no PR head moved', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote') ? ok('deadbeef\trefs/pull/7/head\n') : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef' },
+      exec,
+    })
+
+    expect(result).toEqual({ fetched: false, heads: { 'refs/pull/7/head': 'deadbeef' } })
+    expect(calls.some((c) => c[0] === 'git' && c[1] === 'fetch')).toBe(false)
+  })
+
+  test('fetches all PR heads in one round trip when a head moved', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote')
+        ? ok('newsha\trefs/pull/7/head\ncafe12\trefs/pull/8/head\n')
+        : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef', 'refs/pull/8/head': 'cafe12' },
+      exec,
+    })
+
+    expect(result.fetched).toBe(true)
+    expect(calls).toContainEqual([
+      'git',
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    ])
+  })
+
+  test('fetches when a PR head disappears so the mirror is pruned', async () => {
+    const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef' },
+      exec,
+    })
+
+    expect(result.fetched).toBe(true)
+    expect(result.heads).toEqual({})
+  })
+})
+
+describe('prMergeStatus', () => {
+  test('retries while GitHub reports UNKNOWN, then returns the resolved state', async () => {
+    const calls: Call[] = []
+    let n = 0
+    const exec: Exec = async (cmd) => {
+      calls.push(cmd)
+      n++
+      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
+      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
+    }
+
+    const status = await prMergeStatus('/repo', 7, exec)
+
+    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
+    expect(calls).toHaveLength(2)
   })
 })
 

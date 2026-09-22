@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
@@ -70,12 +72,17 @@ describe('OpencodeTranslator against a recorded transcript', () => {
     const { events, translator } = await replay()
     const usageEvents = events.filter((e) => e.kind === 'usage')
     expect(usageEvents).toEqual([
-      { kind: 'usage', inputTokens: 12067, outputTokens: 68, costUsd: 0 },
-      { kind: 'usage', inputTokens: 118, outputTokens: 67, costUsd: 0 },
-      { kind: 'usage', inputTokens: 198, outputTokens: 54, costUsd: 0 },
-      { kind: 'usage', inputTokens: 279, outputTokens: 29, costUsd: 0 },
+      { kind: 'usage', inputTokens: 12067, outputTokens: 68, cachedTokens: 1792, costUsd: 0 },
+      { kind: 'usage', inputTokens: 118, outputTokens: 67, cachedTokens: 13824, costUsd: 0 },
+      { kind: 'usage', inputTokens: 198, outputTokens: 54, cachedTokens: 13824, costUsd: 0 },
+      { kind: 'usage', inputTokens: 279, outputTokens: 29, cachedTokens: 13824, costUsd: 0 },
     ])
-    expect(translator.usage).toEqual({ inputTokens: 12662, outputTokens: 218, costUsd: 0 })
+    expect(translator.usage).toEqual({
+      inputTokens: 12662,
+      outputTokens: 218,
+      cachedTokens: 43264,
+      costUsd: 0,
+    })
   })
 
   test('the final text is captured as the summary', async () => {
@@ -167,18 +174,13 @@ describe('OpencodeHarness argv', () => {
 
   test('a fresh start asks for the json format in the target directory', () => {
     const argv = new OpencodeHarness().argv(base, null)
-    expect(argv).toEqual(['opencode', 'run', 'do the thing', '--format', 'json', '--dir', '/wt'])
+    expect(argv).toEqual(['opencode', 'run', '--format', 'json', '--dir', '/wt'])
   })
 
   test('resume continues the prior session by id', () => {
     const argv = new OpencodeHarness().argv(base, 'sess-42')
     expect(argv).toContain('--session')
     expect(argv[argv.indexOf('--session') + 1]).toBe('sess-42')
-  })
-
-  test('the system prompt is folded into the message, since opencode has no flag for it', () => {
-    const argv = new OpencodeHarness().argv({ ...base, systemPrompt: 'be terse' }, null)
-    expect(argv[2]).toBe('be terse\n\ndo the thing')
   })
 
   test('model and effort are forwarded as --model and --variant', () => {
@@ -214,5 +216,23 @@ describe('OpencodeHarness process', () => {
     expect(seen).toEqual([])
     expect(outcome.ok).toBe(false)
     expect(outcome.exitCode).not.toBe(0)
+  })
+
+  test('the folded prompt is piped through stdin, not argv', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'opencode-stdin-'))
+    try {
+      const bin = join(dir, 'echo-stdin')
+      writeFileSync(bin, '#!/bin/sh\ncat >&2\n')
+      chmodSync(bin, 0o755)
+      const harness = new OpencodeHarness({ bin })
+      const proc = harness.start({ cwd: dir, prompt: 'do the thing', systemPrompt: 'be terse' })
+      const seen: AgentEvent[] = []
+      for await (const e of proc.events()) seen.push(e)
+      const outcome = await proc.done
+      expect(seen).toEqual([])
+      expect(outcome.stderr).toBe('be terse\n\ndo the thing')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

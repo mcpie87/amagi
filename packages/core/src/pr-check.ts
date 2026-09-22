@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { gitTokenConfig } from './drivers/pr.ts'
+import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { applyPersona, branchExists } from './worktree.ts'
 
@@ -12,6 +12,12 @@ export type PrInfo = {
   baseRefName: string
   mergeable: string
   mergeStateStatus: string
+  /** Head commit SHA, so the conflict watcher can skip PRs whose head has not changed. */
+  headRefOid: string | null
+  /** Last activity timestamp, so pollers can skip PRs that have not changed. */
+  updatedAt: string
+  /** Label names, so the pointlessness pass can scope to the amagi provenance label. */
+  labels: string[]
 }
 
 export type PrCheckOptions = {
@@ -19,7 +25,8 @@ export type PrCheckOptions = {
   exec?: Exec
 }
 
-const GH_FIELDS = 'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus'
+const GH_FIELDS =
+  'number,title,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -29,12 +36,76 @@ export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
   )
 }
 
+/**
+ * Lists open PRs through gh. GitHub-only by design: the pollers and the
+ * pointlessness pass that consume it share this binding rather than each
+ * hammering a forge-specific endpoint.
+ */
 export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
   const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
     cwd: opts.cwd,
+    env: ghEnv(),
   })
-  return JSON.parse(out) as PrInfo[]
+  const raw = JSON.parse(out) as Array<
+    Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
+  >
+  // gh reports labels as objects; the pass only needs the names.
+  return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
+}
+
+export type FetchPullHeadsOptions = {
+  repoRoot: string
+  /** Last seen PR head SHAs keyed by ref (refs/pull/N/head), so the fetch is skipped when none moved. */
+  lastHeads: Record<string, string>
+  exec?: Exec
+}
+
+export type FetchPullHeadsResult = {
+  /** True when a fetch ran because at least one PR head moved since lastHeads. */
+  fetched: boolean
+  /** Current PR head SHAs keyed by ref, e.g. refs/pull/7/head. */
+  heads: Record<string, string>
+}
+
+/**
+ * Mirrors every open PR head into refs/remotes/origin/pr/* with one fetch.
+ * The pull/star/head namespace covers fork PRs, which a per-branch fetch of
+ * headRefName does not. ls-remote is a zero-transfer zero-quota probe, so the
+ * fetch is skipped on ticks where no head moved.
+ */
+export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<FetchPullHeadsResult> {
+  const run = opts.exec ?? defaultExec
+  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
+
+  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', 'refs/pull/*/head'], {
+    cwd: opts.repoRoot,
+  })
+  const heads: Record<string, string> = {}
+  for (const line of out.trim().split('\n')) {
+    if (line === '') continue
+    const [sha, ref] = line.split('\t')
+    if (sha !== undefined && ref !== undefined) heads[ref] = sha
+  }
+
+  const moved =
+    Object.keys(heads).length !== Object.keys(opts.lastHeads).length ||
+    Object.keys(heads).some((ref) => opts.lastHeads[ref] !== heads[ref])
+  if (!moved) return { fetched: false, heads }
+
+  await execOk(
+    run,
+    [
+      'git',
+      ...tokenCfg,
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    ],
+    { cwd: opts.repoRoot },
+  )
+  return { fetched: true, heads }
 }
 
 export type PrepareConflictWorktreeOptions = {
@@ -64,7 +135,7 @@ export async function prepareConflictWorktree(
   opts: PrepareConflictWorktreeOptions,
 ): Promise<ConflictWorktree> {
   const run = opts.exec ?? defaultExec
-  const tokenCfg = gitTokenConfig()
+  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
 
   await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', opts.baseBranch], {
     cwd: opts.repoRoot,
@@ -103,9 +174,10 @@ export type PushConflictFixOptions = {
 /** Pushes the resolved local branch back to the PR head ref, updating the PR. */
 export async function pushConflictFix(opts: PushConflictFixOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
+  const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github'))
   await execOk(
     run,
-    ['git', ...gitTokenConfig(), 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],
+    ['git', ...tokenCfg, 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],
     { cwd: opts.cwd },
   )
 }
@@ -115,17 +187,27 @@ export type PrMergeStatus = {
   mergeStateStatus: string
 }
 
-/** Re-reads GitHub's merge status for a PR, best effort after a push. */
+/**
+ * Reads a PR's merge status. GitHub computes mergeability asynchronously: bulk
+ * queries (`gh pr list`) report UNKNOWN until a single-PR query triggers it, so
+ * retry briefly until the state resolves.
+ */
 export async function prMergeStatus(
   cwd: string,
   number: number,
   exec?: Exec,
 ): Promise<PrMergeStatus> {
   const run = exec ?? defaultExec
-  const out = await execOk(
-    run,
-    ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-    { cwd },
-  )
-  return JSON.parse(out) as PrMergeStatus
+  let status: PrMergeStatus = { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const out = await execOk(
+      run,
+      ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
+      { cwd, env: ghEnv() },
+    )
+    status = JSON.parse(out) as PrMergeStatus
+    if (status.mergeable !== 'UNKNOWN' && status.mergeStateStatus !== 'UNKNOWN') break
+    if (attempt < 4) await Bun.sleep(1000)
+  }
+  return status
 }

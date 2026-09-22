@@ -1,192 +1,36 @@
-import { type CheckResult, isTerminal, type StoredEvent, type TaskState } from './events.ts'
+import { isTerminal, type StoredEvent } from './events.ts'
+import {
+  emptyProjection,
+  type ProjectedQuestion,
+  type ProjectedTask,
+  type Projection,
+  project,
+} from './project.ts'
 
-export type TaskView = {
-  id: string
-  title: string
-  tracker: string
-  state: TaskState
-  branch: string | null
-  worktree: string | null
-  sessionId: string | null
-  prUrl: string | null
-  prNumber: number | null
-  reviewRound: number
-  lastError: string | null
-  lastCommit: { sha: string; subject: string } | null
-  checks: CheckResult[] | null
-  checksOk: boolean | null
-  createdAt: number
-  updatedAt: number
-}
+export type { ProjectedQuestion, ProjectedTask, Projection }
+export { emptyProjection, project }
 
-export type QuestionView = {
-  id: string
-  taskId: string
-  question: string
-  options: string[]
-  answer: string | null
-  askedAt: number
-  resolvedAt: number | null
-}
+/**
+ * The dashboard and TUI fold the event stream through the same pure reducer
+ * the server uses to keep its SQL projection (`project` in project.ts), so a
+ * client renders exactly what the API would answer, from events alone.
+ */
+export type TaskView = ProjectedTask
+export type QuestionView = ProjectedQuestion
 
-export type DashboardState = {
-  tasks: Record<string, TaskView>
-  questions: Record<string, QuestionView>
+export type DashboardState = Projection & {
   events: StoredEvent[]
   latestSeq: number
 }
 
 export const initialDashboardState = (): DashboardState => ({
-  tasks: {},
-  questions: {},
+  ...emptyProjection(),
   events: [],
   latestSeq: 0,
 })
 
-/**
- * The wire contract from the event log is the single source of truth; the
- * server-side `store.apply` projection is mirrored here so any client (web
- * dashboard, TUI) renders exactly what the API would answer, from events alone.
- */
 export function reduceState(state: DashboardState, event: StoredEvent): DashboardState {
-  const tasks = { ...state.tasks }
-  const questions = { ...state.questions }
-  const task = (id: string) => tasks[id]
-
-  if (event.taskId !== null) {
-    const current = task(event.taskId)
-    switch (event.type) {
-      case 'task.claimed': {
-        if (current) {
-          tasks[event.taskId] = {
-            ...current,
-            title: event.title,
-            tracker: event.tracker,
-            updatedAt: event.ts,
-          }
-        } else {
-          tasks[event.taskId] = {
-            id: event.taskId,
-            title: event.title,
-            tracker: event.tracker,
-            state: 'claimed',
-            branch: null,
-            worktree: null,
-            sessionId: null,
-            prUrl: null,
-            prNumber: null,
-            reviewRound: 0,
-            lastError: null,
-            lastCommit: null,
-            checks: null,
-            checksOk: null,
-            createdAt: event.ts,
-            updatedAt: event.ts,
-          }
-        }
-        break
-      }
-      case 'task.state': {
-        if (current) {
-          const reviewRound =
-            event.to === 'reviewing' ? current.reviewRound + 1 : current.reviewRound
-          tasks[event.taskId] = { ...current, state: event.to, reviewRound, updatedAt: event.ts }
-        }
-        break
-      }
-      case 'task.reclaimed':
-        if (current) {
-          tasks[event.taskId] = { ...current, state: 'claimed', updatedAt: event.ts }
-        }
-        break
-      case 'worktree.created':
-        if (current) {
-          tasks[event.taskId] = {
-            ...current,
-            worktree: event.path,
-            branch: event.branch,
-            updatedAt: event.ts,
-          }
-        }
-        break
-      case 'worktree.removed':
-        if (current) {
-          tasks[event.taskId] = {
-            ...current,
-            worktree: null,
-            branch: null,
-            updatedAt: event.ts,
-          }
-        }
-        break
-      case 'agent.exited':
-        if (current && event.sessionId !== null) {
-          tasks[event.taskId] = { ...current, sessionId: event.sessionId, updatedAt: event.ts }
-        }
-        break
-      case 'commit.created':
-        if (current) {
-          tasks[event.taskId] = {
-            ...current,
-            lastCommit: { sha: event.sha, subject: event.subject },
-            updatedAt: event.ts,
-          }
-        }
-        break
-      case 'pr.created':
-        if (current) {
-          tasks[event.taskId] = {
-            ...current,
-            prUrl: event.url,
-            prNumber: event.number,
-            updatedAt: event.ts,
-          }
-        }
-        break
-      case 'checks.finished':
-        if (current) {
-          tasks[event.taskId] = {
-            ...current,
-            checks: event.results,
-            checksOk: event.ok,
-            updatedAt: event.ts,
-          }
-        }
-        break
-      case 'question.asked':
-        questions[event.questionId] = {
-          id: event.questionId,
-          taskId: event.taskId,
-          question: event.question,
-          options: event.options,
-          answer: null,
-          askedAt: event.ts,
-          resolvedAt: null,
-        }
-        break
-      case 'question.answered':
-        if (questions[event.questionId]) {
-          const q = questions[event.questionId]
-          if (q) questions[event.questionId] = { ...q, answer: event.answer, resolvedAt: event.ts }
-        }
-        break
-      case 'question.timedout':
-        if (questions[event.questionId]) {
-          const q = questions[event.questionId]
-          if (q) questions[event.questionId] = { ...q, resolvedAt: event.ts }
-        }
-        break
-      case 'error':
-        if (current) {
-          tasks[event.taskId] = { ...current, lastError: event.message, updatedAt: event.ts }
-        }
-        break
-      default:
-        break
-    }
-  }
-
-  return { tasks, questions, events: [...state.events, event], latestSeq: event.seq }
+  return { ...project(state, event), events: [...state.events, event], latestSeq: event.seq }
 }
 
 /** The queue view: every task still in flight, most recently touched first. */
@@ -198,7 +42,7 @@ export function activeTasks(state: DashboardState): TaskView[] {
 
 export function tasksNeedingAttention(state: DashboardState): TaskView[] {
   return Object.values(state.tasks)
-    .filter((t) => t.state === 'needs_human')
+    .filter((t) => t.state === 'needs_human' || t.state === 'no_pr' || t.state === 'pr_flagged')
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
@@ -214,7 +58,218 @@ export function currentAgentFor(
 ): Extract<StoredEvent, { type: 'agent.started' }> | null {
   for (let i = state.events.length - 1; i >= 0; i--) {
     const event = state.events[i]
-    if (event?.taskId === taskId && event.type === 'agent.started') return event
+    // A chat run is not the implementing agent; skip it so the task detail
+    // keeps naming the agent that actually did the work.
+    if (event?.taskId === taskId && event.type === 'agent.started' && event.role !== 'chat') {
+      return event
+    }
   }
   return null
+}
+
+/** Context size of the agent currently running on the task, if any usage has been reported. */
+export function currentUsageFor(
+  state: DashboardState,
+  taskId: string,
+): { inputTokens: number; outputTokens: number; cachedTokens: number } | null {
+  let inputTokens = 0
+  let outputTokens = 0
+  let cachedTokens = 0
+  for (let i = state.events.length - 1; i >= 0; i--) {
+    const event = state.events[i]
+    if (event?.taskId !== taskId) continue
+    // Stop at the current implementing run; earlier runs are another context.
+    // Chat runs are not the implementing agent, so their usage is skipped like
+    // currentAgentFor skips their starts.
+    if (event.type === 'agent.started' && event.role !== 'chat') break
+    if (event.type === 'agent.stream' && event.event.kind === 'usage' && event.role !== 'chat') {
+      inputTokens += event.event.inputTokens
+      outputTokens += event.event.outputTokens
+      cachedTokens += event.event.cachedTokens ?? 0
+    }
+  }
+  if (inputTokens === 0 && outputTokens === 0 && cachedTokens === 0) return null
+  return { inputTokens, outputTokens, cachedTokens }
+}
+
+/** One message in the operator/worker chat: a user message or an assistant turn. */
+export type ChatTurn = {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  ts: number
+  /** The assistant turn is still streaming in (no agent.exited yet). */
+  pending: boolean
+}
+
+/**
+ * Folds the event log into a conversation: chat.message events are the
+ * operator's side, and the text chunks of each 'chat'-role agent run fold into
+ * one assistant turn. A chat run still in flight comes back as a pending turn
+ * so the UI can show the worker typing as its text streams in.
+ */
+export function chatTurns(state: DashboardState, taskId: string): ChatTurn[] {
+  const turns: ChatTurn[] = []
+  let open: { text: string; seq: number; ts: number } | null = null
+  const flush = (pending = false) => {
+    if (open === null) return
+    turns.push({
+      id: `a${open.seq}`,
+      role: 'assistant',
+      text: open.text,
+      ts: open.ts,
+      pending,
+    })
+    open = null
+  }
+  for (const event of state.events) {
+    if (event.taskId !== taskId) continue
+    if (event.type === 'chat.message') {
+      flush()
+      turns.push({
+        id: `u${event.seq}`,
+        role: 'user',
+        text: event.text,
+        ts: event.ts,
+        pending: false,
+      })
+    } else if (event.type === 'agent.started' && event.role === 'chat') {
+      flush()
+      open = { text: '', seq: event.seq, ts: event.ts }
+    } else if (
+      event.type === 'agent.stream' &&
+      event.role === 'chat' &&
+      event.event.kind === 'text' &&
+      open !== null
+    ) {
+      open.text += event.event.text
+    } else if (event.type === 'agent.exited' && event.role === 'chat') {
+      flush()
+    }
+  }
+  flush(true)
+  return turns
+}
+
+/** Whether a chat run is currently in flight for the task (worker responding). */
+export function chatInFlight(state: DashboardState, taskId: string): boolean {
+  let started = false
+  for (const event of state.events) {
+    if (event.taskId !== taskId) continue
+    if (event.type === 'agent.started' && event.role === 'chat') started = true
+    else if (event.type === 'agent.exited' && event.role === 'chat') started = false
+  }
+  return started
+}
+
+/**
+ * A task's run health as the guards see it: context against the soft/hard
+ * limits, cost and elapsed against the task budgets, and every guard warning
+ * already raised. Values come from the event stream alone, so the dashboard
+ * and TUI render exactly what the runner enforced.
+ */
+export type RunHealth = {
+  /** Peak input context (input + cached) of the current run, from the last run.context event. */
+  contextTokens: number | null
+  /** Effective soft context limit for the active harness, from run.limits. */
+  contextWarnTokens: number | null
+  /** Effective hard context limit for the active harness, from run.limits. */
+  contextMaxTokens: number | null
+  /** Accumulated implement usage cost in USD; 0 when the harness reports no cost. */
+  costUsd: number
+  /** Whether any implement usage event carried a dollar figure. */
+  costSeen: boolean
+  /** Max cost budget in USD; 0 means unbounded. */
+  maxCostUsd: number
+  /** Wall-clock since first claim, in ms. */
+  elapsedMs: number
+  /** Max run time budget in ms; 0 or null means unbounded. */
+  maxRunMs: number | null
+  /** Guard warnings already raised: doom-loop detections and context crossings. */
+  warnings: string[]
+}
+
+/** Folds a task's run health out of the event stream. `now` is injectable for tests. */
+export function runHealth(state: DashboardState, taskId: string, now = Date.now()): RunHealth {
+  const task = state.tasks[taskId]
+  let contextTokens: number | null = null
+  let contextWarnTokens: number | null = null
+  let contextMaxTokens: number | null = null
+  let maxRunMs: number | null = null
+  let maxCostUsd = 0
+  let costUsd = 0
+  let costSeen = false
+  const warnings: string[] = []
+  for (const event of state.events) {
+    if (event.taskId !== taskId) continue
+    switch (event.type) {
+      case 'run.context':
+        contextTokens = event.contextTokens
+        break
+      case 'run.limits':
+        contextWarnTokens = event.contextWarnTokens
+        contextMaxTokens = event.contextMaxTokens
+        maxRunMs = event.maxRunMs === 0 ? null : event.maxRunMs
+        maxCostUsd = event.maxCostUsd
+        break
+      case 'agent.stream':
+        // Chat runs are not the implementing agent, so their usage is outside
+        // the task budgets, matching how the runner accumulates cost.
+        if (event.event.kind !== 'usage' || event.role === 'chat') break
+        if (event.event.costUsd !== undefined) {
+          costUsd += event.event.costUsd
+          costSeen = true
+        }
+        break
+      case 'doom.detected':
+        warnings.push(`doom loop: ${event.detail}`)
+        break
+      case 'context.warn':
+        warnings.push(`context warning: ${event.contextTokens}/${event.limit} tokens`)
+        break
+      case 'context.exceeded':
+        warnings.push(`context exceeded: ${event.contextTokens}/${event.limit} tokens`)
+        break
+      default:
+        break
+    }
+  }
+  return {
+    contextTokens,
+    contextWarnTokens,
+    contextMaxTokens,
+    costUsd,
+    costSeen,
+    maxCostUsd,
+    elapsedMs: task === undefined ? 0 : now - task.createdAt,
+    maxRunMs,
+    warnings,
+  }
+}
+
+/**
+ * Whether a run is nearing a guard limit: a warning already raised, context at
+ * or past the soft limit, or elapsed/cost at 80% of the configured budget. The
+ * compact marker the workers panels use.
+ */
+export function runHealthNearLimit(health: RunHealth): boolean {
+  if (health.warnings.length > 0) return true
+  if (
+    health.contextTokens !== null &&
+    health.contextWarnTokens !== null &&
+    health.contextTokens >= health.contextWarnTokens
+  ) {
+    return true
+  }
+  if (
+    health.maxRunMs !== null &&
+    health.maxRunMs > 0 &&
+    health.elapsedMs / health.maxRunMs >= 0.8
+  ) {
+    return true
+  }
+  if (health.costSeen && health.maxCostUsd > 0 && health.costUsd / health.maxCostUsd >= 0.8) {
+    return true
+  }
+  return false
 }

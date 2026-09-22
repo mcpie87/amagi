@@ -2,39 +2,71 @@ import {
   activeTasks,
   agentLogStore,
   type DashboardState,
+  fmtDuration,
+  fmtTokens,
+  isTerminal,
   openQuestionsFor,
   type QuestionView,
+  relTime,
+  runHealth,
+  runHealthNearLimit,
   type StoredEvent,
   type TaskState,
   type TaskView,
+  tasksNeedingAttention,
 } from '@amagi/core'
+import type { TrackerTask } from '@amagi/core/drivers/types'
+import type { RunnerStatus } from '@amagi/core/run-service'
 import { Box, Text, useApp, useInput } from 'ink'
-import { useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { fetchTaskToken, submitAnswer } from './answer.ts'
-import { relTime } from './format.ts'
 import { useDashboardStream } from './useDashboardStream.ts'
+import { useOverview } from './useOverview.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
   needs_human: 'red',
   done: 'green',
-  reviewing: 'magenta',
-  fixing: 'magenta',
 }
 
 function Badge({ state }: { state: TaskState }) {
   return <Text color={STATE_COLOR[state] ?? 'gray'}>{state}</Text>
 }
 
-export type AppProps = { baseUrl: string }
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = n
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`
+}
 
-type Screen = { name: 'queue' } | { name: 'detail'; taskId: string }
+function fmtCpu(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s'
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
 
-export function App({ baseUrl }: AppProps) {
+export type AppProps = { baseUrl: string; repo: string }
+
+type Screen = { name: 'overview' } | { name: 'queue' } | { name: 'detail'; taskId: string }
+
+export function App({ baseUrl, repo }: AppProps) {
   const { exit } = useApp()
-  const state = useDashboardStream(baseUrl)
-  const [screen, setScreen] = useState<Screen>({ name: 'queue' })
+  const state = useDashboardStream(baseUrl, repo)
+  const overview = useOverview(baseUrl, repo)
+  const [screen, setScreen] = useState<Screen>({ name: 'overview' })
   const [showAll, setShowAll] = useState(false)
+  // One wall-clock snapshot per second so elapsed-vs-budget stays live between
+  // stream events.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   const tasks = useMemo(
     () =>
@@ -48,9 +80,23 @@ export function App({ baseUrl }: AppProps) {
     return (
       <TaskDetail
         baseUrl={baseUrl}
+        repo={repo}
         state={state}
         taskId={screen.taskId}
+        now={now}
         onBack={() => setScreen({ name: 'queue' })}
+      />
+    )
+  }
+
+  if (screen.name === 'overview') {
+    return (
+      <OverviewScreen
+        state={state}
+        runner={overview.runner}
+        ready={overview.ready}
+        onQueue={() => setScreen({ name: 'queue' })}
+        onQuit={() => exit()}
       />
     )
   }
@@ -58,9 +104,12 @@ export function App({ baseUrl }: AppProps) {
   return (
     <QueueScreen
       tasks={tasks}
+      state={state}
+      now={now}
       showAll={showAll}
       onToggleAll={() => setShowAll((v) => !v)}
       onSelect={(taskId) => setScreen({ name: 'detail', taskId })}
+      onToOverview={() => setScreen({ name: 'overview' })}
       onQuit={() => exit()}
     />
   )
@@ -68,15 +117,21 @@ export function App({ baseUrl }: AppProps) {
 
 function QueueScreen({
   tasks,
+  state,
+  now,
   showAll,
   onToggleAll,
   onSelect,
+  onToOverview,
   onQuit,
 }: {
   tasks: TaskView[]
+  state: DashboardState
+  now: number
   showAll: boolean
   onToggleAll: () => void
   onSelect: (taskId: string) => void
+  onToOverview: () => void
   onQuit: () => void
 }) {
   const [index, setIndex] = useState(0)
@@ -85,6 +140,10 @@ function QueueScreen({
   useInput((input, key) => {
     if (input === 'q' || key.ctrl) {
       if (input === 'q') onQuit()
+      return
+    }
+    if (key.tab || input === 'o') {
+      onToOverview()
       return
     }
     if (key.upArrow || input === 'k') setIndex((i) => Math.max(0, i - 1))
@@ -103,21 +162,163 @@ function QueueScreen({
         <Text dimColor>no {showAll ? '' : 'active '}tasks</Text>
       ) : (
         <Box flexDirection="column" marginTop={1}>
-          {tasks.map((task, i) => (
-            <Box key={task.id} gap={1}>
-              {i === selected ? <Text color="cyan">{'>'}</Text> : <Text> </Text>}
-              <Badge state={task.state} />
-              <Text wrap="truncate">{task.title}</Text>
-              <Text dimColor>
-                {task.id}
-                {task.reviewRound > 0 ? ` r${task.reviewRound}` : ''} {relTime(task.updatedAt)}
-              </Text>
-            </Box>
-          ))}
+          {tasks.map((task, i) => {
+            const nearLimit = runHealthNearLimit(runHealth(state, task.id, now))
+            return (
+              <Box key={task.id} gap={1}>
+                {i === selected ? <Text color="cyan">{'>'}</Text> : <Text> </Text>}
+                <Badge state={task.state} />
+                {nearLimit && <Text color="yellow">!</Text>}
+                <Text wrap="truncate">{task.title}</Text>
+                <Text dimColor>
+                  {task.id} {relTime(task.updatedAt)}
+                </Text>
+              </Box>
+            )
+          })}
         </Box>
       )}
       <Box marginTop={1}>
-        <Text dimColor>↑/↓ move · enter open · a all/active · q quit</Text>
+        <Text dimColor>↑/↓ move · enter open · a all/active · tab overview · q quit</Text>
+      </Box>
+    </Box>
+  )
+}
+
+function OverviewScreen({
+  state,
+  runner,
+  ready,
+  onQueue,
+  onQuit,
+}: {
+  state: DashboardState
+  runner: RunnerStatus | null
+  ready: TrackerTask[]
+  onQueue: () => void
+  onQuit: () => void
+}) {
+  useInput((input, key) => {
+    if (key.tab || input === 'o') onQueue()
+    else if (input === 'q') onQuit()
+  })
+
+  const running = runner?.running ?? []
+  const openPrs = Object.values(state.tasks)
+    .filter((t) => t.prUrl !== null && !isTerminal(t.state))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+  const attention = tasksNeedingAttention(state)
+  const resources = running.reduce(
+    (acc, id) => {
+      const r = runner?.resources[id]
+      if (r === undefined) return acc
+      return {
+        processes: acc.processes + r.processes,
+        rssBytes: acc.rssBytes + r.rssBytes,
+        cpuMs: acc.cpuMs + r.cpuMs,
+      }
+    },
+    { processes: 0, rssBytes: 0, cpuMs: 0 },
+  )
+
+  return (
+    <Box flexDirection="column">
+      <Text bold>amagi overview</Text>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold>runner</Text>
+        {runner === null ? (
+          <Text dimColor>offline</Text>
+        ) : (
+          <Text>
+            {runner.available ? 'available' : 'busy'} · {running.length}/{runner.capacity} workers ·
+            auto-queue {runner.autoQueue ? 'on' : 'off'}
+          </Text>
+        )}
+        {resources.processes > 0 && (
+          <Text dimColor>
+            rss {fmtBytes(resources.rssBytes)} · cpu {fmtCpu(resources.cpuMs)} · procs{' '}
+            {resources.processes}
+          </Text>
+        )}
+      </Box>
+
+      {running.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>running</Text>
+          {running.map((id) => {
+            const task = state.tasks[id]
+            return <Text key={id}>{task !== undefined ? `${task.title} (${id})` : id}</Text>
+          })}
+        </Box>
+      )}
+
+      {runner?.workers !== undefined && runner.workers.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>watchers</Text>
+          {runner.workers.map((w) => (
+            <Text key={`${w.repo}/${w.name}`} {...(w.error !== null ? { color: 'red' } : {})}>
+              {w.name} · {w.repo} · last run {w.lastRunAt === 0 ? 'never' : relTime(w.lastRunAt)}
+              {w.error === null
+                ? w.detail !== null && w.detail !== undefined
+                  ? ` · ${w.detail}`
+                  : w.counters.map((c) => ` · ${c.label} ${c.value}`).join('')
+                : ` · ${w.error}`}
+            </Text>
+          ))}
+        </Box>
+      )}
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold>claimable {ready.length > 0 ? `(${ready.length})` : ''}</Text>
+        {ready.length === 0 ? (
+          <Text dimColor>none</Text>
+        ) : (
+          ready.map((t) => (
+            <Text key={t.id}>
+              {t.id} {t.title}
+            </Text>
+          ))
+        )}
+      </Box>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold>open PRs {openPrs.length > 0 ? `(${openPrs.length})` : ''}</Text>
+        {openPrs.length === 0 ? (
+          <Text dimColor>none</Text>
+        ) : (
+          openPrs.map((t) => (
+            <Text key={t.id}>
+              {t.prMergeStatus === 'conflicted' ? (
+                <Text color="red">conflict</Text>
+              ) : t.prMergeStatus === 'mergeable' ? (
+                <Text color="green">mergeable</Text>
+              ) : (
+                <Text color="gray">unknown</Text>
+              )}{' '}
+              {t.title} ({t.id})
+            </Text>
+          ))
+        )}
+      </Box>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold {...(attention.length > 0 ? { color: 'yellow' } : {})}>
+          needs attention {attention.length > 0 ? `(${attention.length})` : ''}
+        </Text>
+        {attention.length === 0 ? (
+          <Text dimColor>none</Text>
+        ) : (
+          attention.map((t) => (
+            <Text key={t.id}>
+              <Badge state={t.state} /> {t.title} ({t.id})
+            </Text>
+          ))
+        )}
+      </Box>
+
+      <Box marginTop={1}>
+        <Text dimColor>tab queue · q quit</Text>
       </Box>
     </Box>
   )
@@ -143,26 +344,33 @@ type AnswerMode =
 
 function TaskDetail({
   baseUrl,
+  repo,
   state,
   taskId,
+  now,
   onBack,
 }: {
   baseUrl: string
+  repo: string
   state: DashboardState
   taskId: string
+  now: number
   onBack: () => void
 }) {
   const task = state.tasks[taskId]
   const questions = openQuestionsFor(state, taskId)
   const [qIndex, setQIndex] = useState(0)
   const [mode, setMode] = useState<AnswerMode>({ kind: 'browse' })
+  const logKey = `${repo}/${taskId}`
+  const health = runHealth(state, taskId, now)
 
   const version = useSyncExternalStore(
-    (listener) => agentLogStore.subscribe(taskId, listener),
-    () => agentLogStore.get(taskId).version,
+    (listener) => agentLogStore.subscribe(logKey, listener),
+    () => agentLogStore.get(logKey).version,
   )
   const tail = useMemo(() => {
-    const buffer = agentLogStore.get(taskId)
+    void version
+    const buffer = agentLogStore.get(logKey)
     const start = Math.max(0, buffer.length - AGENT_LOG_TAIL)
     const lines = []
     for (let i = start; i < buffer.length; i++) {
@@ -170,7 +378,7 @@ function TaskDetail({
       if (line) lines.push(line)
     }
     return lines
-  }, [taskId, version])
+  }, [logKey, version])
 
   const agentStarts = state.events.filter(
     (e): e is Extract<StoredEvent, { type: 'agent.started' }> =>
@@ -186,7 +394,7 @@ function TaskDetail({
 
   async function answer(questionId: string, text: string): Promise<void> {
     setMode({ kind: 'answering', questionId, draft: text, busy: true, error: null })
-    const token = await fetchTaskToken(baseUrl, taskId)
+    const token = await fetchTaskToken(baseUrl, repo, taskId)
     if (token === null) {
       setMode({
         kind: 'answering',
@@ -197,7 +405,7 @@ function TaskDetail({
       })
       return
     }
-    const outcome = await submitAnswer(baseUrl, taskId, questionId, token, text)
+    const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, token, text)
     if (outcome.kind === 'error') {
       setMode({ kind: 'answering', questionId, draft: text, busy: false, error: outcome.message })
     } else {
@@ -261,7 +469,6 @@ function TaskDetail({
       <Box gap={1}>
         <Text bold>{task.title}</Text>
         <Badge state={task.state} />
-        {task.reviewRound > 0 && <Text dimColor>review round {task.reviewRound}</Text>}
       </Box>
       <Text dimColor>{task.id}</Text>
 
@@ -273,6 +480,24 @@ function TaskDetail({
         <DetailRow label="worktree" value={task.worktree} />
         <DetailRow label="branch" value={task.branch} />
         <DetailRow label="PR" value={task.prUrl} />
+        {task.prMergeStatus !== null && (
+          <Box gap={1}>
+            <Box width={10}>
+              <Text dimColor>pr status</Text>
+            </Box>
+            <Text
+              color={
+                task.prMergeStatus === 'conflicted'
+                  ? 'red'
+                  : task.prMergeStatus === 'mergeable'
+                    ? 'green'
+                    : 'gray'
+              }
+            >
+              {task.prMergeStatus === 'conflicted' ? 'merge conflict' : task.prMergeStatus}
+            </Text>
+          </Box>
+        )}
         {task.lastCommit !== null && (
           <DetailRow
             label="commit"
@@ -281,7 +506,49 @@ function TaskDetail({
         )}
         <DetailRow label="session" value={task.sessionId} />
         <DetailRow label="error" value={task.lastError} />
+        <DetailRow
+          label="context"
+          value={
+            health.contextTokens === null
+              ? null
+              : health.contextWarnTokens === null
+                ? fmtTokens(health.contextTokens)
+                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn / ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+          }
+        />
+        <DetailRow
+          label="cost"
+          value={
+            !health.costSeen
+              ? null
+              : health.maxCostUsd > 0
+                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                : `$${health.costUsd.toFixed(2)}`
+          }
+        />
+        <DetailRow
+          label="elapsed"
+          value={
+            health.maxRunMs === null
+              ? fmtDuration(health.elapsedMs)
+              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+          }
+        />
       </Box>
+
+      {health.warnings.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="yellow">
+            guard warnings
+          </Text>
+          {health.warnings.map((w, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: warning strings have no stable id
+            <Text key={i} wrap="truncate">
+              {w}
+            </Text>
+          ))}
+        </Box>
+      )}
 
       {tail.length > 0 && (
         <Box flexDirection="column" marginTop={1}>

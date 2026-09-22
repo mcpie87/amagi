@@ -1,16 +1,8 @@
-import { AsyncQueue } from '../../async-queue.ts'
 import type { AgentEvent } from '../../events.ts'
 import { CommandError, exec } from '../../exec.ts'
-import { jsonLines } from '../../jsonl.ts'
 import { parseModelLines } from '../../models.ts'
-import { killTree } from '../../process.ts'
-import type {
-  AgentOutcome,
-  AgentProcess,
-  AgentStartOptions,
-  AgentUsage,
-  Harness,
-} from '../types.ts'
+import type { AgentProcess, AgentStartOptions, AgentUsage, Harness } from '../types.ts'
+import { renderToolResult, spawnAgent } from './spawn.ts'
 
 type ToolState = {
   status?: string
@@ -24,7 +16,7 @@ type Part = {
   callID?: string
   state?: ToolState
   text?: string
-  tokens?: { input?: number; output?: number }
+  tokens?: { input?: number; output?: number; cache?: { read?: number; write?: number } }
   cost?: number
 }
 
@@ -32,11 +24,6 @@ type OpencodeMessage = {
   type?: string
   sessionID?: string
   part?: Part
-}
-
-function renderToolResult(output: unknown): string {
-  if (typeof output === 'string') return output
-  return JSON.stringify(output ?? '')
 }
 
 /**
@@ -60,6 +47,7 @@ export class OpencodeTranslator {
   private readonly startedTools = new Set<string>()
   private totalInputTokens = 0
   private totalOutputTokens = 0
+  private totalCachedTokens = 0
   private totalCostUsd = 0
   /** Whether any message was ever seen, so finalize() stays silent on a run that produced no JSON at all. */
   private sawAnyMessage = false
@@ -123,17 +111,28 @@ export class OpencodeTranslator {
   private fromStepFinish(part: Part): AgentEvent[] {
     const inputTokens = part.tokens?.input ?? 0
     const outputTokens = part.tokens?.output ?? 0
+    const cachedTokens = part.tokens?.cache?.read ?? 0
     const costUsd = part.cost ?? 0
 
     this.totalInputTokens += inputTokens
     this.totalOutputTokens += outputTokens
+    this.totalCachedTokens += cachedTokens
     this.totalCostUsd += costUsd
     this.usage = {
       inputTokens: this.totalInputTokens,
       outputTokens: this.totalOutputTokens,
+      cachedTokens: this.totalCachedTokens,
       costUsd: this.totalCostUsd,
     }
-    return [{ kind: 'usage', inputTokens, outputTokens, costUsd }]
+    return [
+      {
+        kind: 'usage',
+        inputTokens,
+        outputTokens,
+        ...(cachedTokens === 0 ? {} : { cachedTokens }),
+        costUsd,
+      },
+    ]
   }
 }
 
@@ -160,15 +159,17 @@ export class OpencodeHarness implements Harness {
     return parseModelLines(result.stdout)
   }
 
+  // opencode's `--variant` is provider-specific, so there is no universal list.
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
     return this.spawn(this.argv(opts, sessionId), opts)
   }
 
   argv(opts: AgentStartOptions, sessionId: string | null): string[] {
-    // opencode has no `--append-system-prompt` equivalent, so it is folded
-    // into the message itself.
-    const prompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.prompt}` : opts.prompt
-    const argv = [this.bin, 'run', prompt, '--format', 'json', '--dir', opts.cwd]
+    const argv = [this.bin, 'run', '--format', 'json', '--dir', opts.cwd]
 
     if (sessionId !== null) argv.push('--session', sessionId)
     if (opts.model) argv.push('--model', opts.model)
@@ -184,53 +185,23 @@ export class OpencodeHarness implements Harness {
     return argv
   }
 
+  /**
+   * opencode has no `--append-system-prompt` equivalent, so it is folded into
+   * the message itself. The message goes over stdin, not argv: a single argv
+   * element is capped at MAX_ARG_STRLEN (~128 KB), which a mention prompt with
+   * PR context easily exceeds (E2BIG on spawn). opencode's `run` reads the
+   * message from piped stdin when no positional is given.
+   */
+  private static message(opts: AgentStartOptions): string {
+    return opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.prompt}` : opts.prompt
+  }
+
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    const proc = Bun.spawn(argv, {
-      cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-
-    const queue = new AsyncQueue<AgentEvent>()
     const translator = new OpencodeTranslator()
-    const stderr = new Response(proc.stderr).text()
-
-    const done: Promise<AgentOutcome> = (async () => {
-      try {
-        for await (const raw of jsonLines(proc.stdout)) {
-          for (const event of translator.push(raw)) queue.push(event)
-        }
-        for (const event of translator.finalize()) queue.push(event)
-      } catch (err) {
-        queue.push({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
-      } finally {
-        queue.close()
-      }
-
-      const exitCode = await proc.exited
-      return {
-        exitCode,
-        ok: translator.ok && exitCode === 0,
-        sessionId: translator.sessionId,
-        summary: translator.summary,
-        usage: translator.usage,
-        stderr: await stderr,
-      }
-    })()
-
-    return {
-      pid: proc.pid,
-      events: () => queue,
-      done,
-      kill: async () => {
-        await killTree(proc.pid)
-      },
-      get model() {
-        return null
-      },
+    return spawnAgent(argv, opts, translator, {
+      finalize: () => translator.finalize(),
       effort: opts.effort ?? null,
-    }
+      stdin: OpencodeHarness.message(opts),
+    })
   }
 }
