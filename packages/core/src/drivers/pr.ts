@@ -377,6 +377,7 @@ function forgejoPr(exec: Exec): PrDriver {
       return (items as Array<Record<string, unknown>>).map((item) => ({
         number: Number(item.number ?? 0),
         title: typeof item.title === 'string' ? item.title : '',
+        body: typeof item.body === 'string' ? item.body : '',
         url: typeof item.html_url === 'string' ? item.html_url : '',
         headRefName: refName(item.head),
         baseRefName: refName(item.base),

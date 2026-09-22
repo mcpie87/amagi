@@ -23,6 +23,7 @@ const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
 const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
   title: 'Do the thing',
+  body: '',
   url: 'https://github.com/owner/repo/pull/7',
   headRefName: 'amagi/am-1-do-the-thing',
   baseRefName: 'main',
@@ -392,6 +393,7 @@ describe('forgejoPr', () => {
       {
         number: 3,
         title: 'Do the thing',
+        body: '',
         url: 'https://git.example.com/owner/repo/pulls/3',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',

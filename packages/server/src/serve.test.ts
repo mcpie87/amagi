@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import type { TaskRow } from '@amagi/core'
+import type { ProjectedTask } from '@amagi/core'
 import { serve } from './serve.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
@@ -24,7 +24,7 @@ test('serves the API over a real socket', async () => {
   const res = await fetch(`http://127.0.0.1:${server.port}/api/repos/repo1/tasks`)
 
   expect(res.status).toBe(200)
-  expect(((await res.json()) as TaskRow[])[0]?.id).toBe('bd-1')
+  expect(((await res.json()) as ProjectedTask[])[0]?.id).toBe('bd-1')
 })
 
 test('serves dashboard assets with SPA fallback', async () => {

@@ -6,13 +6,13 @@ import {
   fmtTokens,
   isTerminal,
   openQuestionsFor,
-  type QuestionView,
+  type ProjectedQuestion,
+  type ProjectedTask,
   relTime,
   runHealth,
   runHealthNearLimit,
   type StoredEvent,
   type TaskState,
-  type TaskView,
   tasksNeedingAttention,
 } from '@amagi/core'
 import type { TrackerTask } from '@amagi/core/drivers/types'
@@ -125,7 +125,7 @@ function QueueScreen({
   onToOverview,
   onQuit,
 }: {
-  tasks: TaskView[]
+  tasks: ProjectedTask[]
   state: DashboardState
   now: number
   showAll: boolean
@@ -595,7 +595,7 @@ function QuestionsPanel({
   qIndex,
   mode,
 }: {
-  questions: QuestionView[]
+  questions: ProjectedQuestion[]
   qIndex: number
   mode: AnswerMode
 }) {
