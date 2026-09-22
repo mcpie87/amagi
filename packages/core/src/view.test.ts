@@ -453,7 +453,6 @@ describe('dashboard state reducer', () => {
     expect(tasksNeedingAttention(state).map((t) => t.id)).toEqual(['am-2'])
     expect(state.tasks['am-1']?.state).toBe('retrying')
   })
-
   test('completing a parked task keeps the verdict and the chat conversation', () => {
     const events = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
