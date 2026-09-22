@@ -10,6 +10,10 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Free-form markdown notes on the issue; beads populates it, others leave it unset. */
+  notes?: string
+  /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
+  comments?: string[]
   /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
   difficulty?: string | null
 }

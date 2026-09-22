@@ -26,6 +26,11 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     "  option, new API endpoint), append a short `### How to use` section to the task's",
     '  description in the issue tracker: how to trigger it and what it does. The PR',
     '  description is built from that description.',
+    '- The tracker CLI (bd) is unavailable inside this worktree; the full issue text',
+    '  (description, notes, comments) is embedded in the prompt instead.',
+    '- For investigation-style tasks ("determine whether ... and fix accordingly"), a',
+    '  clean working tree is not a valid outcome: even when no code change is needed,',
+    '  still write your findings, evidence, and conclusion in your final summary.',
     "- Once the work is finished, append a `### Conclusion` section to the task's",
     '  description in the issue tracker, written against the real diff',
     '  (`git diff <base>...HEAD`), not against the task: what the changes do',
@@ -51,9 +56,20 @@ export function implementSystemPrompt(ctx: PromptContext): string {
   return lines.join('\n')
 }
 
+/** Notes and comments the tracker carries, so the agent never needs bd to see them. */
+function trackerContext(task: TrackerTask): string[] {
+  const parts: string[] = []
+  const notes = task.notes?.trim()
+  if (notes !== undefined && notes !== '') parts.push('', 'Issue notes:', '', notes)
+  const comments = (task.comments ?? []).map((c) => c.trim()).filter((c) => c !== '')
+  if (comments.length > 0) parts.push('', 'Issue comments:', '', ...comments.map((c) => `- ${c}`))
+  return parts
+}
+
 export function implementPrompt(ctx: PromptContext): string {
   const parts = [`Task ${ctx.task.id}: ${ctx.task.title}`]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push(...trackerContext(ctx.task))
   parts.push('', 'Implement this task completely, then stop.')
   return parts.join('\n')
 }
@@ -68,6 +84,7 @@ export function reclaimPrompt(ctx: PromptContext): string {
     'where it left off, and finish what is missing.',
   ]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push(...trackerContext(ctx.task))
   parts.push('', 'Continue this task completely, then stop.')
   return parts.join('\n')
 }
@@ -327,6 +344,7 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
     'Do not modify any files; reply with the explanation only.',
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
+  parts.push(...trackerContext(task))
   return parts.join('\n')
 }
 

@@ -6,6 +6,7 @@ import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from '
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { errMsg } from './errors.ts'
 import {
+  type AgentEvent,
   type AgentRole,
   type CheckResult,
   isTerminal,
@@ -235,6 +236,10 @@ export class Runner {
   private cancelled = false
   private retryNowRequested = false
   private currentProcess: AgentProcess | null = null
+  /** Running peak input context (input + cached tokens) for the current task run. */
+  private peakContext = 0
+  /** Whether the soft context limit has been flagged for the current task run. */
+  private contextWarned = false
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -299,6 +304,8 @@ export class Runner {
    */
   async runClaimed(task: TrackerTask): Promise<RunOnceResult> {
     const { store } = this.deps
+    this.peakContext = 0
+    this.contextWarned = false
     store.append(task.id, {
       type: 'task.claimed',
       title: task.title,
@@ -461,7 +468,21 @@ export class Runner {
     resume = false,
   ): Promise<void> {
     const { store, config } = this.deps
-    const promptCtx = { task, worktree: cwd, branch, askCommand: 'amagi ask "<question>"' }
+    // The claimed task is a lite ready row without notes or comments; re-read the
+    // full issue so the agent sees the tracker context (and never needs bd inside
+    // the worktree, where it has no database). Best effort, like the PR-body re-read.
+    let currentTask = task
+    try {
+      currentTask = (await this.deps.tracker.get(task.id)) ?? task
+    } catch {
+      currentTask = task
+    }
+    const promptCtx = {
+      task: currentTask,
+      worktree: cwd,
+      branch,
+      askCommand: 'amagi ask "<question>"',
+    }
 
     this.throwIfCancelled(task.id)
     this.throwIfBudgetExhausted(task.id, budget)
@@ -556,7 +577,7 @@ export class Runner {
           current.sessionId,
           {
             cwd,
-            prompt: whyNoChangesPrompt(task),
+            prompt: whyNoChangesPrompt(currentTask),
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
@@ -567,12 +588,14 @@ export class Runner {
         if (why.stopped) return
         reason = why.summary?.trim() !== '' ? why.summary : null
       }
+      // No changes AND no agent-written explanation: never read as "already done".
       this.transition(
         task.id,
         'no_pr',
         reason ??
-          'the agent produced no changes; the task may already be done or need no PR — ' +
-            'verify and close it explicitly, it will not be closed automatically',
+          'the agent produced no changes and wrote no summary explaining why; treat ' +
+            'this as unverified rather than done — investigate before closing, it will ' +
+            'not be closed automatically',
       )
       return
     }
@@ -789,7 +812,15 @@ export class Runner {
     phase: string,
     budget: TaskBudget,
     role: AgentRole = 'implement',
-  ): Promise<AgentRun & { ok: boolean; detail: string | null }> {
+  ): Promise<{
+    sessionId: string | null
+    ok: boolean
+    detail: string | null
+    summary: string | null
+    model: string | null
+    effort: string | null
+    contextExceeded: boolean
+  }> {
     const { store, harness } = this.deps
     const spawn = {
       ...opts,
@@ -823,6 +854,7 @@ export class Runner {
       const model = proc.model ?? opts.model ?? null
       const effort = proc.effort ?? null
       let started = false
+      let contextExceeded = false
       for await (const event of proc.events()) {
         if (!started) {
           started = true
@@ -852,6 +884,12 @@ export class Runner {
             break
         }
         store.append(taskId, { type: 'agent.stream', role, event })
+        if (this.observeContext(taskId, event)) {
+          // Hard limit reached: stop the agent now rather than let it degrade.
+          contextExceeded = true
+          await proc.kill()
+          break
+        }
         const spent = budget.spentReason()
         if (spent !== null) {
           budgetSpent = spent
@@ -876,7 +914,7 @@ export class Runner {
       if (budgetSpent !== null) throw new BudgetExhaustedError(taskId, budgetSpent)
 
       let detail: string | null = null
-      if (!outcome.ok && !this.cancelled) {
+      if (!outcome.ok && !this.cancelled && !contextExceeded) {
         detail =
           outcome.stderr.trim() ||
           resultSummary ||
@@ -893,11 +931,49 @@ export class Runner {
         summary: outcome.summary,
         model,
         effort,
+        contextExceeded,
       }
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
     }
+  }
+
+  /**
+   * Effective context budget for the active harness: per-harness overrides win
+   * over the loop defaults, since context windows differ between harnesses.
+   */
+  private contextLimits(): { warnTokens: number; maxTokens: number } {
+    const { config, harness } = this.deps
+    const overrides = config.loop.contextOverrides[harness.kind] ?? {}
+    return {
+      warnTokens: overrides.warnTokens ?? config.loop.contextWarnTokens,
+      maxTokens: overrides.maxTokens ?? config.loop.contextMaxTokens,
+    }
+  }
+
+  /**
+   * Folds a streamed usage event into the run's peak context and enforces the
+   * budget. Returns true when the hard limit was crossed, signalling the
+   * caller to kill the agent.
+   */
+  private observeContext(taskId: string, event: AgentEvent): boolean {
+    if (event.kind !== 'usage') return false
+    const { store } = this.deps
+    const { warnTokens, maxTokens } = this.contextLimits()
+    const context = event.inputTokens + (event.cachedTokens ?? 0)
+    if (context <= this.peakContext) return false
+    this.peakContext = context
+    store.append(taskId, { type: 'run.context', contextTokens: context })
+    if (!this.contextWarned && context >= warnTokens) {
+      this.contextWarned = true
+      store.append(taskId, { type: 'context.warn', contextTokens: context, limit: warnTokens })
+    }
+    if (context >= maxTokens) {
+      store.append(taskId, { type: 'context.exceeded', contextTokens: context, limit: maxTokens })
+      return true
+    }
+    return false
   }
 
   /**
@@ -928,6 +1004,17 @@ export class Runner {
       summary = run.summary
       model = run.model
       effort = run.effort
+      if (run.contextExceeded) {
+        // Checked before ok: a hard kill must stop the run even when the
+        // process happens to report a clean exit. Restarting fresh-context is
+        // am-672.4; for now the run stops and the operator resumes it.
+        this.transition(
+          taskId,
+          'needs_human',
+          `context budget exceeded: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+        )
+        return { sessionId, stopped: true, summary, model, effort }
+      }
       if (run.ok) return { sessionId, stopped: false, summary, model, effort }
       if (lease.isLost) throw new LeaseLostError(taskId)
 
