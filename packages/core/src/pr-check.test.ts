@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from './exec.ts'
 import {
+  fetchPullHeads,
   isConflicting,
   listOpenPrs,
   type PrInfo,
@@ -93,6 +94,56 @@ describe('listOpenPrs', () => {
     // gh reports labels as objects; listOpenPrs reduces them to names
     expect(prs[0]?.labels).toEqual(['amagi', 'amagi/bug'])
     expect(prs[1]?.labels).toEqual([])
+  })
+})
+
+describe('fetchPullHeads', () => {
+  test('skips the fetch when no PR head moved', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote') ? ok('deadbeef\trefs/pull/7/head\n') : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef' },
+      exec,
+    })
+
+    expect(result).toEqual({ fetched: false, heads: { 'refs/pull/7/head': 'deadbeef' } })
+    expect(calls.some((c) => c[0] === 'git' && c[1] === 'fetch')).toBe(false)
+  })
+
+  test('fetches all PR heads in one round trip when a head moved', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote')
+        ? ok('newsha\trefs/pull/7/head\ncafe12\trefs/pull/8/head\n')
+        : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef', 'refs/pull/8/head': 'cafe12' },
+      exec,
+    })
+
+    expect(result.fetched).toBe(true)
+    expect(calls).toContainEqual([
+      'git',
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    ])
+  })
+
+  test('fetches when a PR head disappears so the mirror is pruned', async () => {
+    const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      lastHeads: { 'refs/pull/7/head': 'deadbeef' },
+      exec,
+    })
+
+    expect(result.fetched).toBe(true)
+    expect(result.heads).toEqual({})
   })
 })
 

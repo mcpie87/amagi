@@ -3,6 +3,7 @@ import {
   conflictWatchPath,
   type Exec,
   errMsg,
+  fetchPullHeads,
   flagPointlessPrs,
   isConflicting,
   listOpenPrs,
@@ -68,6 +69,8 @@ export function startPrConflictWatcher({
   let scanned = 0
   let conflicting = 0
   let resolved = 0
+  /** Last seen PR head SHAs, so the per-tick fetch is skipped when none moved. */
+  let lastPullHeads: Record<string, string> = {}
   let runs = 0
   let failures = 0
   let flagged = 0
@@ -110,6 +113,12 @@ export function startPrConflictWatcher({
       status: 'active',
     }
     try {
+      const heads = await fetchPullHeads({
+        repoRoot: root,
+        lastHeads: lastPullHeads,
+        ...(exec === undefined ? {} : { exec }),
+      })
+      lastPullHeads = heads.heads
       const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
       scanned = prs.length
       const statePath = conflictWatchPath(repoName)
