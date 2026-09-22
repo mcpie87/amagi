@@ -25,6 +25,7 @@ type BdIssue = {
   notes?: string
   comments?: Array<{ text: string }>
   dependent_count?: number
+  created_at?: string
   metadata?: Record<string, string>
 }
 
@@ -88,6 +89,7 @@ const STATUS_MAP: Record<string, TrackerStatus> = {
 
 function toTask(issue: BdIssue): TrackerTask {
   const difficulty = issue.metadata?.difficulty
+  const created = issue.created_at === undefined ? null : Date.parse(issue.created_at)
   const task: TrackerTask = {
     id: issue.id,
     title: issue.title,
@@ -97,6 +99,7 @@ function toTask(issue: BdIssue): TrackerTask {
     type: issue.issue_type ?? null,
     url: null,
     ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
+    ...(created !== null && !Number.isNaN(created) ? { createdAt: created } : {}),
   }
   const notes = issue.notes?.trim()
   if (notes) task.notes = notes

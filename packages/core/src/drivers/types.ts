@@ -10,6 +10,8 @@ export type TrackerTask = {
   priority: number | null
   type: string | null
   url: string | null
+  /** Creation timestamp (epoch ms); absent when the tracker does not report it. */
+  createdAt?: number | null
   /** Free-form markdown notes on the issue; beads populates it, others leave it unset. */
   notes?: string
   /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
