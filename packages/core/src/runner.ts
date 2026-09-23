@@ -17,7 +17,7 @@ import {
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
-import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
+import { changesSinceBase, diffBase, formatPrBody, withAgentSections } from './pr-body.ts'
 import {
   answerPrompt,
   commitMessage,
@@ -512,6 +512,8 @@ export class Runner {
       // is never told to use them.
       ...(this.deps.channel ? { askCommand: 'amagi ask "<question>"' } : {}),
       ...(this.deps.channel ? { gitRequestCommand: 'amagi git-request commit' } : {}),
+      baseBranch: config.repo.baseBranch,
+      checks: this.checkCommands(),
     }
 
     this.throwIfCancelled(task.id)
@@ -751,6 +753,23 @@ export class Runner {
     } catch {
       current = task
     }
+    let summary = fallbackSummary
+    const sections = withAgentSections(current.description, fallbackSummary)
+    if (sections !== null) {
+      summary = sections.summary
+      current = { ...current, description: sections.description }
+      if (this.deps.tracker.capabilities.edit) {
+        try {
+          await this.deps.tracker.updateTask(task.id, { description: sections.description })
+        } catch (err) {
+          store.append(task.id, {
+            type: 'error',
+            message: `writing the PR sections into ${task.id} failed: ${errMsg(err)}`,
+            fatal: false,
+          })
+        }
+      }
+    }
     const opts: CreatePrOptions = {
       cwd,
       branch,
@@ -768,7 +787,7 @@ export class Runner {
           model: model ?? config.harness.implement.model ?? null,
           effort: effort ?? config.harness.implement.effort ?? null,
         },
-        fallbackSummary,
+        summary,
       ),
       labels: amagiLabels(current.type),
     }
@@ -1205,13 +1224,17 @@ export class Runner {
     }
   }
 
-  private async runChecks(cwd: string): Promise<CheckResult[]> {
-    const results: CheckResult[] = []
+  private checkCommands(): string[] {
     const { format, lint, commands } = this.deps.config.checks
     // The mandatory gate always runs before the configured commands, so a PR
     // cannot be pushed until the worktree is formatted and lint-clean.
     const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
-    for (const command of [...gate, ...commands]) {
+    return [...gate, ...commands]
+  }
+
+  private async runChecks(cwd: string): Promise<CheckResult[]> {
+    const results: CheckResult[] = []
+    for (const command of this.checkCommands()) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,

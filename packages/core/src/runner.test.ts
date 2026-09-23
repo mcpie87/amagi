@@ -627,6 +627,29 @@ describe('Runner.runOnce', () => {
     expect(body).toContain('Added `hello.txt` with a greeting.')
   })
 
+  test('takes the sections from the final message and keeps them out of the summary', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([{ ...TASK, description: '' }]),
+      new FakeHarness([
+        {
+          ...writesAFile,
+          outcome: {
+            summary:
+              'Wrote the greeting.\n\n### How to use\n\nRun `hello`\n\n### Conclusion\n\nOnly hello.txt changed.',
+          },
+        },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body).toContain('### 📝 Summary\n\nWrote the greeting.\n\n### 🚀 How to use')
+    expect(body).toContain('### 🧠 Conclusion\n\nOnly `hello.txt` changed.')
+    expect(body.match(/Conclusion/g)).toHaveLength(1)
+  })
+
   test('falls back to the run summary when the agent wrote no conclusion', async () => {
     const pr = new FakePr()
     await makeRunner(
