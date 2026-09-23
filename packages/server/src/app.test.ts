@@ -809,6 +809,25 @@ describe('POST /api/repos/:repo/tasks/:id/reset', () => {
     },
   )
 
+  test('starts over an in-flight task stuck before it got a worktree', async () => {
+    claim('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: ProjectedTask }).task).toMatchObject({
+      state: 'claimed',
+      attempt: 2,
+    })
+    expect(tracker.released).toEqual(['bd-1'])
+  })
+
+  test('409s on an in-flight task that has a worktree', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt/bd-1', branch: 'amagi/bd-1-x' })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
   test('409s on a task whose PR is open', async () => {
     parked('bd-1', 'pr_open')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })

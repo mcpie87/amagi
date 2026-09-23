@@ -2,6 +2,7 @@ import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
+  canReset,
   classifyDifficulty,
   errMsg,
   HARDCODED_EFFORTS,
@@ -469,9 +470,7 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       const task = ws.store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // Only a parked task has nothing live to lose: an in-flight run is
-      // stopped first, and a pr_open task would leave its PR dangling.
-      if (task.state !== 'cancelled' && task.state !== 'needs_human' && task.state !== 'no_pr') {
+      if (!canReset(task.state, task.worktree !== null)) {
         return c.json({ error: `task ${id} cannot be reset from state ${task.state}` }, 409)
       }
       if (runner !== undefined) {

@@ -5,6 +5,7 @@ import type { TrackerTask } from '@amagi/core/drivers/types'
 import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
+  canReset,
   currentAttemptEvents,
   isTerminal,
   type MergeStatus,
@@ -2843,12 +2844,11 @@ function FileAsErrorButton({
 }
 
 /**
- * Restart a run that has no worktree recorded yet, so the runner starts fresh.
- * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
- * need the worktree path; done and abandoned runs have no path back, so the
- * button is hidden for them.
+ * Start a parked task over as a fresh attempt: the server drops the worktree,
+ * branch and session, so nothing of the previous run is resumed. The earlier
+ * attempt stays browsable from the attempt switcher.
  */
-function RestartRunButton({
+function ResetButton({
   repo,
   taskId,
   state,
@@ -2859,58 +2859,10 @@ function RestartRunButton({
   state: TaskState
   worktree: string | null
 }) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  if (worktree !== null || state === 'done' || state === 'abandoned') return null
-
-  const restart = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null
-        setError(body?.error ?? `HTTP ${res.status}`)
-      }
-    } catch {
-      setError('could not reach the amagi server')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="restart-run">
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void restart()}
-        className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
-      >
-        <Icon name="refresh" size={15} />
-        {busy ? 'Restarting...' : 'Restart run'}
-      </button>
-      {error !== null && (
-        <p className="restart-error" role="alert">
-          {error}
-        </p>
-      )}
-    </div>
-  )
-}
-
-/**
- * Start a parked task over as a fresh attempt: the server drops the worktree,
- * branch and session, so nothing of the previous run is resumed. The earlier
- * attempt stays browsable from the attempt switcher.
- */
-function ResetButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
   const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (state !== 'cancelled' && state !== 'needs_human' && state !== 'no_pr') return null
+  if (!canReset(state, worktree !== null)) return null
 
   const reset = async () => {
     if (
@@ -2941,7 +2893,7 @@ function ResetButton({ repo, taskId, state }: { repo: string; taskId: string; st
   }
 
   return (
-    <div>
+    <div className="reset-run">
       <button
         type="button"
         disabled={busy}
@@ -2952,7 +2904,11 @@ function ResetButton({ repo, taskId, state }: { repo: string; taskId: string; st
         <Icon name="refresh" size={15} />
         {busy ? 'Resetting...' : 'Reset'}
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {error !== null && (
+        <p className="reset-error" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   )
 }
@@ -3646,15 +3602,12 @@ function TaskDetailView() {
           />
         )}
         {selected !== null && !past && (
-          <RestartRunButton
+          <ResetButton
             repo={selected}
             taskId={task.id}
             state={task.state}
             worktree={task.worktree}
           />
-        )}
-        {selected !== null && !past && (
-          <ResetButton repo={selected} taskId={task.id} state={task.state} />
         )}
         {selected !== null && !past && (
           <RetryNowButton repo={selected} taskId={task.id} state={task.state} />

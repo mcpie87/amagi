@@ -38,6 +38,17 @@ export function isTerminal(state: TaskState): boolean {
 }
 
 /**
+ * Whether the operator may start a task over from scratch: any parked task,
+ * or an in-flight one stuck before it got a worktree. Never done/abandoned
+ * (the tracker issue is closed) nor a task with a PR, which would dangle.
+ */
+export function canReset(state: TaskState, hasWorktree: boolean): boolean {
+  if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr') return true
+  if (isTerminal(state) || state === 'pr_open' || state === 'pr_flagged') return false
+  return !hasWorktree
+}
+
+/**
  * Any state may fall to a terminal state, so those edges are implicit rather
  * than listed here. Only forward progress is enumerated; the operator-settled
  * exits of the parked/stopped states are special-cased in canTransition, not
