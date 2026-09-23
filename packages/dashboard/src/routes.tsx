@@ -27,7 +27,9 @@ import {
   type ProjectedTask,
   runHealth,
   runHealthNearLimit,
+  type StatusEntry,
   stateAtAttempt,
+  statusLog,
   tasksNeedingAttention,
 } from '@amagi/core/view'
 import {
@@ -3492,7 +3494,60 @@ function CopyReportButton({
   )
 }
 
-type DetailTab = 'log' | 'checks'
+const STATUS_CAUSE_LABEL: Record<StatusEntry['cause'], string | null> = {
+  claimed: 'claimed',
+  state: null,
+  reset: 'reset',
+  reclaimed: 'reclaimed',
+}
+
+function StatusLogView({ entries }: { entries: StatusEntry[] }) {
+  if (entries.length === 0) {
+    return <p className="text-sm text-fg-faint">No state changes recorded yet.</p>
+  }
+  return (
+    <ol className="status-log divide-y divide-line rounded-lg border border-line bg-surface">
+      {entries.map((entry) => {
+        const cause = STATUS_CAUSE_LABEL[entry.cause]
+        const date = new Date(entry.ts)
+        return (
+          <li key={entry.seq} className="flex flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
+            <time
+              dateTime={date.toISOString()}
+              className="w-44 shrink-0 font-mono text-xs tabular-nums text-fg-muted"
+            >
+              {date.toLocaleString([], {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })}
+            </time>
+            <Badge state={entry.to} />
+            {cause !== null && <span className="text-xs text-fg-faint">{cause}</span>}
+            {entry.from !== null && (
+              <span className="text-xs text-fg-faint">from {entry.from}</span>
+            )}
+            {entry.reason !== null && (
+              <span className="min-w-0 flex-1 truncate text-fg-muted" title={entry.reason}>
+                {entry.reason}
+              </span>
+            )}
+            {entry.durationMs !== null && (
+              <span className="ml-auto shrink-0 text-xs tabular-nums text-fg-faint">
+                {fmtDuration(entry.durationMs)}
+              </span>
+            )}
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+type DetailTab = 'log' | 'status' | 'checks'
 
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
@@ -3545,6 +3600,7 @@ function TaskDetailView() {
 
   const tabs: { key: DetailTab; label: string }[] = [
     { key: 'log', label: 'Log' },
+    { key: 'status', label: 'Status' },
     ...(task.checks !== null
       ? [{ key: 'checks', label: `Checks ${task.checksOk ? '(passed)' : '(failed)'}` } as const]
       : []),
@@ -3743,6 +3799,7 @@ function TaskDetailView() {
         {tab === 'log' && selected !== null && (
           <AgentLogView repo={selected} taskId={id} attempt={attempt} />
         )}
+        {tab === 'status' && <StatusLogView entries={statusLog(state, id, past ? null : now)} />}
         {tab === 'checks' && task.checks !== null && (
           <ul className="space-y-2">
             {task.checks.map((c) => (
