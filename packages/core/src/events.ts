@@ -225,6 +225,13 @@ export const EventBody = z.discriminatedUnion('type', [
    * "-m", "x"]`).
    */
   z.object({ type: z.literal('git.blocked'), argv: z.array(z.string()) }),
+  /**
+   * The worktree's HEAD moved during an agent run without the runner doing it:
+   * the agent reached the real git past the shim (an absolute path, a
+   * rewritten PATH). `entries` are the new HEAD reflog lines, newest first, as
+   * `<sha> <reflog subject>` (e.g. `"abc123 reset: moving to HEAD"` for a stash).
+   */
+  z.object({ type: z.literal('git.bypassed'), entries: z.array(z.string()) }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),

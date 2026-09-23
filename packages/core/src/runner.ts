@@ -887,6 +887,8 @@ export class Runner {
         AMAGI_RUN_STATE: runState,
       },
     }
+    const reflogBefore = await this.headReflog(opts.cwd)
+    const seqBefore = store.recentEvents(taskId, 1)[0]?.seq ?? 0
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
@@ -997,6 +999,46 @@ export class Runner {
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
+      await this.recordGitBypass(taskId, opts.cwd, reflogBefore, seqBefore)
+    }
+  }
+
+  /** HEAD reflog of `cwd` as `<sha> <subject>` lines, newest first; null when unreadable. */
+  private async headReflog(cwd: string): Promise<string[] | null> {
+    const r = await this.exec(['git', 'reflog', 'show', '--format=%H %gs', 'HEAD'], { cwd })
+    if (r.exitCode !== 0) return null
+    return r.stdout.split('\n').filter((l) => l !== '')
+  }
+
+  /**
+   * Records `git.bypassed` when the worktree's HEAD reflog grew during an agent
+   * run by entries the runner did not make. The shim only sees git reached
+   * through PATH; this catches the rest after the fact. Commits recorded as
+   * `commit.created` since `sinceSeq` are the sanctioned `git-request` ones,
+   * made by the server's own Runner, so they are matched through the store.
+   * Best effort: an unreadable reflog records nothing.
+   */
+  private async recordGitBypass(
+    taskId: string,
+    cwd: string,
+    before: string[] | null,
+    sinceSeq: number,
+  ): Promise<void> {
+    try {
+      const after = await this.headReflog(cwd)
+      if (before === null || after === null) return
+      const { store } = this.deps
+      const sanctioned = new Set(
+        store
+          .events({ taskId, sinceSeq, limit: 1_000_000 })
+          .flatMap((e) => (e.type === 'commit.created' ? [e.sha] : [])),
+      )
+      const entries = after
+        .slice(0, Math.max(0, after.length - before.length))
+        .filter((line) => !sanctioned.has(line.split(' ', 1)[0] ?? ''))
+      if (entries.length > 0) store.append(taskId, { type: 'git.bypassed', entries })
+    } catch {
+      // Best effort: the bypass check never fails the run.
     }
   }
 

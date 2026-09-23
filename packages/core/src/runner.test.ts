@@ -1874,3 +1874,53 @@ describe('Runner.drainGitBlocked', () => {
     })
   })
 })
+
+describe('Runner git bypass check', () => {
+  const realGit = (cwd: string, args: string[]): string => {
+    const r = Bun.spawnSync(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr.toString()}`)
+    return r.stdout.toString().trim()
+  }
+  const bypassed = () =>
+    store
+      .events({ taskId: TASK.id, limit: 999 })
+      .filter((e): e is Extract<StoredEvent, { type: 'git.bypassed' }> => e.type === 'git.bypassed')
+
+  test('a stash made past the shim lands as git.bypassed and the run still opens a PR', async () => {
+    const stashes: Turn = {
+      effect: (cwd) => {
+        writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+        realGit(cwd, ['add', 'hello.txt'])
+        realGit(cwd, ['stash'])
+        realGit(cwd, ['stash', 'pop'])
+      },
+      events: [{ kind: 'text', text: 'stashed to compare against base' }],
+    }
+    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([stashes])).runOnce()
+    expect(result?.state).toBe('pr_open')
+    const events = bypassed()
+    expect(events).toHaveLength(1)
+    expect(events[0]?.entries.some((line) => line.endsWith('reset: moving to HEAD'))).toBe(true)
+  })
+
+  test('a commit recorded as commit.created during the run is not a bypass', async () => {
+    const requestsCommit: Turn = {
+      effect: (cwd) => {
+        writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+        realGit(cwd, ['add', '-A'])
+        realGit(cwd, ['commit', '-q', '-m', 'checkpoint'])
+        store.append(TASK.id, {
+          type: 'commit.created',
+          sha: realGit(cwd, ['rev-parse', 'HEAD']),
+          subject: `[${TASK.id}] ${TASK.title}`,
+        })
+      },
+    }
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([requestsCommit]),
+    ).runOnce()
+    expect(result?.state).toBe('pr_open')
+    expect(bypassed()).toEqual([])
+  })
+})
