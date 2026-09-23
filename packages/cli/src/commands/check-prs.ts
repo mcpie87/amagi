@@ -127,7 +127,7 @@ export const checkPrsCommand = defineCommand({
   meta: {
     name: 'check-prs',
     description:
-      'List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch',
+      'List open PRs and dispatch an agent to resolve any conflicts against the base branch',
   },
   args: {
     'dry-run': {

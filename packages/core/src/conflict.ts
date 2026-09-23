@@ -1,11 +1,12 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
+import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { cacheHome } from './paths.ts'
-import { type PrInfo, prepareConflictWorktree, prMergeStatus, pushConflictFix } from './pr-check.ts'
+import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import { resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
 
 export type ConflictLogLevel = 'info' | 'ok' | 'warn' | 'error' | 'agent'
@@ -15,6 +16,8 @@ export type ResolveConflictOptions = {
   repoName: string
   pr: PrInfo
   config: Config
+  /** Forge driver, so the post-push merge verdict is read from the real forge. */
+  driver: PrDriver
   exec?: Exec
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness
@@ -101,11 +104,11 @@ export async function resolveConflict(
       remote: opts.config.forge.remote,
       exec: run,
     })
-    const status = await prMergeStatus(opts.repoRoot, opts.pr.number, run)
-    const ok = status.mergeable === 'MERGEABLE' || status.mergeStateStatus === 'CLEAN'
+    const status = await opts.driver.getMergeStatus(opts.repoRoot, opts.pr.number)
+    const ok = status === 'mergeable'
     const message = ok
       ? 'resolved and pushed; PR is mergeable'
-      : `pushed; GitHub reports ${status.mergeStateStatus}`
+      : `pushed; the forge reports ${status}`
     log(ok ? 'ok' : 'warn', message)
     return { ok, message }
   } catch (err) {

@@ -10,7 +10,6 @@ import {
   forgeToken,
   gitTokenConfig,
   isConflicting,
-  listOpenPrs,
   type MergeTreeVerdict,
   type makeHarness,
   mergeableToVerdict,
@@ -18,7 +17,6 @@ import {
   mergeTreeVerdict,
   type PrDriver,
   type PrInfo,
-  prMergeStatus,
   type ResolveConflictResult,
   readConflictWatch,
   recordMergeTreeObservation,
@@ -116,10 +114,10 @@ export function startPrConflictWatcher({
 
   /**
    * Observation-only audit: for every open PR, compare the local
-   * `git merge-tree` verdict against GitHub's `mergeable` and append one row
+   * `git merge-tree` verdict against the forge's `mergeable` and append one row
    * per PR to the observation JSONL. Dispatch never reads these verdicts.
    * UNKNOWN is a third bucket, never a divergence; up to two UNKNOWN PRs per
-   * tick are forced through `prMergeStatus` so the mergeability job resolves
+   * tick are forced through the driver so the mergeability job resolves
    * round-robin and coverage accrues without a tenfold call increase.
    */
   async function observeMergeTree(prs: PrInfo[], run: Exec): Promise<void> {
@@ -135,8 +133,15 @@ export function startPrConflictWatcher({
       for (let i = 0; i < 2 && i < unknown.length; i++) {
         const p = unknown[(start + i) % unknown.length]
         if (p === undefined) continue
-        const status = await prMergeStatus(root, p.number, run)
-        forced.set(p.number, status.mergeable)
+        const status = await driver.getMergeStatus(root, p.number)
+        forced.set(
+          p.number,
+          status === 'conflicted'
+            ? 'CONFLICTING'
+            : status === 'mergeable'
+              ? 'MERGEABLE'
+              : 'UNKNOWN',
+        )
       }
       unknownCursor += 2
     }
@@ -188,7 +193,7 @@ export function startPrConflictWatcher({
         ...(exec === undefined ? {} : { exec }),
       })
       lastPullHeads = heads.heads
-      const prs = await listOpenPrs({ cwd: root, ...(exec === undefined ? {} : { exec }) })
+      const prs = await driver.listOpenPrs(root)
       scanned = prs.length
       if (config.loop.mergeTreeCheck) {
         // Observation never blocks dispatch: a failed audit is logged and skipped.
@@ -217,6 +222,7 @@ export function startPrConflictWatcher({
           repoName,
           pr,
           config,
+          driver,
           ...(exec === undefined ? {} : { exec }),
           ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
         })
