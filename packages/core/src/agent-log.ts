@@ -152,3 +152,8 @@ export class AgentLogStore {
 
 /** Shared store for the running app; tests construct their own with a synchronous scheduler. */
 export const agentLogStore = new AgentLogStore()
+
+/** One log buffer per attempt, namespaced by repo so identical issue ids never share one. */
+export function agentLogKey(repo: string, taskId: string, attempt: number): string {
+  return `${repo}/${taskId}#${attempt}`
+}

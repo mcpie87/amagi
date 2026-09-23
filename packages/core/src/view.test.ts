@@ -11,6 +11,7 @@ import {
   reduceState,
   runHealth,
   runHealthNearLimit,
+  stateAtAttempt,
   tasksNeedingAttention,
 } from './view.ts'
 
@@ -121,6 +122,43 @@ describe('dashboard state reducer', () => {
     expect(state.tasks['am-1']?.worktree).toBe('/tmp/am-1')
     expect(state.tasks['am-1']?.branch).toBe('x')
     expect(activeTasks(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
+  test('reset starts a fresh attempt and keeps the earlier one browsable', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'worktree.created', path: '/tmp/am-1', branch: 'x' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(5, 'am-1', 1350, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 10, outputTokens: 5, costUsd: 2 },
+      }),
+      ev(6, 'am-1', 1360, {
+        type: 'question.asked',
+        questionId: 'q1',
+        question: 'which?',
+        options: [],
+        gateRef: null,
+      }),
+      ev(7, 'am-1', 1400, { type: 'task.state', from: 'implementing', to: 'cancelled' }),
+      ev(8, 'am-1', 1500, { type: 'worktree.removed', path: '/tmp/am-1' }),
+      ev(9, 'am-1', 1600, { type: 'task.reset', reason: 'operator reset' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(state.tasks['am-1']).toMatchObject({
+      state: 'claimed',
+      attempt: 2,
+      worktree: null,
+      createdAt: 1600,
+    })
+    expect(openQuestionsFor(state, 'am-1')).toEqual([])
+    expect(runHealth(state, 'am-1', 1700)).toMatchObject({ costSeen: false, elapsedMs: 100 })
+
+    const first = stateAtAttempt(state, 'am-1', 1)
+    expect(first.tasks['am-1']).toMatchObject({ state: 'cancelled', attempt: 1 })
+    expect(runHealth(first, 'am-1', 1700)).toMatchObject({ costUsd: 2, costSeen: true })
   })
 
   test('queue view lists only in-flight tasks, most recent first', () => {

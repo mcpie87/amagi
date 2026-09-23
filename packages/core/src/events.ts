@@ -143,6 +143,8 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string().optional(),
   }),
   z.object({ type: z.literal('task.reclaimed'), reason: z.string().optional() }),
+  /** Operator reset: the task starts a fresh attempt; earlier events stay as history. */
+  z.object({ type: z.literal('task.reset'), reason: z.string().optional() }),
   z.object({
     type: z.literal('doom.detected'),
     /** Which heuristic tripped: repeated tool calls, identical check failures, static diff. */
@@ -299,3 +301,19 @@ export const StoredEvent = z.intersection(
   EventBody,
 )
 export type StoredEvent = z.infer<typeof StoredEvent>
+
+/**
+ * The task's events since its last operator reset: budgets, usage and health
+ * belong to the current attempt only. Events of other tasks are dropped.
+ */
+export function currentAttemptEvents(events: StoredEvent[], taskId: string): StoredEvent[] {
+  let start = 0
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]
+    if (e?.taskId === taskId && e.type === 'task.reset') {
+      start = i
+      break
+    }
+  }
+  return events.slice(start).filter((e) => e.taskId === taskId)
+}

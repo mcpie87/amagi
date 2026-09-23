@@ -1,10 +1,11 @@
 import type { PrInfo } from '@amagi/core'
-import { agentLogStore } from '@amagi/core/agent-log'
+import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
 import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
+  currentAttemptEvents,
   isTerminal,
   type MergeStatus,
   type StoredEvent,
@@ -25,6 +26,7 @@ import {
   type ProjectedTask,
   runHealth,
   runHealthNearLimit,
+  stateAtAttempt,
   tasksNeedingAttention,
 } from '@amagi/core/view'
 import {
@@ -1343,8 +1345,8 @@ function RunButton() {
 }
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
-function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
-  const key = `${repo}/${taskId}`
+function LastLogLine({ repo, taskId, attempt }: { repo: string; taskId: string; attempt: number }) {
+  const key = agentLogKey(repo, taskId, attempt)
   useSyncExternalStore(
     (listener) => agentLogStore.subscribe(key, listener),
     () => agentLogStore.get(key).version,
@@ -1436,7 +1438,9 @@ function WorkerSlot({
           </>
         )}
       </div>
-      {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
+      {selected !== null && (
+        <LastLogLine repo={selected} taskId={taskId} attempt={task?.attempt ?? 1} />
+      )}
     </div>
   )
 }
@@ -2898,6 +2902,94 @@ function RestartRunButton({
 }
 
 /**
+ * Start a parked task over as a fresh attempt: the server drops the worktree,
+ * branch and session, so nothing of the previous run is resumed. The earlier
+ * attempt stays browsable from the attempt switcher.
+ */
+function ResetButton({ repo, taskId, state }: { repo: string; taskId: string; state: TaskState }) {
+  const { start } = useRunner()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (state !== 'cancelled' && state !== 'needs_human' && state !== 'no_pr') return null
+
+  const reset = async () => {
+    if (
+      !window.confirm(
+        `Reset ${taskId}? Its worktree and branch are deleted and it reruns from scratch.`,
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reset`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setError(body?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void reset()}
+        title="deletes the worktree, branch and agent session, then reruns the task from scratch as a new attempt"
+        className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
+      >
+        <Icon name="refresh" size={15} />
+        {busy ? 'Resetting...' : 'Reset'}
+      </button>
+      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
+/** Switch the task detail between the current attempt and earlier, reset ones. */
+function AttemptSwitcher({
+  current,
+  viewing,
+  onSelect,
+}: {
+  current: number
+  viewing: number
+  onSelect: (attempt: number | null) => void
+}) {
+  if (current < 2) return null
+  return (
+    <div className="detail-tabs mt-3 flex gap-1 border-b border-line">
+      {Array.from({ length: current }, (_, i) => i + 1).map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onSelect(n === current ? null : n)}
+          className={`rounded-t px-3 py-1.5 text-sm ${
+            viewing === n
+              ? 'border-b-2 border-sky-500 text-fg-strong'
+              : 'text-fg-muted hover:text-fg'
+          }`}
+        >
+          Attempt #{n}
+          {n === current ? ' (current)' : ''}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/**
  * Skip a deferred automatic retry's backoff and run it now, only meaningful
  * while the task sits in retrying (the runner owns it and is sleeping).
  */
@@ -3364,7 +3456,7 @@ const REPORT_LOG_LINES = 100
 
 /** Markdown summary of a task, ready to feed an LLM for bug-report generation. */
 function taskReport(task: ProjectedTask, elapsedMs: number, repo: string): string {
-  const buffer = agentLogStore.get(`${repo}/${task.id}`)
+  const buffer = agentLogStore.get(agentLogKey(repo, task.id, task.attempt))
   const start = Math.max(0, buffer.length - REPORT_LOG_LINES)
   const log: string[] = []
   for (let i = start; i < buffer.length; i++) {
@@ -3448,21 +3540,31 @@ type DetailTab = 'log' | 'checks'
 
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
-  const { state, selected } = useDashboard()
+  const { state: liveState, selected } = useDashboard()
   const { status } = useRunner()
+  // null follows the current attempt, so a reset moves the view along with it.
+  const [viewAttempt, setViewAttempt] = useState<number | null>(null)
+  const currentAttempt = liveState.tasks[id]?.attempt ?? 1
+  const attempt =
+    viewAttempt !== null && viewAttempt < currentAttempt ? viewAttempt : currentAttempt
+  const past = attempt < currentAttempt
+  const state = useMemo(
+    () => (past ? stateAtAttempt(liveState, id, attempt) : liveState),
+    [past, liveState, id, attempt],
+  )
   const task: ProjectedTask | undefined = state.tasks[id]
-  const questions = openQuestionsFor(state, id)
+  const questions = past ? [] : openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
-  const runnerTask = status?.tasks?.[id]
+  const runnerTask = past ? undefined : status?.tasks?.[id]
   const [tab, setTab] = useState<DetailTab>('log')
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
-  const health = runHealth(state, id, now)
-  const usageEvents = state.events
-    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
+  const health = runHealth(state, id, past && task !== undefined ? task.updatedAt : now)
+  const usageEvents = currentAttemptEvents(state.events, id)
+    .filter((e): e is AgentStreamEvent => e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
   const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
@@ -3496,11 +3598,12 @@ function TaskDetailView() {
   // keeps the panel only when a conversation was actually recorded, so the
   // operator does not lose it by completing the task.
   const chatAvailable =
-    (task.state === 'no_pr' &&
+    !past &&
+    ((task.state === 'no_pr' &&
       task.statusReason !== null &&
       task.sessionId !== null &&
       task.worktree !== null) ||
-    state.events.some((e) => e.taskId === task.id && e.type === 'chat.message')
+      state.events.some((e) => e.taskId === task.id && e.type === 'chat.message'))
 
   return (
     <section>
@@ -3510,7 +3613,7 @@ function TaskDetailView() {
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
-        {selected !== null && (
+        {selected !== null && !past && (
           <ReclaimButton
             repo={selected}
             taskId={task.id}
@@ -3518,7 +3621,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RetryButton
             repo={selected}
             taskId={task.id}
@@ -3526,7 +3629,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RequeueButton
             repo={selected}
             taskId={task.id}
@@ -3534,7 +3637,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <FileAsErrorButton
             repo={selected}
             taskId={task.id}
@@ -3542,7 +3645,7 @@ function TaskDetailView() {
             statusReason={task.statusReason}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RestartRunButton
             repo={selected}
             taskId={task.id}
@@ -3550,19 +3653,31 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
+          <ResetButton repo={selected} taskId={task.id} state={task.state} />
+        )}
+        {selected !== null && !past && (
           <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
         )}
-        {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
+        {selected !== null && !past && (
+          <CloseButtons repo={selected} taskId={task.id} state={task.state} />
+        )}
         {selected !== null && (
           <CopyReportButton repo={selected} task={task} elapsedMs={health.elapsedMs} />
         )}
-        <StopButton taskId={task.id} />
+        {!past && <StopButton taskId={task.id} />}
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
+
+      <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
+      {past && (
+        <p className="mt-2 text-sm text-fg-muted">
+          Viewing attempt #{attempt}, which was reset. Actions apply to the current attempt.
+        </p>
+      )}
 
       <SummaryPanel task={task} />
 
@@ -3672,7 +3787,9 @@ function TaskDetailView() {
             ))}
           </div>
         )}
-        {tab === 'log' && selected !== null && <AgentLogView repo={selected} taskId={id} />}
+        {tab === 'log' && selected !== null && (
+          <AgentLogView repo={selected} taskId={id} attempt={attempt} />
+        )}
         {tab === 'checks' && task.checks !== null && (
           <ul className="space-y-2">
             {task.checks.map((c) => (

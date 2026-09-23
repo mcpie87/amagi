@@ -9,6 +9,7 @@ import {
   type AgentEvent,
   type AgentRole,
   type CheckResult,
+  currentAttemptEvents,
   isTerminal,
   type StoredEvent,
   type TaskState,
@@ -414,7 +415,9 @@ export class Runner {
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
-    const prior = taskCost(store.events({ taskId: task.id, limit: 1_000_000 }))
+    const prior = taskCost(
+      currentAttemptEvents(store.events({ taskId: task.id, limit: 1_000_000 }), task.id),
+    )
     const budget = new TaskBudget(
       store.task(task.id)?.createdAt ?? Date.now(),
       config.loop.maxRunMinutes * 60_000,

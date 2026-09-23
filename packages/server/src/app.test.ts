@@ -761,6 +761,67 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/repos/:repo/tasks/:id/reset', () => {
+  let tracker: FakeGateTracker
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    // git runs in the repo root to drop the branch, so it has to exist.
+    mkdirSync(ws.workspaces.get('repo1')?.root ?? '', { recursive: true })
+  })
+
+  const parked = (id: string, to: 'cancelled' | 'needs_human' | 'no_pr' | 'pr_open') => {
+    claim(id)
+    store.append(id, { type: 'worktree.created', path: `/tmp/wt/${id}`, branch: `amagi/${id}-x` })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'agent.exited', role: 'implement', exitCode: 0, sessionId: 'sess-1' })
+    if (to === 'pr_open') {
+      store.append(id, { type: 'task.state', from: 'implementing', to: 'checks' })
+      store.append(id, { type: 'task.state', from: 'checks', to: 'committed' })
+      store.append(id, { type: 'task.state', from: 'committed', to: 'pr_open' })
+    } else {
+      store.append(id, { type: 'task.state', from: 'implementing', to })
+    }
+  }
+
+  test.each(['cancelled', 'needs_human', 'no_pr'] as const)(
+    'starts a %s task over as a fresh attempt with no worktree or session',
+    async (state) => {
+      parked('bd-1', state)
+      const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: ProjectedTask }
+      expect(body.task).toMatchObject({
+        state: 'claimed',
+        attempt: 2,
+        worktree: null,
+        branch: null,
+        sessionId: null,
+      })
+      expect(tracker.released).toEqual(['bd-1'])
+      expect(
+        store.events({ taskId: 'bd-1', limit: 100 }).some((e) => e.type === 'task.reset'),
+      ).toBe(true)
+    },
+  )
+
+  test('409s on a task whose PR is open', async () => {
+    parked('bd-1', 'pr_open')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect(store.task('bd-1')?.attempt).toBe(1)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/repos/repo1/tasks/nope/reset', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
   const parkedError = (id: string, reason: string) => {
     claim(id)
