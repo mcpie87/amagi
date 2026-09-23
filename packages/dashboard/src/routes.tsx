@@ -1919,11 +1919,15 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
     dialog.showModal()
   }, [])
   return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc already closes via onCancel; this only handles backdrop clicks.
     <dialog
       ref={dialogRef}
       onCancel={(event) => {
         event.preventDefault()
         onClose()
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
       }}
       className="ready-queue-dialog"
     >
