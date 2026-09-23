@@ -1,4 +1,4 @@
-import { isTerminal, type StoredEvent } from './events.ts'
+import { currentAttemptEvents, isTerminal, type StoredEvent } from './events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -28,6 +28,26 @@ export const initialDashboardState = (): DashboardState => ({
 
 export function reduceState(state: DashboardState, event: StoredEvent): DashboardState {
   return { ...project(state, event), events: [...state.events, event], latestSeq: event.seq }
+}
+
+/**
+ * The dashboard state as it stood at the end of one attempt of a task: the
+ * task's events are cut at the reset that started the next attempt and
+ * re-projected, so every per-task view renders that attempt unchanged.
+ * Other tasks keep their full history.
+ */
+export function stateAtAttempt(
+  state: DashboardState,
+  taskId: string,
+  attempt: number,
+): DashboardState {
+  let seen = 1
+  const events = state.events.filter((e) => {
+    if (e.taskId !== taskId) return true
+    if (e.type === 'task.reset') seen++
+    return seen <= attempt
+  })
+  return { ...events.reduce(project, emptyProjection()), events, latestSeq: state.latestSeq }
 }
 
 /** The queue view: every task still in flight, most recently touched first. */
@@ -197,8 +217,7 @@ export function runHealth(state: DashboardState, taskId: string, now = Date.now(
   let costUsd = 0
   let costSeen = false
   const warnings: string[] = []
-  for (const event of state.events) {
-    if (event.taskId !== taskId) continue
+  for (const event of currentAttemptEvents(state.events, taskId)) {
     switch (event.type) {
       case 'run.context':
         contextTokens = event.contextTokens

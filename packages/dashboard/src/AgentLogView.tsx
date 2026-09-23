@@ -1,4 +1,4 @@
-import { type AgentLogLine, agentLogStore } from '@amagi/core/agent-log'
+import { type AgentLogLine, agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { EmptyState, Time } from './ui.tsx'
@@ -26,11 +26,18 @@ const kindClass: Record<AgentLogLine['kind'], string> = {
  * costs one re-render, not one per line. Rows outside the viewport are never
  * mounted, via @tanstack/react-virtual.
  */
-export function AgentLogView({ repo, taskId }: { repo: string; taskId: string }) {
+export function AgentLogView({
+  repo,
+  taskId,
+  attempt,
+}: {
+  repo: string
+  taskId: string
+  attempt: number
+}) {
   const parentRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
-  // namespaced by repo so identical issue ids across repos never share a buffer
-  const logKey = `${repo}/${taskId}`
+  const logKey = agentLogKey(repo, taskId, attempt)
   const [following, setFollowing] = useState(true)
 
   useSyncExternalStore(

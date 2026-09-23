@@ -1,10 +1,12 @@
 import type { PrInfo } from '@amagi/core'
-import { agentLogStore } from '@amagi/core/agent-log'
+import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
 import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
+  canReset,
+  currentAttemptEvents,
   isTerminal,
   type MergeStatus,
   type StoredEvent,
@@ -25,6 +27,7 @@ import {
   type ProjectedTask,
   runHealth,
   runHealthNearLimit,
+  stateAtAttempt,
   tasksNeedingAttention,
 } from '@amagi/core/view'
 import {
@@ -1343,8 +1346,8 @@ function RunButton() {
 }
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
-function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
-  const key = `${repo}/${taskId}`
+function LastLogLine({ repo, taskId, attempt }: { repo: string; taskId: string; attempt: number }) {
+  const key = agentLogKey(repo, taskId, attempt)
   useSyncExternalStore(
     (listener) => agentLogStore.subscribe(key, listener),
     () => agentLogStore.get(key).version,
@@ -1436,7 +1439,9 @@ function WorkerSlot({
           </>
         )}
       </div>
-      {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
+      {selected !== null && (
+        <LastLogLine repo={selected} taskId={taskId} attempt={task?.attempt ?? 1} />
+      )}
     </div>
   )
 }
@@ -1879,13 +1884,97 @@ const metricTone = {
   none: { box: 'border-line bg-surface', value: 'text-fg-strong' },
 } as const
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'red' | 'amber' }) {
+function Metric({
+  label,
+  value,
+  tone,
+  onClick,
+}: {
+  label: string
+  value: string
+  tone?: 'red' | 'amber'
+  onClick?: () => void
+}) {
   const t = metricTone[tone ?? 'none']
-  return (
-    <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>
+  const body = (
+    <>
       <div className="text-[11px] font-medium uppercase tracking-wide text-fg-faint">{label}</div>
       <div className={`mt-1 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
-    </div>
+    </>
+  )
+  if (onClick === undefined) {
+    return <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>{body}</div>
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`metric rounded-lg border px-4 py-3 text-left ${t.box} hover:border-line-strong`}
+    >
+      {body}
+    </button>
+  )
+}
+
+function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog === null) return
+    dialog.showModal()
+  }, [])
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc already closes via onCancel; this only handles backdrop clicks.
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+      className="ready-queue-dialog"
+    >
+      <div className="flex items-center justify-between border-b border-line px-4 py-3">
+        <h2 className="text-sm font-semibold text-fg">Ready to run ({tasks.length})</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="rounded p-1 text-fg-muted hover:bg-raised hover:text-fg"
+        >
+          <Icon name="close" size={16} />
+        </button>
+      </div>
+      {tasks.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-fg-faint">nothing in the ready queue</p>
+      ) : (
+        <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto">
+          {tasks.map((task) => (
+            <li key={task.id} className="px-4 py-2.5 text-sm">
+              {task.url === null ? (
+                <span className="block truncate font-medium text-fg">{task.title}</span>
+              ) : (
+                <a
+                  href={task.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block truncate font-medium text-fg hover:underline"
+                >
+                  {task.title}
+                </a>
+              )}
+              <span className="block truncate text-xs text-fg-faint">
+                {task.id}
+                {task.priority !== null && ` · P${task.priority}`}
+                {task.type !== null && ` · ${task.type}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </dialog>
   )
 }
 
@@ -1966,7 +2055,9 @@ function MergeablePrsPanel() {
 function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
+  const readyQueue = useReadyQueue()
   const [search, setSearch] = useState('')
+  const [readyQueueOpen, setReadyQueueOpen] = useState(false)
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
   const openQuestions = Object.values(state.questions).filter((q) => q.resolvedAt === null).length
@@ -1998,8 +2089,13 @@ function OverviewView() {
         </div>
       </div>
 
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Metric label="Active runs" value={String(queue.length)} />
+        <Metric
+          label="Ready to run"
+          value={String(readyQueue.length)}
+          onClick={() => setReadyQueueOpen(true)}
+        />
         <Metric label="Workers busy" value={workers} />
         <Metric
           label="Needs attention"
@@ -2053,6 +2149,10 @@ function OverviewView() {
         </EmptyState>
       ) : (
         <RunList tasks={visible} showReason={false} />
+      )}
+
+      {readyQueueOpen && (
+        <ReadyQueueDialog tasks={readyQueue} onClose={() => setReadyQueueOpen(false)} />
       )}
     </section>
   )
@@ -2744,12 +2844,11 @@ function FileAsErrorButton({
 }
 
 /**
- * Restart a run that has no worktree recorded yet, so the runner starts fresh.
- * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
- * need the worktree path; done and abandoned runs have no path back, so the
- * button is hidden for them.
+ * Start a parked task over as a fresh attempt: the server drops the worktree,
+ * branch and session, so nothing of the previous run is resumed. The earlier
+ * attempt stays browsable from the attempt switcher.
  */
-function RestartRunButton({
+function ResetButton({
   repo,
   taskId,
   state,
@@ -2760,21 +2859,32 @@ function RestartRunButton({
   state: TaskState
   worktree: string | null
 }) {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (worktree !== null || state === 'done' || state === 'abandoned') return null
+  if (!canReset(state, worktree !== null)) return null
 
-  const restart = async () => {
+  const reset = async () => {
+    if (
+      !window.confirm(
+        `Reset ${taskId}? Its worktree and branch are deleted and it reruns from scratch.`,
+      )
+    ) {
+      return
+    }
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reset`, {
         method: 'POST',
       })
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null
         setError(body?.error ?? `HTTP ${res.status}`)
+        return
       }
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2783,21 +2893,54 @@ function RestartRunButton({
   }
 
   return (
-    <div className="restart-run">
+    <div className="reset-run">
       <button
         type="button"
         disabled={busy}
-        onClick={() => void restart()}
+        onClick={() => void reset()}
+        title="deletes the worktree, branch and agent session, then reruns the task from scratch as a new attempt"
         className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
       >
         <Icon name="refresh" size={15} />
-        {busy ? 'Restarting...' : 'Restart run'}
+        {busy ? 'Resetting...' : 'Reset'}
       </button>
       {error !== null && (
-        <p className="restart-error" role="alert">
+        <p className="reset-error" role="alert">
           {error}
         </p>
       )}
+    </div>
+  )
+}
+
+/** Switch the task detail between the current attempt and earlier, reset ones. */
+function AttemptSwitcher({
+  current,
+  viewing,
+  onSelect,
+}: {
+  current: number
+  viewing: number
+  onSelect: (attempt: number | null) => void
+}) {
+  if (current < 2) return null
+  return (
+    <div className="detail-tabs mt-3 flex gap-1 border-b border-line">
+      {Array.from({ length: current }, (_, i) => i + 1).map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onSelect(n === current ? null : n)}
+          className={`rounded-t px-3 py-1.5 text-sm ${
+            viewing === n
+              ? 'border-b-2 border-sky-500 text-fg-strong'
+              : 'text-fg-muted hover:text-fg'
+          }`}
+        >
+          Attempt #{n}
+          {n === current ? ' (current)' : ''}
+        </button>
+      ))}
     </div>
   )
 }
@@ -3269,7 +3412,7 @@ const REPORT_LOG_LINES = 100
 
 /** Markdown summary of a task, ready to feed an LLM for bug-report generation. */
 function taskReport(task: ProjectedTask, elapsedMs: number, repo: string): string {
-  const buffer = agentLogStore.get(`${repo}/${task.id}`)
+  const buffer = agentLogStore.get(agentLogKey(repo, task.id, task.attempt))
   const start = Math.max(0, buffer.length - REPORT_LOG_LINES)
   const log: string[] = []
   for (let i = start; i < buffer.length; i++) {
@@ -3353,21 +3496,31 @@ type DetailTab = 'log' | 'checks'
 
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
-  const { state, selected } = useDashboard()
+  const { state: liveState, selected } = useDashboard()
   const { status } = useRunner()
+  // null follows the current attempt, so a reset moves the view along with it.
+  const [viewAttempt, setViewAttempt] = useState<number | null>(null)
+  const currentAttempt = liveState.tasks[id]?.attempt ?? 1
+  const attempt =
+    viewAttempt !== null && viewAttempt < currentAttempt ? viewAttempt : currentAttempt
+  const past = attempt < currentAttempt
+  const state = useMemo(
+    () => (past ? stateAtAttempt(liveState, id, attempt) : liveState),
+    [past, liveState, id, attempt],
+  )
   const task: ProjectedTask | undefined = state.tasks[id]
-  const questions = openQuestionsFor(state, id)
+  const questions = past ? [] : openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
-  const runnerTask = status?.tasks?.[id]
+  const runnerTask = past ? undefined : status?.tasks?.[id]
   const [tab, setTab] = useState<DetailTab>('log')
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
-  const health = runHealth(state, id, now)
-  const usageEvents = state.events
-    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
+  const health = runHealth(state, id, past && task !== undefined ? task.updatedAt : now)
+  const usageEvents = currentAttemptEvents(state.events, id)
+    .filter((e): e is AgentStreamEvent => e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
   const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
@@ -3401,11 +3554,12 @@ function TaskDetailView() {
   // keeps the panel only when a conversation was actually recorded, so the
   // operator does not lose it by completing the task.
   const chatAvailable =
-    (task.state === 'no_pr' &&
+    !past &&
+    ((task.state === 'no_pr' &&
       task.statusReason !== null &&
       task.sessionId !== null &&
       task.worktree !== null) ||
-    state.events.some((e) => e.taskId === task.id && e.type === 'chat.message')
+      state.events.some((e) => e.taskId === task.id && e.type === 'chat.message'))
 
   return (
     <section>
@@ -3415,7 +3569,7 @@ function TaskDetailView() {
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
-        {selected !== null && (
+        {selected !== null && !past && (
           <ReclaimButton
             repo={selected}
             taskId={task.id}
@@ -3423,7 +3577,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RetryButton
             repo={selected}
             taskId={task.id}
@@ -3431,7 +3585,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RequeueButton
             repo={selected}
             taskId={task.id}
@@ -3439,7 +3593,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <FileAsErrorButton
             repo={selected}
             taskId={task.id}
@@ -3447,27 +3601,36 @@ function TaskDetailView() {
             statusReason={task.statusReason}
           />
         )}
-        {selected !== null && (
-          <RestartRunButton
+        {selected !== null && !past && (
+          <ResetButton
             repo={selected}
             taskId={task.id}
             state={task.state}
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
         )}
-        {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
+        {selected !== null && !past && (
+          <CloseButtons repo={selected} taskId={task.id} state={task.state} />
+        )}
         {selected !== null && (
           <CopyReportButton repo={selected} task={task} elapsedMs={health.elapsedMs} />
         )}
-        <StopButton taskId={task.id} />
+        {!past && <StopButton taskId={task.id} />}
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
+
+      <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
+      {past && (
+        <p className="mt-2 text-sm text-fg-muted">
+          Viewing attempt #{attempt}, which was reset. Actions apply to the current attempt.
+        </p>
+      )}
 
       <SummaryPanel task={task} />
 
@@ -3577,7 +3740,9 @@ function TaskDetailView() {
             ))}
           </div>
         )}
-        {tab === 'log' && selected !== null && <AgentLogView repo={selected} taskId={id} />}
+        {tab === 'log' && selected !== null && (
+          <AgentLogView repo={selected} taskId={id} attempt={attempt} />
+        )}
         {tab === 'checks' && task.checks !== null && (
           <ul className="space-y-2">
             {task.checks.map((c) => (

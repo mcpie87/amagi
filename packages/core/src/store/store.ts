@@ -30,6 +30,7 @@ type RawTask = {
   last_commit_subject: string | null
   checks: string | null
   checks_ok: number | null
+  attempt: number
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -68,6 +69,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
       : { sha: r.last_commit_sha, subject: r.last_commit_subject ?? '' },
   checks: r.checks === null ? null : (JSON.parse(r.checks) as CheckResult[]),
   checksOk: r.checks_ok === null ? null : r.checks_ok === 1,
+  attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 })
@@ -111,6 +113,7 @@ const taskRow = (t: ProjectedTask): Row => ({
   last_commit_subject: t.lastCommit?.subject ?? null,
   checks: t.checks === null ? null : JSON.stringify(t.checks),
   checks_ok: t.checksOk === null ? null : t.checksOk ? 1 : 0,
+  attempt: t.attempt,
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({

@@ -2,6 +2,7 @@ import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
+  canReset,
   classifyDifficulty,
   errMsg,
   HARDCODED_EFFORTS,
@@ -461,6 +462,44 @@ export function createApp({
         console.warn(`release ${id}: ${errMsg(err)}`)
       }
       ws.store.append(id, { type: 'task.reclaimed' })
+      return c.json({ task: ws.store.task(id) })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/reset', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (!canReset(task.state, task.worktree !== null)) {
+        return c.json({ error: `task ${id} cannot be reset from state ${task.state}` }, 409)
+      }
+      if (runner !== undefined) {
+        try {
+          await runner.stop(id)
+        } catch (err) {
+          console.warn(`stop on reset ${id}: ${errMsg(err)}`)
+        }
+      }
+      // Unlike close, the worktree removal is not best effort: a surviving
+      // worktree or branch would be resumed by the next run, which is exactly
+      // what the reset promises not to do.
+      if (task.worktree !== null) {
+        try {
+          await removeWorktree(ws.store, id, {
+            repoRoot: ws.root,
+            path: task.worktree,
+            branch: task.branch ?? null,
+          })
+        } catch (err) {
+          return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
+        }
+      }
+      try {
+        await ws.tracker.release(id)
+      } catch (err) {
+        console.warn(`release on reset ${id}: ${errMsg(err)}`)
+      }
+      ws.store.append(id, { type: 'task.reset', reason: 'operator reset' })
       return c.json({ task: ws.store.task(id) })
     })
 
