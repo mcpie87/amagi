@@ -22,6 +22,7 @@ import {
   answerPrompt,
   commitMessage,
   fixChecksPrompt,
+  implementAfterVerifyPrompt,
   implementPrompt,
   implementSystemPrompt,
   prTitle,
@@ -523,16 +524,23 @@ export class Runner {
     // repository, so a task already satisfied on the base branch is stopped
     // before the implement agent writes anything or a no-op PR is opened. A
     // resumed run skips the check: its worktree already holds in-progress work.
+    // Implement resumes the check's session so its exploration is not redone.
+    let verifySession: string | null = null
     if (!resume) {
-      const viable = await this.verifyViability(task, cwd, branch, budget)
-      if (!viable) return
+      const verified = await this.verifyViability(task, cwd, branch, budget)
+      if (verified === null) return
+      verifySession = verified.sessionId
     }
     const first = await this.runAgentWithRetry(
       task.id,
-      null,
+      verifySession,
       {
         cwd,
-        prompt: resume ? reclaimPrompt(promptCtx) : implementPrompt(promptCtx),
+        prompt: resume
+          ? reclaimPrompt(promptCtx)
+          : verifySession !== null
+            ? implementAfterVerifyPrompt(promptCtx)
+            : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
         ...harnessStartOpts(config.harness.implement),
       },
@@ -664,14 +672,15 @@ export class Runner {
    * task is not viable, in which case it is reported inside the task (a
    * tracker comment) and parked in `no_pr` before any code is written. Any
    * failure to check defaults to viable: a broken check must never kill a
-   * task, only a clear not-viable verdict does.
+   * task, only a clear not-viable verdict does. A viable verdict carries the
+   * check's session for implement to resume; a failed check carries none.
    */
   private async verifyViability(
     task: TrackerTask,
     cwd: string,
     branch: string,
     budget: TaskBudget,
-  ): Promise<boolean> {
+  ): Promise<{ sessionId: string | null } | null> {
     const { store, config } = this.deps
     const run = await this.runAgent(
       task.id,
@@ -689,10 +698,10 @@ export class Runner {
     if (!run.ok) {
       // A cancel mid-check must stop the run, not fall through to implement.
       this.throwIfCancelled(task.id)
-      return true
+      return { sessionId: null }
     }
     const decision = run.summary === null ? null : parseViabilityDecision(run.summary)
-    if (decision === null || decision.viable) return true
+    if (decision === null || decision.viable) return { sessionId: run.sessionId }
 
     const reason =
       decision.reason.trim() !== ''
@@ -711,7 +720,7 @@ export class Runner {
       })
     }
     this.transition(task.id, 'no_pr', reason)
-    return false
+    return null
   }
 
   /**

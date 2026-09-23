@@ -503,15 +503,28 @@ describe('Runner.runOnce', () => {
     expect(harness.calls[0]?.prompt).toContain('Implement this task')
   })
 
+  test('implement resumes the viability check session instead of starting cold', async () => {
+    const harness = new FakeHarness([writesAFile], {
+      events: [],
+      outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
+    })
+    await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(harness.calls[0]?.resumeFrom).toBe('verify-sess')
+    expect(harness.calls[0]?.prompt).toContain('viability check is over')
+    expect(harness.calls[0]?.prompt).toContain('Implement this task')
+  })
+
   test('a failed viability check defaults to continuing the task', async () => {
     const harness = new FakeHarness([writesAFile], {
-      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' },
+      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable', sessionId: 'broken' },
     })
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(result?.state).toBe('pr_open')
     expect(harness.verifyCalls).toHaveLength(1)
     expect(harness.calls).toHaveLength(1)
+    expect(harness.calls[0]?.resumeFrom).toBeNull()
   })
 
   test('an unparseable viability verdict defaults to continuing the task', async () => {

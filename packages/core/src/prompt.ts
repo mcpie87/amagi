@@ -108,6 +108,21 @@ export function implementPrompt(ctx: PromptContext): string {
   return parts.join('\n')
 }
 
+/**
+ * Sent into the viability check's own session, so the agent keeps what it
+ * already read. The task text is repeated because a context restart replays
+ * this prompt into a fresh session.
+ */
+export function implementAfterVerifyPrompt(ctx: PromptContext): string {
+  return [
+    'The viability check is over and the task is still needed. The read-only rule and',
+    'the JSON reply format of the check no longer apply: follow the implementation rules and',
+    'implement the task, reusing what you already found instead of re-reading it.',
+    '',
+    implementPrompt(ctx),
+  ].join('\n')
+}
+
 /** A previously interrupted run was reclaimed and its worktree resumed. */
 export function reclaimPrompt(ctx: PromptContext): string {
   const parts = [

@@ -124,8 +124,8 @@ class FakeHarness implements Harness {
       effort: null,
     }
   }
-  resume(): AgentProcess {
-    throw new Error('no resume in run-service tests')
+  resume(_sessionId: string, opts: AgentStartOptions): AgentProcess {
+    return this.start(opts)
   }
   async listModels(): Promise<string[]> {
     return []
