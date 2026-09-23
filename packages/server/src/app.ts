@@ -785,7 +785,11 @@ export function createApp({
         }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
-          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+          if (runner !== undefined && runnerRepo === repo) {
+            const workersEnabled =
+              workspaces.list().find((entry) => entry.key === repo)?.workers === true
+            runner.setAutoQueue(autoQueue && workersEnabled)
+          }
         }
         return c.json({
           maxParallel: ws.config.loop.maxParallel,
