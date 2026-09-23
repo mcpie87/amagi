@@ -7,6 +7,7 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  type MergeStatus,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -36,25 +37,19 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
-function fakeExec(prs: () => PrInfo[]): Exec {
+/** Serves the git side of a tick: ls-remote, worktree, merge. PRs come from the driver. */
+function fakeExec(): Exec {
   return async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return { exitCode: 0, stdout: JSON.stringify(prs()), stderr: '' }
-    }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    if (cmd.includes('view')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        stderr: '',
-      }
-    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
 }
 
 class FakePr implements PrDriver {
+  prs: PrInfo[] = []
+  mergeStatus: MergeStatus = 'mergeable'
+  readonly mergeStatusCalls: number[] = []
   readonly addedLabels: string[] = []
   readonly removedLabels: string[] = []
   readonly postedComments: string[] = []
@@ -66,10 +61,11 @@ class FakePr implements PrDriver {
     return 'open'
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
-    return []
+    return this.prs
   }
-  async getMergeStatus(_cwd: string, _number: number) {
-    return 'mergeable' as const
+  async getMergeStatus(_cwd: string, number: number): Promise<MergeStatus> {
+    this.mergeStatusCalls.push(number)
+    return this.mergeStatus
   }
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     return ''
@@ -206,11 +202,9 @@ const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): n
 
 test('lists open PRs, resolves only conflicting ones, and records counters', async () => {
   let started = 0
-  const exec = fakeExec(() => [
-    pr(),
-    pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-  ])
-  const w = start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr(), pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
 
@@ -230,8 +224,9 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
 
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
   let started = 0
-  const exec = fakeExec(() => [pr()])
-  const w = start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(1)
@@ -245,13 +240,15 @@ test('does not re-attempt a conflicting PR until its head SHA changes', async ()
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
   let started = 0
   let head = 'deadbeef'
-  const exec = fakeExec(() => [pr({ headRefOid: head })])
-  start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr({ headRefOid: head })]
+  start(fakeExec(), () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(1)
 
   head = 'newsha'
+  driver.prs = [pr({ headRefOid: head })]
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(2)
   expect(stateFile()['7']).toEqual({ headOid: 'newsha' })
@@ -260,12 +257,16 @@ test('re-attempts a conflicting PR once its head SHA changes', async () => {
 test('a failed resolution is recorded so the same head is not retried', async () => {
   let started = 0
   const fail = true
-  const exec = fakeExec(() => [pr()])
-  const w = start(exec, () =>
-    fakeHarness(() => {
-      started++
-      if (fail) throw new Error('agent failed: model overloaded')
-    }),
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const w = start(
+    fakeExec(),
+    () =>
+      fakeHarness(() => {
+        started++
+        if (fail) throw new Error('agent failed: model overloaded')
+      }),
+    { driver },
   )
 
   await Bun.sleep(60)
@@ -280,18 +281,25 @@ test('a failed resolution is recorded so the same head is not retried', async ()
 
 test('a conflicting PR that stops conflicting drops out of the state file', async () => {
   let conflicting = true
-  const exec = fakeExec(() => [
+  const driver = new FakePr()
+  driver.prs = [
     pr({
       mergeable: conflicting ? 'CONFLICTING' : 'MERGEABLE',
       mergeStateStatus: conflicting ? 'DIRTY' : 'CLEAN',
     }),
-  ])
-  start(exec, () => fakeHarness(() => {}))
+  ]
+  start(fakeExec(), () => fakeHarness(() => {}), { driver })
 
   await Bun.sleep(60)
   expect(stateFile()['7']).toBeDefined()
 
   conflicting = false
+  driver.prs = [
+    pr({
+      mergeable: conflicting ? 'CONFLICTING' : 'MERGEABLE',
+      mergeStateStatus: conflicting ? 'DIRTY' : 'CLEAN',
+    }),
+  ]
   await Bun.sleep(60)
   expect(stateFile()['7']).toBeUndefined()
 })
@@ -304,21 +312,13 @@ test('fetches every open PR head each tick when a head moved', async () => {
     if (cmd.includes('ls-remote')) {
       return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
     }
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return { exitCode: 0, stdout: JSON.stringify([pr()]), stderr: '' }
-    }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    if (cmd.includes('view')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        stderr: '',
-      }
-    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(exec, () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
   const fetches = calls.filter((c) => c[0] === 'git' && c[1] === 'fetch')
@@ -333,8 +333,12 @@ test('fetches every open PR head each tick when a head moved', async () => {
 })
 
 test('a tick that fails to list PRs reports the error and keeps the previous stamp', async () => {
-  const failing: Exec = async () => ({ exitCode: 1, stdout: '', stderr: 'gh: not logged in' })
-  const w = start(failing, () => fakeHarness(() => {}))
+  const driver = new FakePr()
+  driver.listOpenPrs = async () => {
+    throw new Error('not logged in')
+  }
+  const benign: Exec = async () => ({ exitCode: 0, stdout: '', stderr: '' })
+  const w = start(benign, () => fakeHarness(() => {}), { driver })
 
   await Bun.sleep(60)
 
@@ -361,16 +365,6 @@ const mergeTreeLog = (): { pr: number; local: string; github: string; headOid: s
 test('records merge-tree observations and divergences when the flag is on', async () => {
   const local = new Map<number, 'conflict' | 'clean'>()
   const exec: Exec = async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          pr({ number: 7, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-          pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        ]),
-        stderr: '',
-      }
-    }
     if (cmd.includes('merge-tree')) {
       const head = cmd[cmd.length - 1] ?? ''
       const n = Number(head.match(/pr\/(\d+)\/head/)?.[1] ?? '0')
@@ -380,22 +374,20 @@ test('records merge-tree observations and divergences when the flag is on', asyn
     }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    if (cmd.includes('view')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        stderr: '',
-      }
-    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
+  const driver = new FakePr()
+  driver.prs = [
+    pr({ number: 7, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+    pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+  ]
   local.set(7, 'clean')
   local.set(8, 'conflict')
-  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig() })
+  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig(), driver })
 
   await Bun.sleep(60)
 
-  // #8 conflicts locally while GitHub reports it mergeable: the divergence.
+  // #8 conflicts locally while the forge reports it mergeable: the divergence.
   expect(counter(w, 'divergent')).toBeGreaterThanOrEqual(1)
   const rows = mergeTreeLog()
   expect(rows.length).toBeGreaterThanOrEqual(2)
@@ -404,35 +396,19 @@ test('records merge-tree observations and divergences when the flag is on', asyn
 })
 
 test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', async () => {
-  let views = 0
   const exec: Exec = async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          pr({ number: 7, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }),
-        ]),
-        stderr: '',
-      }
-    }
     if (cmd.includes('merge-tree')) return { exitCode: 0, stdout: '', stderr: '' }
-    if (cmd.includes('view')) {
-      views++
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        stderr: '',
-      }
-    }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig() })
+  const driver = new FakePr()
+  driver.prs = [pr({ number: 7, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })]
+  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig(), driver })
 
   await Bun.sleep(60)
 
-  expect(views).toBeGreaterThanOrEqual(1)
+  expect(driver.mergeStatusCalls).toContain(7)
   expect(counter(w, 'divergent')).toBe(0)
   const rows = mergeTreeLog()
   expect(rows.length).toBeGreaterThanOrEqual(1)
@@ -440,8 +416,9 @@ test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', asyn
 })
 
 test('merge-tree observations stay off when the flag is off', async () => {
-  const exec = fakeExec(() => [pr()])
-  start(exec, () => fakeHarness(() => {}))
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(fakeExec(), () => fakeHarness(() => {}), { driver })
 
   await Bun.sleep(60)
 
@@ -460,20 +437,9 @@ const openPrTask = (store: Store): void => {
   }
 }
 
-function fakeExecForPointless(diff: () => string, head: () => string = () => 'deadbeef'): Exec {
+/** Serves the pointless pass's `gh pr diff`; PRs come from the driver. */
+function fakeExecForPointless(diff: () => string): Exec {
   return async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          {
-            ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head() }),
-            labels: [{ name: 'amagi' }],
-          },
-        ]),
-        stderr: '',
-      }
-    }
     if (cmd.includes('diff')) return { exitCode: 0, stdout: diff(), stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
@@ -487,6 +453,7 @@ test('an amagi PR with an empty diff gets labelled, commented on and parked in p
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
   start(
     fakeExecForPointless(() => ''),
     () => fakeHarness(() => {}),
@@ -508,22 +475,12 @@ test('a PR without the amagi label is never flagged whatever its diff', async ()
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
-  const exec: Exec = async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          {
-            ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-            labels: [],
-          },
-        ]),
-        stderr: '',
-      }
-    }
-    return { exitCode: 0, stdout: '', stderr: '' }
-  }
-  start(exec, () => fakeHarness(() => {}), { store, tracker, driver })
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: [] }]
+  start(
+    fakeExecForPointless(() => ''),
+    () => fakeHarness(() => {}),
+    { store, tracker, driver },
+  )
 
   await Bun.sleep(60)
 
@@ -540,11 +497,14 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
   const driver = new FakePr()
   let diff = ''
   let head = 'deadbeef'
+  driver.prs = [
+    {
+      ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head }),
+      labels: ['amagi'],
+    },
+  ]
   start(
-    fakeExecForPointless(
-      () => diff,
-      () => head,
-    ),
+    fakeExecForPointless(() => diff),
     () => fakeHarness(() => {}),
     {
       store,
@@ -558,6 +518,12 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
 
   diff = 'a real diff\n'
   head = 'newsha'
+  driver.prs = [
+    {
+      ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head }),
+      labels: ['amagi'],
+    },
+  ]
   await Bun.sleep(60)
 
   expect(store.task('bd-1')?.state).toBe('pr_open')
@@ -573,6 +539,7 @@ test('an unchanged flagged PR is not re-commented on subsequent ticks', async ()
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
   start(
     fakeExecForPointless(() => ''),
     () => fakeHarness(() => {}),
