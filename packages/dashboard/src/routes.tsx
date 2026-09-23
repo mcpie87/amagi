@@ -3850,6 +3850,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           tone: 'red',
         })
         break
+      case 'git.bypassed':
+        items.push({
+          key: `gy${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `git bypass detected: ${event.entries.join('; ')}`,
+          icon: 'close',
+          tone: 'red',
+        })
+        break
       case 'question.asked':
         items.push({
           key: `q${event.seq}`,

@@ -15,6 +15,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
+import { headReflog, headReflogEntriesSince } from './git-bypass.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
 import {
@@ -887,6 +888,8 @@ export class Runner {
         AMAGI_RUN_STATE: runState,
       },
     }
+    const reflogBefore = await headReflog(opts.cwd, this.deps.exec ?? defaultExec)
+    const seqBefore = store.recentEvents(taskId, 1)[0]?.seq ?? 0
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
@@ -997,6 +1000,34 @@ export class Runner {
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
+      await this.recordGitBypass(taskId, opts.cwd, reflogBefore, seqBefore)
+    }
+  }
+
+  /** Records unexpected HEAD reflog entries created during an agent run. */
+  private async recordGitBypass(
+    taskId: string,
+    cwd: string,
+    before: string[] | null,
+    sinceSeq: number,
+  ): Promise<void> {
+    try {
+      if (before === null) return
+      const after = await headReflog(cwd, this.deps.exec ?? defaultExec)
+      if (after === null) return
+      const sanctioned = new Set(
+        this.deps.store
+          .events({ taskId, sinceSeq, limit: 1_000_000 })
+          .flatMap((event) => (event.type === 'commit.created' ? [event.sha] : [])),
+      )
+      const entries = headReflogEntriesSince(before, after).filter(
+        (line) => !sanctioned.has(line.split(' ', 1)[0] ?? ''),
+      )
+      if (entries.length > 0) {
+        this.deps.store.append(taskId, { type: 'git.bypassed', entries })
+      }
+    } catch {
+      // Best effort: bypass reporting never fails the run.
     }
   }
 

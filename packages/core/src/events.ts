@@ -225,6 +225,7 @@ export const EventBody = z.discriminatedUnion('type', [
    * "-m", "x"]`).
    */
   z.object({ type: z.literal('git.blocked'), argv: z.array(z.string()) }),
+  z.object({ type: z.literal('git.bypassed'), entries: z.array(z.string()) }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),

@@ -5,6 +5,7 @@ import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import { resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
@@ -23,6 +24,8 @@ export type ResolveConflictOptions = {
   makeHarnessFn?: typeof makeHarness
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
+  /** Called when the agent moves HEAD outside the expected commit operation. */
+  onGitBypassed?: (entries: string[]) => void
 }
 
 export type ResolveConflictResult = {
@@ -77,20 +80,27 @@ export async function resolveConflict(
       checks: opts.config.checks.commands,
     }
     const harness = mk(opts.config.harness.implement)
-    const proc = harness.start({
-      cwd: wt.path,
-      prompt: resolveConflictPrompt(ctx),
-      systemPrompt: resolveConflictSystemPrompt(ctx),
-      ...harnessStartOpts(opts.config.harness.implement),
-    })
     log('info', `agent: ${harness.kind} (${wt.branch})`)
 
-    for await (const event of proc.events()) {
-      if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
-      else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
-      else if (event.kind === 'error') log('error', event.message)
-    }
-    const outcome = await proc.done
+    const outcome = await withHeadReflogBypassCheck(
+      wt.path,
+      run,
+      async () => {
+        const proc = harness.start({
+          cwd: wt.path,
+          prompt: resolveConflictPrompt(ctx),
+          systemPrompt: resolveConflictSystemPrompt(ctx),
+          ...harnessStartOpts(opts.config.harness.implement),
+        })
+        for await (const event of proc.events()) {
+          if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
+          else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
+          else if (event.kind === 'error') log('error', event.message)
+        }
+        return proc.done
+      },
+      opts.onGitBypassed,
+    )
     if (!outcome.ok) {
       const message = `agent failed: ${agentFailure(outcome)}`
       log('error', message)
