@@ -227,6 +227,26 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
+test('shows conflict resolution warnings in watcher activity', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const exec: Exec = async (cmd) => {
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  const w = start(exec, () => fakeHarness(() => {}), { driver, intervalMs: 100 })
+
+  await Bun.sleep(150)
+
+  expect(w.activity().detail).toContain(
+    'warnings: #7: base already contains the PR work; skipped the empty merge push',
+  )
+})
+
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
   let started = 0
   const driver = new FakePr()

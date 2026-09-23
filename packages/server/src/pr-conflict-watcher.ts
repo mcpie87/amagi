@@ -210,6 +210,7 @@ export function startPrConflictWatcher({
       const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
       conflicting = conflicts.length
       let resolvedNow = 0
+      const warnings: string[] = []
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
@@ -233,12 +234,14 @@ export function startPrConflictWatcher({
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
           console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
+          warnings.push(`#${pr.number}: agent verdict ${result.verdict.verdict}`)
         }
         if (result.ok) {
           resolved++
           resolvedNow++
         } else {
           console.warn(`pr conflict #${pr.number}: ${result.message}`)
+          warnings.push(`#${pr.number}: ${result.message}`)
         }
       }
       // Only PRs that are still conflicting stay tracked; the rest drop out.
@@ -256,7 +259,9 @@ export function startPrConflictWatcher({
       })
       flagged += pointless.flagged
       cleared += pointless.cleared
-      next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}`
+      next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}${
+        warnings.length === 0 ? '' : `; warnings: ${warnings.join('; ')}`
+      }`
     } catch (err) {
       failures++
       next.ok = false
