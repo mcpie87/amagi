@@ -29,7 +29,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { AsyncQueue, BeadsTracker, loadConfig } from '@amagi/core'
+import { AsyncQueue, BeadsTracker, killTree, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -1615,6 +1615,48 @@ describe('runner endpoints', () => {
         status: 'active',
       },
     ])
+  })
+
+  test('GET /api/runner merges a live foreground worker into the slots', async () => {
+    const proc = Bun.spawn(['sleep', '30'], { stdout: 'ignore' })
+    try {
+      app = createApp({
+        workspaces: ws.workspaces,
+        runner: stubRunner(),
+        liveRuns: () => [
+          {
+            pid: proc.pid,
+            repoKey: 'repo1',
+            repoName: 'repo1',
+            taskId: 'bd-9',
+            title: 'just-run worker',
+            harness: 'claude',
+            model: 'sonnet',
+            effort: null,
+            startedAt: 1720000000000,
+          },
+        ],
+      })
+      const res = await app.request('/api/runner')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        running: string[]
+        startedAt: Record<string, number>
+        tasks: Record<string, unknown>
+        resources: Record<string, unknown>
+      }
+      expect(body.running).toEqual(['bd-9'])
+      expect(body.startedAt['bd-9']).toBe(1720000000000)
+      expect(body.tasks['bd-9']).toEqual({
+        title: 'just-run worker',
+        harness: 'claude',
+        model: 'sonnet',
+        effort: null,
+      })
+      expect(body.resources['bd-9']).toBeDefined()
+    } finally {
+      await killTree(proc.pid, { graceMs: 50 })
+    }
   })
 
   test('runner endpoints are 501 without a runner service', async () => {

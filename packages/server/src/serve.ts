@@ -1,6 +1,6 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { errMsg } from '@amagi/core'
+import { errMsg, loadLiveRuns } from '@amagi/core'
 import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
@@ -232,6 +232,7 @@ export function serve({
     ...(runner === undefined ? {} : { runner }),
     ...(runnerRepo === undefined ? {} : { runnerRepo }),
     workers: repoPollers.workers,
+    liveRuns: () => loadLiveRuns(),
   })
   const server = Bun.serve({
     hostname: host,

@@ -1673,7 +1673,8 @@ function WorkersPanel() {
         <span>procs: {total.processes}</span>
       </div>
       <div className="space-y-2">
-        {Array.from({ length: status.capacity }, (_, i) => (
+        {/* running can exceed capacity when foreground `just run` workers are merged in. */}
+        {Array.from({ length: Math.max(status.capacity, running.length) }, (_, i) => (
           <WorkerSlot
             key={i}
             taskId={running[i] ?? null}
