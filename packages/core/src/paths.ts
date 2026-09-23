@@ -45,3 +45,8 @@ export function registryPath(): string {
 export function runStateDir(taskId: string): string {
   return join(stateHome(), 'amagi', 'runs', taskId)
 }
+
+/** The git shim's rejected-call log for one task's run, drained by the runner. */
+export function rejectedGitLogPath(taskId: string): string {
+  return join(runStateDir(taskId), 'rejected-git.jsonl')
+}

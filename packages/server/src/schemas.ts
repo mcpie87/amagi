@@ -90,6 +90,19 @@ export const AnswerBody = z.object({
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
 
+/**
+ * The closed set of git writes an agent can request. The runner never parses
+ * prose and never interprets anything outside this set; an unknown verb is
+ * rejected as a 400 before any work happens.
+ */
+export const GitRequestVerb = z.enum(['commit'])
+export type GitRequestVerb = z.infer<typeof GitRequestVerb>
+
+export const GitRequestBody = z.object({
+  verb: GitRequestVerb,
+})
+export type GitRequestBody = z.infer<typeof GitRequestBody>
+
 /** A message from the operator to the worker behind a parked task. */
 export const ChatBody = z.object({
   message: z.string().trim().min(1).max(4000),

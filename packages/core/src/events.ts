@@ -214,6 +214,12 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
   z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),
+  /**
+   * The git shim rejected an agent's write attempt inside the protected repo.
+   * `argv` is the rejected call without the leading `git` (e.g. `["commit",
+   * "-m", "x"]`).
+   */
+  z.object({ type: z.literal('git.blocked'), argv: z.array(z.string()) }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),
