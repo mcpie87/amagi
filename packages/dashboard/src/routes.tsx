@@ -3803,6 +3803,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           tone: 'green',
         })
         break
+      case 'git.blocked':
+        items.push({
+          key: `gb${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `git write blocked: git ${event.argv.join(' ')}`,
+          icon: 'close',
+          tone: 'red',
+        })
+        break
       case 'question.asked':
         items.push({
           key: `q${event.seq}`,

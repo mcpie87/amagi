@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -15,7 +15,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
-import { runStateDir } from './paths.ts'
+import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
 import {
   answerPrompt,
@@ -46,6 +46,12 @@ export type RunnerDeps = {
   forge?: PrDriver
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
+  /**
+   * True when a server channel exists (amagi serve), so the agent is told
+   * about ask and git-request. A standalone amagi run has no server to POST
+   * to, so its agent is not told about either.
+   */
+  channel?: boolean
 }
 
 export type RunOnceResult = {
@@ -349,6 +355,11 @@ export class Runner {
         store.append(task.id, { type: 'error', message, fatal: true })
         this.transition(task.id, 'needs_human', message)
       }
+    } finally {
+      // Best effort: surface the shim's rejected git attempts next to the
+      // run's own commit/pr events, so a rule-fighting agent is visible
+      // without a chat session to discover it.
+      await this.drainGitBlocked(task.id)
     }
 
     const row = store.task(task.id)
@@ -494,7 +505,10 @@ export class Runner {
       task: currentTask,
       worktree: cwd,
       branch,
-      askCommand: 'amagi ask "<question>"',
+      // The channel commands only exist under amagi serve, so a standalone run
+      // is never told to use them.
+      ...(this.deps.channel ? { askCommand: 'amagi ask "<question>"' } : {}),
+      ...(this.deps.channel ? { gitRequestCommand: 'amagi git-request commit' } : {}),
     }
 
     this.throwIfCancelled(task.id)
@@ -1259,16 +1273,7 @@ export class Runner {
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
   private async commit(task: TrackerTask, cwd: string, base: string): Promise<boolean> {
-    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-    if (status.stdout.trim() !== '') {
-      await this.exec(['git', 'add', '-A'], { cwd })
-      const changes = await changesSinceBase(this.exec, cwd, this.deps.config.repo.baseBranch, true)
-      const message = commitMessage(task, changes)
-      const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
-      if (commit.exitCode !== 0) {
-        throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
-      }
-    }
+    await this.stageAndCommit(task, cwd)
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
@@ -1283,5 +1288,88 @@ export class Runner {
       subject: `[${task.id}] ${task.title}`,
     })
     return true
+  }
+
+  /**
+   * Stages and commits the worktree with the same message format as the
+   * end-of-phase commit. `committed: false` means the worktree was already
+   * clean; a git failure throws, since the caller decides how to surface it.
+   */
+  private async stageAndCommit(
+    task: Pick<TrackerTask, 'id' | 'title'>,
+    cwd: string,
+  ): Promise<{ committed: false } | { committed: true; sha: string }> {
+    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
+    if (status.stdout.trim() === '') return { committed: false }
+    await this.exec(['git', 'add', '-A'], { cwd })
+    const changes = await changesSinceBase(this.exec, cwd, this.deps.config.repo.baseBranch, true)
+    const message = commitMessage(task, changes)
+    const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
+    if (commit.exitCode !== 0) {
+      throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
+    }
+    const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
+    return { committed: true, sha }
+  }
+
+  /**
+   * The one sanctioned git write an agent can cause, over the server channel:
+   * stages and commits the worktree, records `commit.created`, and returns
+   * the sha. A clean worktree or a git failure is returned as an error so the
+   * agent learns immediately. No state transition, so it is usable any number
+   * of times within a run.
+   */
+  async requestCommit(
+    taskId: string,
+    cwd: string,
+  ): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
+    const task = this.deps.store.task(taskId)
+    if (task === null) return { ok: false, error: `unknown task ${taskId}` }
+    try {
+      const staged = await this.stageAndCommit(task, cwd)
+      if (!staged.committed) return { ok: false, error: 'nothing to commit; the worktree is clean' }
+      this.deps.store.append(taskId, {
+        type: 'commit.created',
+        sha: staged.sha,
+        subject: `[${task.id}] ${task.title}`,
+      })
+      return { ok: true, sha: staged.sha }
+    } catch (err) {
+      return { ok: false, error: errMsg(err) }
+    }
+  }
+
+  /**
+   * Consumes the git shim's rejected-call log for this task into `git.blocked`
+   * events and clears the file. Best effort per line, so one malformed entry
+   * cannot stop the rest; a missing file is just no blocked calls.
+   */
+  async drainGitBlocked(taskId: string): Promise<void> {
+    const path = rejectedGitLogPath(taskId)
+    let lines: string[]
+    try {
+      lines = readFileSync(path, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim() !== '')
+    } catch {
+      return
+    }
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line) as { argv?: unknown }
+        const argv = Array.isArray(parsed.argv)
+          ? parsed.argv.filter((a): a is string => typeof a === 'string')
+          : []
+        if (argv.length === 0) continue
+        this.deps.store.append(taskId, { type: 'git.blocked', argv })
+      } catch {
+        // Best effort: a malformed line is skipped, never fatal.
+      }
+    }
+    try {
+      rmSync(path, { force: true })
+    } catch {
+      // Best effort: a stale file is harmless.
+    }
   }
 }
