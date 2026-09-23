@@ -377,6 +377,9 @@ export class CodexHarness implements Harness {
     if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
     // Before extraArgs so a repo can turn skills back on: a later -c wins.
     argv.push('-c', 'skills.include_instructions=false')
+    // A repo's .codex/hooks.json (bd prime on SessionStart) is written for the
+    // operator's sessions and would inject tracker workflow into every turn.
+    argv.push('-c', 'features.hooks=false')
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')
