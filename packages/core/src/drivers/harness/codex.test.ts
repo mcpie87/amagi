@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
-import { CodexHarness, CodexTranslator } from './codex.ts'
+import { CodexHarness, CodexRolloutContext, CodexTranslator } from './codex.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'codex-stream.jsonl')
 
@@ -64,6 +64,11 @@ describe('CodexTranslator against a recorded transcript', () => {
       cachedTokens: 26240,
     })
     expect(translator.usage?.costUsd).toBeNull()
+  })
+
+  test('without a rollout reader no context is reported, since usage is a thread total', async () => {
+    const { events } = await replay()
+    expect(events.some((e) => e.kind === 'context')).toBe(false)
   })
 
   test('the final agent_message is captured as the summary', async () => {
@@ -260,5 +265,59 @@ describe('CodexHarness listModels', () => {
         expect(await new CodexHarness().listModels()).toEqual([])
       },
     )
+  })
+})
+
+describe('CodexRolloutContext', () => {
+  const THREAD = '01a0cfbf-6fa0-7c33-9e3e-6e8132dbe00c'
+  const tokenCount = (last: number, total: number): string =>
+    `${JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          total_token_usage: { input_tokens: total, cached_input_tokens: total - 1000 },
+          last_token_usage: { input_tokens: last, cached_input_tokens: last - 1000 },
+          model_context_window: 258_400,
+        },
+      },
+    })}\n`
+
+  test('reports the latest request context, not the thread total, as the rollout grows', () => {
+    const home = mkdtempSync(join(tmpdir(), 'amagi-codex-home-'))
+    try {
+      const day = join(home, 'sessions', '2026', '09', '23')
+      mkdirSync(day, { recursive: true })
+      const file = join(day, `rollout-2026-09-23T21-30-24-${THREAD}.jsonl`)
+      writeFileSync(file, `${JSON.stringify({ type: 'session_meta', payload: { id: THREAD } })}\n`)
+      const reader = new CodexRolloutContext(home)
+      const translator = new CodexTranslator(reader.read)
+
+      expect(translator.push({ type: 'thread.started', thread_id: THREAD })).toEqual([])
+      appendFileSync(file, tokenCount(40_000, 40_000) + tokenCount(87_747, 1_598_369))
+      expect(translator.push({ type: 'turn.started' })).toEqual([
+        { kind: 'context', tokens: 87_747 },
+      ])
+      expect(translator.push({ type: 'turn.started' })).toEqual([])
+      // A line codex is still writing is held back until it is complete.
+      const next = tokenCount(88_000, 1_686_366)
+      appendFileSync(file, next.slice(0, 50))
+      expect(translator.push({ type: 'turn.started' })).toEqual([])
+      appendFileSync(file, next.slice(50))
+      expect(translator.push({ type: 'turn.started' })).toEqual([
+        { kind: 'context', tokens: 88_000 },
+      ])
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('a thread with no rollout file reports nothing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'amagi-codex-home-'))
+    try {
+      expect(new CodexRolloutContext(home).read(THREAD)).toBeNull()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

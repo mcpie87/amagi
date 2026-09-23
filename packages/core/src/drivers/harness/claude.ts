@@ -40,8 +40,14 @@ type ClaudeMessage = {
   result?: string
   total_cost_usd?: number
   model?: string
-  message?: { model?: string; content?: ContentBlock[] }
+  message?: { model?: string; content?: ContentBlock[]; usage?: RequestUsage }
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number }
+}
+
+type RequestUsage = {
+  input_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
 }
 
 /**
@@ -56,6 +62,9 @@ export class ClaudeTranslator {
   /** The model claude reports it resolved to; the init line carries it. */
   model: string | null = null
 
+  /** Last context emitted: claude repeats one request's usage on every content block. */
+  private lastContext: number | null = null
+
   /** tool_result carries only the tool_use_id, so names are remembered here. */
   private readonly toolNames = new Map<string, string>()
 
@@ -69,7 +78,10 @@ export class ClaudeTranslator {
 
     switch (msg.type) {
       case 'assistant':
-        return (msg.message?.content ?? []).flatMap((b) => this.fromAssistant(b))
+        return [
+          ...this.fromRequestUsage(msg.message?.usage),
+          ...(msg.message?.content ?? []).flatMap((b) => this.fromAssistant(b)),
+        ]
       case 'user':
         return (msg.message?.content ?? []).flatMap((b) => this.fromUser(b))
       case 'result':
@@ -78,6 +90,17 @@ export class ClaudeTranslator {
         // system/init and rate_limit_event carry no progress worth replaying.
         return []
     }
+  }
+
+  private fromRequestUsage(usage: RequestUsage | undefined): AgentEvent[] {
+    if (usage === undefined) return []
+    const tokens =
+      (usage.input_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) +
+      (usage.cache_creation_input_tokens ?? 0)
+    if (tokens === this.lastContext) return []
+    this.lastContext = tokens
+    return [{ kind: 'context', tokens }]
   }
 
   private fromAssistant(block: ContentBlock): AgentEvent[] {

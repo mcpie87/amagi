@@ -1442,18 +1442,39 @@ describe('Runner.runOnce', () => {
 })
 
 describe('Runner context budget', () => {
-  const usage = (inputTokens: number, cachedTokens = 0, outputTokens = 10): AgentEvent => ({
-    kind: 'usage',
-    inputTokens,
-    outputTokens,
-    cachedTokens,
+  const context = (tokens: number): AgentEvent => ({ kind: 'context', tokens })
+
+  test('session-total usage never trips the guard, only per-request context does', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        events: [
+          context(90_000),
+          { kind: 'usage', inputTokens: 1_700_000, outputTokens: 13_000, cachedTokens: 1_600_000 },
+        ],
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 160_000, contextMaxTokens: 200_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.kills).toBe(0)
+    expect(types(TASK.id)).not.toContain('context.warn')
+    const peaks = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'run.context' }> => e.type === 'run.context')
+      .map((e) => e.contextTokens)
+    expect(peaks).toEqual([90_000])
   })
 
   test('crossing the soft limit warns but the run completes', async () => {
     const harness = new FakeHarness([
       {
         ...writesAFile,
-        events: [{ kind: 'text', text: 'wrote hello.txt' }, usage(180_000, 10_000)],
+        events: [{ kind: 'text', text: 'wrote hello.txt' }, context(190_000)],
       },
     ])
     const result = await makeRunner(
@@ -1473,11 +1494,11 @@ describe('Runner context budget', () => {
     expect(types(TASK.id)).not.toContain('context.exceeded')
   })
 
-  test('the warning fires once on the peak, not on every usage event', async () => {
+  test('the warning fires once on the peak, not on every context event', async () => {
     const harness = new FakeHarness([
       {
         ...writesAFile,
-        events: [usage(80_000, 20_000), usage(100_000, 50_000), usage(120_000, 60_000)],
+        events: [context(100_000), context(150_000), context(180_000)],
       },
     ])
     const result = await makeRunner(
@@ -1501,7 +1522,7 @@ describe('Runner context budget', () => {
 
   test('crossing the hard limit kills the agent, restarts it fresh with a handoff, and continues', async () => {
     const harness = new FakeHarness([
-      { ...writesAFile, events: [usage(190_000, 15_000)] },
+      { ...writesAFile, events: [context(205_000)] },
       { effect: (cwd) => writeFileSync(join(cwd, 'second.txt'), 'hi\n') },
     ])
     const result = await makeRunner(
@@ -1551,7 +1572,7 @@ describe('Runner context budget', () => {
   })
 
   test('the restart budget is spent across phases and escalates to needs_human when exhausted', async () => {
-    const crossing = { ...writesAFile, events: [usage(190_000, 15_000)] }
+    const crossing = { ...writesAFile, events: [context(205_000)] }
     const harness = new FakeHarness([crossing, crossing])
     const result = await makeRunner(
       new FakeTracker([TASK]),
@@ -1578,7 +1599,7 @@ describe('Runner context budget', () => {
   })
 
   test('contextMaxRestarts 0 keeps the historical hard-kill to needs_human', async () => {
-    const harness = new FakeHarness([{ ...writesAFile, events: [usage(190_000, 15_000)] }])
+    const harness = new FakeHarness([{ ...writesAFile, events: [context(205_000)] }])
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
@@ -1595,7 +1616,7 @@ describe('Runner context budget', () => {
 
   test('per-harness overrides win over the loop defaults', async () => {
     const harness = new FakeHarness(
-      [{ ...writesAFile, events: [usage(180_000)] }],
+      [{ ...writesAFile, events: [context(180_000)] }],
       'viable',
       'codex',
     )
@@ -1604,7 +1625,7 @@ describe('Runner context budget', () => {
       harness,
       config({
         loop: {
-          // Loop defaults are far above the emitted usage, so only the
+          // Loop defaults are far above the emitted context, so only the
           // codex override can trip the guard here.
           contextWarnTokens: 1_000_000,
           contextMaxTokens: 1_000_000,

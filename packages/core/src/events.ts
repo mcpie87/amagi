@@ -101,6 +101,12 @@ export const AgentEvent = z.discriminatedUnion('kind', [
     cachedTokens: z.number().int().optional(),
     costUsd: z.number().optional(),
   }),
+  /**
+   * Input context of the latest single model request, which is what the
+   * context guard measures. Never derive it from `usage`: harnesses report
+   * that as a running total across every request of a session.
+   */
+  z.object({ kind: z.literal('context'), tokens: z.number().int() }),
   z.object({ kind: z.literal('result'), ok: z.boolean(), summary: z.string().optional() }),
   z.object({ kind: z.literal('error'), message: z.string() }),
 ])
@@ -169,8 +175,7 @@ export const EventBody = z.discriminatedUnion('type', [
     sessionId: z.string().nullable(),
   }),
   /**
-   * The run's running peak input context (input + cached tokens) as usage
-   * events stream in. Appended each time the peak grows; the last one of a run
+   * The run's running peak input context as context events stream in. Appended each time the peak grows; the last one of a run
    * is its peak context.
    */
   z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),

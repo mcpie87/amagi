@@ -125,6 +125,7 @@ export class OpencodeTranslator {
       costUsd: this.totalCostUsd,
     }
     return [
+      { kind: 'context', tokens: inputTokens + cachedTokens + (part.tokens?.cache?.write ?? 0) },
       {
         kind: 'usage',
         inputTokens,

@@ -23,14 +23,18 @@ describe('OpencodeTranslator against a recorded transcript', () => {
     expect(events.map((e) => e.kind)).toEqual([
       'tool_use',
       'tool_result',
+      'context',
       'usage',
       'tool_use',
       'tool_result',
+      'context',
       'usage',
       'tool_use',
       'tool_result',
+      'context',
       'usage',
       'text',
+      'context',
       'usage',
       'result',
     ])

@@ -82,6 +82,8 @@ export function linesForAgentEvent(event: AgentEvent): string[] {
       return splitLines(event.output).map((line) => (event.ok ? line : `! ${line}`))
     case 'usage':
       return [formatUsage(event)]
+    case 'context':
+      return [`context ${event.tokens} tokens`]
     case 'result':
       return [event.summary ?? (event.ok ? 'done' : 'failed')]
     case 'error':
