@@ -52,7 +52,6 @@ import { SessionsView } from './SessionsView.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
-  type RunOptions,
   useConnection,
   useDashboard,
   useReadyQueue,
@@ -1224,43 +1223,9 @@ function IssuesView() {
 }
 
 function RunButton() {
-  const { start } = useRunner()
+  const { start, options } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
-
-  const run = async (opts?: RunOptions) => {
-    setBusy(true)
-    setMessage(null)
-    const res = await start(undefined, opts)
-    setBusy(false)
-    setOpen(false)
-    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
-  }
-
-  return (
-    <div className="flex items-center gap-2">
-      {message !== null && <span className="text-sm text-fg-muted">{message}</span>}
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => setOpen(true)}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-      >
-        Run next
-      </button>
-      {open && <RunPicker onClose={() => setOpen(false)} onRun={run} />}
-    </div>
-  )
-}
-
-/**
- * Lets the operator pick harness/model/effort before "Run next" dispatches.
- * Every field defaults to "use the configured value": leaving the harness at
- * default sends no overrides, so the server's config.harness.implement wins.
- */
-function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunOptions) => void }) {
-  const { options } = useRunner()
   const harnesses = options?.harnesses ?? []
   const [harness, setHarness] = useState('')
   const [model, setModel] = useState('')
@@ -1279,116 +1244,100 @@ function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunO
     setEffort('')
   }
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
+  const run = async () => {
+    setBusy(true)
+    setMessage(null)
     const effectiveModel = model === 'custom' ? customModel.trim() : model
-    onRun({
+    const res = await start(undefined, {
       ...(harness === '' ? {} : { harness }),
       ...(effectiveModel === '' ? {} : { model: effectiveModel }),
       ...(effort === '' ? {} : { effort }),
     })
+    setBusy(false)
+    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
-  const input =
-    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
-  const label = 'mb-1 block text-sm text-fg-muted'
+  const field = 'rounded border border-line-strong bg-sunken px-2 py-1 text-sm text-fg-strong'
+  const label = 'mb-0.5 block text-xs text-fg-muted'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form
-        onSubmit={submit}
-        className="w-full max-w-md rounded-lg border border-line-strong bg-surface p-4"
+    <div className="flex flex-wrap items-end gap-2">
+      {message !== null && <span className="self-center text-sm text-fg-muted">{message}</span>}
+      <div>
+        <label className={label} htmlFor="run-harness">
+          Harness
+        </label>
+        <select
+          id="run-harness"
+          value={harness}
+          onChange={(e) => switchHarness(e.target.value)}
+          className={field}
+        >
+          <option value="">default ({options?.default?.kind ?? 'config'})</option>
+          {harnesses.map((h) => (
+            <option key={h.name} value={h.name}>
+              {h.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className={label} htmlFor="run-model">
+          Model
+        </label>
+        <select
+          id="run-model"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          className={field}
+        >
+          <option value="">
+            {selected?.model === undefined ? 'default (harness)' : `default (${selected.model})`}
+          </option>
+          {models.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+          <option value="custom">(custom model)</option>
+        </select>
+        {model === 'custom' && (
+          <input
+            value={customModel}
+            onChange={(e) => setCustomModel(e.target.value)}
+            placeholder="model id"
+            className={`${field} mt-1 block w-full`}
+          />
+        )}
+      </div>
+      <div>
+        <label className={label} htmlFor="run-effort">
+          Effort
+        </label>
+        <select
+          id="run-effort"
+          value={effort}
+          onChange={(e) => setEffort(e.target.value)}
+          className={field}
+        >
+          <option value="">
+            {selected?.effort === undefined ? 'default (harness)' : `default (${selected.effort})`}
+          </option>
+          {efforts.map((e) => (
+            <option key={e} value={e}>
+              {e}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={run}
+        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
-        <h2 className="mb-3 text-lg font-semibold">Run next task</h2>
-        <div className="space-y-3">
-          <div>
-            <label className={label} htmlFor="run-harness">
-              Harness
-            </label>
-            <select
-              id="run-harness"
-              value={harness}
-              onChange={(e) => switchHarness(e.target.value)}
-              className={input}
-            >
-              <option value="">default ({options?.default?.kind ?? 'config'})</option>
-              {harnesses.map((h) => (
-                <option key={h.name} value={h.name}>
-                  {h.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={label} htmlFor="run-model">
-              Model
-            </label>
-            <select
-              id="run-model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className={input}
-            >
-              <option value="">
-                {selected?.model === undefined
-                  ? 'default (harness)'
-                  : `default (${selected.model})`}
-              </option>
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-              <option value="custom">(custom model)</option>
-            </select>
-            {model === 'custom' && (
-              <input
-                value={customModel}
-                onChange={(e) => setCustomModel(e.target.value)}
-                placeholder="model id"
-                className={`${input} mt-1`}
-              />
-            )}
-          </div>
-          <div>
-            <label className={label} htmlFor="run-effort">
-              Effort
-            </label>
-            <select
-              id="run-effort"
-              value={effort}
-              onChange={(e) => setEffort(e.target.value)}
-              className={input}
-            >
-              <option value="">
-                {selected?.effort === undefined
-                  ? 'default (harness)'
-                  : `default (${selected.effort})`}
-              </option>
-              {efforts.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-line-strong px-3 py-1 text-sm text-fg-muted hover:bg-raised"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
-          >
-            Run
-          </button>
-        </div>
-      </form>
+        Run next
+      </button>
     </div>
   )
 }
