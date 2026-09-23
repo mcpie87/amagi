@@ -1,5 +1,6 @@
 import {
   type Config,
+  type ConflictWatchState,
   conflictWatchPath,
   exec as defaultExec,
   type Exec,
@@ -205,7 +206,7 @@ export function startPrConflictWatcher({
       }
       const statePath = conflictWatchPath(repoName)
       const state = readConflictWatch(statePath)
-      const nextState: Record<string, { headOid: string }> = {}
+      const nextState: ConflictWatchState = {}
       const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
       conflicting = conflicts.length
       let resolvedNow = 0
@@ -226,7 +227,13 @@ export function startPrConflictWatcher({
           ...(exec === undefined ? {} : { exec }),
           ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
         })
-        nextState[key] = { headOid }
+        nextState[key] = {
+          headOid,
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+        }
+        if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
+          console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
+        }
         if (result.ok) {
           resolved++
           resolvedNow++

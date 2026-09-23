@@ -42,6 +42,9 @@ function fakeExec(): Exec {
   return async (cmd) => {
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 1, stdout: '', stderr: '' }
+    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
 }
@@ -126,7 +129,9 @@ const fakeTracker = (): Tracker & { comments: { id: string; body: string }[] } =
   }
 }
 
-function fakeHarness(onStart: () => void): Harness {
+function fakeHarness(
+  onStart: (opts: { cwd: string; prompt: string; systemPrompt: string }) => void,
+): Harness {
   const process = {
     pid: -1,
     events: async function* () {},
@@ -144,8 +149,8 @@ function fakeHarness(onStart: () => void): Harness {
   }
   return {
     kind: 'fake',
-    start: (_opts: { cwd: string; prompt: string; systemPrompt: string }) => {
-      onStart()
+    start: (opts: { cwd: string; prompt: string; systemPrompt: string }) => {
+      onStart(opts)
       return process
     },
     resume: () => process,
@@ -194,8 +199,10 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, { headOid: string }> =>
-  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
+const stateFile = (): Record<
+  string,
+  { headOid: string; verdict?: { verdict: string; reasoning: string; proposal: string } }
+> => JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
@@ -235,6 +242,36 @@ test('does not re-attempt a conflicting PR until its head SHA changes', async ()
   await Bun.sleep(60)
   expect(started).toBe(afterFirst)
   expect(counter(w, 'resolved')).toBeGreaterThanOrEqual(1)
+})
+
+test('stores the agent verdict with the head SHA it classified', async () => {
+  let started = 0
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(
+    fakeExec(),
+    () =>
+      fakeHarness((opts) => {
+        started++
+        const path = opts.prompt.match(/Verdict file: (.+)/)?.[1]
+        if (path !== undefined) {
+          writeFileSync(path, 'CLOSE TASK\nREASONING:\nBase has the work.\nPROPOSAL:\nClose am-1.')
+        }
+      }),
+    { driver },
+  )
+
+  await Bun.sleep(60)
+
+  expect(stateFile()['7']).toEqual({
+    headOid: 'deadbeef',
+    verdict: {
+      verdict: 'CLOSE TASK',
+      reasoning: 'Base has the work.',
+      proposal: 'Close am-1.',
+    },
+  })
+  expect(started).toBe(1)
 })
 
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
@@ -440,6 +477,9 @@ const openPrTask = (store: Store): void => {
 /** Serves the pointless pass's `gh pr diff`; PRs come from the driver. */
 function fakeExecForPointless(diff: () => string): Exec {
   return async (cmd) => {
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 1, stdout: '', stderr: '' }
+    }
     if (cmd.includes('diff')) return { exitCode: 0, stdout: diff(), stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
@@ -475,6 +515,7 @@ test('an agent verdict on a pointless PR carries reasoning on the PR and the pro
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
+  driver.prs = [{ ...pr(), labels: ['amagi'] }]
   writeFileSync(
     join(tmpdir(), 'amagi-pointless-7.md'),
     [

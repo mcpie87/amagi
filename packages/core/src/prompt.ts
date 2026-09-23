@@ -165,6 +165,7 @@ export type ConflictPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  outPath?: string
 }
 
 export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string {
@@ -177,10 +178,17 @@ export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string 
     '',
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
-    '- Resolve every conflict in favor of the pull request intent, keeping base branch changes where both are wanted.',
+    '- Resolve conflicts by preserving the intent of both branches where possible. Inspect whether base already contains the PR work; do not reinstate a duplicate or fight the base version when it does.',
     "- The PR is another agent's completed task; do not rework its non-conflicting changes.",
     '- Commit the resolved merge to finish the in-progress merge. Do not push; the dispatcher pushes.',
   ]
+  if (ctx.outPath !== undefined) {
+    lines.splice(
+      lines.length - 1,
+      0,
+      `- Classify the outcome and write a verdict to ${ctx.outPath}.`,
+    )
+  }
   return lines.join('\n')
 }
 
@@ -189,7 +197,24 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
     `Resolve the merge conflict in PR #${ctx.pr.number} "${ctx.pr.title}" against ${ctx.baseBranch}.`,
     '',
     'A merge of the base branch is in progress and currently conflicts. Resolve all conflicted files.',
+    '',
+    'Check whether base already contains the PR work. If it does, preserve base and do not reintroduce a duplicate or fight base’s version just to make the merge look like the PR.',
   ]
+  if (ctx.outPath !== undefined) {
+    parts.push(
+      '',
+      'The dispatcher checks the final diff against base and will never push an empty diff.',
+      '',
+      'Classify the task using exactly one of these verdicts and write it as the first line to the verdict file:',
+      '- `RESOLVED` when the merge has real PR content and nothing is wrong.',
+      '- `CLOSE TASK` when base already contains this work.',
+      '- `NEW TASK` when base solved it differently and something remains.',
+      '- `REPHRASE TASK` when the task as written can no longer be satisfied.',
+      `Verdict file: ${ctx.outPath}`,
+      'After the verdict line, include `REASONING:` and `PROPOSAL:` sections following the pointless PR verdict format.',
+      '',
+    )
+  }
   if (ctx.checks.length > 0) {
     parts.push(
       '',
