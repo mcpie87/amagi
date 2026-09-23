@@ -13,6 +13,7 @@ const kindClass: Record<AgentLogLine['kind'], string> = {
   tool_use: 'text-sky-ink',
   tool_result: 'text-fg-muted',
   usage: 'text-fg-dim',
+  context: 'text-fg-dim',
   result: 'text-emerald-ink',
   error: 'text-red-ink',
 }

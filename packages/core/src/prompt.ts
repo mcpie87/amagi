@@ -8,6 +8,8 @@ export type PromptContext = {
   branch: string
   /** Set once the question channel exists, so the agent is told how to ask. */
   askCommand?: string | null
+  /** Set once the server channel exists, so the agent is told how to checkpoint. */
+  gitRequestCommand?: string | null
 }
 
 export function implementSystemPrompt(ctx: PromptContext): string {
@@ -55,6 +57,16 @@ export function implementSystemPrompt(ctx: PromptContext): string {
       'If a decision is genuinely ambiguous and picking wrong would waste the task,',
       `ask instead of guessing: ${ctx.askCommand}`,
       'It blocks until a human answers and prints the answer on stdout.',
+    )
+  }
+
+  if (ctx.gitRequestCommand) {
+    lines.push(
+      '',
+      'To checkpoint mid-run work, you may request a commit:',
+      ctx.gitRequestCommand,
+      'It blocks until the orchestrator commits the worktree and prints the commit sha',
+      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
     )
   }
 
@@ -133,7 +145,10 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
   )
 }
 
-export function commitMessage(task: TrackerTask, changes: readonly PrChange[] = []): string {
+export function commitMessage(
+  task: Pick<TrackerTask, 'id' | 'title'>,
+  changes: readonly PrChange[] = [],
+): string {
   const lines = [task.title, '', `Task: ${task.id}`]
   if (changes.length > 0) {
     lines.push('', 'Changes:')

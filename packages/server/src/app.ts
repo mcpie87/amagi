@@ -45,6 +45,7 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  GitRequestBody,
   IssueCreateBody,
   IssueUpdateBody,
   QuestionQuery,
@@ -878,6 +879,39 @@ export function createApp({
         }
         await resolveQuestionGate(ws.tracker, question.gateRef)
         return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) })
+      },
+    )
+
+    .post(
+      '/api/repos/:repo/tasks/:id/git-requests',
+      valid('param', RepoTaskIdParam),
+      valid('json', GitRequestBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { verb } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        if (!authorized(c, ws.store, id)) {
+          return c.json({ error: 'task token mismatch' }, 401)
+        }
+        if (task.worktree === null) {
+          return c.json({ error: `task ${id} has no worktree to commit` }, 409)
+        }
+        // The commit is synchronous, so it runs here and the sha returns in
+        // the same response; a separate await endpoint would add a round trip.
+        const runner = new Runner({
+          store: ws.store,
+          tracker: ws.tracker,
+          harness: makeHarness(ws.config.harness.implement),
+          config: ws.config,
+          repoRoot: ws.root,
+          repoName: ws.name,
+          ...(ws.forge === null ? {} : { forge: ws.forge }),
+        })
+        const result = await runner.requestCommit(id, task.worktree)
+        if (!result.ok) return c.json({ error: result.error }, 500)
+        return c.json({ verb, sha: result.sha })
       },
     )
 

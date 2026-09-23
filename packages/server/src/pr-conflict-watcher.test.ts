@@ -129,9 +129,7 @@ const fakeTracker = (): Tracker & { comments: { id: string; body: string }[] } =
   }
 }
 
-function fakeHarness(
-  onStart: (opts: { cwd: string; prompt: string; systemPrompt: string }) => void,
-): Harness {
+function fakeHarness(onStart: (opts: Parameters<Harness['start']>[0]) => void): Harness {
   const process = {
     pid: -1,
     events: async function* () {},
@@ -149,7 +147,7 @@ function fakeHarness(
   }
   return {
     kind: 'fake',
-    start: (opts: { cwd: string; prompt: string; systemPrompt: string }) => {
+    start: (opts: Parameters<Harness['start']>[0]) => {
       onStart(opts)
       return process
     },
@@ -515,23 +513,25 @@ test('an agent verdict on a pointless PR carries reasoning on the PR and the pro
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
-  driver.prs = [{ ...pr(), labels: ['amagi'] }]
-  writeFileSync(
-    join(tmpdir(), 'amagi-pointless-7.md'),
-    [
-      'CLOSE TASK',
-      '',
-      'REASONING:',
-      'Base already contains this work.',
-      '',
-      'PROPOSAL:',
-      'Close bd-1: the task is done.',
-      '',
-    ].join('\n'),
-  )
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
+  const verdict = [
+    'CLOSE TASK',
+    '',
+    'REASONING:',
+    'Base already contains this work.',
+    '',
+    'PROPOSAL:',
+    'Close bd-1: the task is done.',
+    '',
+  ].join('\n')
   start(
     fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
+    () =>
+      fakeHarness(({ prompt }) => {
+        const outPath = prompt.match(/^file: (.+)$/m)?.[1]
+        if (outPath === undefined) throw new Error('pointless prompt has no verdict path')
+        writeFileSync(outPath, verdict)
+      }),
     { store, tracker, driver },
   )
 

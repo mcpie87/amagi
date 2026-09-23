@@ -64,6 +64,21 @@ function withWorktree(env: Record<string, string>): Record<string, string> {
   return out
 }
 
+/** PATH with every amagi git shim dir removed, so `git` is the real binary. */
+function pathWithoutShims(): string {
+  return (process.env.PATH ?? '')
+    .split(':')
+    .filter((dir) => {
+      if (dir === '') return false
+      try {
+        return !readFileSync(join(dir, 'git'), 'utf8').includes('REAL_GIT=')
+      } catch {
+        return true
+      }
+    })
+    .join(':')
+}
+
 let wt: string
 let other: string
 
@@ -175,7 +190,7 @@ describe('defense-in-depth limits', () => {
   const commits = (dir: string) => git(dir, ['rev-list', '--count', 'HEAD']).stdout.trim()
 
   test('an absolute real git path bypasses the shim', () => {
-    const real = Bun.which('git')
+    const real = Bun.which('git', { PATH: pathWithoutShims() })
     expect(real).toBeTruthy()
     if (!real) throw new Error('git not found')
     const r = Bun.spawnSync([real, 'commit', '--allow-empty', '-m', 'abs'], {
@@ -191,7 +206,11 @@ describe('defense-in-depth limits', () => {
   test('a PATH without the shim resolves the real git', () => {
     const r = Bun.spawnSync(['git', 'commit', '--allow-empty', '-m', 'noshim'], {
       cwd: wt,
-      env: { ...process.env, ...withWorktree({ AMAGI_WORKTREE: 'WT' }) },
+      env: {
+        ...process.env,
+        PATH: pathWithoutShims(),
+        ...withWorktree({ AMAGI_WORKTREE: 'WT' }),
+      },
       stdout: 'pipe',
       stderr: 'pipe',
     })
