@@ -20,6 +20,7 @@ import {
   reconcilePr,
   removeWorktree,
   type Store,
+  type StoredEvent,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
@@ -524,19 +525,33 @@ export function createApp({
         if (createCap !== null) return c.json({ error: createCap }, 501)
         const depCap = capabilityError(ws.tracker, 'dependencies')
         if (depCap !== null) return c.json({ error: depCap }, 501)
-        const errorTask = await ws.tracker.createTask({
-          title: `Error: ${task.title}`,
-          description:
-            `The task ${id} errored out while the agent was implementing it.\n\n` +
-            `${reason}\n\n` +
-            `Resolve this task to rerun ${id} once its root cause is fixed.`,
-          acceptanceCriteria: null,
-          priority: null,
-          // The error task is the operator's to resolve, not the agent's.
-          labels: [HUMAN_ONLY_LABEL],
-          dependencies: [],
-          parent: null,
-        })
+        // The same failure on the same task must not stack a second error bead:
+        // filing twice (a repeated recovery, a double-click) reuses the open
+        // error task already recorded for this exact reason.
+        const prior = ws.store
+          .events({ taskId: id })
+          .filter(
+            (e): e is Extract<StoredEvent, { type: 'retry.filed_as_error' }> =>
+              e.type === 'retry.filed_as_error',
+          )
+          .findLast((e) => e.reason === reason)
+        const priorTask = prior === undefined ? null : await ws.tracker.get(prior.errorTaskId)
+        const errorTask =
+          priorTask !== null && priorTask.status !== 'closed'
+            ? priorTask
+            : await ws.tracker.createTask({
+                title: `Error: ${task.title}`,
+                description:
+                  `The task ${id} errored out while the agent was implementing it.\n\n` +
+                  `${reason}\n\n` +
+                  `Resolve this task to rerun ${id} once its root cause is fixed.`,
+                acceptanceCriteria: null,
+                priority: null,
+                // The error task is the operator's to resolve, not the agent's.
+                labels: [HUMAN_ONLY_LABEL],
+                dependencies: [],
+                parent: null,
+              })
         // The original blocks on the error task, so the runner skips it until
         // the error task resolves, then reruns it from its preserved worktree.
         await ws.tracker.updateTask(id, { dependencies: { add: [errorTask.id], remove: [] } })

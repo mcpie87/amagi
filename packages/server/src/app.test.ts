@@ -831,6 +831,35 @@ describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
     expect(res.status).toBe(501)
     expect(((await res.json()) as { error: string }).error).toContain('does not support')
   })
+
+  test('filing the same failure twice creates one error bead and reuses it', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', title: 'work on bd-1' })
+    app = issueApp(tracker)
+    parkedError('bd-1', 'agent failed: model quota exhausted')
+
+    const firstBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+    const secondBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+
+    expect(tracker.created).toHaveLength(1)
+    expect(secondBody.errorTask.id).toBe(firstBody.errorTask.id)
+  })
+
+  test('a recurring failure after the prior error task was closed files a new bead', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', title: 'work on bd-1' })
+    app = issueApp(tracker)
+    parkedError('bd-1', 'agent failed: model quota exhausted')
+
+    const firstBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+    const prior = tracker.issues.get(firstBody.errorTask.id)
+    if (prior !== undefined)
+      tracker.issues.set(firstBody.errorTask.id, { ...prior, status: 'closed' })
+    const secondBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+
+    expect(tracker.created).toHaveLength(2)
+    expect(secondBody.errorTask.id).not.toBe(firstBody.errorTask.id)
+  })
 })
 
 describe('POST /api/repos/:repo/tasks/:id/retry', () => {
