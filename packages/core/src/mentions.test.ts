@@ -24,14 +24,11 @@ import {
   type MentionClassified,
   type MentionProgress,
   mentionsPath,
-  mentionWatchPath,
   parseMentionKind,
   readHandledMentions,
-  readMentionWatch,
   resolveTaskId,
   respondToMention,
   saveHandledMentions,
-  saveMentionWatch,
   taskIdFromPrTitle,
 } from './mentions.ts'
 import type { PrInfo } from './pr-check.ts'
@@ -256,19 +253,6 @@ describe('handled mentions', () => {
 
   test('mentionsPath lives under the amagi cache', () => {
     expect(mentionsPath('amagi')).toContain('amagi/mentions/amagi.json')
-  })
-
-  test('mention watch state roundtrips through a json file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'amagi-mentions-'))
-    try {
-      const path = join(dir, 'watch.json')
-      expect(readMentionWatch(path)).toEqual({})
-      saveMentionWatch(path, { 7: '2026-09-21T10:00:00Z' })
-      expect(readMentionWatch(path)).toEqual({ 7: '2026-09-21T10:00:00Z' })
-      expect(mentionWatchPath('amagi')).toContain('amagi/mentions/amagi.watch.json')
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
   })
 })
 
