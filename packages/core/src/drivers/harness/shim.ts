@@ -33,27 +33,27 @@ function resolveBinary(name: string): string {
 
 /**
  * The git shim. Read verbs pass; everything else is rejected, but only when
- * the effective repository (honouring -C, --git-dir, --work-tree and cwd)
- * resolves to the task worktree or the main checkout, both read from the
- * environment so the shared script stays per-task-agnostic. Repositories
- * outside those two are passed through untouched, which is what lets the
- * project checks (`git init`/`commit` in temp dirs) keep working from inside
- * a shimmed worktree. Rejected calls append their argv to
- * `$AMAGI_RUN_STATE/rejected-git.jsonl` for the channel task to drain.
+ * the effective repository's common git dir (honouring -C, --git-dir,
+ * GIT_DIR and cwd) is the one behind the task worktree or the main checkout,
+ * both read from the environment so the shared script stays
+ * per-task-agnostic. It is the git dir, not the work tree, that decides:
+ * opencode snapshots the worktree into its own repo with `--git-dir <own>
+ * --work-tree <worktree>`, which writes nothing here and must pass, while
+ * `--work-tree elsewhere` against our git dir must not. Other repositories
+ * pass through untouched, which is what lets the project checks (`git
+ * init`/`commit` in temp dirs) keep working from inside a shimmed worktree.
+ * Rejected calls append their argv to `$AMAGI_RUN_STATE/rejected-git.jsonl`
+ * for the channel task to drain.
  *
- * Defense-in-depth, not an enforcement boundary. Known bypasses, covered by
- * shim.test.ts:
- * - absolute git path or a PATH without this shim dir resolves the real git;
- * - `--git-dir`/`--work-tree` flags and `GIT_DIR`/`GIT_WORK_TREE` env can
- *   operate on the protected repo while reporting a different worktree, so
- *   the resolved top-level no longer matches a protected root.
+ * Defense-in-depth, not an enforcement boundary: an absolute git path or a
+ * PATH without this shim dir resolves the real git. The runner diffs the
+ * worktree's HEAD reflog around each agent run to catch that case.
  */
 function gitShimScript(realGit: string, binDir: string): string {
   return `#!/bin/sh
 # amagi: git shim for harness agents. Read-only inside the protected worktree
-# and main checkout; every other repository passes through untouched.
-# Defense-in-depth only: absolute paths, a rewritten PATH, and
-# GIT_DIR/GIT_WORK_TREE/--git-dir/--work-tree retargeting bypass this shim.
+# and main checkout's git dir; every other repository passes through untouched.
+# Defense-in-depth only: absolute paths and a rewritten PATH bypass this shim.
 set -u
 
 REAL_GIT='${realGit}'
@@ -122,13 +122,15 @@ reject() {
   exit 1
 }
 
-# Resolves the effective repository and reports verb, top-level and the first
-# argument after the verb. Runs in a subshell so the original argv is intact
-# for the exec at the bottom.
+# Resolves the effective repository and reports verb, absolute common git dir
+# and how many global arguments precede the verb. Runs in a subshell so the
+# original argv is intact for the exec at the bottom. The common dir comes from
+# rev-parse under the same -C/--git-dir/--work-tree flags and the inherited
+# GIT_DIR, so a retargeted work tree cannot hide which repository is written.
 resolve() {
   verb=''
-  after=''
   flags=''
+  n=0
   while [ "$#" -gt 0 ]; do
     a="$1"
     case "$a" in
@@ -136,94 +138,159 @@ resolve() {
         shift
         flags="$flags -C $(shq "$1")"
         shift
+        n=$((n + 2))
         ;;
       -C*)
         flags="$flags -C $(shq "\${a#-C}")"
         shift
+        n=$((n + 1))
         ;;
       --git-dir=*)
         flags="$flags --git-dir $(shq "\${a#--git-dir=}")"
         shift
+        n=$((n + 1))
         ;;
       --git-dir)
         shift
         flags="$flags --git-dir $(shq "$1")"
         shift
+        n=$((n + 2))
         ;;
       --work-tree=*)
         flags="$flags --work-tree $(shq "\${a#--work-tree=}")"
         shift
+        n=$((n + 1))
         ;;
       --work-tree)
         shift
         flags="$flags --work-tree $(shq "$1")"
         shift
+        n=$((n + 2))
         ;;
-      -c)
+      -c|--namespace|--config-env|--attr-source|--super-prefix)
         shift
         shift
+        n=$((n + 2))
         ;;
-      -c*)
+      --version|--help|--exec-path|--html-path|--man-path|--info-path)
+        verb="$a"
+        break
+        ;;
+      -*)
         shift
+        n=$((n + 1))
         ;;
       *)
         verb="$a"
-        shift
-        after="\${1:-}"
         break
         ;;
     esac
   done
-  target=$(eval "$(shq "$REAL_GIT") $flags rev-parse --show-toplevel 2>/dev/null") || target=''
+  common=$(eval "$(shq "$REAL_GIT") $flags rev-parse --path-format=absolute --git-common-dir 2>/dev/null") || common=''
   printf '%s\\n' "$verb"
-  printf '%s\\n' "$target"
-  printf '%s\\n' "$after"
+  printf '%s\\n' "$common"
+  printf '%s\\n' "$n"
 }
-
-out=$(resolve "$@")
-verb=$(printf '%s\\n' "$out" | sed -n '1p')
-target=$(printf '%s\\n' "$out" | sed -n '2p')
-after=$(printf '%s\\n' "$out" | sed -n '3p')
 
 canon() {
   (cd "$1" 2>/dev/null && pwd -P) || printf '%s\\n' "$1"
 }
 
+# The common git dir behind a protected root, ignoring any GIT_DIR the caller
+# exported, which would otherwise override -C and report the caller's repo.
+root_common() {
+  (
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+    "$REAL_GIT" -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null
+  )
+}
+
+# Succeeds when verb "$1" with arguments "$2..." only reads the repository.
+read_only() {
+  v="\${1:-}"
+  shift
+  case "$v" in
+    ''|status|diff|diff-tree|diff-files|diff-index|log|show|show-ref|rev-parse|rev-list|\\
+    ls-files|ls-tree|blame|cat-file|describe|merge-base|for-each-ref|grep|shortlog|\\
+    name-rev|range-diff|check-ignore|check-attr|var|version|help|--version|--help|\\
+    --exec-path|--html-path|--man-path|--info-path)
+      return 0
+      ;;
+    branch|tag)
+      listing=0
+      for x in "$@"; do
+        case "$x" in
+          -l|--list) listing=1 ;;
+          --show-current|-a|--all|-r|--remotes|-v|-vv|--verbose|--column|--no-column|\\
+          --format=*|--sort=*|--color|--color=*|--no-color) ;;
+          -*) return 1 ;;
+          *) [ "$listing" -eq 1 ] || return 1 ;;
+        esac
+      done
+      return 0
+      ;;
+    remote)
+      case "\${1:-}" in
+        ''|-v|--verbose|get-url|show) return 0 ;;
+      esac
+      ;;
+    config)
+      case "\${1:-}" in
+        --get|--get-all|--get-regexp|--get-urlmatch|--list|-l|get|list) return 0 ;;
+      esac
+      if [ "$#" -eq 1 ]; then
+        case "$1" in
+          -*) ;;
+          *) return 0 ;;
+        esac
+      fi
+      ;;
+    stash)
+      case "\${1:-}" in
+        list|show) return 0 ;;
+      esac
+      ;;
+    reflog)
+      case "\${1:-}" in
+        ''|show|-*) return 0 ;;
+      esac
+      ;;
+    worktree)
+      [ "\${1:-}" = "list" ] && return 0
+      ;;
+  esac
+  return 1
+}
+
+# Drops the global arguments before the verb, then judges verb and the rest.
+verb_is_read_only() {
+  skip="$1"
+  shift
+  shift "$skip"
+  read_only "$@"
+}
+
+out=$(resolve "$@")
+common=$(printf '%s\\n' "$out" | sed -n '2p')
+skip=$(printf '%s\\n' "$out" | sed -n '3p')
+
 protected=0
-if [ -n "$target" ]; then
-  t=$(canon "$target")
+if [ -n "$common" ]; then
+  c=$(canon "$common")
   for root in "\${AMAGI_WORKTREE:-}" "\${AMAGI_REPO_ROOT:-}"; do
     if [ -z "$root" ]; then
       continue
     fi
-    r=$(canon "$root")
-    if [ "$t" = "$r" ]; then
+    rc=$(root_common "$root") || continue
+    if [ -n "$rc" ] && [ "$c" = "$(canon "$rc")" ]; then
       protected=1
       break
     fi
   done
 fi
 
-if [ "$protected" -eq 1 ]; then
-  allowed=0
-  case "$verb" in
-    status|diff|log|show|rev-parse|ls-files|blame|cat-file|describe)
-      allowed=1
-      ;;
-    branch)
-      if [ "$after" = "--list" ] || [ "$after" = "-l" ]; then
-        allowed=1
-      fi
-      ;;
-    worktree)
-      if [ "$after" = "list" ]; then
-        allowed=1
-      fi
-      ;;
-  esac
-  if [ "$allowed" -ne 1 ]; then
-    reject "$@"
-  fi
+if [ "$protected" -eq 1 ] && ! verb_is_read_only "\${skip:-0}" "$@"; then
+  reject "$@"
 fi
 
 exec "$REAL_GIT" "$@"

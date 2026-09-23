@@ -403,6 +403,8 @@ export class RunService implements RunServiceApi {
           : config,
       repoRoot,
       repoName,
+      // A server-side run has the ask and git-request channels to POST to.
+      channel: true,
       ...(exec === undefined ? {} : { exec }),
       ...(forge === undefined ? {} : { forge }),
     })

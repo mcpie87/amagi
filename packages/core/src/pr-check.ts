@@ -254,31 +254,6 @@ export type PrMergeStatus = {
   mergeStateStatus: string
 }
 
-/**
- * Reads a PR's merge status. GitHub computes mergeability asynchronously: bulk
- * queries (`gh pr list`) report UNKNOWN until a single-PR query triggers it, so
- * retry briefly until the state resolves.
- */
-export async function prMergeStatus(
-  cwd: string,
-  number: number,
-  exec?: Exec,
-): Promise<PrMergeStatus> {
-  const run = exec ?? defaultExec
-  let status: PrMergeStatus = { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const out = await execOk(
-      run,
-      ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-      { cwd, env: ghEnv() },
-    )
-    status = JSON.parse(out) as PrMergeStatus
-    if (status.mergeable !== 'UNKNOWN' && status.mergeStateStatus !== 'UNKNOWN') break
-    if (attempt < 4) await Bun.sleep(1000)
-  }
-  return status
-}
-
 /** Pinned merge config so the local verdict is reproducible regardless of ambient git config. */
 const MERGE_TREE_ARGS = [
   '-c',

@@ -38,6 +38,17 @@ export function isTerminal(state: TaskState): boolean {
 }
 
 /**
+ * Whether the operator may start a task over from scratch: any parked task,
+ * or an in-flight one stuck before it got a worktree. Never done/abandoned
+ * (the tracker issue is closed) nor a task with a PR, which would dangle.
+ */
+export function canReset(state: TaskState, hasWorktree: boolean): boolean {
+  if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr') return true
+  if (isTerminal(state) || state === 'pr_open' || state === 'pr_flagged') return false
+  return !hasWorktree
+}
+
+/**
  * Any state may fall to a terminal state, so those edges are implicit rather
  * than listed here. Only forward progress is enumerated; the operator-settled
  * exits of the parked/stopped states are special-cased in canTransition, not
@@ -101,6 +112,12 @@ export const AgentEvent = z.discriminatedUnion('kind', [
     cachedTokens: z.number().int().optional(),
     costUsd: z.number().optional(),
   }),
+  /**
+   * Input context of the latest single model request, which is what the
+   * context guard measures. Never derive it from `usage`: harnesses report
+   * that as a running total across every request of a session.
+   */
+  z.object({ kind: z.literal('context'), tokens: z.number().int() }),
   z.object({ kind: z.literal('result'), ok: z.boolean(), summary: z.string().optional() }),
   z.object({ kind: z.literal('error'), message: z.string() }),
 ])
@@ -137,6 +154,8 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string().optional(),
   }),
   z.object({ type: z.literal('task.reclaimed'), reason: z.string().optional() }),
+  /** Operator reset: the task starts a fresh attempt; earlier events stay as history. */
+  z.object({ type: z.literal('task.reset'), reason: z.string().optional() }),
   z.object({
     type: z.literal('doom.detected'),
     /** Which heuristic tripped: repeated tool calls, identical check failures, static diff. */
@@ -169,8 +188,7 @@ export const EventBody = z.discriminatedUnion('type', [
     sessionId: z.string().nullable(),
   }),
   /**
-   * The run's running peak input context (input + cached tokens) as usage
-   * events stream in. Appended each time the peak grows; the last one of a run
+   * The run's running peak input context as context events stream in. Appended each time the peak grows; the last one of a run
    * is its peak context.
    */
   z.object({ type: z.literal('run.context'), contextTokens: z.number().int() }),
@@ -214,6 +232,19 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
   z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),
+  /**
+   * The git shim rejected an agent's write attempt inside the protected repo.
+   * `argv` is the rejected call without the leading `git` (e.g. `["commit",
+   * "-m", "x"]`).
+   */
+  z.object({ type: z.literal('git.blocked'), argv: z.array(z.string()) }),
+  /**
+   * The worktree's HEAD moved during an agent run without the runner doing it:
+   * the agent reached the real git past the shim (an absolute path, a
+   * rewritten PATH). `entries` are the new HEAD reflog lines, newest first, as
+   * `<sha> <reflog subject>` (e.g. `"abc123 reset: moving to HEAD"` for a stash).
+   */
+  z.object({ type: z.literal('git.bypassed'), entries: z.array(z.string()) }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),
@@ -281,3 +312,19 @@ export const StoredEvent = z.intersection(
   EventBody,
 )
 export type StoredEvent = z.infer<typeof StoredEvent>
+
+/**
+ * The task's events since its last operator reset: budgets, usage and health
+ * belong to the current attempt only. Events of other tasks are dropped.
+ */
+export function currentAttemptEvents(events: StoredEvent[], taskId: string): StoredEvent[] {
+  let start = 0
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]
+    if (e?.taskId === taskId && e.type === 'task.reset') {
+      start = i
+      break
+    }
+  }
+  return events.slice(start).filter((e) => e.taskId === taskId)
+}

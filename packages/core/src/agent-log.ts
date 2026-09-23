@@ -82,6 +82,8 @@ export function linesForAgentEvent(event: AgentEvent): string[] {
       return splitLines(event.output).map((line) => (event.ok ? line : `! ${line}`))
     case 'usage':
       return [formatUsage(event)]
+    case 'context':
+      return [`context ${event.tokens} tokens`]
     case 'result':
       return [event.summary ?? (event.ok ? 'done' : 'failed')]
     case 'error':
@@ -150,3 +152,8 @@ export class AgentLogStore {
 
 /** Shared store for the running app; tests construct their own with a synchronous scheduler. */
 export const agentLogStore = new AgentLogStore()
+
+/** One log buffer per attempt, namespaced by repo so identical issue ids never share one. */
+export function agentLogKey(repo: string, taskId: string, attempt: number): string {
+  return `${repo}/${taskId}#${attempt}`
+}

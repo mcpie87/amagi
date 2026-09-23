@@ -1,10 +1,12 @@
 import type { PrInfo } from '@amagi/core'
-import { agentLogStore } from '@amagi/core/agent-log'
+import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import type { TrackerTask } from '@amagi/core/drivers/types'
 import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
+  canReset,
+  currentAttemptEvents,
   isTerminal,
   type MergeStatus,
   type StoredEvent,
@@ -25,6 +27,7 @@ import {
   type ProjectedTask,
   runHealth,
   runHealthNearLimit,
+  stateAtAttempt,
   tasksNeedingAttention,
 } from '@amagi/core/view'
 import {
@@ -52,7 +55,6 @@ import { SessionsView } from './SessionsView.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
-  type RunOptions,
   useConnection,
   useDashboard,
   useReadyQueue,
@@ -1224,43 +1226,9 @@ function IssuesView() {
 }
 
 function RunButton() {
-  const { start } = useRunner()
+  const { start, options } = useRunner()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
-
-  const run = async (opts?: RunOptions) => {
-    setBusy(true)
-    setMessage(null)
-    const res = await start(undefined, opts)
-    setBusy(false)
-    setOpen(false)
-    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
-  }
-
-  return (
-    <div className="flex items-center gap-2">
-      {message !== null && <span className="text-sm text-fg-muted">{message}</span>}
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => setOpen(true)}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-      >
-        Run next
-      </button>
-      {open && <RunPicker onClose={() => setOpen(false)} onRun={run} />}
-    </div>
-  )
-}
-
-/**
- * Lets the operator pick harness/model/effort before "Run next" dispatches.
- * Every field defaults to "use the configured value": leaving the harness at
- * default sends no overrides, so the server's config.harness.implement wins.
- */
-function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunOptions) => void }) {
-  const { options } = useRunner()
   const harnesses = options?.harnesses ?? []
   const [harness, setHarness] = useState('')
   const [model, setModel] = useState('')
@@ -1279,123 +1247,107 @@ function RunPicker({ onClose, onRun }: { onClose: () => void; onRun: (opts: RunO
     setEffort('')
   }
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
+  const run = async () => {
+    setBusy(true)
+    setMessage(null)
     const effectiveModel = model === 'custom' ? customModel.trim() : model
-    onRun({
+    const res = await start(undefined, {
       ...(harness === '' ? {} : { harness }),
       ...(effectiveModel === '' ? {} : { model: effectiveModel }),
       ...(effort === '' ? {} : { effort }),
     })
+    setBusy(false)
+    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
   }
 
-  const input =
-    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
-  const label = 'mb-1 block text-sm text-fg-muted'
+  const field = 'rounded border border-line-strong bg-sunken px-2 py-1 text-sm text-fg-strong'
+  const label = 'mb-0.5 block text-xs text-fg-muted'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form
-        onSubmit={submit}
-        className="w-full max-w-md rounded-lg border border-line-strong bg-surface p-4"
+    <div className="flex flex-wrap items-end gap-2">
+      {message !== null && <span className="self-center text-sm text-fg-muted">{message}</span>}
+      <div>
+        <label className={label} htmlFor="run-harness">
+          Harness
+        </label>
+        <select
+          id="run-harness"
+          value={harness}
+          onChange={(e) => switchHarness(e.target.value)}
+          className={field}
+        >
+          <option value="">default ({options?.default?.kind ?? 'config'})</option>
+          {harnesses.map((h) => (
+            <option key={h.name} value={h.name}>
+              {h.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className={label} htmlFor="run-model">
+          Model
+        </label>
+        <select
+          id="run-model"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          className={field}
+        >
+          <option value="">
+            {selected?.model === undefined ? 'default (harness)' : `default (${selected.model})`}
+          </option>
+          {models.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+          <option value="custom">(custom model)</option>
+        </select>
+        {model === 'custom' && (
+          <input
+            value={customModel}
+            onChange={(e) => setCustomModel(e.target.value)}
+            placeholder="model id"
+            className={`${field} mt-1 block w-full`}
+          />
+        )}
+      </div>
+      <div>
+        <label className={label} htmlFor="run-effort">
+          Effort
+        </label>
+        <select
+          id="run-effort"
+          value={effort}
+          onChange={(e) => setEffort(e.target.value)}
+          className={field}
+        >
+          <option value="">
+            {selected?.effort === undefined ? 'default (harness)' : `default (${selected.effort})`}
+          </option>
+          {efforts.map((e) => (
+            <option key={e} value={e}>
+              {e}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={run}
+        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
       >
-        <h2 className="mb-3 text-lg font-semibold">Run next task</h2>
-        <div className="space-y-3">
-          <div>
-            <label className={label} htmlFor="run-harness">
-              Harness
-            </label>
-            <select
-              id="run-harness"
-              value={harness}
-              onChange={(e) => switchHarness(e.target.value)}
-              className={input}
-            >
-              <option value="">default ({options?.default?.kind ?? 'config'})</option>
-              {harnesses.map((h) => (
-                <option key={h.name} value={h.name}>
-                  {h.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={label} htmlFor="run-model">
-              Model
-            </label>
-            <select
-              id="run-model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className={input}
-            >
-              <option value="">
-                {selected?.model === undefined
-                  ? 'default (harness)'
-                  : `default (${selected.model})`}
-              </option>
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-              <option value="custom">(custom model)</option>
-            </select>
-            {model === 'custom' && (
-              <input
-                value={customModel}
-                onChange={(e) => setCustomModel(e.target.value)}
-                placeholder="model id"
-                className={`${input} mt-1`}
-              />
-            )}
-          </div>
-          <div>
-            <label className={label} htmlFor="run-effort">
-              Effort
-            </label>
-            <select
-              id="run-effort"
-              value={effort}
-              onChange={(e) => setEffort(e.target.value)}
-              className={input}
-            >
-              <option value="">
-                {selected?.effort === undefined
-                  ? 'default (harness)'
-                  : `default (${selected.effort})`}
-              </option>
-              {efforts.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-line-strong px-3 py-1 text-sm text-fg-muted hover:bg-raised"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
-          >
-            Run
-          </button>
-        </div>
-      </form>
+        Run next
+      </button>
     </div>
   )
 }
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
-function LastLogLine({ repo, taskId }: { repo: string; taskId: string }) {
-  const key = `${repo}/${taskId}`
+function LastLogLine({ repo, taskId, attempt }: { repo: string; taskId: string; attempt: number }) {
+  const key = agentLogKey(repo, taskId, attempt)
   useSyncExternalStore(
     (listener) => agentLogStore.subscribe(key, listener),
     () => agentLogStore.get(key).version,
@@ -1487,7 +1439,9 @@ function WorkerSlot({
           </>
         )}
       </div>
-      {selected !== null && <LastLogLine repo={selected} taskId={taskId} />}
+      {selected !== null && (
+        <LastLogLine repo={selected} taskId={taskId} attempt={task?.attempt ?? 1} />
+      )}
     </div>
   )
 }
@@ -1724,7 +1678,8 @@ function WorkersPanel() {
         <span>procs: {total.processes}</span>
       </div>
       <div className="space-y-2">
-        {Array.from({ length: status.capacity }, (_, i) => (
+        {/* running can exceed capacity when foreground `just run` workers are merged in. */}
+        {Array.from({ length: Math.max(status.capacity, running.length) }, (_, i) => (
           <WorkerSlot
             key={i}
             taskId={running[i] ?? null}
@@ -1929,13 +1884,97 @@ const metricTone = {
   none: { box: 'border-line bg-surface', value: 'text-fg-strong' },
 } as const
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'red' | 'amber' }) {
+function Metric({
+  label,
+  value,
+  tone,
+  onClick,
+}: {
+  label: string
+  value: string
+  tone?: 'red' | 'amber'
+  onClick?: () => void
+}) {
   const t = metricTone[tone ?? 'none']
-  return (
-    <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>
+  const body = (
+    <>
       <div className="text-[11px] font-medium uppercase tracking-wide text-fg-faint">{label}</div>
       <div className={`mt-1 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
-    </div>
+    </>
+  )
+  if (onClick === undefined) {
+    return <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>{body}</div>
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`metric rounded-lg border px-4 py-3 text-left ${t.box} hover:border-line-strong`}
+    >
+      {body}
+    </button>
+  )
+}
+
+function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog === null) return
+    dialog.showModal()
+  }, [])
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc already closes via onCancel; this only handles backdrop clicks.
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+      className="ready-queue-dialog"
+    >
+      <div className="flex items-center justify-between border-b border-line px-4 py-3">
+        <h2 className="text-sm font-semibold text-fg">Ready to run ({tasks.length})</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="rounded p-1 text-fg-muted hover:bg-raised hover:text-fg"
+        >
+          <Icon name="close" size={16} />
+        </button>
+      </div>
+      {tasks.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-fg-faint">nothing in the ready queue</p>
+      ) : (
+        <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto">
+          {tasks.map((task) => (
+            <li key={task.id} className="px-4 py-2.5 text-sm">
+              {task.url === null ? (
+                <span className="block truncate font-medium text-fg">{task.title}</span>
+              ) : (
+                <a
+                  href={task.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block truncate font-medium text-fg hover:underline"
+                >
+                  {task.title}
+                </a>
+              )}
+              <span className="block truncate text-xs text-fg-faint">
+                {task.id}
+                {task.priority !== null && ` · P${task.priority}`}
+                {task.type !== null && ` · ${task.type}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </dialog>
   )
 }
 
@@ -2016,7 +2055,9 @@ function MergeablePrsPanel() {
 function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
+  const readyQueue = useReadyQueue()
   const [search, setSearch] = useState('')
+  const [readyQueueOpen, setReadyQueueOpen] = useState(false)
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
   const openQuestions = Object.values(state.questions).filter((q) => q.resolvedAt === null).length
@@ -2048,8 +2089,13 @@ function OverviewView() {
         </div>
       </div>
 
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Metric label="Active runs" value={String(queue.length)} />
+        <Metric
+          label="Ready to run"
+          value={String(readyQueue.length)}
+          onClick={() => setReadyQueueOpen(true)}
+        />
         <Metric label="Workers busy" value={workers} />
         <Metric
           label="Needs attention"
@@ -2103,6 +2149,10 @@ function OverviewView() {
         </EmptyState>
       ) : (
         <RunList tasks={visible} showReason={false} />
+      )}
+
+      {readyQueueOpen && (
+        <ReadyQueueDialog tasks={readyQueue} onClose={() => setReadyQueueOpen(false)} />
       )}
     </section>
   )
@@ -2794,12 +2844,11 @@ function FileAsErrorButton({
 }
 
 /**
- * Restart a run that has no worktree recorded yet, so the runner starts fresh.
- * Runs that keep a worktree are restarted by Reclaim/Retry/Requeue above, which
- * need the worktree path; done and abandoned runs have no path back, so the
- * button is hidden for them.
+ * Start a parked task over as a fresh attempt: the server drops the worktree,
+ * branch and session, so nothing of the previous run is resumed. The earlier
+ * attempt stays browsable from the attempt switcher.
  */
-function RestartRunButton({
+function ResetButton({
   repo,
   taskId,
   state,
@@ -2810,21 +2859,32 @@ function RestartRunButton({
   state: TaskState
   worktree: string | null
 }) {
+  const { start } = useRunner()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (worktree !== null || state === 'done' || state === 'abandoned') return null
+  if (!canReset(state, worktree !== null)) return null
 
-  const restart = async () => {
+  const reset = async () => {
+    if (
+      !window.confirm(
+        `Reset ${taskId}? Its worktree and branch are deleted and it reruns from scratch.`,
+      )
+    ) {
+      return
+    }
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reset`, {
         method: 'POST',
       })
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null
         setError(body?.error ?? `HTTP ${res.status}`)
+        return
       }
+      const run = await start(taskId)
+      if (!run.ok) setError(run.error ?? 'run failed to start')
     } catch {
       setError('could not reach the amagi server')
     } finally {
@@ -2833,21 +2893,54 @@ function RestartRunButton({
   }
 
   return (
-    <div className="restart-run">
+    <div className="reset-run">
       <button
         type="button"
         disabled={busy}
-        onClick={() => void restart()}
+        onClick={() => void reset()}
+        title="deletes the worktree, branch and agent session, then reruns the task from scratch as a new attempt"
         className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
       >
         <Icon name="refresh" size={15} />
-        {busy ? 'Restarting...' : 'Restart run'}
+        {busy ? 'Resetting...' : 'Reset'}
       </button>
       {error !== null && (
-        <p className="restart-error" role="alert">
+        <p className="reset-error" role="alert">
           {error}
         </p>
       )}
+    </div>
+  )
+}
+
+/** Switch the task detail between the current attempt and earlier, reset ones. */
+function AttemptSwitcher({
+  current,
+  viewing,
+  onSelect,
+}: {
+  current: number
+  viewing: number
+  onSelect: (attempt: number | null) => void
+}) {
+  if (current < 2) return null
+  return (
+    <div className="detail-tabs mt-3 flex gap-1 border-b border-line">
+      {Array.from({ length: current }, (_, i) => i + 1).map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onSelect(n === current ? null : n)}
+          className={`rounded-t px-3 py-1.5 text-sm ${
+            viewing === n
+              ? 'border-b-2 border-sky-500 text-fg-strong'
+              : 'text-fg-muted hover:text-fg'
+          }`}
+        >
+          Attempt #{n}
+          {n === current ? ' (current)' : ''}
+        </button>
+      ))}
     </div>
   )
 }
@@ -3315,25 +3408,119 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   )
 }
 
+const REPORT_LOG_LINES = 100
+
+/** Markdown summary of a task, ready to feed an LLM for bug-report generation. */
+function taskReport(task: ProjectedTask, elapsedMs: number, repo: string): string {
+  const buffer = agentLogStore.get(agentLogKey(repo, task.id, task.attempt))
+  const start = Math.max(0, buffer.length - REPORT_LOG_LINES)
+  const log: string[] = []
+  for (let i = start; i < buffer.length; i++) {
+    const line = buffer.at(i)
+    if (line !== undefined) log.push(line.text)
+  }
+  const checks =
+    task.checks === null
+      ? 'none'
+      : task.checksOk
+        ? `passed (${task.checks.length} checks)`
+        : `failed (${task.checks.length} checks)`
+  const pr = task.prUrl ?? 'none'
+  const branch = task.branch ?? 'none'
+  const needsHuman = task.state === 'needs_human' ? ' (needs human attention)' : ''
+  return [
+    `# ${task.title}`,
+    '',
+    `- **ID**: ${task.id}`,
+    `- **State**: ${task.state}${needsHuman}`,
+    `- **Tracker**: ${task.tracker}`,
+    `- **Branch**: ${branch}`,
+    `- **PR**: ${pr}`,
+    `- **Checks**: ${checks}`,
+    `- **Elapsed**: ${fmtDuration(elapsedMs)}`,
+    '',
+    '## Summary',
+    '',
+    task.statusReason ?? 'none',
+    '',
+    `## Log (last ${log.length} lines)`,
+    '',
+    '```',
+    ...log,
+    '```',
+    '',
+  ].join('\n')
+}
+
+/** Header-row button that copies a markdown task report to the clipboard. */
+function CopyReportButton({
+  repo,
+  task,
+  elapsedMs,
+}: {
+  repo: string
+  task: ProjectedTask
+  elapsedMs: number
+}) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (timer.current !== null) clearTimeout(timer.current)
+    }
+  }, [])
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(taskReport(task, elapsedMs, repo))
+      setCopied(true)
+      if (timer.current !== null) clearTimeout(timer.current)
+      timer.current = setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // clipboard unavailable (non-secure context); leave the button quiet
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+    >
+      {copied ? 'Copied' : 'Copy report'}
+    </button>
+  )
+}
+
 type DetailTab = 'log' | 'checks'
 
 function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
-  const { state, selected } = useDashboard()
+  const { state: liveState, selected } = useDashboard()
   const { status } = useRunner()
+  // null follows the current attempt, so a reset moves the view along with it.
+  const [viewAttempt, setViewAttempt] = useState<number | null>(null)
+  const currentAttempt = liveState.tasks[id]?.attempt ?? 1
+  const attempt =
+    viewAttempt !== null && viewAttempt < currentAttempt ? viewAttempt : currentAttempt
+  const past = attempt < currentAttempt
+  const state = useMemo(
+    () => (past ? stateAtAttempt(liveState, id, attempt) : liveState),
+    [past, liveState, id, attempt],
+  )
   const task: ProjectedTask | undefined = state.tasks[id]
-  const questions = openQuestionsFor(state, id)
+  const questions = past ? [] : openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
-  const runnerTask = status?.tasks?.[id]
+  const runnerTask = past ? undefined : status?.tasks?.[id]
   const [tab, setTab] = useState<DetailTab>('log')
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
-  const health = runHealth(state, id, now)
-  const usageEvents = state.events
-    .filter((e): e is AgentStreamEvent => e.taskId === id && e.type === 'agent.stream')
+  const health = runHealth(state, id, past && task !== undefined ? task.updatedAt : now)
+  const usageEvents = currentAttemptEvents(state.events, id)
+    .filter((e): e is AgentStreamEvent => e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
   const effIn = usageEvents.reduce((sum, u) => sum + u.inputTokens, 0)
@@ -3367,11 +3554,12 @@ function TaskDetailView() {
   // keeps the panel only when a conversation was actually recorded, so the
   // operator does not lose it by completing the task.
   const chatAvailable =
-    (task.state === 'no_pr' &&
+    !past &&
+    ((task.state === 'no_pr' &&
       task.statusReason !== null &&
       task.sessionId !== null &&
       task.worktree !== null) ||
-    state.events.some((e) => e.taskId === task.id && e.type === 'chat.message')
+      state.events.some((e) => e.taskId === task.id && e.type === 'chat.message'))
 
   return (
     <section>
@@ -3381,7 +3569,7 @@ function TaskDetailView() {
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
-        {selected !== null && (
+        {selected !== null && !past && (
           <ReclaimButton
             repo={selected}
             taskId={task.id}
@@ -3389,7 +3577,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RetryButton
             repo={selected}
             taskId={task.id}
@@ -3397,7 +3585,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RequeueButton
             repo={selected}
             taskId={task.id}
@@ -3405,7 +3593,7 @@ function TaskDetailView() {
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <FileAsErrorButton
             repo={selected}
             taskId={task.id}
@@ -3413,24 +3601,36 @@ function TaskDetailView() {
             statusReason={task.statusReason}
           />
         )}
-        {selected !== null && (
-          <RestartRunButton
+        {selected !== null && !past && (
+          <ResetButton
             repo={selected}
             taskId={task.id}
             state={task.state}
             worktree={task.worktree}
           />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
         )}
-        {selected !== null && (
+        {selected !== null && !past && (
           <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
         )}
-        {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
-        <StopButton taskId={task.id} />
+        {selected !== null && !past && (
+          <CloseButtons repo={selected} taskId={task.id} state={task.state} />
+        )}
+        {selected !== null && (
+          <CopyReportButton repo={selected} task={task} elapsedMs={health.elapsedMs} />
+        )}
+        {!past && <StopButton taskId={task.id} />}
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
+
+      <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
+      {past && (
+        <p className="mt-2 text-sm text-fg-muted">
+          Viewing attempt #{attempt}, which was reset. Actions apply to the current attempt.
+        </p>
+      )}
 
       <SummaryPanel task={task} />
 
@@ -3540,7 +3740,9 @@ function TaskDetailView() {
             ))}
           </div>
         )}
-        {tab === 'log' && selected !== null && <AgentLogView repo={selected} taskId={id} />}
+        {tab === 'log' && selected !== null && (
+          <AgentLogView repo={selected} taskId={id} attempt={attempt} />
+        )}
         {tab === 'checks' && task.checks !== null && (
           <ul className="space-y-2">
             {task.checks.map((c) => (
@@ -3801,6 +4003,26 @@ function activityItems(state: DashboardState): ActivityItem[] {
           text: `PR #${event.number} opened`,
           icon: 'external',
           tone: 'green',
+        })
+        break
+      case 'git.blocked':
+        items.push({
+          key: `gb${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `git write blocked: git ${event.argv.join(' ')}`,
+          icon: 'close',
+          tone: 'red',
+        })
+        break
+      case 'git.bypassed':
+        items.push({
+          key: `gx${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `git write past the shim: ${event.entries.join('; ')}`,
+          icon: 'close',
+          tone: 'red',
         })
         break
       case 'question.asked':

@@ -8,6 +8,8 @@ export type PromptContext = {
   branch: string
   /** Set once the question channel exists, so the agent is told how to ask. */
   askCommand?: string | null
+  /** Set once the server channel exists, so the agent is told how to checkpoint. */
+  gitRequestCommand?: string | null
 }
 
 export function implementSystemPrompt(ctx: PromptContext): string {
@@ -55,6 +57,16 @@ export function implementSystemPrompt(ctx: PromptContext): string {
       'If a decision is genuinely ambiguous and picking wrong would waste the task,',
       `ask instead of guessing: ${ctx.askCommand}`,
       'It blocks until a human answers and prints the answer on stdout.',
+    )
+  }
+
+  if (ctx.gitRequestCommand) {
+    lines.push(
+      '',
+      'To checkpoint mid-run work, you may request a commit:',
+      ctx.gitRequestCommand,
+      'It blocks until the orchestrator commits the worktree and prints the commit sha',
+      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
     )
   }
 
@@ -133,7 +145,10 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
   )
 }
 
-export function commitMessage(task: TrackerTask, changes: readonly PrChange[] = []): string {
+export function commitMessage(
+  task: Pick<TrackerTask, 'id' | 'title'>,
+  changes: readonly PrChange[] = [],
+): string {
   const lines = [task.title, '', `Task: ${task.id}`]
   if (changes.length > 0) {
     lines.push('', 'Changes:')
@@ -372,6 +387,61 @@ export function takeDownPrompt(ctx: TakeDownMentionContext): string {
       'from the repository. Weigh this in your verdict.',
     )
   }
+  return parts.join('\n')
+}
+
+export type PointlessVerdictContext = {
+  pr: { number: number; title: string; url: string; body: string }
+  /** The task the PR was opened for; null when no task could be resolved. */
+  task: { id: string; title: string; description: string } | null
+  baseBranch: string
+  outPath: string
+}
+
+export function pointlessSystemPrompt(): string {
+  return [
+    'You are deciding what an empty-diff pull request means for the task it was opened for.',
+    'Read the repository and the PR, then write a verdict to the file.',
+    'Do not modify any files in the repository.',
+  ].join('\n')
+}
+
+export function pointlessPrompt(ctx: PointlessVerdictContext): string {
+  const parts = [
+    `PR #${ctx.pr.number} "${ctx.pr.title}" (${ctx.pr.url}) has an empty diff against ${ctx.baseBranch}:`,
+    'merging it changes nothing, so a mechanical check labels it as potentially pointless.',
+    'The work it was opened for may have already landed on base, been solved differently,',
+    'or the task as written may no longer be satisfiable.',
+  ]
+  if (ctx.task !== null) {
+    parts.push('', `Task ${ctx.task.id}: ${ctx.task.title}`)
+    if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  } else {
+    parts.push('', 'No task could be resolved for this PR.')
+  }
+  if (ctx.pr.body.trim() !== '') {
+    parts.push('', 'Pull request description:', '', ctx.pr.body.trim())
+  }
+  parts.push(
+    '',
+    'Inspect the repository to decide which verdict applies. Write your verdict to this',
+    `file: ${ctx.outPath}`,
+    '',
+    'Start the file with exactly one verdict line:',
+    '- `RESOLVED` when the merge does have real content and nothing is wrong.',
+    '- `CLOSE TASK` when base already contains this work; propose closing the task.',
+    '- `NEW TASK` when base solved it differently and something remains; propose a new task for the remainder.',
+    '- `REPHRASE TASK` when the task as written can no longer be satisfied; propose new wording.',
+    '',
+    'Then write two sections, each introduced by its own heading line:',
+    '- `REASONING:` followed by why this diff is empty in the context of this task. This is',
+    '  posted as the PR comment.',
+    '- `PROPOSAL:` followed by the recommendation for the task. This is posted as a comment',
+    '  on the task issue, so make it self-contained, naming the task by id.',
+    '',
+    'The verdict is a recommendation only; nothing is closed, created or edited off the',
+    'back of it.',
+  )
   return parts.join('\n')
 }
 

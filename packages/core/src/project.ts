@@ -43,6 +43,9 @@ export type ProjectedTask = {
   lastCommit: { sha: string; subject: string } | null
   checks: CheckResult[] | null
   checksOk: boolean | null
+  /** 1-based; bumped by each operator reset, which wipes the run fields. */
+  attempt: number
+  /** Start of the current attempt: the first claim, or the latest reset. */
   createdAt: number
   updatedAt: number
 }
@@ -108,9 +111,40 @@ export function project(state: Projection, event: StoredEvent): Projection {
             lastCommit: null,
             checks: null,
             checksOk: null,
+            attempt: 1,
             createdAt: event.ts,
             updatedAt: event.ts,
           }
+      break
+
+    case 'task.reset':
+      if (current) {
+        tasks[event.taskId] = {
+          ...current,
+          state: 'claimed',
+          branch: null,
+          worktree: null,
+          sessionId: null,
+          prUrl: null,
+          prNumber: null,
+          prMergeStatus: null,
+          statusReason: event.reason ?? null,
+          lastError: null,
+          retryCount: 0,
+          retryAt: null,
+          lastCommit: null,
+          checks: null,
+          checksOk: null,
+          attempt: current.attempt + 1,
+          createdAt: event.ts,
+          updatedAt: event.ts,
+        }
+        for (const q of Object.values(questions)) {
+          if (q.taskId === event.taskId && q.resolvedAt === null) {
+            questions[q.id] = { ...q, resolvedAt: event.ts }
+          }
+        }
+      }
       break
 
     case 'task.state':

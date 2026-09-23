@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type {
   AgentEvent,
   AgentOutcome,
@@ -29,7 +31,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { AsyncQueue, BeadsTracker, loadConfig } from '@amagi/core'
+import { AsyncQueue, BeadsTracker, killTree, loadConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -759,6 +761,86 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
   )
 })
 
+describe('POST /api/repos/:repo/tasks/:id/reset', () => {
+  let tracker: FakeGateTracker
+
+  beforeEach(() => {
+    tracker = new FakeGateTracker()
+    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    // git runs in the repo root to drop the branch, so it has to exist.
+    mkdirSync(ws.workspaces.get('repo1')?.root ?? '', { recursive: true })
+  })
+
+  const parked = (id: string, to: 'cancelled' | 'needs_human' | 'no_pr' | 'pr_open') => {
+    claim(id)
+    store.append(id, { type: 'worktree.created', path: `/tmp/wt/${id}`, branch: `amagi/${id}-x` })
+    store.append(id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append(id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+    store.append(id, { type: 'agent.exited', role: 'implement', exitCode: 0, sessionId: 'sess-1' })
+    if (to === 'pr_open') {
+      store.append(id, { type: 'task.state', from: 'implementing', to: 'checks' })
+      store.append(id, { type: 'task.state', from: 'checks', to: 'committed' })
+      store.append(id, { type: 'task.state', from: 'committed', to: 'pr_open' })
+    } else {
+      store.append(id, { type: 'task.state', from: 'implementing', to })
+    }
+  }
+
+  test.each(['cancelled', 'needs_human', 'no_pr'] as const)(
+    'starts a %s task over as a fresh attempt with no worktree or session',
+    async (state) => {
+      parked('bd-1', state)
+      const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { task: ProjectedTask }
+      expect(body.task).toMatchObject({
+        state: 'claimed',
+        attempt: 2,
+        worktree: null,
+        branch: null,
+        sessionId: null,
+      })
+      expect(tracker.released).toEqual(['bd-1'])
+      expect(
+        store.events({ taskId: 'bd-1', limit: 100 }).some((e) => e.type === 'task.reset'),
+      ).toBe(true)
+    },
+  )
+
+  test('starts over an in-flight task stuck before it got a worktree', async () => {
+    claim('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { task: ProjectedTask }).task).toMatchObject({
+      state: 'claimed',
+      attempt: 2,
+    })
+    expect(tracker.released).toEqual(['bd-1'])
+  })
+
+  test('409s on an in-flight task that has a worktree', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'worktree.created', path: '/tmp/wt/bd-1', branch: 'amagi/bd-1-x' })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
+  test('409s on a task whose PR is open', async () => {
+    parked('bd-1', 'pr_open')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect(store.task('bd-1')?.attempt).toBe(1)
+  })
+
+  test('404s on an unknown task', async () => {
+    const res = await app.request('/api/repos/repo1/tasks/nope/reset', { method: 'POST' })
+    expect(res.status).toBe(404)
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
   const parkedError = (id: string, reason: string) => {
     claim(id)
@@ -830,6 +912,35 @@ describe('POST /api/repos/:repo/tasks/:id/filed-as-error', () => {
     const res = await file('bd-1')
     expect(res.status).toBe(501)
     expect(((await res.json()) as { error: string }).error).toContain('does not support')
+  })
+
+  test('filing the same failure twice creates one error bead and reuses it', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', title: 'work on bd-1' })
+    app = issueApp(tracker)
+    parkedError('bd-1', 'agent failed: model quota exhausted')
+
+    const firstBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+    const secondBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+
+    expect(tracker.created).toHaveLength(1)
+    expect(secondBody.errorTask.id).toBe(firstBody.errorTask.id)
+  })
+
+  test('a recurring failure after the prior error task was closed files a new bead', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', title: 'work on bd-1' })
+    app = issueApp(tracker)
+    parkedError('bd-1', 'agent failed: model quota exhausted')
+
+    const firstBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+    const prior = tracker.issues.get(firstBody.errorTask.id)
+    if (prior !== undefined)
+      tracker.issues.set(firstBody.errorTask.id, { ...prior, status: 'closed' })
+    const secondBody = (await (await file('bd-1')).json()) as { errorTask: BeadsIssue }
+
+    expect(tracker.created).toHaveLength(2)
+    expect(secondBody.errorTask.id).not.toBe(firstBody.errorTask.id)
   })
 })
 
@@ -1617,6 +1728,48 @@ describe('runner endpoints', () => {
     ])
   })
 
+  test('GET /api/runner merges a live foreground worker into the slots', async () => {
+    const proc = Bun.spawn(['sleep', '30'], { stdout: 'ignore' })
+    try {
+      app = createApp({
+        workspaces: ws.workspaces,
+        runner: stubRunner(),
+        liveRuns: () => [
+          {
+            pid: proc.pid,
+            repoKey: 'repo1',
+            repoName: 'repo1',
+            taskId: 'bd-9',
+            title: 'just-run worker',
+            harness: 'claude',
+            model: 'sonnet',
+            effort: null,
+            startedAt: 1720000000000,
+          },
+        ],
+      })
+      const res = await app.request('/api/runner')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        running: string[]
+        startedAt: Record<string, number>
+        tasks: Record<string, unknown>
+        resources: Record<string, unknown>
+      }
+      expect(body.running).toEqual(['bd-9'])
+      expect(body.startedAt['bd-9']).toBe(1720000000000)
+      expect(body.tasks['bd-9']).toEqual({
+        title: 'just-run worker',
+        harness: 'claude',
+        model: 'sonnet',
+        effort: null,
+      })
+      expect(body.resources['bd-9']).toBeDefined()
+    } finally {
+      await killTree(proc.pid, { graceMs: 50 })
+    }
+  })
+
   test('runner endpoints are 501 without a runner service', async () => {
     expect((await app.request('/api/runner')).status).toBe(501)
     expect((await post('/api/runs', '{}')).status).toBe(501)
@@ -2185,6 +2338,89 @@ describe('POST /api/repos (onboarding)', () => {
       body: JSON.stringify({ path: '/nonexistent-path-xyz' }),
     })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
+  let repo: string
+  let wt: string
+  const branch = 'amagi/bd-1-do-something'
+
+  const git = (cwd: string, args: string[]) => {
+    const r = Bun.spawnSync(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }
+  }
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'amagi-git-request-repo-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    git(repo, ['config', 'user.name', 'Test'])
+    git(repo, ['config', 'user.email', 'test@example.com'])
+    writeFileSync(join(repo, 'README.md'), '# demo\n')
+    git(repo, ['add', '.'])
+    git(repo, ['commit', '-q', '-m', 'init'])
+    wt = mkdtempSync(join(tmpdir(), 'amagi-git-request-wt-'))
+    git(repo, ['worktree', 'add', '-b', branch, wt, 'main'])
+
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+    store.append('bd-1', { type: 'task.claimed', title: 'do something', tracker: 'beads' })
+    store.append('bd-1', { type: 'worktree.created', path: wt, branch })
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+    store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+  })
+
+  afterEach(() => {
+    ws.cleanup()
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(wt, { recursive: true, force: true })
+  })
+
+  const request = (id: string, verb: unknown, token?: string) =>
+    app.request(`/api/repos/repo1/tasks/${id}/git-requests`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token === undefined ? {} : { 'X-Amagi-Token': token }),
+      },
+      body: JSON.stringify({ verb }),
+    })
+
+  test('commits the worktree and returns the sha', async () => {
+    writeFileSync(join(wt, 'hello.txt'), 'hi\n')
+    const res = await request('bd-1', 'commit', store.token('bd-1'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { verb: string; sha: string }
+    expect(body.verb).toBe('commit')
+    expect(body.sha).toMatch(/^[0-9a-f]{40}$/)
+    const created = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'commit.created')
+    expect(created?.type === 'commit.created' ? created.sha : null).toBe(body.sha)
+    expect(git(wt, ['rev-parse', 'HEAD']).stdout.trim()).toBe(body.sha)
+  })
+
+  test('rejects an unknown verb as a 400 before any git write', async () => {
+    writeFileSync(join(wt, 'hello.txt'), 'hi\n')
+    const res = await request('bd-1', 'push', store.token('bd-1'))
+    expect(res.status).toBe(400)
+    expect(git(wt, ['status', '--porcelain']).stdout.trim()).not.toBe('')
+  })
+
+  test('a missing token is a 401', async () => {
+    const res = await request('bd-1', 'commit')
+    expect(res.status).toBe(401)
+  })
+
+  test('an unknown task is a 404', async () => {
+    const res = await request('nope', 'commit', 'x')
+    expect(res.status).toBe(404)
+  })
+
+  test('a clean worktree fails with the git error', async () => {
+    const res = await request('bd-1', 'commit', store.token('bd-1'))
+    expect(res.status).toBe(500)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('nothing to commit')
   })
 })
 

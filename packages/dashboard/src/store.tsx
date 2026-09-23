@@ -1,4 +1,4 @@
-import { agentLogStore } from '@amagi/core/agent-log'
+import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { StoredEvent } from '@amagi/core/events'
 import type { RunnerStatus } from '@amagi/core/run-service'
@@ -144,6 +144,9 @@ function RepoStream({
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
   const latestSeqRef = useRef(0)
   latestSeqRef.current = state.latestSeq
+  // Survives reconnects, which only replay missed events, so a resumed stream
+  // keeps counting resets from where the first connection left off.
+  const attemptsRef = useRef(new Map<string, number>())
 
   useEffect(() => {
     let alive = true
@@ -182,8 +185,18 @@ function RepoStream({
         // text and tool output. It bypasses the reducer entirely so it never
         // costs a setState per line; the ring buffer in agentLog.ts owns it
         // and batches renders on requestAnimationFrame instead.
+        if (parsed.type === 'task.reset' && parsed.taskId !== null) {
+          const attempts = attemptsRef.current
+          attempts.set(parsed.taskId, (attempts.get(parsed.taskId) ?? 1) + 1)
+        }
         if (parsed.type === 'agent.stream' && parsed.taskId !== null) {
-          agentLogStore.append(`${repo}/${parsed.taskId}`, parsed.role, parsed.ts, parsed.event)
+          const attempt = attemptsRef.current.get(parsed.taskId) ?? 1
+          agentLogStore.append(
+            agentLogKey(repo, parsed.taskId, attempt),
+            parsed.role,
+            parsed.ts,
+            parsed.event,
+          )
           // usage is sparse (one per step/turn, not per line): the only
           // agent.stream event the reducer needs, for the sessions view.
           // Chat runs are also routed to the reducer so the chat panel can

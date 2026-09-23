@@ -1,10 +1,12 @@
 import {
+  dropLiveRun,
   isTerminal,
   listModelsCached,
   loadConfig,
   makeHarness,
   makeTracker,
   Runner,
+  recordLiveRun,
   repoName,
   repoRoot,
 } from '@amagi/core'
@@ -31,7 +33,7 @@ export async function workOneTask(opts: {
 }): Promise<void> {
   const { root, taskId } = opts
   const { config } = loadConfig(root)
-  const { key, store } = currentRepo()
+  const { key, name, store } = currentRepo()
   const selection: RunSelection = await pickRunSelection(
     config,
     opts.flags,
@@ -58,9 +60,29 @@ export async function workOneTask(opts: {
     repoName: repoName(root),
   })
 
+  // The task is claimed inside runner.runOnce, so the worker's identity is only
+  // known once the claim event lands. Record it then so the dashboard Workers
+  // section shows this foreground run; drop it in the finally below.
+  let liveTaskId: string | null = null
+  const recordLive = (claimedTaskId: string, title: string) => {
+    liveTaskId = claimedTaskId
+    recordLiveRun({
+      pid: process.pid,
+      repoKey: key,
+      repoName: name,
+      taskId: claimedTaskId,
+      title,
+      harness: implement.kind,
+      model: implement.model ?? null,
+      effort: implement.effort ?? null,
+      startedAt: Date.now(),
+    })
+  }
+
   const unsubscribe = store.subscribe((event) => {
     switch (event.type) {
       case 'task.claimed': {
+        if (event.taskId !== null) recordLive(event.taskId, event.title)
         console.log(`\n${bold(event.taskId ?? '')}  ${event.title}`)
         const details = [
           event.priority === null || event.priority === undefined ? null : `P${event.priority}`,
@@ -132,6 +154,7 @@ export async function workOneTask(opts: {
     if (needsHuman) process.exitCode = 1
   } finally {
     unsubscribe()
+    if (liveTaskId !== null) dropLiveRun(key, liveTaskId)
     store.close()
   }
 }

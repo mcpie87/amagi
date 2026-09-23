@@ -20,6 +20,7 @@ describe('ClaudeTranslator against a recorded transcript', () => {
   test('normalizes the stream into the shared event union', async () => {
     const { events } = await replay()
     expect(events.map((e) => e.kind)).toEqual([
+      'context',
       'tool_use',
       'tool_result',
       'text',
@@ -48,6 +49,25 @@ describe('ClaudeTranslator against a recorded transcript', () => {
     const { events } = await replay()
     const use = events.find((e) => e.kind === 'tool_use')
     expect(use).toMatchObject({ name: 'Bash' })
+  })
+
+  test('context comes from a single request, deduped across its repeated usage', () => {
+    const translator = new ClaudeTranslator()
+    const request = {
+      input_tokens: 3,
+      cache_read_input_tokens: 90_000,
+      cache_creation_input_tokens: 2_000,
+    }
+    const push = (text: string) =>
+      translator.push({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text }], usage: request },
+      })
+    expect(push('a')).toEqual([
+      { kind: 'context', tokens: 92_003 },
+      { kind: 'text', text: 'a' },
+    ])
+    expect(push('b')).toEqual([{ kind: 'text', text: 'b' }])
   })
 
   test('usage and cost are carried through', async () => {
@@ -118,6 +138,11 @@ describe('ClaudeHarness argv', () => {
   test('the tool list is a single argv element so extraArgs cannot be swallowed', () => {
     const argv = new ClaudeHarness().argv({ ...base, extraArgs: ['--add-dir', '/other'] }, null)
     expect(argv[argv.indexOf('--allowedTools') + 2]).toBe('--add-dir')
+  })
+
+  test("skills are disabled so the operator's own skills do not leak into workers", () => {
+    expect(new ClaudeHarness().argv(base, null)).toContain('--disable-slash-commands')
+    expect(new ClaudeHarness().argv(base, 'sess-42')).toContain('--disable-slash-commands')
   })
 
   test('bypass drops the allowlist entirely', () => {
