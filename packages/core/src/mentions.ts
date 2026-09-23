@@ -263,6 +263,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
   if (!outcome.ok) {
     throw new Error(`agent failed: ${agentFailure(outcome)}`)
   }
+  await commitWorktree(run, wt.path, opts.pr)
   p.phase('pushing fix')
   await pushConflictFix({
     cwd: wt.path,
@@ -271,6 +272,20 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
     remote: opts.config.forge.remote,
     exec: run,
   })
+}
+
+/** Stages and commits the fix, mirroring runner.commit: nothing to commit is fine, a git failure throws. */
+async function commitWorktree(run: Exec, cwd: string, pr: PrInfo): Promise<void> {
+  const status = await run(['git', 'status', '--porcelain'], { cwd })
+  if (status.stdout.trim() === '') return
+  await run(['git', 'add', '-A'], { cwd })
+  const commit = await run(['git', 'commit', '-q', '-F', '-'], {
+    cwd,
+    stdin: `Respond to review feedback on PR #${pr.number}\n\nPR: ${pr.url}`,
+  })
+  if (commit.exitCode !== 0) {
+    throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
+  }
 }
 
 async function respondToExplain(

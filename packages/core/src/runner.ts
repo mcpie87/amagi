@@ -599,7 +599,7 @@ export class Runner {
         current.sessionId,
         {
           cwd,
-          prompt: fixChecksPrompt(results),
+          prompt: fixChecksPrompt(results, this.deps.channel ? 'amagi git-request commit' : null),
           permissions: config.harness.implement.permissions,
           extraArgs: config.harness.implement.extraArgs,
         },
@@ -834,7 +834,11 @@ export class Runner {
           sessionId,
           {
             cwd,
-            prompt: answerPrompt(question.question, q.answer),
+            prompt: answerPrompt(
+              question.question,
+              q.answer,
+              this.deps.channel ? 'amagi git-request commit' : null,
+            ),
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },

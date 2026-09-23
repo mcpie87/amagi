@@ -92,13 +92,15 @@ export type StampedIteration = {
 export async function stampIterationLabel(opts: {
   cwd: string
   pr: PrInfo
+  /** Explicit count when multiple dispatches share a stale PR snapshot. */
+  iteration?: number
   exec?: Exec
 }): Promise<StampedIteration | null> {
   const run = opts.exec ?? defaultExec
   const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
   if (taskId === null) return null
   const current = iterationsFromLabels(opts.pr.labels)
-  const iteration = current + 1
+  const iteration = opts.iteration ?? current + 1
   await execOk(run, ['gh', 'label', 'create', iterationLabel(iteration), '--force'], {
     cwd: opts.cwd,
     env: ghEnv(),
@@ -111,7 +113,7 @@ export async function stampIterationLabel(opts: {
     '--add-label',
     iterationLabel(iteration),
   ]
-  if (current > 0) edit.push('--remove-label', iterationLabel(current))
+  if (current > 0 && current !== iteration) edit.push('--remove-label', iterationLabel(current))
   await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
   return { taskId, iteration }
 }

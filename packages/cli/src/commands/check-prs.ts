@@ -1,23 +1,19 @@
 import {
   type Config,
-  harnessStartOpts,
   isConflicting,
   loadConfig,
-  makeHarness,
   makePrDriver,
   makeTracker,
   type PrDriver,
   type PrInfo,
-  prepareConflictWorktree,
-  pushConflictFix,
   repoName,
   repoRoot,
-  resolveConflictPrompt,
-  resolveConflictSystemPrompt,
-  stampIterationLabel,
+  resolveConflict,
+  taskIdFromAmagiBranch,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
-import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
+import { bold, dim, green, red, table, yellow } from '../format.ts'
+import { currentRepo } from '../repo.ts'
 
 function mergeLabel(p: PrInfo, baseBranch: string): string {
   if (isConflicting(p, baseBranch)) return 'CONFLICT'
@@ -49,75 +45,33 @@ async function resolveOne(
   root: string,
   config: Config,
   driver: PrDriver,
+  tracker: import('@amagi/core').Tracker,
+  store: import('@amagi/core').Store,
 ): Promise<void> {
   console.log(`\n${bold(`#${pr.number}`)}  ${pr.title}`)
   console.log(dim(`  ${pr.url}`))
   try {
-    const wt = await prepareConflictWorktree({
+    const result = await resolveConflict({
       repoRoot: root,
       repoName: repoName(root),
-      worktreeRoot: config.repo.worktreeRoot,
-      baseBranch: config.repo.baseBranch,
       pr,
-      persona: config.repo.persona,
+      config,
+      driver,
+      store,
+      onLog: (level, text) =>
+        console.log(level === 'error' || level === 'warn' ? red(`  ${text}`) : dim(`  ${text}`)),
     })
-    console.log(dim(`  worktree: ${wt.path}`))
-
-    if (!wt.conflicted) {
-      await pushConflictFix({
-        cwd: wt.path,
-        branch: wt.branch,
-        headRef: pr.headRefName,
-        remote: config.forge.remote,
-      })
-      console.log(green('  base merges cleanly; pushed the merge to update the PR'))
-      return
+    const taskId = taskIdFromAmagiBranch(pr.headRefName)
+    if (taskId !== null && result.iteration > 0) {
+      try {
+        await tracker.setMetadata?.(taskId, { iterations: String(result.iteration) })
+      } catch (err) {
+        console.log(
+          red(`  iteration metadata failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+      }
     }
-
-    const ctx = {
-      pr,
-      worktree: wt.path,
-      branch: wt.branch,
-      baseBranch: config.repo.baseBranch,
-      checks: config.checks.commands,
-    }
-    const harness = makeHarness(config.harness.implement)
-    const proc = harness.start({
-      cwd: wt.path,
-      prompt: resolveConflictPrompt(ctx),
-      systemPrompt: resolveConflictSystemPrompt(ctx),
-      ...harnessStartOpts(config.harness.implement),
-    })
-    console.log(dim(`  agent: ${harness.kind} (${wt.branch})`))
-
-    for await (const event of proc.events()) {
-      if (event.kind === 'tool_use') console.log(dim(`  ${event.name}`))
-      if (event.kind === 'text' && event.text.trim()) printBlock(event.text)
-      if (event.kind === 'error') console.log(red(`  ${event.message}`))
-    }
-    const outcome = await proc.done
-    if (!outcome.ok) {
-      console.log(
-        red(
-          `  agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,
-        ),
-      )
-      return
-    }
-
-    await pushConflictFix({
-      cwd: wt.path,
-      branch: wt.branch,
-      headRef: pr.headRefName,
-      remote: config.forge.remote,
-    })
-    const status = await driver.getMergeStatus(root, pr.number)
-    const ok = status === 'mergeable'
-    console.log(
-      ok
-        ? green('  resolved and pushed; PR is mergeable')
-        : yellow(`  pushed; GitHub reports ${status}`),
-    )
+    console.log(result.ok ? green(`  ${result.message}`) : red(`  ${result.message}`))
   } catch (err) {
     console.log(red(`  ${err instanceof Error ? err.message : String(err)}`))
   }
@@ -191,19 +145,9 @@ export const checkPrsCommand = defineCommand({
       `\n${yellow(`${conflicts.length} conflicting PR(s), dispatching resolution agents:`)}`,
     )
     const tracker = makeTracker(config, root)
+    const store = currentRepo().store
     for (const pr of conflicts) {
-      try {
-        const stamped = await stampIterationLabel({ cwd: root, pr })
-        if (stamped !== null) {
-          await tracker.setMetadata?.(stamped.taskId, { iterations: String(stamped.iteration) })
-          console.log(dim(`  iteration ${stamped.iteration} for #${pr.number} (${stamped.taskId})`))
-        }
-      } catch (err) {
-        console.log(
-          red(`  iteration bump failed: ${err instanceof Error ? err.message : String(err)}`),
-        )
-      }
-      await resolveOne(pr, root, config, driver)
+      await resolveOne(pr, root, config, driver, tracker, store)
     }
   },
 })

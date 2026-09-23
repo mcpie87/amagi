@@ -20,7 +20,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '',
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
-    '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
+    '- Git is read-only in this worktree: do not commit, push, or otherwise write.',
+    '- The runner commits your work and opens the pull request.',
     '- Follow the conventions already present in the code you are changing.',
     "- Run the project's own checks if you are unsure a change is correct.",
     '- Before finishing, run the project formatter then its lint check on your',
@@ -99,9 +100,21 @@ export function reclaimPrompt(ctx: PromptContext): string {
     'This task was interrupted mid-run and is being resumed. Existing work is',
     'already in the worktree and branch; inspect the current state, continue',
     'where it left off, and finish what is missing.',
+    '',
+    'Git is read-only in this worktree: do not commit, push, or otherwise write.',
+    'The runner commits your work and opens the pull request.',
   ]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
   parts.push(...trackerContext(ctx.task))
+  if (ctx.gitRequestCommand) {
+    parts.push(
+      '',
+      'To checkpoint mid-run work, you may request a commit:',
+      ctx.gitRequestCommand,
+      'It blocks until the orchestrator commits the worktree and prints the commit sha',
+      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
+    )
+  }
   parts.push('', 'Continue this task completely, then stop.')
   return parts.join('\n')
 }
@@ -126,23 +139,55 @@ export function withRestartHandoff(prompt: string, handoff: string): string {
   ].join('\n')
 }
 
-export function answerPrompt(question: string, answer: string): string {
-  return [
+export function answerPrompt(
+  question: string,
+  answer: string,
+  gitRequestCommand?: string | null,
+): string {
+  const lines = [
     'A human answered the question you were waiting on. Continue the task.',
     '',
     `Question: ${question}`,
     `Answer: ${answer}`,
     '',
-    'Apply the answer and finish the task, then stop.',
-  ].join('\n')
+    'Git is read-only in this worktree: do not commit, push, or otherwise write.',
+    'The runner commits your work and opens the pull request.',
+  ]
+  if (gitRequestCommand) {
+    lines.push(
+      '',
+      'To checkpoint mid-run work, you may request a commit:',
+      gitRequestCommand,
+      'It blocks until the orchestrator commits the worktree and prints the commit sha',
+      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
+    )
+  }
+  lines.push('', 'Apply the answer and finish the task, then stop.')
+  return lines.join('\n')
 }
 
-export function fixChecksPrompt(results: readonly CheckResult[]): string {
+export function fixChecksPrompt(
+  results: readonly CheckResult[],
+  gitRequestCommand?: string | null,
+): string {
+  const lines = [
+    'Git is read-only in this worktree: do not commit, push, or otherwise write.',
+    'The runner commits your work and opens the pull request.',
+    '',
+    'The project checks failed on your changes. Fix them, then stop.',
+  ]
+  if (gitRequestCommand) {
+    lines.push(
+      '',
+      'To checkpoint mid-run work, you may request a commit:',
+      gitRequestCommand,
+      'It blocks until the orchestrator commits the worktree and prints the commit sha',
+      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
+    )
+  }
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
-  return ['The project checks failed on your changes. Fix them, then stop.', '', ...blocks].join(
-    '\n',
-  )
+  return [...lines, '', ...blocks].join('\n')
 }
 
 export function commitMessage(
@@ -180,6 +225,8 @@ export type ConflictPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
+  conflictFiles: readonly string[]
 }
 
 export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string {
@@ -194,7 +241,7 @@ export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string 
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- Resolve every conflict in favor of the pull request intent, keeping base branch changes where both are wanted.',
     "- The PR is another agent's completed task; do not rework its non-conflicting changes.",
-    '- Commit the resolved merge to finish the in-progress merge. Do not push; the dispatcher pushes.',
+    '- Resolve the conflicted files and stop; the runner commits the merge.',
   ]
   return lines.join('\n')
 }
@@ -204,15 +251,17 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
     `Resolve the merge conflict in PR #${ctx.pr.number} "${ctx.pr.title}" against ${ctx.baseBranch}.`,
     '',
     'A merge of the base branch is in progress and currently conflicts. Resolve all conflicted files.',
+    '',
+    `Currently unresolved: ${ctx.conflictFiles.join(', ')}`,
   ]
   if (ctx.checks.length > 0) {
     parts.push(
       '',
-      'Run the project checks and make sure they pass before committing:',
+      'Run the project checks and make sure they pass before stopping:',
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
-  parts.push('', 'Then finish the merge with `git add -A` and `git commit`, and stop.')
+  parts.push('', 'Stage the resolved files with `git add`, then stop.')
   return parts.join('\n')
 }
 
@@ -246,7 +295,8 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
-    '- Commit your changes. Do not push; the dispatcher pushes.',
+    '- Git is read-only in this worktree: do not commit, push, or otherwise write.',
+    '- Resolve conflicts or make the requested fix, then stop; the runner commits and pushes it.',
   ]
   if (ctx.conflicted) {
     lines.push(
@@ -272,14 +322,11 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   if (ctx.checks.length > 0) {
     parts.push(
       '',
-      'Run the project checks and make sure they pass before committing:',
+      'Run the project checks and make sure they pass before stopping:',
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
-  parts.push(
-    '',
-    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
-  )
+  parts.push('', 'Address the feedback with the smallest change that satisfies it, then stop.')
   return parts.join('\n')
 }
 

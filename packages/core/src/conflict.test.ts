@@ -69,9 +69,10 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
-/** A merge into the PR worktree that always conflicts. */
+/** A merge into the PR worktree that always conflicts and leaves an unmerged file. */
 const conflicted = (c: Call): ExecResult | undefined => {
-  if (c.includes('rev-parse')) return fail('')
+  if (c.includes('MERGE_HEAD')) return ok('')
+  if (c.includes('diff')) return ok('src/a.txt\n')
   if (c.includes('merge')) return fail('conflict')
   return undefined
 }
@@ -150,11 +151,14 @@ describe('resolveConflict', () => {
     expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
   })
 
-  test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
+  test('dispatches the agent, commits the merge, pushes the fix, and reports the merge status', async () => {
+    let diffed = 0
     const started: string[] = []
     const { exec, calls } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
+      if (c.includes('diff')) return diffed++ === 0 ? ok('src/a.txt\n') : ok('')
       return undefined
     })
     const logs: { level: ConflictLogLevel; text: string }[] = []
@@ -175,6 +179,7 @@ describe('resolveConflict', () => {
 
     expect(result.ok).toBe(true)
     expect(started).toEqual(['claude'])
+    expect(calls).toContainEqual(['git', 'commit', '--no-edit'])
     expect(calls).toContainEqual([
       'git',
       'push',
@@ -182,7 +187,32 @@ describe('resolveConflict', () => {
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
     expect(driver.calls).toContain(7)
+    expect(result.iteration).toBe(1)
     expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
+  })
+
+  test('re-dispatches with the file list when unmerged paths remain, then parks the task at needs_human when iterations run out', async () => {
+    const { exec } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return fail('conflict')
+      if (c.includes('diff')) return ok('src/a.txt\nsrc/b.txt\n')
+      return undefined
+    })
+    const logs: string[] = []
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: Config.parse({ repo: { baseBranch: 'main', worktreeRoot: '/wt' } }),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => fakeHarness(),
+      onLog: (_level, text) => logs.push(text),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('unmerged paths remain')
+    expect(result.message).toContain('needs_human')
   })
 
   test('reports a failed agent without pushing', async () => {

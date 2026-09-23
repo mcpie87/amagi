@@ -3,11 +3,19 @@ import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
-import { exec as defaultExec, type Exec } from './exec.ts'
+import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { cacheHome } from './paths.ts'
-import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
+import {
+  iterationsFromLabels,
+  type PrInfo,
+  prepareConflictWorktree,
+  pushConflictFix,
+  stampIterationLabel,
+  taskIdFromAmagiBranch,
+} from './pr-check.ts'
 import { resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
+import type { Store } from './store/store.ts'
 
 export type ConflictLogLevel = 'info' | 'ok' | 'warn' | 'error' | 'agent'
 
@@ -18,6 +26,8 @@ export type ResolveConflictOptions = {
   config: Config
   /** Forge driver, so the post-push merge verdict is read from the real forge. */
   driver: PrDriver
+  /** Store used to park the linked task at needs_human once iterations run out. */
+  store?: Store
   exec?: Exec
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness
@@ -28,14 +38,54 @@ export type ResolveConflictOptions = {
 export type ResolveConflictResult = {
   ok: boolean
   message: string
+  /** Conflict-resolution dispatches this call ran for the PR, for the caller to mirror onto the linked task. */
+  iteration: number
+}
+
+/** Paths still unmerged (in conflict); empty once every conflict is resolved. */
+async function unmergedPaths(run: Exec, cwd: string): Promise<string[]> {
+  const out = await execOk(run, ['git', 'diff', '--name-only', '--diff-filter=U'], { cwd })
+  return out
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '')
+}
+
+/** Finishes the in-progress merge with the default merge message, never a fresh one. */
+async function finishMerge(run: Exec, cwd: string): Promise<void> {
+  const head = await run(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd })
+  if (head.exitCode !== 0) return
+  const commit = await run(['git', 'commit', '--no-edit'], { cwd })
+  if (commit.exitCode !== 0) {
+    throw new Error(`git commit --no-edit failed: ${(commit.stderr || commit.stdout).trim()}`)
+  }
+}
+
+/** Parks the linked task at needs_human, so a PR that keeps re-conflicting stops being re-dispatched. */
+function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly string[]): void {
+  if (opts.store === undefined) return
+  const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
+  if (taskId === null) return
+  const task = opts.store.task(taskId)
+  if (task === null) return
+  opts.store.append(taskId, {
+    type: 'task.state',
+    from: task.state,
+    to: 'needs_human',
+    reason: `PR #${opts.pr.number} still has unmerged paths after ${opts.config.loop.conflictMaxIterations} conflict-resolution dispatches: ${unmerged.join(', ')}`,
+  })
 }
 
 /**
  * Resolves one PR's merge conflict: merges the base into the PR head in a
- * worktree, runs the agent over any conflicts, and pushes the resolved merge
- * back to the PR head ref. Shared by the check-prs command and the periodic
- * PR conflict watcher. Never throws: failures come back as `ok: false` and
- * are logged so one broken PR does not abort the caller's loop.
+ * worktree, runs the agent over any conflicts, commits the resolved merge, and
+ * pushes it back to the PR head ref. The agent resolves files and stops; the
+ * runner commits. Unmerged paths left behind re-dispatch the agent with the
+ * file list and bump the per-PR Iteration counter, so a PR that keeps
+ * re-conflicting sinks in the dispatch order; once iterations run out the
+ * linked task is parked at needs_human. Shared by the check-prs command and
+ * the periodic PR conflict watcher. Never throws: failures come back as
+ * `ok: false` and are logged so one broken PR does not abort the caller's loop.
  */
 export async function resolveConflict(
   opts: ResolveConflictOptions,
@@ -43,6 +93,7 @@ export async function resolveConflict(
   const run = opts.exec ?? defaultExec
   const mk = opts.makeHarnessFn ?? makeHarness
   const log = (level: ConflictLogLevel, text: string): void => opts.onLog?.(level, text)
+  let iteration = 0
 
   try {
     const wt = await prepareConflictWorktree({
@@ -55,6 +106,7 @@ export async function resolveConflict(
       exec: run,
     })
     log('info', `worktree: ${wt.path}`)
+    iteration = iterationsFromLabels(opts.pr.labels)
 
     if (!wt.conflicted) {
       await pushConflictFix({
@@ -66,37 +118,56 @@ export async function resolveConflict(
       })
       const message = 'base merges cleanly; pushed the merge to update the PR'
       log('ok', message)
-      return { ok: true, message }
+      return { ok: true, message, iteration }
     }
 
-    const ctx = {
-      pr: opts.pr,
-      worktree: wt.path,
-      branch: wt.branch,
-      baseBranch: opts.config.repo.baseBranch,
-      checks: opts.config.checks.commands,
-    }
-    const harness = mk(opts.config.harness.implement)
-    const proc = harness.start({
-      cwd: wt.path,
-      prompt: resolveConflictPrompt(ctx),
-      systemPrompt: resolveConflictSystemPrompt(ctx),
-      ...harnessStartOpts(opts.config.harness.implement),
-    })
-    log('info', `agent: ${harness.kind} (${wt.branch})`)
+    for (;;) {
+      const unmerged = await unmergedPaths(run, wt.path)
+      if (unmerged.length === 0) break
+      if (iteration >= opts.config.loop.conflictMaxIterations) {
+        parkAtNeedsHuman(opts, unmerged)
+        const message = `unmerged paths remain after ${iteration} dispatches; parked the task at needs_human: ${unmerged.join(', ')}`
+        log('error', message)
+        return { ok: false, message, iteration }
+      }
+      iteration++
+      try {
+        await stampIterationLabel({ cwd: wt.path, pr: opts.pr, iteration, exec: run })
+      } catch (err) {
+        log('warn', `iteration bump failed: ${errMsg(err)}`)
+      }
 
-    for await (const event of proc.events()) {
-      if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
-      else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
-      else if (event.kind === 'error') log('error', event.message)
-    }
-    const outcome = await proc.done
-    if (!outcome.ok) {
-      const message = `agent failed: ${agentFailure(outcome)}`
-      log('error', message)
-      return { ok: false, message }
+      const ctx = {
+        pr: opts.pr,
+        worktree: wt.path,
+        branch: wt.branch,
+        baseBranch: opts.config.repo.baseBranch,
+        checks: opts.config.checks.commands,
+        conflictFiles: unmerged,
+      }
+      const harness = mk(opts.config.harness.implement)
+      const proc = harness.start({
+        cwd: wt.path,
+        prompt: resolveConflictPrompt(ctx),
+        systemPrompt: resolveConflictSystemPrompt(ctx),
+        ...harnessStartOpts(opts.config.harness.implement),
+      })
+      log('info', `agent: ${harness.kind} (${wt.branch})`)
+
+      for await (const event of proc.events()) {
+        if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
+        else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
+        else if (event.kind === 'error') log('error', event.message)
+      }
+      const outcome = await proc.done
+      if (!outcome.ok) {
+        const message = `agent failed: ${agentFailure(outcome)}`
+        log('error', message)
+        return { ok: false, message, iteration }
+      }
     }
 
+    await finishMerge(run, wt.path)
     await pushConflictFix({
       cwd: wt.path,
       branch: wt.branch,
@@ -110,11 +181,11 @@ export async function resolveConflict(
       ? 'resolved and pushed; PR is mergeable'
       : `pushed; the forge reports ${status}`
     log(ok ? 'ok' : 'warn', message)
-    return { ok, message }
+    return { ok, message, iteration }
   } catch (err) {
     const message = errMsg(err)
     log('error', message)
-    return { ok: false, message }
+    return { ok: false, message, iteration }
   }
 }
 

@@ -39,9 +39,19 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
 
 /** Serves the git side of a tick: ls-remote, worktree, merge. PRs come from the driver. */
 function fakeExec(): Exec {
+  let unmerged = false
   return async (cmd) => {
+    if (cmd.includes('MERGE_HEAD')) return { exitCode: 0, stdout: 'merge-head', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
-    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd.includes('merge')) {
+      unmerged = true
+      return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    }
+    if (cmd.includes('--diff-filter=U')) {
+      const stdout = unmerged ? 'src/a.ts\n' : ''
+      unmerged = false
+      return { exitCode: 0, stdout, stderr: '' }
+    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
 }
@@ -307,14 +317,13 @@ test('a conflicting PR that stops conflicting drops out of the state file', asyn
 test('fetches every open PR head each tick when a head moved', async () => {
   let started = 0
   const calls: string[][] = []
-  const exec: Exec = async (cmd) => {
+  const git = fakeExec()
+  const exec: Exec = async (cmd, opts) => {
     calls.push(cmd as string[])
     if (cmd.includes('ls-remote')) {
       return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
     }
-    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
-    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    return { exitCode: 0, stdout: '', stderr: '' }
+    return git(cmd, opts)
   }
   const driver = new FakePr()
   driver.prs = [pr()]
@@ -475,6 +484,7 @@ test('an agent verdict on a pointless PR carries reasoning on the PR and the pro
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: ['amagi'] })]
   writeFileSync(
     join(tmpdir(), 'amagi-pointless-7.md'),
     [
