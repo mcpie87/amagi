@@ -9,7 +9,9 @@ import {
   HarnessKind,
   HUMAN_ONLY_LABEL,
   isTerminal,
+  type LiveRun,
   makeHarness,
+  mergeLiveRuns,
   type Notifier,
   type Question,
   type RegistryEntry,
@@ -66,6 +68,8 @@ export type ServerDeps = {
   runnerRepo?: string
   /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
   workers?: () => WorkerActivity[]
+  /** Foreground CLI workers (`just run`) outside the server runner, merged into /api/runner. */
+  liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
 }
@@ -182,6 +186,7 @@ export function createApp({
   runner,
   runnerRepo,
   workers,
+  liveRuns,
   chatHarnessFor,
 }: ServerDeps) {
   // One ChatService per workspace, so the in-flight guard survives requests.
@@ -660,7 +665,8 @@ export function createApp({
 
     .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const status = await runner.status()
+      let status = await runner.status()
+      if (liveRuns !== undefined) status = await mergeLiveRuns(status, liveRuns())
       if (workers === undefined) return c.json(status)
       return c.json({ ...status, workers: workers() })
     })
