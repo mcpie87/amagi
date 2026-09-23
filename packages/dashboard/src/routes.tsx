@@ -1966,6 +1966,7 @@ function MergeablePrsPanel() {
 function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
+  const readyQueue = useReadyQueue()
   const [search, setSearch] = useState('')
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
@@ -1998,8 +1999,9 @@ function OverviewView() {
         </div>
       </div>
 
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Metric label="Active runs" value={String(queue.length)} />
+        <Metric label="Ready to run" value={String(readyQueue.length)} />
         <Metric label="Workers busy" value={workers} />
         <Metric
           label="Needs attention"
