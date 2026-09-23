@@ -3265,6 +3265,90 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   )
 }
 
+const REPORT_LOG_LINES = 100
+
+/** Markdown summary of a task, ready to feed an LLM for bug-report generation. */
+function taskReport(task: ProjectedTask, elapsedMs: number, repo: string): string {
+  const buffer = agentLogStore.get(`${repo}/${task.id}`)
+  const start = Math.max(0, buffer.length - REPORT_LOG_LINES)
+  const log: string[] = []
+  for (let i = start; i < buffer.length; i++) {
+    const line = buffer.at(i)
+    if (line !== undefined) log.push(line.text)
+  }
+  const checks =
+    task.checks === null
+      ? 'none'
+      : task.checksOk
+        ? `passed (${task.checks.length} checks)`
+        : `failed (${task.checks.length} checks)`
+  const pr = task.prUrl ?? 'none'
+  const branch = task.branch ?? 'none'
+  const needsHuman = task.state === 'needs_human' ? ' (needs human attention)' : ''
+  return [
+    `# ${task.title}`,
+    '',
+    `- **ID**: ${task.id}`,
+    `- **State**: ${task.state}${needsHuman}`,
+    `- **Tracker**: ${task.tracker}`,
+    `- **Branch**: ${branch}`,
+    `- **PR**: ${pr}`,
+    `- **Checks**: ${checks}`,
+    `- **Elapsed**: ${fmtDuration(elapsedMs)}`,
+    '',
+    '## Summary',
+    '',
+    task.statusReason ?? 'none',
+    '',
+    `## Log (last ${log.length} lines)`,
+    '',
+    '```',
+    ...log,
+    '```',
+    '',
+  ].join('\n')
+}
+
+/** Header-row button that copies a markdown task report to the clipboard. */
+function CopyReportButton({
+  repo,
+  task,
+  elapsedMs,
+}: {
+  repo: string
+  task: ProjectedTask
+  elapsedMs: number
+}) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (timer.current !== null) clearTimeout(timer.current)
+    }
+  }, [])
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(taskReport(task, elapsedMs, repo))
+      setCopied(true)
+      if (timer.current !== null) clearTimeout(timer.current)
+      timer.current = setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // clipboard unavailable (non-secure context); leave the button quiet
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+    >
+      {copied ? 'Copied' : 'Copy report'}
+    </button>
+  )
+}
+
 type DetailTab = 'log' | 'checks'
 
 function TaskDetailView() {
@@ -3378,6 +3462,9 @@ function TaskDetailView() {
           <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
         )}
         {selected !== null && <CloseButtons repo={selected} taskId={task.id} state={task.state} />}
+        {selected !== null && (
+          <CopyReportButton repo={selected} task={task} elapsedMs={health.elapsedMs} />
+        )}
         <StopButton taskId={task.id} />
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
