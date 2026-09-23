@@ -1879,13 +1879,93 @@ const metricTone = {
   none: { box: 'border-line bg-surface', value: 'text-fg-strong' },
 } as const
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'red' | 'amber' }) {
+function Metric({
+  label,
+  value,
+  tone,
+  onClick,
+}: {
+  label: string
+  value: string
+  tone?: 'red' | 'amber'
+  onClick?: () => void
+}) {
   const t = metricTone[tone ?? 'none']
-  return (
-    <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>
+  const body = (
+    <>
       <div className="text-[11px] font-medium uppercase tracking-wide text-fg-faint">{label}</div>
       <div className={`mt-1 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
-    </div>
+    </>
+  )
+  if (onClick === undefined) {
+    return <div className={`metric rounded-lg border px-4 py-3 ${t.box}`}>{body}</div>
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`metric rounded-lg border px-4 py-3 text-left ${t.box} hover:border-line-strong`}
+    >
+      {body}
+    </button>
+  )
+}
+
+function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog === null) return
+    dialog.showModal()
+  }, [])
+  return (
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="ready-queue-dialog"
+    >
+      <div className="flex items-center justify-between border-b border-line px-4 py-3">
+        <h2 className="text-sm font-semibold text-fg">Ready to run ({tasks.length})</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="rounded p-1 text-fg-muted hover:bg-raised hover:text-fg"
+        >
+          <Icon name="close" size={16} />
+        </button>
+      </div>
+      {tasks.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-fg-faint">nothing in the ready queue</p>
+      ) : (
+        <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto">
+          {tasks.map((task) => (
+            <li key={task.id} className="px-4 py-2.5 text-sm">
+              {task.url === null ? (
+                <span className="block truncate font-medium text-fg">{task.title}</span>
+              ) : (
+                <a
+                  href={task.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block truncate font-medium text-fg hover:underline"
+                >
+                  {task.title}
+                </a>
+              )}
+              <span className="block truncate text-xs text-fg-faint">
+                {task.id}
+                {task.priority !== null && ` · P${task.priority}`}
+                {task.type !== null && ` · ${task.type}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </dialog>
   )
 }
 
@@ -1968,6 +2048,7 @@ function OverviewView() {
   const { status } = useRunner()
   const readyQueue = useReadyQueue()
   const [search, setSearch] = useState('')
+  const [readyQueueOpen, setReadyQueueOpen] = useState(false)
   const queue = activeTasks(state)
   const attention = tasksNeedingAttention(state)
   const openQuestions = Object.values(state.questions).filter((q) => q.resolvedAt === null).length
@@ -2001,7 +2082,11 @@ function OverviewView() {
 
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Metric label="Active runs" value={String(queue.length)} />
-        <Metric label="Ready to run" value={String(readyQueue.length)} />
+        <Metric
+          label="Ready to run"
+          value={String(readyQueue.length)}
+          onClick={() => setReadyQueueOpen(true)}
+        />
         <Metric label="Workers busy" value={workers} />
         <Metric
           label="Needs attention"
@@ -2055,6 +2140,10 @@ function OverviewView() {
         </EmptyState>
       ) : (
         <RunList tasks={visible} showReason={false} />
+      )}
+
+      {readyQueueOpen && (
+        <ReadyQueueDialog tasks={readyQueue} onClose={() => setReadyQueueOpen(false)} />
       )}
     </section>
   )
