@@ -158,8 +158,8 @@ export const Config = z.object({
       retryMaxMs: z.number().int().min(0).default(300_000),
       /**
        * Input context at which a run is flagged: the runner appends a
-       * `context.warn` event once the run's peak context (input + cached
-       * tokens) reaches it. Kept under `contextMaxTokens` so there is a
+       * `context.warn` event once the run's peak context (the input, cached
+       * tokens included, of its largest single model request) reaches it. Kept under `contextMaxTokens` so there is a
        * breathing room between warning and acting.
        */
       contextWarnTokens: z.number().int().min(0).default(160_000),

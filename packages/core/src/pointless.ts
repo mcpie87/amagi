@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
@@ -177,7 +177,8 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
       persona: opts.config.repo.persona,
       exec: run,
     })
-    const outPath = join(tmpdir(), `amagi-pointless-${opts.pr.number}.md`)
+    const outDir = mkdtempSync(join(tmpdir(), `amagi-pointless-${opts.pr.number}-`))
+    const outPath = join(outDir, 'verdict.md')
     try {
       const proc = mk(opts.config.harness.implement).start({
         cwd: wt.path,
@@ -198,7 +199,7 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
       const raw = readFileSync(outPath, 'utf8').trim()
       return raw === '' ? null : parsePointlessVerdict(raw)
     } finally {
-      rmSync(outPath, { force: true })
+      rmSync(outDir, { recursive: true, force: true })
     }
   } catch (err) {
     console.warn(`pr pointless verdict #${opts.pr.number}: ${errMsg(err)}`)

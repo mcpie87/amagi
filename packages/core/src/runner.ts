@@ -244,7 +244,7 @@ export class Runner {
   private cancelled = false
   private retryNowRequested = false
   private currentProcess: AgentProcess | null = null
-  /** Running peak input context (input + cached tokens) for the current task run. */
+  /** Running peak input context of a single model request in the current task run. */
   private peakContext = 0
   /** Whether the soft context limit has been flagged for the current task run. */
   private contextWarned = false
@@ -948,7 +948,7 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        store.append(taskId, { type: 'agent.stream', role, event })
+        if (event.kind !== 'context') store.append(taskId, { type: 'agent.stream', role, event })
         if (this.observeContext(taskId, event)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true
@@ -1018,15 +1018,15 @@ export class Runner {
   }
 
   /**
-   * Folds a streamed usage event into the run's peak context and enforces the
+   * Folds a streamed context event into the run's peak context and enforces the
    * budget. Returns true when the hard limit was crossed, signalling the
    * caller to kill the agent.
    */
   private observeContext(taskId: string, event: AgentEvent): boolean {
-    if (event.kind !== 'usage') return false
+    if (event.kind !== 'context') return false
     const { store } = this.deps
     const { warnTokens, maxTokens } = this.contextLimits()
-    const context = event.inputTokens + (event.cachedTokens ?? 0)
+    const context = event.tokens
     if (context <= this.peakContext) return false
     this.peakContext = context
     store.append(taskId, { type: 'run.context', contextTokens: context })
