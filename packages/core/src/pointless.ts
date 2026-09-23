@@ -1,11 +1,17 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import type { Config } from './config.ts'
 import { ghEnv } from './drivers/forge-cred.ts'
 import { AMAGI_LABEL, NEEDS_CLOSING_LABEL, type PrDriver } from './drivers/pr.ts'
-import type { Tracker } from './drivers/types.ts'
+import type { Tracker, TrackerTask } from './drivers/types.ts'
+import { agentFailure, errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
+import { harnessStartOpts, makeHarness } from './factory.ts'
+import { resolveTaskId } from './mentions.ts'
 import { cacheHome } from './paths.ts'
-import type { PrInfo } from './pr-check.ts'
+import { type PrInfo, prepareConflictWorktree } from './pr-check.ts'
+import { pointlessPrompt, pointlessSystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
 
 export type FlagPointlessOptions = {
@@ -16,17 +22,57 @@ export type FlagPointlessOptions = {
   cwd: string
   repoName: string
   prs: PrInfo[]
+  config: Config
   exec?: Exec
+  /** Test seam: the harness factory, defaulting to the configured one. */
+  makeHarnessFn?: typeof makeHarness
 }
 
 export type FlagPointlessResult = { flagged: number; cleared: number }
 
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+export const POINTLESS_VERDICTS = ['RESOLVED', 'CLOSE TASK', 'NEW TASK', 'REPHRASE TASK'] as const
+export type PointlessVerdictKind = (typeof POINTLESS_VERDICTS)[number]
+
+export type PointlessVerdict = {
+  /** The verdict line the agent picked; null when the file has no recognized line. */
+  verdict: PointlessVerdictKind | null
+  /** The `REASONING:` section: why this diff is empty in the context of the task. */
+  reasoning: string
+  /** The `PROPOSAL:` section: the recommendation, posted to the tracker. */
+  proposal: string
+}
+
+/** Text between the `START:` and `END:` heading lines, trimmed; '' when either is missing. */
+function section(lines: readonly string[], start: string, end?: string): string {
+  const startIdx = lines.findIndex((l) => l.trim().toUpperCase() === `${start}:`)
+  if (startIdx === -1) return ''
+  const body: string[] = []
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (line === undefined) break
+    if (end !== undefined && line.trim().toUpperCase() === `${end}:`) break
+    body.push(line)
+  }
+  return body.join('\n').trim()
+}
+
+export function parsePointlessVerdict(raw: string): PointlessVerdict {
+  const lines = raw.split('\n')
+  const first = lines[0]?.trim().toUpperCase() ?? ''
+  const verdict = (POINTLESS_VERDICTS as readonly string[]).includes(first)
+    ? (first as PointlessVerdictKind)
+    : null
+  return {
+    verdict,
+    reasoning: section(lines, 'REASONING', 'PROPOSAL'),
+    proposal: section(lines, 'PROPOSAL'),
+  }
+}
 
 /**
- * The reasoning posted to the PR and the tracker issue: the close button and
- * the decision live there, and the tracker comment survives once the PR is
- * gone. Amagi flags, a human closes.
+ * The fallback reasoning posted when no agent verdict is available: the close
+ * button and the decision live there, and the tracker comment survives once
+ * the PR is gone. Amagi flags, a human closes.
  */
 export function pointlessReason(pr: PrInfo): string {
   return [
@@ -75,12 +121,102 @@ export function savePointlessWatch(path: string, state: PointlessWatchState): vo
 }
 
 /**
+ * The task text an agent verdict sees, resolved per am-qji (PR body trailer,
+ * then branch against the tracker's open ids, then the PR title) so the
+ * verdict still works when the local store has no row for the PR. Never
+ * throws: a resolution or lookup failure just yields null.
+ */
+async function taskForVerdict(
+  pr: PrInfo,
+  tracker: Tracker,
+  storeTaskId: string | null,
+): Promise<TrackerTask | null> {
+  let id = storeTaskId
+  try {
+    id = (await resolveTaskId(pr, tracker)) ?? id
+  } catch (err) {
+    console.warn(`pr pointless task id #${pr.number}: ${errMsg(err)}`)
+  }
+  if (id === null) return null
+  try {
+    return await tracker.get(id)
+  } catch (err) {
+    console.warn(`pr pointless task ${id}: ${errMsg(err)}`)
+    return null
+  }
+}
+
+type JudgePointlessOptions = {
+  /** Repo root the PR worktree is prepared from. */
+  root: string
+  repoName: string
+  pr: PrInfo
+  /** The task the PR was opened for, or null when it could not be resolved. */
+  task: TrackerTask | null
+  config: Config
+  exec?: Exec
+  makeHarnessFn?: typeof makeHarness
+}
+
+/**
+ * The agent verdict on an empty-diff PR: the mechanical check established
+ * that the diff is empty, the agent reads the repo and the task and writes a
+ * verdict to a file (see pointlessPrompt). Returns null on any failure so the
+ * caller's mechanical flagging still happens with the static reason.
+ */
+async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVerdict | null> {
+  const run = opts.exec ?? defaultExec
+  const mk = opts.makeHarnessFn ?? makeHarness
+  try {
+    const wt = await prepareConflictWorktree({
+      repoRoot: opts.root,
+      repoName: opts.repoName,
+      worktreeRoot: opts.config.repo.worktreeRoot,
+      baseBranch: opts.config.repo.baseBranch,
+      pr: opts.pr,
+      persona: opts.config.repo.persona,
+      exec: run,
+    })
+    const outPath = join(tmpdir(), `amagi-pointless-${opts.pr.number}.md`)
+    try {
+      const proc = mk(opts.config.harness.implement).start({
+        cwd: wt.path,
+        prompt: pointlessPrompt({
+          pr: opts.pr,
+          task: opts.task,
+          baseBranch: opts.config.repo.baseBranch,
+          outPath,
+        }),
+        systemPrompt: pointlessSystemPrompt(),
+        ...harnessStartOpts(opts.config.harness.implement),
+      })
+      const outcome = await proc.done
+      if (!outcome.ok) {
+        console.warn(`pr pointless verdict #${opts.pr.number}: ${agentFailure(outcome)}`)
+        return null
+      }
+      const raw = readFileSync(outPath, 'utf8').trim()
+      return raw === '' ? null : parsePointlessVerdict(raw)
+    } finally {
+      rmSync(outPath, { force: true })
+    }
+  } catch (err) {
+    console.warn(`pr pointless verdict #${opts.pr.number}: ${errMsg(err)}`)
+    return null
+  }
+}
+
+/**
  * Flags amagi-provenance open PRs whose diff against base is empty: adds the
- * needs-closing label, comments the reasoning on the PR and the tracker issue,
- * and parks the task in pr_flagged. A later tick whose PR no longer qualifies
- * (real commits pushed) removes the label and returns the task to pr_open,
- * without a second comment. Never closes a pull request. PRs without the amagi
- * label are skipped regardless of their diff, so a human's PR is never touched.
+ * needs-closing label, comments the reasoning on the PR and the proposal on
+ * the tracker issue, and parks the task in pr_flagged. The empty diff is the
+ * mechanical trigger; an agent verdict on top supplies the reasoning (why the
+ * diff is empty in the context of the task) and a proposal (close, new, or
+ * rephrase the task), and never acts on either. A later tick whose PR no
+ * longer qualifies (real commits pushed) removes the label and returns the
+ * task to pr_open, without a second comment. Never closes a pull request.
+ * PRs without the amagi label are skipped regardless of their diff, so a
+ * human's PR is never touched.
  */
 export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<FlagPointlessResult> {
   const run = opts.exec ?? defaultExec
@@ -114,13 +250,26 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
       if (task !== undefined && task.state === 'pr_open') {
         try {
           await opts.driver.addLabel(opts.cwd, pr.number, NEEDS_CLOSING_LABEL)
-          await opts.driver.postComment(opts.cwd, pr.number, pointlessReason(pr))
-          await opts.tracker.comment(task.id, pointlessReason(pr))
+          const verdict = await judgePointless({
+            root: opts.cwd,
+            repoName: opts.repoName,
+            pr,
+            task: await taskForVerdict(pr, opts.tracker, task.id),
+            config: opts.config,
+            ...(opts.exec === undefined ? {} : { exec: opts.exec }),
+            ...(opts.makeHarnessFn === undefined ? {} : { makeHarnessFn: opts.makeHarnessFn }),
+          })
+          const reasoning =
+            verdict !== null && verdict.reasoning !== '' ? verdict.reasoning : pointlessReason(pr)
+          const proposal =
+            verdict !== null && verdict.proposal !== '' ? verdict.proposal : pointlessReason(pr)
+          await opts.driver.postComment(opts.cwd, pr.number, reasoning)
+          await opts.tracker.comment(task.id, proposal)
           opts.store.append(task.id, {
             type: 'task.state',
             from: 'pr_open',
             to: 'pr_flagged',
-            reason: pointlessReason(pr),
+            reason: reasoning,
           })
           flagged++
         } catch (err) {

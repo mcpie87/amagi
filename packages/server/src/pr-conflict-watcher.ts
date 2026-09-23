@@ -237,7 +237,9 @@ export function startPrConflictWatcher({
         cwd: root,
         repoName,
         prs,
+        config,
         ...(exec === undefined ? {} : { exec }),
+        ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
       })
       flagged += pointless.flagged
       cleared += pointless.cleared
