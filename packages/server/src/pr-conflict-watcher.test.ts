@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -500,6 +500,39 @@ test('an amagi PR with an empty diff gets labelled, commented on and parked in p
   expect(driver.postedComments).toHaveLength(1)
   expect(tracker.comments).toHaveLength(1)
   expect(tracker.comments[0]?.body).toBe(driver.postedComments[0])
+  expect(pointlessStateFile()['7']).toEqual({ headOid: 'deadbeef', flagged: true })
+})
+
+test('an agent verdict on a pointless PR carries reasoning on the PR and the proposal on the tracker', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPrTask(store)
+  const tracker = fakeTracker()
+  const driver = new FakePr()
+  writeFileSync(
+    join(tmpdir(), 'amagi-pointless-7.md'),
+    [
+      'CLOSE TASK',
+      '',
+      'REASONING:',
+      'Base already contains this work.',
+      '',
+      'PROPOSAL:',
+      'Close bd-1: the task is done.',
+      '',
+    ].join('\n'),
+  )
+  start(
+    fakeExecForPointless(() => ''),
+    () => fakeHarness(() => {}),
+    { store, tracker, driver },
+  )
+
+  await Bun.sleep(60)
+
+  expect(store.task('bd-1')?.state).toBe('pr_flagged')
+  expect(driver.addedLabels).toEqual(['amagi/needs-closing'])
+  expect(driver.postedComments).toEqual(['Base already contains this work.'])
+  expect(tracker.comments).toEqual([{ id: 'bd-1', body: 'Close bd-1: the task is done.' }])
   expect(pointlessStateFile()['7']).toEqual({ headOid: 'deadbeef', flagged: true })
 })
 
