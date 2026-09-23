@@ -870,6 +870,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
           startedAt: {},
           resources: {},
           tasks: {},
+          manual: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1133,6 +1134,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           startedAt: { 'bd-1': 1720000000000 },
           resources: {},
           tasks: {},
+          manual: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1188,6 +1190,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           startedAt: {},
           resources: {},
           tasks: {},
+          manual: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1515,6 +1518,7 @@ describe('runner endpoints', () => {
       startedAt: {},
       resources: {},
       tasks: {},
+      manual: {},
       autoQueue: false,
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1549,6 +1553,7 @@ describe('runner endpoints', () => {
           startedAt: { 'bd-1': 1720000000000 },
           resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
           tasks: {},
+          manual: {},
           autoQueue: false,
         }),
       }),
@@ -1563,6 +1568,7 @@ describe('runner endpoints', () => {
       startedAt: { 'bd-1': 1720000000000 },
       resources: { 'bd-1': { processes: 3, rssBytes: 1048576, cpuMs: 4200 } },
       tasks: {},
+      manual: {},
       autoQueue: false,
     })
   })
@@ -1638,6 +1644,22 @@ describe('runner endpoints', () => {
     expect(res.status).toBe(201)
     expect(await res.json()).toEqual({ taskId: 'bd-1' })
     expect(started).toEqual([undefined])
+  })
+
+  test('POST /api/runs launches manually so it may overfill capacity', async () => {
+    const manual: boolean[] = []
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: stubRunner({
+        start: async (_taskId, _opts, isManual) => {
+          manual.push(isManual ?? false)
+          return { ok: true, taskId: 'bd-1' }
+        },
+      }),
+    })
+    const res = await post('/api/runs', '{}')
+    expect(res.status).toBe(201)
+    expect(manual).toEqual([true])
   })
 
   test('POST /api/runs forwards a task id and rejects an invalid body', async () => {
@@ -1800,6 +1822,7 @@ describe('repo settings endpoints', () => {
           resources: {},
           startedAt: {},
           tasks: {},
+          manual: {},
           autoQueue: true,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
@@ -1845,6 +1868,7 @@ describe('repo settings endpoints', () => {
           startedAt: {},
           resources: {},
           tasks: {},
+          manual: {},
           autoQueue: false,
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),

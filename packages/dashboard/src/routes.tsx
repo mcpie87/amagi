@@ -1413,6 +1413,7 @@ function WorkerSlot({
   taskInfo,
   state,
   selected,
+  manual,
 }: {
   taskId: string | null
   startedAt: number | undefined
@@ -1422,6 +1423,8 @@ function WorkerSlot({
   taskInfo?: RunnerTask | undefined
   state: DashboardState
   selected: string | null
+  /** True when the worker was launched manually beyond the automatic capacity. */
+  manual?: boolean | undefined
 }) {
   if (taskId === null) {
     return (
@@ -1455,6 +1458,9 @@ function WorkerSlot({
           </span>
         )}
         <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
+        {manual === true && (
+          <span className={`${PILL} bg-violet-soft text-violet-ink ring-violet-edge`}>manual</span>
+        )}
         {nearLimit && (
           <span
             className="shrink-0 rounded bg-amber-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-ink ring-1 ring-inset ring-amber-edge"
@@ -1724,7 +1730,7 @@ function WorkersPanel() {
         <span>procs: {total.processes}</span>
       </div>
       <div className="space-y-2">
-        {Array.from({ length: status.capacity }, (_, i) => (
+        {Array.from({ length: Math.max(status.capacity, running.length) }, (_, i) => (
           <WorkerSlot
             key={i}
             taskId={running[i] ?? null}
@@ -1734,6 +1740,7 @@ function WorkersPanel() {
             taskInfo={running[i] === undefined ? undefined : status.tasks?.[running[i]]}
             state={state}
             selected={selected}
+            manual={running[i] === undefined ? undefined : (status.manual?.[running[i]] ?? false)}
           />
         ))}
       </div>

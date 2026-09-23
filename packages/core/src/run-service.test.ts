@@ -50,7 +50,11 @@ class FakeTracker implements Tracker {
     return this.queue
   }
   async claim(id?: string): Promise<TrackerTask | null> {
-    if (id !== undefined) return this.queue.find((t) => t.id === id) ?? null
+    if (id !== undefined) {
+      const index = this.queue.findIndex((t) => t.id === id)
+      if (index === -1) return null
+      return this.queue.splice(index, 1)[0] ?? null
+    }
     // Like a real tracker's atomic claim, a no-id claim consumes the task.
     return this.queue.shift() ?? null
   }
@@ -311,6 +315,7 @@ describe('RunService', () => {
       startedAt: {},
       resources: {},
       tasks: {},
+      manual: {},
       autoQueue: false,
     })
     service.dispose()
@@ -608,6 +613,61 @@ describe('RunService', () => {
     const second = await service.start()
     expect(second).toEqual({ ok: false, status: 409, error: 'runner at capacity (1/1)' })
     await service.stop(TASK.id)
+  })
+
+  test('a manual launch can overfill capacity and is reported manual', async () => {
+    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 1)
+    expect(await service.start(TASK.id, undefined, true)).toEqual({ ok: true, taskId: TASK.id })
+    expect(await service.start(TASK2.id, undefined, true)).toEqual({
+      ok: true,
+      taskId: TASK2.id,
+    })
+    const status = await service.status()
+    expect(status.running).toEqual([TASK.id, TASK2.id])
+    expect(status.manual).toEqual({ [TASK.id]: true, [TASK2.id]: true })
+    expect(status.available).toBe(false)
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+  })
+
+  test('automatic dispatch stays gated while manual workers fill capacity', async () => {
+    const tracker = new FakeTracker([TASK, TASK2])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 1, config(), {
+      autoQueueIdleMs: 20,
+      autoQueueActiveMs: 10,
+    })
+    // The manual launch fills the only slot; the auto queue must not add a
+    // second worker while any worker (manual included) is at capacity.
+    expect((await service.start(TASK.id, undefined, true)).ok).toBe(true)
+    await waitFor(() => harness.starts >= 1)
+    service.setAutoQueue(true)
+    await Bun.sleep(150)
+    expect(harness.starts).toBe(1)
+    expect((await service.status()).running).toEqual([TASK.id])
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
+  test('automatic dispatch fills a slot once the manual overfill drops out', async () => {
+    const tracker = new FakeTracker([TASK, TASK2])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 1, config(), {
+      autoQueueIdleMs: 20,
+      autoQueueActiveMs: 10,
+    })
+    expect((await service.start(TASK.id, undefined, true)).ok).toBe(true)
+    await waitFor(() => harness.starts >= 1)
+    service.setAutoQueue(true)
+    await Bun.sleep(150)
+    expect(harness.starts).toBe(1)
+    // Freeing the manual worker drops the total below capacity, so the auto
+    // queue can claim the next task.
+    await service.stop(TASK.id)
+    await waitFor(() => harness.starts >= 2)
+    expect((await service.status()).running).toEqual([TASK2.id])
+    await service.stop(TASK2.id)
+    service.dispose()
   })
 
   test('start refuses to launch the same task twice', async () => {

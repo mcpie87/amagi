@@ -119,8 +119,13 @@ body), and stops a run it owns (`POST /api/runs/:id/stop`). Stop is graceful:
 the owned agent process is killed, the tracker lease is released, and the task
 is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
-server runs up to `loop.maxParallel` tasks at once and refuses launch requests
-that would exceed that or claim a task that is already running. The dashboard
+server's automatic dispatch runs up to `loop.maxParallel` tasks at once and
+refuses to claim a task that is already running; automatic dispatch also pauses
+while manual workers keep the total count at or above the limit. A manual launch
+request (`POST /api/runs`) may overfill beyond `loop.maxParallel`: the extra
+worker is reported as a manual worker (`manual` in `GET /api/runner` and a
+"manual" tag on its slot in the dashboard Workers section), and it only occupies
+a slot, never raising the automatic ceiling. The dashboard
 surfaces all of this from the task board and task detail pages.
 
 `GET /api/runner` also carries per-task resource usage for the runner, summed

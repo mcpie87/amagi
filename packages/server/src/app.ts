@@ -741,7 +741,9 @@ export function createApp({
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
       }
-      const result = await runner.start(taskId, opts)
+      // A launch request is inherently manual: it may overfill the automatic
+      // capacity, so the run is marked manual and reported as such.
+      const result = await runner.start(taskId, opts, true)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })

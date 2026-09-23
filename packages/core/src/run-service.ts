@@ -37,6 +37,8 @@ export type RunnerStatus = {
   resources: Record<string, RunnerResource>
   /** Title and live agent per running task, keyed by task id. */
   tasks: Record<string, RunnerTask>
+  /** Running task ids launched manually, keyed by task id; manual launches may overfill capacity. */
+  manual: Record<string, boolean>
   /** Whether automatic dispatch is on: ready tasks launch themselves on free slots. */
   autoQueue: boolean
   /** Activity of background workers (e.g. the mention watcher), when any. */
@@ -92,7 +94,8 @@ export type RunOptions = {
 /** The slice of RunService the HTTP layer depends on, so tests can stub it. */
 export interface RunServiceApi {
   status(): Promise<RunnerStatus>
-  start(taskId?: string, opts?: RunOptions): Promise<StartResult>
+  /** `manual` launches are allowed beyond capacity and count as manual workers. */
+  start(taskId?: string, opts?: RunOptions, manual?: boolean): Promise<StartResult>
   stop(taskId: string): Promise<StopResult>
   /** Live capacity change; only affects new launches, never in-flight runs. */
   setMaxParallel(n: number): void
@@ -141,7 +144,7 @@ export class RunService implements RunServiceApi {
   private capacity: number
   private readonly runs = new Map<
     string,
-    { runner: Runner; startedAt: number; done: Promise<RunOnceResult> }
+    { runner: Runner; startedAt: number; done: Promise<RunOnceResult>; manual: boolean }
   >()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
@@ -224,9 +227,12 @@ export class RunService implements RunServiceApi {
     const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
     const tasks: Record<string, RunnerTask> = {}
+    const manual: Record<string, boolean> = {}
     await Promise.all(
       running.map(async (id) => {
-        const pid = this.runs.get(id)?.runner.currentPid()
+        const entry = this.runs.get(id)
+        if (entry !== undefined) manual[id] = entry.manual
+        const pid = entry?.runner.currentPid()
         if (pid !== null && pid !== undefined && pid > 0) {
           resources[id] = await processTreeStats(pid)
         }
@@ -251,12 +257,13 @@ export class RunService implements RunServiceApi {
       startedAt,
       resources,
       tasks,
+      manual,
       autoQueue: this.autoQueue,
     }
   }
 
-  start(taskId?: string, opts?: RunOptions): Promise<StartResult> {
-    const result = this.launchQueue.then(() => this.tryStart(taskId, opts))
+  start(taskId?: string, opts?: RunOptions, manual = false): Promise<StartResult> {
+    const result = this.launchQueue.then(() => this.tryStart(taskId, opts, manual))
     this.launchQueue = result.then(
       () => undefined,
       () => undefined,
@@ -307,11 +314,14 @@ export class RunService implements RunServiceApi {
     return { ok: true, implement: base, changed }
   }
 
-  private async tryStart(taskId?: string, opts?: RunOptions): Promise<StartResult> {
+  private async tryStart(taskId?: string, opts?: RunOptions, manual = false): Promise<StartResult> {
     if (taskId !== undefined && this.runs.has(taskId)) {
       return { ok: false, status: 409, error: `task ${taskId} is already running` }
     }
-    if (this.runs.size >= this.capacity) {
+    // Only the automatic dispatch honors capacity. A manual launch may overfill,
+    // but the auto gate counts every running worker (manual included) against
+    // capacity, so manual workers never let the automatic count exceed the limit.
+    if (!manual && this.runs.size >= this.capacity) {
       return {
         ok: false,
         status: 409,
@@ -338,7 +348,7 @@ export class RunService implements RunServiceApi {
       }
       const task = await this.opts.tracker.claim(taskId)
       if (task === null) return { ok: false, status: 409, error: 'no ready task to claim' }
-      this.launch(task, implement, changed)
+      this.launch(task, implement, changed, manual)
       return { ok: true, taskId: task.id }
     }
     const skipped: string[] = []
@@ -352,7 +362,7 @@ export class RunService implements RunServiceApi {
       const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''
       return { ok: false, status: 409, error: `no ready task to claim${detail}` }
     }
-    this.launch(task, implement, changed)
+    this.launch(task, implement, changed, manual)
     return { ok: true, taskId: task.id }
   }
 
@@ -379,6 +389,7 @@ export class RunService implements RunServiceApi {
     task: TrackerTask,
     implement?: Config['harness']['implement'],
     changed = false,
+    manual = false,
   ): void {
     const { store, tracker, harness, config, repoRoot, repoName, exec, forge } = this.opts
     const makeHarnessFn = this.opts.makeHarness ?? makeHarness
@@ -399,6 +410,6 @@ export class RunService implements RunServiceApi {
       ...(forge === undefined ? {} : { forge }),
     })
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
-    this.runs.set(task.id, { runner, startedAt: Date.now(), done })
+    this.runs.set(task.id, { runner, startedAt: Date.now(), done, manual })
   }
 }
