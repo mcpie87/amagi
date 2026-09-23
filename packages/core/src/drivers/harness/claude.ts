@@ -189,6 +189,7 @@ export class ClaudeHarness implements Harness {
     if (sessionId !== null) argv.push('--resume', sessionId)
     if (opts.model) argv.push('--model', opts.model)
     if (opts.systemPrompt) argv.push('--append-system-prompt', opts.systemPrompt)
+    argv.push('--disable-slash-commands')
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-skip-permissions')

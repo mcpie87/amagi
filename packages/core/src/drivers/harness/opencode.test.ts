@@ -235,4 +235,34 @@ describe('OpencodeHarness process', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test('the skill tool is denied through OPENCODE_CONFIG_CONTENT', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'opencode-env-'))
+    try {
+      const bin = join(dir, 'echo-env')
+      writeFileSync(bin, '#!/bin/sh\nprintf %s "$OPENCODE_CONFIG_CONTENT" >&2\n')
+      chmodSync(bin, 0o755)
+      const outcome = await new OpencodeHarness({ bin }).start({ cwd: dir, prompt: 'x' }).done
+      expect(JSON.parse(outcome.stderr)).toEqual({ permission: { skill: 'deny' } })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('opts.env still overrides the skill deny', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'opencode-env-'))
+    try {
+      const bin = join(dir, 'echo-env')
+      writeFileSync(bin, '#!/bin/sh\nprintf %s "$OPENCODE_CONFIG_CONTENT" >&2\n')
+      chmodSync(bin, 0o755)
+      const outcome = await new OpencodeHarness({ bin }).start({
+        cwd: dir,
+        prompt: 'x',
+        env: { OPENCODE_CONFIG_CONTENT: '{}' },
+      }).done
+      expect(outcome.stderr).toBe('{}')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

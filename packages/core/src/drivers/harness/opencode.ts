@@ -202,6 +202,11 @@ export class OpencodeHarness implements Harness {
       finalize: () => translator.finalize(),
       effort: opts.effort ?? null,
       stdin: OpencodeHarness.message(opts),
+      // spawnAgent layers this over opts.env, so opts.env is spread back in to keep it overridable.
+      env: {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { skill: 'deny' } }),
+        ...opts.env,
+      },
     })
   }
 }

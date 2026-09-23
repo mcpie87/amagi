@@ -131,6 +131,8 @@ describe('CodexHarness argv', () => {
       '--json',
       '-C',
       '/wt',
+      '-c',
+      'skills.include_instructions=false',
       '-s',
       'workspace-write',
       'do the thing',
@@ -139,7 +141,16 @@ describe('CodexHarness argv', () => {
 
   test('resume drops -C and -s, which codex exec resume does not accept', () => {
     const argv = new CodexHarness().argv(base, 'sess-42')
-    expect(argv).toEqual(['codex', 'exec', '--json', 'resume', 'sess-42', 'do the thing'])
+    expect(argv).toEqual([
+      'codex',
+      'exec',
+      '--json',
+      'resume',
+      'sess-42',
+      '-c',
+      'skills.include_instructions=false',
+      'do the thing',
+    ])
   })
 
   test('bypass swaps the sandbox flag on a fresh start', () => {
@@ -172,7 +183,7 @@ describe('CodexHarness argv', () => {
       { ...base, systemPrompt: 'be terse', effort: 'xhigh' },
       null,
     )
-    expect(argv.filter((a) => a === '-c')).toHaveLength(2)
+    expect(argv.filter((a) => a === '-c')).toHaveLength(3)
     expect(argv).toContain('developer_instructions=be terse')
     expect(argv).toContain('model_reasoning_effort=xhigh')
   })
@@ -180,6 +191,16 @@ describe('CodexHarness argv', () => {
   test('extraArgs land before the trailing prompt', () => {
     const argv = new CodexHarness().argv({ ...base, extraArgs: ['--add-dir', '/other'] }, null)
     expect(argv.slice(-3)).toEqual(['--add-dir', '/other', 'do the thing'])
+  })
+
+  test('skills are hidden unless extraArgs re-enables them with a later -c', () => {
+    const argv = new CodexHarness().argv(
+      { ...base, extraArgs: ['-c', 'skills.include_instructions=true'] },
+      null,
+    )
+    const hide = argv.indexOf('skills.include_instructions=false')
+    expect(hide).toBeGreaterThan(-1)
+    expect(argv.indexOf('skills.include_instructions=true')).toBeGreaterThan(hide)
   })
 })
 

@@ -120,6 +120,11 @@ describe('ClaudeHarness argv', () => {
     expect(argv[argv.indexOf('--allowedTools') + 2]).toBe('--add-dir')
   })
 
+  test("skills are disabled so the operator's own skills do not leak into workers", () => {
+    expect(new ClaudeHarness().argv(base, null)).toContain('--disable-slash-commands')
+    expect(new ClaudeHarness().argv(base, 'sess-42')).toContain('--disable-slash-commands')
+  })
+
   test('bypass drops the allowlist entirely', () => {
     const argv = new ClaudeHarness().argv({ ...base, permissions: 'bypass' }, null)
     expect(argv).toContain('--dangerously-skip-permissions')

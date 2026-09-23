@@ -286,6 +286,8 @@ export class CodexHarness implements Harness {
     // config key that injects extra instructions as a separate message.
     if (opts.systemPrompt) argv.push('-c', `developer_instructions=${opts.systemPrompt}`)
     if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
+    // Before extraArgs so a repo can turn skills back on: a later -c wins.
+    argv.push('-c', 'skills.include_instructions=false')
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')
