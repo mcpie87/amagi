@@ -119,6 +119,8 @@ const openPrTask = (store: Store): void => {
   }
 }
 
+let pendingVerdict: string | null = null
+
 const fakeHarness = (): Harness => {
   const process = {
     pid: -1,
@@ -137,17 +139,24 @@ const fakeHarness = (): Harness => {
   }
   return {
     kind: 'fake',
-    start: () => process,
+    start: ({ prompt }) => {
+      const outPath = prompt.match(/^file: (.+)$/m)?.[1]
+      if (outPath !== undefined && pendingVerdict !== null) {
+        writeFileSync(outPath, pendingVerdict)
+        pendingVerdict = null
+      }
+      return process
+    },
     resume: () => process,
     listModels: async () => [],
     listEfforts: async () => [],
   }
 }
 
-/** The tmpdir file judgePointless reads back for PR 7. */
-const verdictFile = (): string => join(tmpdir(), 'amagi-pointless-7.md')
-
-const writeVerdict = (raw: string): void => writeFileSync(verdictFile(), raw)
+/** The verdict staged for the fake harness on its next start. */
+const writeVerdict = (raw: string): void => {
+  pendingVerdict = raw
+}
 
 type FlagOpts = {
   store: Store
@@ -189,6 +198,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  pendingVerdict = null
   delete process.env.XDG_CACHE_HOME
   rmSync(cacheDir, { recursive: true, force: true })
 })
