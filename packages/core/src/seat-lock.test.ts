@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { childPids, killTree } from './process.ts'
 import { acquireSeat } from './seat-lock.ts'
 
 let directory: string
@@ -93,5 +94,40 @@ describe('seat locks', () => {
     await child.exited
     const reclaimed = await acquireSeat('claude', { directory: path, maxWaitMs: 1000 })
     reclaimed.release()
+  })
+
+  test.skipIf(process.platform !== 'linux')(
+    'reclaims a seat whose holder exited but was never reaped',
+    async () => {
+      const path = tempDirectory()
+      const parent = Bun.spawn(['sh', '-c', 'true & exec sleep 30'], { stdout: 'ignore' })
+      try {
+        await Bun.sleep(300)
+        const [zombie] = await childPids(parent.pid)
+        if (zombie === undefined) throw new Error('no unreaped child left behind')
+        const stale = await acquireSeat('codex', { directory: path })
+        stale.bind(zombie)
+        const reclaimed = await acquireSeat('codex', { directory: path, maxWaitMs: 1000 })
+        reclaimed.release()
+      } finally {
+        await killTree(parent.pid, { graceMs: 50 })
+      }
+    },
+  )
+
+  test('skips a ticket whose waiter stopped waiting while its process lives on', async () => {
+    const path = tempDirectory()
+    const queue = join(path, Buffer.from('codex', 'utf8').toString('hex'), 'queue')
+    mkdirSync(queue, { recursive: true })
+    const orphan = join(queue, '000000000000-orphan.json')
+    writeFileSync(
+      orphan,
+      JSON.stringify({ id: '000000000000-orphan', pid: process.pid, startedAt: 0 }),
+    )
+    const past = new Date(Date.now() - 60_000)
+    utimesSync(orphan, past, past)
+
+    const lease = await acquireSeat('codex', { directory: path, maxWaitMs: 1000 })
+    lease.release()
   })
 })
