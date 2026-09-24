@@ -297,6 +297,21 @@ export class Store {
     }))
   }
 
+  eventsSince(ts: number): StoredEvent[] {
+    const rows = this.db.query('select * from events where ts >= ? order by ts, seq').all(ts) as {
+      seq: number
+      ts: number
+      task_id: string | null
+      body: string
+    }[]
+    return rows.map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
   /**
    * The most recent events for one task, oldest first, for windowed analysis
    * (e.g. the doom-loop guard). Reads from the tail so a long-lived task's
