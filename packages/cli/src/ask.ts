@@ -1,10 +1,7 @@
-import { errorOf } from '@amagi/core'
-
 export type AskOutcome = { kind: 'answered'; answer: string } | { kind: 'no_answer' }
 
 export type AskOptions = {
   baseUrl: string
-  repo: string
   taskId: string
   token: string
   question: string
@@ -12,13 +9,23 @@ export type AskOptions = {
   deadlineMs: number
 }
 
-export { taskIdFromAmagiBranch as taskIdFromBranch } from '@amagi/core'
+/** `amagi/<id>-<slug>` from the worktree branch is the agent's own task id. */
+export function taskIdFromBranch(branch: string): string | null {
+  return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
+}
+
+async function errorOf(res: Response): Promise<string> {
+  try {
+    return ((await res.json()) as { error?: string }).error ?? `HTTP ${res.status}`
+  } catch {
+    return `HTTP ${res.status}`
+  }
+}
 
 export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
   const headers = { 'content-type': 'application/json', 'X-Amagi-Token': opts.token }
-  const base = `${opts.baseUrl}/api/repos/${opts.repo}/tasks/${opts.taskId}`
 
-  const asked = await fetch(`${base}/questions`, {
+  const asked = await fetch(`${opts.baseUrl}/api/tasks/${opts.taskId}/questions`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ question: opts.question, options: opts.options }),
@@ -27,7 +34,7 @@ export async function askQuestion(opts: AskOptions): Promise<AskOutcome> {
   const question = ((await asked.json()) as { question: { id: string } }).question
 
   const awaited = await fetch(
-    `${base}/questions/${question.id}/await?deadlineMs=${opts.deadlineMs}`,
+    `${opts.baseUrl}/api/tasks/${opts.taskId}/questions/${question.id}/await?deadlineMs=${opts.deadlineMs}`,
     { headers },
   )
   if (!awaited.ok) throw new Error(`amagi ask: ${await errorOf(awaited)}`)

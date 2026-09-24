@@ -16,6 +16,11 @@ export type TaskListQuery = z.infer<typeof TaskListQuery>
 
 /** Every repo-scoped route starts with the workspace key. */
 export const RepoParam = z.object({ repo: z.string().min(1) })
+export const IssueIdParam = z.object({ id: z.string().min(1) })
+export const TaskQuestionParam = z.object({
+  id: z.string().min(1),
+  questionId: z.string().min(1),
+})
 
 /** Combined because hono's zValidator replaces, not merges, a validated target. */
 export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string().min(1) })

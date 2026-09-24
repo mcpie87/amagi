@@ -15,7 +15,7 @@ const POLL_MS = 4000
  * queue. Polled on the same cadence as the web dashboard's providers; every
  * task-level signal (open PRs, run health) already arrives over the stream.
  */
-export function useOverview(baseUrl: string, repo: string): OverviewData {
+export function useOverview(baseUrl: string): OverviewData {
   const [runner, setRunner] = useState<RunnerStatus | null>(null)
   const [ready, setReady] = useState<TrackerTask[]>([])
 
@@ -26,7 +26,7 @@ export function useOverview(baseUrl: string, repo: string): OverviewData {
         fetch(`${baseUrl}/api/runner`)
           .then((res) => (res.ok ? (res.json() as Promise<RunnerStatus>) : null))
           .catch(() => null),
-        fetch(`${baseUrl}/api/repos/${repo}/ready-queue`)
+        fetch(`${baseUrl}/api/issues`)
           .then((res) => (res.ok ? (res.json() as Promise<TrackerTask[]>) : []))
           .catch(() => []),
       ])
@@ -40,7 +40,7 @@ export function useOverview(baseUrl: string, repo: string): OverviewData {
       alive = false
       clearInterval(timer)
     }
-  }, [baseUrl, repo])
+  }, [baseUrl])
 
   return { runner, ready }
 }

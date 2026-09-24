@@ -1,31 +1,32 @@
 import { resolve, sep } from 'node:path'
-import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { errMsg, loadLiveRuns } from '@amagi/core'
+import type { BeadsIssue, PrDriver, RunServiceApi, Store, Tracker } from '@amagi/core'
 import { createApp } from './app.ts'
-import { type GatePoller, startGatePoller } from './gate-poller.ts'
-import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
-import { type PrConflictWatcher, startPrConflictWatcher } from './pr-conflict-watcher.ts'
-import { type PrPoller, startPrPoller } from './pr-poller.ts'
-import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
+import { startGatePoller } from './gate-poller.ts'
+import { startPrPoller } from './pr-poller.ts'
 
 export type ServeOptions = {
-  workspaces: Workspaces
+  store: Store
   host: string
   port: number
-  notify?: Notifier[] | undefined
+  tracker?: Tracker
+  listIssues?: () => Promise<BeadsIssue[]>
+  getIssue?: (id: string) => Promise<BeadsIssue | null>
   gatePollIntervalMs?: number
+  /**
+   * When present, park tasks at pr_open are reconciled against the remote PR
+   * state, settling merged and closed PRs. `forgeCwd` is the repo the PRs live
+   * in, so the forge CLI can resolve them.
+   */
+  forge?: PrDriver
+  forgeCwd?: string
   prPollIntervalMs?: number
-  mentionWatchIntervalMs?: number
-  prConflictWatchIntervalMs?: number
-  stallWatchIntervalMs?: number
-  /** Poller supervisor interval, overridable for tests. */
-  repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
-  runner?: RunServiceApi | undefined
-  /** The repo key the runner is bound to; its settings apply live to it. */
-  runnerRepo?: string | undefined
+  runner?: RunServiceApi
+  requestCommit?: (
+    taskId: string,
+  ) => Promise<{ ok: true; sha: string } | { ok: false; error: string }>
 }
 
 /**
@@ -47,242 +48,47 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
   return new Response('dashboard not built', { status: 404 })
 }
 
-/**
- * Gate and PR pollers are per repo, plus an agent-mention watcher wherever a
- * forge driver exists and a stall watcher (recovers tasks whose worker stopped
- * heartbeating). A supervisor checks the registry every few seconds so a repo
- * added (or removed) after startup gets (or loses) its pollers without
- * restarting the server.
- */
-function startRepoPollers(
-  workspaces: Workspaces,
-  {
-    gateIntervalMs,
-    prIntervalMs,
-    mentionIntervalMs,
-    prConflictIntervalMs,
-    stallIntervalMs,
-    runner,
-    runnerRepo,
-    supervisorIntervalMs,
-  }: {
-    gateIntervalMs?: number | undefined
-    prIntervalMs?: number | undefined
-    mentionIntervalMs?: number | undefined
-    prConflictIntervalMs?: number | undefined
-    stallIntervalMs?: number | undefined
-    runner?: { setAutoQueue(enabled: boolean): void }
-    runnerRepo?: string
-    supervisorIntervalMs?: number
-  },
-) {
-  const pollers = new Map<
-    string,
-    {
-      gate: GatePoller
-      pr: PrPoller | null
-      mention: MentionWatcher | null
-      conflict: PrConflictWatcher | null
-      stall: StallWatcher | null
-    }
-  >()
-  let autoQueueAllowed: boolean | undefined
-
-  function ensure(): void {
-    const entries = workspaces.list()
-    const byKey = new Map(entries.map((entry) => [entry.key, entry]))
-    const keys = new Set(entries.filter((entry) => entry.watchers).map((e) => e.key))
-    if (runner !== undefined && runnerRepo !== undefined) {
-      const entry = byKey.get(runnerRepo)
-      const ws = entry ? workspaces.get(runnerRepo) : null
-      const enabled = entry?.workers === true && ws?.config.loop.autoQueue === true
-      if (enabled !== autoQueueAllowed) {
-        autoQueueAllowed = enabled
-        runner.setAutoQueue(enabled)
-      }
-    }
-    for (const key of [...pollers.keys()]) {
-      if (keys.has(key)) continue
-      const p = pollers.get(key)
-      p?.gate.stop()
-      p?.pr?.stop()
-      p?.mention?.stop()
-      p?.conflict?.stop()
-      p?.stall?.stop()
-      pollers.delete(key)
-    }
-    for (const key of keys) {
-      let ws: Workspace | null
-      try {
-        ws = workspaces.refreshWatcherConfig(key)
-      } catch (err) {
-        console.warn(`repo ${key}: watcher config refresh failed: ${errMsg(err)}`)
-        continue
-      }
-      if (!ws) continue
-      const forge = ws.forge
-      const mentionEnabled = forge !== null && ws.config.watchers.mention.enabled
-      const conflictEnabled = forge !== null && ws.config.watchers.prConflict.enabled
-      const stallEnabled = ws.config.watchers.stall.enabled
-      const startMention = () =>
-        forge === null
-          ? null
-          : startMentionWatcher({
-              repo: ws.key,
-              root: ws.root,
-              repoName: ws.name,
-              config: ws.config,
-              driver: forge,
-              tracker: ws.tracker,
-              store: ws.store,
-              intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
-            })
-      const startConflict = () =>
-        forge === null
-          ? null
-          : startPrConflictWatcher({
-              repo: ws.key,
-              root: ws.root,
-              repoName: ws.name,
-              config: ws.config,
-              store: ws.store,
-              tracker: ws.tracker,
-              driver: forge,
-              intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
-            })
-      const startStall = () =>
-        startStallWatcher({
-          repo: ws.key,
-          store: ws.store,
-          tracker: ws.tracker,
-          timeoutMs: ws.config.loop.stallTimeoutSec * 1000,
-          intervalMs: stallIntervalMs ?? ws.config.loop.stallWatchIntervalSec * 1000,
-          ...(ws.config.loop.doomEnabled
-            ? {
-                doom: {
-                  toolWindowMs: ws.config.loop.doomToolWindowSec * 1000,
-                  toolRepeat: ws.config.loop.doomToolRepeat,
-                  checkRounds: ws.config.loop.doomCheckRounds,
-                  diffWindowMs: ws.config.loop.doomDiffWindowSec * 1000,
-                },
-              }
-            : {}),
-        })
-      const existing = pollers.get(key)
-      if (existing === undefined) {
-        pollers.set(key, {
-          gate: startGatePoller({
-            store: ws.store,
-            tracker: ws.tracker,
-            intervalMs: gateIntervalMs,
-          }),
-          pr:
-            forge === null
-              ? null
-              : startPrPoller({
-                  store: ws.store,
-                  forge,
-                  tracker: ws.tracker,
-                  cwd: ws.root,
-                  intervalMs: prIntervalMs,
-                }),
-          mention: mentionEnabled ? startMention() : null,
-          conflict: conflictEnabled ? startConflict() : null,
-          stall: stallEnabled ? startStall() : null,
-        })
-        continue
-      }
-      if (mentionEnabled && existing.mention === null) existing.mention = startMention()
-      else if (!mentionEnabled && existing.mention !== null) {
-        existing.mention.stop()
-        existing.mention = null
-      }
-      if (conflictEnabled && existing.conflict === null) existing.conflict = startConflict()
-      else if (!conflictEnabled && existing.conflict !== null) {
-        existing.conflict.stop()
-        existing.conflict = null
-      }
-      if (stallEnabled && existing.stall === null) existing.stall = startStall()
-      else if (!stallEnabled && existing.stall !== null) {
-        existing.stall.stop()
-        existing.stall = null
-      }
-    }
-  }
-
-  ensure()
-  const supervisor = setInterval(ensure, supervisorIntervalMs ?? 10_000)
-  const workers = (): WorkerActivity[] =>
-    [...pollers.values()].flatMap((p) => [
-      ...(p.mention ? [p.mention.activity()] : []),
-      ...(p.conflict ? [p.conflict.activity()] : []),
-      ...(p.stall ? [p.stall.activity()] : []),
-    ])
-  return {
-    workers,
-    stop() {
-      clearInterval(supervisor)
-      for (const p of pollers.values()) {
-        p.gate.stop()
-        p.pr?.stop()
-        p.mention?.stop()
-        p.conflict?.stop()
-        p.stall?.stop()
-      }
-      pollers.clear()
-    },
-  }
-}
-
-/**
- * Probes the bind up front so callers can refuse before doing expensive setup.
- * A free port here can still be taken by the time the real bind happens, so
- * this is a better error message, not a guarantee.
- */
-export function portInUse(host: string, port: number): boolean {
-  try {
-    Bun.serve({ hostname: host, port, fetch: () => new Response('') }).stop(true)
-    return false
-  } catch {
-    return true
-  }
-}
-
 export function serve({
-  workspaces,
+  store,
   host,
   port,
-  notify,
+  tracker,
   gatePollIntervalMs,
+  forge,
+  forgeCwd,
   prPollIntervalMs,
-  mentionWatchIntervalMs,
-  prConflictWatchIntervalMs,
-  stallWatchIntervalMs,
-  repoPollerSupervisorIntervalMs,
   staticDir,
+  listIssues,
   runner,
-  runnerRepo,
+  getIssue,
+  requestCommit,
 }: ServeOptions) {
-  const repoPollers = startRepoPollers(workspaces, {
-    gateIntervalMs: gatePollIntervalMs,
-    prIntervalMs: prPollIntervalMs,
-    mentionIntervalMs: mentionWatchIntervalMs,
-    prConflictIntervalMs: prConflictWatchIntervalMs,
-    stallIntervalMs: stallWatchIntervalMs,
-    ...(runner === undefined ? {} : { runner }),
-    ...(runnerRepo === undefined ? {} : { runnerRepo }),
-    ...(repoPollerSupervisorIntervalMs === undefined
-      ? {}
-      : { supervisorIntervalMs: repoPollerSupervisorIntervalMs }),
-  })
   const app = createApp({
-    workspaces,
-    notify,
-    runner,
-    runnerRepo,
-    workers: repoPollers.workers,
-    liveRuns: () => loadLiveRuns(),
+    store,
+    ...(tracker === undefined ? {} : { tracker }),
+    ...(listIssues === undefined ? {} : { listIssues }),
+    ...(runner === undefined ? {} : { runner }),
+    ...(requestCommit === undefined ? {} : { requestCommit }),
+    ...(getIssue === undefined ? {} : { getIssue }),
   })
+  const poller =
+    tracker === undefined
+      ? null
+      : startGatePoller({
+          store,
+          tracker,
+          ...(gatePollIntervalMs === undefined ? {} : { intervalMs: gatePollIntervalMs }),
+        })
+  const prPoller =
+    forge === undefined || forgeCwd === undefined || tracker === undefined
+      ? null
+      : startPrPoller({
+          store,
+          forge,
+          tracker,
+          cwd: forgeCwd,
+          ...(prPollIntervalMs === undefined ? {} : { intervalMs: prPollIntervalMs }),
+        })
   const server = Bun.serve({
     hostname: host,
     port,
@@ -298,8 +104,8 @@ export function serve({
     port: server.port,
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
-      repoPollers.stop()
-      runner?.dispose?.()
+      poller?.stop()
+      prPoller?.stop()
       return server.stop(closeActiveConnections)
     },
   }

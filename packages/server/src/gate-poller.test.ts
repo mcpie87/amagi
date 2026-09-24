@@ -14,7 +14,6 @@ import {
 } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startGatePoller } from './gate-poller.ts'
-import { testWorkspaces } from './test-util.ts'
 
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
@@ -143,9 +142,8 @@ test('a gate resolved after the question timed out still unblocks the parked run
 })
 
 test('await unblocks within one poll interval after the gate resolves', async () => {
+  const store = new Store(openDatabase(':memory:'))
   const tracker = new FakeTracker()
-  const ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-  const store = ws.store('repo1')
   claim(store)
   implementing(store)
   store.append('bd-1', {
@@ -156,11 +154,11 @@ test('await unblocks within one poll interval after the gate resolves', async ()
     gateRef: 'gate-7',
   })
 
-  const app = createApp({ workspaces: ws.workspaces })
+  const app = createApp({ store, tracker })
   pollers.push(startGatePoller({ store, tracker, intervalMs: 10 }))
 
   const token = store.token('bd-1')
-  const pending = app.request('/api/repos/repo1/tasks/bd-1/questions/q1/await', {
+  const pending = app.request('/api/tasks/bd-1/questions/q1/await', {
     headers: { 'X-Amagi-Token': token },
   })
   await Bun.sleep(20)
@@ -171,5 +169,4 @@ test('await unblocks within one poll interval after the gate resolves', async ()
   const body = (await res.json()) as { question: ProjectedQuestion }
   expect(body.question.answer).toBe('')
   expect(body.question.answeredVia).toBe('gate')
-  ws.cleanup()
 })

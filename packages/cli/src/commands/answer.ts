@@ -12,11 +12,10 @@ export const answerCommand = defineCommand({
   },
   async run({ args }) {
     const { config } = loadConfig(repoRoot())
-    const { key, store } = currentRepo()
+    const { store } = currentRepo()
     try {
       const outcome = await answerQuestion(
         `http://${config.server.host}:${config.server.port}`,
-        key,
         store,
         args.id,
         args.answer,

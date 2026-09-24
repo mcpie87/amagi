@@ -101,9 +101,9 @@ const EVENTS: StoredEvent[] = [
 function streamMock(events: StoredEvent[], extra?: (url: string, init?: RequestInit) => Response) {
   return (async (url: string, init?: RequestInit) => {
     const href = url.toString()
-    if (href.includes('/api/repos/repo1/stream')) return sseResponse(events)
+    if (href.includes('/api/stream')) return sseResponse(events)
     if (href.endsWith('/api/runner')) return json(RUNNER)
-    if (href.endsWith('/api/repos/repo1/ready-queue')) return json(READY)
+    if (href.endsWith('/api/issues')) return json(READY)
     if (extra !== undefined) {
       const response = extra(href, init)
       if (response !== undefined) return response
@@ -123,7 +123,7 @@ describe('App', () => {
     ]
     globalThis.fetch = streamMock(events)
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('1/2 workers'))
       const frame = instance.lastFrame() ?? ''
@@ -143,7 +143,7 @@ describe('App', () => {
   test('opens a watcher activity log and returns to the overview', async () => {
     globalThis.fetch = streamMock(EVENTS)
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('mention-watcher'))
       instance.stdin.write('\r')
@@ -163,7 +163,7 @@ describe('App', () => {
   test('renders the queue, opens a task, and shows its pending question', async () => {
     globalThis.fetch = streamMock(EVENTS)
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
       instance.stdin.write('\t')
@@ -186,7 +186,7 @@ describe('App', () => {
   test('answering an option posts it with the task token', async () => {
     const posted: { url: string; body: unknown }[] = []
     globalThis.fetch = streamMock(EVENTS, (href, init) => {
-      if (href.endsWith('/api/repos/repo1/tasks/am-1')) {
+      if (href.endsWith('/api/tasks/am-1')) {
         return new Response(JSON.stringify({ token: 'secret' }), { status: 200 })
       }
       if (href.includes('/answer')) {
@@ -196,7 +196,7 @@ describe('App', () => {
       throw new Error(`unexpected fetch ${href}`)
     })
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
       instance.stdin.write('\t')
@@ -206,9 +206,7 @@ describe('App', () => {
 
       instance.stdin.write('1')
       await waitFor(() => posted.length > 0)
-      expect(posted[0]?.url).toBe(
-        'http://amagi.test/api/repos/repo1/tasks/am-1/questions/q-1/answer',
-      )
+      expect(posted[0]?.url).toBe('http://amagi.test/api/tasks/am-1/questions/q-1/answer')
       expect(posted[0]?.body).toEqual({ answer: 'npm', via: 'cli' })
     } finally {
       instance.unmount()

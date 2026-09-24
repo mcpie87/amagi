@@ -383,6 +383,18 @@ export class RunService implements RunServiceApi {
     return { ok: true, taskId }
   }
 
+  async requestCommit(
+    taskId: string,
+  ): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
+    const entry = this.runs.get(taskId)
+    if (entry === undefined) return { ok: false, error: `task ${taskId} is not running here` }
+    const task = this.opts.store.task(taskId)
+    if (task === null || task.worktree === null) {
+      return { ok: false, error: `task ${taskId} has no worktree to commit` }
+    }
+    return entry.runner.requestCommit(taskId, task.worktree)
+  }
+
   private launch(
     task: TrackerTask,
     implement?: Config['harness']['implement'],

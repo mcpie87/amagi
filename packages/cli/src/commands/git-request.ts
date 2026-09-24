@@ -1,7 +1,6 @@
 import { git, loadConfig, repoRoot } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { requestGitWrite, taskIdFromBranch } from '../git-request.ts'
-import { currentRepo } from '../repo.ts'
 
 export const gitRequestCommand = defineCommand({
   meta: {
@@ -23,13 +22,11 @@ export const gitRequestCommand = defineCommand({
     const token = process.env.AMAGI_TASK_TOKEN
     if (!token) throw new Error('AMAGI_TASK_TOKEN is not set; run this inside an amagi worktree')
     const { config } = loadConfig(repoRoot())
-    const { key } = currentRepo()
     const taskId = args.task || taskIdFromBranch(git(['rev-parse', '--abbrev-ref', 'HEAD']))
     if (!taskId) throw new Error('could not read the task id from the worktree branch')
 
     const sha = await requestGitWrite({
       baseUrl: `http://${config.server.host}:${config.server.port}`,
-      repo: key,
       taskId,
       token,
       verb: args.verb,

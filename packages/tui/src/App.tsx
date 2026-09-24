@@ -50,7 +50,7 @@ function fmtCpu(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
-export type AppProps = { baseUrl: string; repo: string }
+export type AppProps = { baseUrl: string }
 
 type Screen =
   | { name: 'overview' }
@@ -58,10 +58,10 @@ type Screen =
   | { name: 'detail'; taskId: string }
   | { name: 'watcher'; watcherId: string }
 
-export function App({ baseUrl, repo }: AppProps) {
+export function App({ baseUrl }: AppProps) {
   const { exit } = useApp()
-  const state = useDashboardStream(baseUrl, repo)
-  const overview = useOverview(baseUrl, repo)
+  const state = useDashboardStream(baseUrl)
+  const overview = useOverview(baseUrl)
   const [screen, setScreen] = useState<Screen>({ name: 'overview' })
   const [showAll, setShowAll] = useState(false)
   // One wall-clock snapshot per second so elapsed-vs-budget stays live between
@@ -84,7 +84,6 @@ export function App({ baseUrl, repo }: AppProps) {
     return (
       <TaskDetail
         baseUrl={baseUrl}
-        repo={repo}
         state={state}
         taskId={screen.taskId}
         now={now}
@@ -423,14 +422,12 @@ type AnswerMode =
 
 function TaskDetail({
   baseUrl,
-  repo,
   state,
   taskId,
   now,
   onBack,
 }: {
   baseUrl: string
-  repo: string
   state: DashboardState
   taskId: string
   now: number
@@ -440,7 +437,7 @@ function TaskDetail({
   const questions = openQuestionsFor(state, taskId)
   const [qIndex, setQIndex] = useState(0)
   const [mode, setMode] = useState<AnswerMode>({ kind: 'browse' })
-  const logKey = `${repo}/${taskId}`
+  const logKey = taskId
   const health = runHealth(state, taskId, now)
 
   const version = useSyncExternalStore(
@@ -473,7 +470,7 @@ function TaskDetail({
 
   async function answer(questionId: string, text: string): Promise<void> {
     setMode({ kind: 'answering', questionId, draft: text, busy: true, error: null })
-    const token = await fetchTaskToken(baseUrl, repo, taskId)
+    const token = await fetchTaskToken(baseUrl, taskId)
     if (token === null) {
       setMode({
         kind: 'answering',
@@ -484,7 +481,7 @@ function TaskDetail({
       })
       return
     }
-    const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, token, text)
+    const outcome = await submitAnswer(baseUrl, taskId, questionId, token, text)
     if (outcome.kind === 'error') {
       setMode({ kind: 'answering', questionId, draft: text, busy: false, error: outcome.message })
     } else {

@@ -1,11 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import type { ProjectedQuestion } from '@amagi/core'
+import { openDatabase, type ProjectedQuestion, Store } from '@amagi/core'
 import { serve } from '../../server/src/serve.ts'
-import { type TestWorkspaces, testWorkspaces } from '../../server/src/test-util.ts'
 import { askQuestion, taskIdFromBranch } from './ask.ts'
 
-let ws: TestWorkspaces
-let store: import('@amagi/core').Store
+let store: Store
 let server: ReturnType<typeof serve>
 let baseUrl: string
 
@@ -27,15 +25,14 @@ const waitForQuestion = async (taskId: string): Promise<ProjectedQuestion> => {
 }
 
 beforeEach(() => {
-  ws = testWorkspaces(['repo1'])
-  store = ws.store('repo1')
-  server = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0 })
+  store = new Store(openDatabase(':memory:'))
+  server = serve({ store, host: '127.0.0.1', port: 0 })
   baseUrl = `http://127.0.0.1:${server.port}`
 })
 
 afterEach(async () => {
   await server.stop(true)
-  ws.cleanup()
+  store.close()
 })
 
 test('taskIdFromBranch parses the worktree branch', () => {
@@ -50,7 +47,6 @@ test('answered in time: prints the answer', async () => {
 
   const pending = askQuestion({
     baseUrl,
-    repo: 'repo1',
     taskId: 'bd-1',
     token,
     question: 'which registry?',
@@ -58,7 +54,7 @@ test('answered in time: prints the answer', async () => {
     deadlineMs: 2000,
   })
   const q = await waitForQuestion('bd-1')
-  const res = await fetch(`${baseUrl}/api/repos/repo1/tasks/bd-1/questions/${q.id}/answer`, {
+  const res = await fetch(`${baseUrl}/api/tasks/bd-1/questions/${q.id}/answer`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
     body: JSON.stringify({ answer: 'npm' }),
@@ -75,7 +71,6 @@ test('timed out: reports no answer yet and parks the task', async () => {
 
   const outcome = await askQuestion({
     baseUrl,
-    repo: 'repo1',
     taskId: 'bd-1',
     token,
     question: 'which registry?',

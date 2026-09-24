@@ -3,7 +3,6 @@ import { fetchTaskToken, submitAnswer } from '@amagi/tui/answer'
 
 export async function answerQuestion(
   baseUrl: string,
-  repo: string,
   store: Store,
   questionId: string,
   answer: string,
@@ -11,8 +10,8 @@ export async function answerQuestion(
   const question = store.question(questionId)
   if (!question) return { kind: 'error', message: `unknown question ${questionId}` }
 
-  const token = await fetchTaskToken(baseUrl, repo, question.taskId)
+  const token = await fetchTaskToken(baseUrl, question.taskId)
   if (!token) return { kind: 'error', message: `could not get task token for ${question.taskId}` }
 
-  return submitAnswer(baseUrl, repo, question.taskId, questionId, token, answer)
+  return submitAnswer(baseUrl, question.taskId, questionId, token, answer)
 }
