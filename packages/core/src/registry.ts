@@ -9,7 +9,13 @@ export type RegistryEntry = {
   name: string
   /** Absolute path of the repo root. */
   path: string
+  /** Whether the server's automatic task queue may claim work from this repo. */
+  workers: boolean
+  /** Whether the server starts background pollers and watchers for this repo. */
+  watchers: boolean
 }
+
+export type RegistryParticipation = Partial<Pick<RegistryEntry, 'workers' | 'watchers'>>
 
 /** Keeps keys safe as URL segments and file names. */
 export function sanitizeRepoKey(key: string): string {
@@ -30,13 +36,26 @@ export function loadRegistry(path = registryPath()): RegistryEntry[] {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
     return Array.isArray(parsed)
-      ? parsed.filter(
-          (e): e is RegistryEntry =>
-            typeof e === 'object' &&
-            e !== null &&
-            typeof (e as RegistryEntry).key === 'string' &&
-            typeof (e as RegistryEntry).path === 'string',
-        )
+      ? parsed.flatMap((e): RegistryEntry[] => {
+          if (
+            typeof e !== 'object' ||
+            e === null ||
+            typeof (e as RegistryEntry).key !== 'string' ||
+            typeof (e as RegistryEntry).path !== 'string'
+          ) {
+            return []
+          }
+          const entry = e as Partial<RegistryEntry> & Pick<RegistryEntry, 'key' | 'path'>
+          return [
+            {
+              key: entry.key,
+              name: typeof entry.name === 'string' ? entry.name : basename(entry.path),
+              path: entry.path,
+              workers: typeof entry.workers === 'boolean' ? entry.workers : true,
+              watchers: typeof entry.watchers === 'boolean' ? entry.watchers : true,
+            },
+          ]
+        })
       : []
   } catch {
     return []
@@ -45,6 +64,22 @@ export function loadRegistry(path = registryPath()): RegistryEntry[] {
 
 export function saveRegistry(entries: RegistryEntry[], path = registryPath()): void {
   writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`)
+}
+
+/** Updates per-repository participation without changing the repo working tree. */
+export function updateRegistryParticipation(
+  key: string,
+  participation: RegistryParticipation,
+  path = registryPath(),
+): boolean {
+  const entries = loadRegistry(path)
+  const index = entries.findIndex((entry) => entry.key === key)
+  if (index < 0) return false
+  const entry = entries[index]
+  if (entry === undefined) return false
+  entries[index] = { ...entry, ...participation }
+  saveRegistry(entries, path)
+  return true
 }
 
 /** True when the path resolves to a git working tree root. */
@@ -107,6 +142,8 @@ export function addRegistryEntry(
     key: uniqueKey(key ?? repoKey(root), entries),
     name: basename(root),
     path: root,
+    workers: true,
+    watchers: true,
   }
   saveRegistry([...entries, entry], registry)
   return entry

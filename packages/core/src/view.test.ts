@@ -11,6 +11,8 @@ import {
   reduceState,
   runHealth,
   runHealthNearLimit,
+  stateAtAttempt,
+  statusLog,
   tasksNeedingAttention,
 } from './view.ts'
 
@@ -121,6 +123,43 @@ describe('dashboard state reducer', () => {
     expect(state.tasks['am-1']?.worktree).toBe('/tmp/am-1')
     expect(state.tasks['am-1']?.branch).toBe('x')
     expect(activeTasks(state).map((t) => t.id)).toEqual(['am-1'])
+  })
+
+  test('reset starts a fresh attempt and keeps the earlier one browsable', () => {
+    const events = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Fix', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'worktree.created', path: '/tmp/am-1', branch: 'x' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(5, 'am-1', 1350, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 10, outputTokens: 5, costUsd: 2 },
+      }),
+      ev(6, 'am-1', 1360, {
+        type: 'question.asked',
+        questionId: 'q1',
+        question: 'which?',
+        options: [],
+        gateRef: null,
+      }),
+      ev(7, 'am-1', 1400, { type: 'task.state', from: 'implementing', to: 'cancelled' }),
+      ev(8, 'am-1', 1500, { type: 'worktree.removed', path: '/tmp/am-1' }),
+      ev(9, 'am-1', 1600, { type: 'task.reset', reason: 'operator reset' }),
+    ]
+    const state = events.reduce(reduceState, initialDashboardState())
+    expect(state.tasks['am-1']).toMatchObject({
+      state: 'claimed',
+      attempt: 2,
+      worktree: null,
+      createdAt: 1600,
+    })
+    expect(openQuestionsFor(state, 'am-1')).toEqual([])
+    expect(runHealth(state, 'am-1', 1700)).toMatchObject({ costSeen: false, elapsedMs: 100 })
+
+    const first = stateAtAttempt(state, 'am-1', 1)
+    expect(first.tasks['am-1']).toMatchObject({ state: 'cancelled', attempt: 1 })
+    expect(runHealth(first, 'am-1', 1700)).toMatchObject({ costUsd: 2, costSeen: true })
   })
 
   test('queue view lists only in-flight tasks, most recent first', () => {
@@ -660,5 +699,61 @@ describe('run health', () => {
     ].reduce(reduceState, initialDashboardState())
     // 1.5 + 4.2 = 5.7 >= 80% of the $5 budget.
     expect(runHealthNearLimit(runHealth(events, 'am-1', 1700))).toBe(true)
+  })
+})
+
+describe('status log', () => {
+  test('lists every state with its timestamp, reason and time spent in it', () => {
+    const state = recorded.reduce(reduceState, initialDashboardState())
+    const log = statusLog(state, 'am-1', 5000)
+    expect(log.map((e) => [e.ts, e.from, e.to, e.durationMs])).toEqual([
+      [1000, null, 'claimed', 100],
+      [1100, 'claimed', 'worktree_ready', 200],
+      [1300, 'worktree_ready', 'implementing', 200],
+      [1500, 'implementing', 'checks', 200],
+      [1700, 'checks', 'committed', 200],
+      [1900, 'committed', 'pr_open', 100],
+      [2000, 'pr_open', 'done', null],
+    ])
+  })
+
+  test('an in-flight task counts its current state up to now, a settled view does not', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(statusLog(state, 'am-1', 1600).at(-1)?.durationMs).toBe(500)
+    expect(statusLog(state, 'am-1', null).at(-1)?.durationMs).toBeNull()
+  })
+
+  test('starts at the last reset and records reclaims with their reason', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'task.state',
+        from: 'claimed',
+        to: 'cancelled',
+        reason: 'operator interrupt',
+      }),
+      ev(3, 'am-1', 1200, { type: 'task.reset', reason: 'start over' }),
+      ev(4, 'am-2', 1250, { type: 'task.claimed', title: 'Other', tracker: 'bd' }),
+      ev(5, 'am-1', 1300, { type: 'task.state', from: 'claimed', to: 'needs_human' }),
+      ev(6, 'am-1', 1400, { type: 'task.reclaimed', reason: 'stale lease' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(statusLog(state, 'am-1', null).map((e) => [e.cause, e.from, e.to, e.reason])).toEqual([
+      ['reset', null, 'claimed', 'start over'],
+      ['state', 'claimed', 'needs_human', null],
+      ['reclaimed', 'needs_human', 'claimed', 'stale lease'],
+    ])
+  })
+
+  test('a past attempt keeps its own log', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'no_pr' }),
+      ev(3, 'am-1', 1200, { type: 'task.reset' }),
+    ].reduce(reduceState, initialDashboardState())
+    const past = stateAtAttempt(state, 'am-1', 1)
+    expect(statusLog(past, 'am-1', null).map((e) => e.to)).toEqual(['claimed', 'no_pr'])
   })
 })

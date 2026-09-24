@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
@@ -21,6 +21,7 @@ import type {
 } from './drivers/types.ts'
 import type { AgentEvent, EventType, StoredEvent } from './events.ts'
 import { type Exec, exec, execOk } from './exec.ts'
+import { runStateDir } from './paths.ts'
 import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
@@ -502,15 +503,28 @@ describe('Runner.runOnce', () => {
     expect(harness.calls[0]?.prompt).toContain('Implement this task')
   })
 
+  test('implement resumes the viability check session instead of starting cold', async () => {
+    const harness = new FakeHarness([writesAFile], {
+      events: [],
+      outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
+    })
+    await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(harness.calls[0]?.resumeFrom).toBe('verify-sess')
+    expect(harness.calls[0]?.prompt).toContain('viability check is over')
+    expect(harness.calls[0]?.prompt).toContain('Implement this task')
+  })
+
   test('a failed viability check defaults to continuing the task', async () => {
     const harness = new FakeHarness([writesAFile], {
-      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' },
+      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable', sessionId: 'broken' },
     })
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(result?.state).toBe('pr_open')
     expect(harness.verifyCalls).toHaveLength(1)
     expect(harness.calls).toHaveLength(1)
+    expect(harness.calls[0]?.resumeFrom).toBeNull()
   })
 
   test('an unparseable viability verdict defaults to continuing the task', async () => {
@@ -626,6 +640,29 @@ describe('Runner.runOnce', () => {
     expect(body).toContain('Added `hello.txt` with a greeting.')
   })
 
+  test('takes the sections from the final message and keeps them out of the summary', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([{ ...TASK, description: '' }]),
+      new FakeHarness([
+        {
+          ...writesAFile,
+          outcome: {
+            summary:
+              'Wrote the greeting.\n\n### How to use\n\nRun `hello`\n\n### Conclusion\n\nOnly hello.txt changed.',
+          },
+        },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body).toContain('### 📝 Summary\n\nWrote the greeting.\n\n### 🚀 How to use')
+    expect(body).toContain('### 🧠 Conclusion\n\nOnly `hello.txt` changed.')
+    expect(body.match(/Conclusion/g)).toHaveLength(1)
+  })
+
   test('falls back to the run summary when the agent wrote no conclusion', async () => {
     const pr = new FakePr()
     await makeRunner(
@@ -710,6 +747,11 @@ describe('Runner.runOnce', () => {
 
     const log = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: row?.worktree ?? '' })
     expect(log).toContain('Add a greeting file')
+    const body = await execOk(exec, ['git', 'log', '-1', '--format=%b'], {
+      cwd: row?.worktree ?? '',
+    })
+    expect(body).toContain('Changes:')
+    expect(body).toContain('- `hello.txt` +1 -0')
     const mainLog = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: repo })
     expect(mainLog).toContain('init')
   })
@@ -1436,18 +1478,39 @@ describe('Runner.runOnce', () => {
 })
 
 describe('Runner context budget', () => {
-  const usage = (inputTokens: number, cachedTokens = 0, outputTokens = 10): AgentEvent => ({
-    kind: 'usage',
-    inputTokens,
-    outputTokens,
-    cachedTokens,
+  const context = (tokens: number): AgentEvent => ({ kind: 'context', tokens })
+
+  test('session-total usage never trips the guard, only per-request context does', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        events: [
+          context(90_000),
+          { kind: 'usage', inputTokens: 1_700_000, outputTokens: 13_000, cachedTokens: 1_600_000 },
+        ],
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ loop: { contextWarnTokens: 160_000, contextMaxTokens: 200_000 } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.kills).toBe(0)
+    expect(types(TASK.id)).not.toContain('context.warn')
+    const peaks = store
+      .events({ taskId: TASK.id })
+      .filter((e): e is Extract<StoredEvent, { type: 'run.context' }> => e.type === 'run.context')
+      .map((e) => e.contextTokens)
+    expect(peaks).toEqual([90_000])
   })
 
   test('crossing the soft limit warns but the run completes', async () => {
     const harness = new FakeHarness([
       {
         ...writesAFile,
-        events: [{ kind: 'text', text: 'wrote hello.txt' }, usage(180_000, 10_000)],
+        events: [{ kind: 'text', text: 'wrote hello.txt' }, context(190_000)],
       },
     ])
     const result = await makeRunner(
@@ -1467,11 +1530,11 @@ describe('Runner context budget', () => {
     expect(types(TASK.id)).not.toContain('context.exceeded')
   })
 
-  test('the warning fires once on the peak, not on every usage event', async () => {
+  test('the warning fires once on the peak, not on every context event', async () => {
     const harness = new FakeHarness([
       {
         ...writesAFile,
-        events: [usage(80_000, 20_000), usage(100_000, 50_000), usage(120_000, 60_000)],
+        events: [context(100_000), context(150_000), context(180_000)],
       },
     ])
     const result = await makeRunner(
@@ -1495,7 +1558,7 @@ describe('Runner context budget', () => {
 
   test('crossing the hard limit kills the agent, restarts it fresh with a handoff, and continues', async () => {
     const harness = new FakeHarness([
-      { ...writesAFile, events: [usage(190_000, 15_000)] },
+      { ...writesAFile, events: [context(205_000)] },
       { effect: (cwd) => writeFileSync(join(cwd, 'second.txt'), 'hi\n') },
     ])
     const result = await makeRunner(
@@ -1545,7 +1608,7 @@ describe('Runner context budget', () => {
   })
 
   test('the restart budget is spent across phases and escalates to needs_human when exhausted', async () => {
-    const crossing = { ...writesAFile, events: [usage(190_000, 15_000)] }
+    const crossing = { ...writesAFile, events: [context(205_000)] }
     const harness = new FakeHarness([crossing, crossing])
     const result = await makeRunner(
       new FakeTracker([TASK]),
@@ -1572,7 +1635,7 @@ describe('Runner context budget', () => {
   })
 
   test('contextMaxRestarts 0 keeps the historical hard-kill to needs_human', async () => {
-    const harness = new FakeHarness([{ ...writesAFile, events: [usage(190_000, 15_000)] }])
+    const harness = new FakeHarness([{ ...writesAFile, events: [context(205_000)] }])
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
@@ -1589,7 +1652,7 @@ describe('Runner context budget', () => {
 
   test('per-harness overrides win over the loop defaults', async () => {
     const harness = new FakeHarness(
-      [{ ...writesAFile, events: [usage(180_000)] }],
+      [{ ...writesAFile, events: [context(180_000)] }],
       'viable',
       'codex',
     )
@@ -1598,7 +1661,7 @@ describe('Runner context budget', () => {
       harness,
       config({
         loop: {
-          // Loop defaults are far above the emitted usage, so only the
+          // Loop defaults are far above the emitted context, so only the
           // codex override can trip the guard here.
           contextWarnTokens: 1_000_000,
           contextMaxTokens: 1_000_000,
@@ -1738,5 +1801,162 @@ describe('Runner.cancel', () => {
     expect(harness.calls).toHaveLength(2)
     // The run completed well inside the 60s backoff, so it cannot have slept it out.
     expect(Date.now() - started).toBeLessThan(10_000)
+  })
+})
+
+describe('Runner.requestCommit', () => {
+  const withWorktree = async (): Promise<string> => {
+    const wtPath = join(wtRoot, 'request-commit-worktree')
+    await execOk(exec, ['git', 'worktree', 'add', '-b', 'amagi/bd-a1b2-commit', wtPath, 'main'], {
+      cwd: repo,
+    })
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    return wtPath
+  }
+
+  test('stages and commits the worktree, returning the sha and recording commit.created', async () => {
+    const wtPath = await withWorktree()
+    writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
+
+    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
+      TASK.id,
+      wtPath,
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.sha).toMatch(/^[0-9a-f]{40}$/)
+    const created = store
+      .events({ taskId: TASK.id })
+      .find(
+        (e): e is Extract<StoredEvent, { type: 'commit.created' }> => e.type === 'commit.created',
+      )
+    expect(created?.sha).toBe(result.sha)
+    expect(created?.subject).toBe(`[${TASK.id}] ${TASK.title}`)
+    const head = (await execOk(exec, ['git', 'rev-parse', 'HEAD'], { cwd: wtPath })).trim()
+    expect(head).toBe(result.sha)
+  })
+
+  test('a clean worktree is a failure, not a commit', async () => {
+    const wtPath = await withWorktree()
+    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
+      TASK.id,
+      wtPath,
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error).toContain('nothing to commit')
+    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
+  })
+
+  test('an unknown task is a failure', async () => {
+    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
+      'nope',
+      repo,
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error).toContain('unknown task')
+  })
+})
+
+describe('Runner.drainGitBlocked', () => {
+  const withStateHome = async (
+    fn: (runner: Runner, dir: string) => Promise<void>,
+  ): Promise<void> => {
+    const savedState = process.env.XDG_STATE_HOME
+    const stateHome = mkdtempSync(join(tmpdir(), 'amagi-run-state-'))
+    process.env.XDG_STATE_HOME = stateHome
+    try {
+      const dir = runStateDir(TASK.id)
+      await fn(makeRunner(new FakeTracker([TASK]), new FakeHarness([])), dir)
+    } finally {
+      if (savedState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = savedState
+      rmSync(stateHome, { recursive: true, force: true })
+    }
+  }
+
+  test('turns rejected git calls into git.blocked events and clears the file', async () => {
+    await withStateHome(async (runner, dir) => {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'rejected-git.jsonl'),
+        [
+          JSON.stringify({ at: '2026-01-01T00:00:00Z', cwd: '/tmp', argv: ['commit', '-m', 'x'] }),
+          'not json at all',
+          JSON.stringify({
+            at: '2026-01-01T00:00:00Z',
+            cwd: '/tmp',
+            argv: ['push', 'origin', 'main'],
+          }),
+        ].join('\n'),
+      )
+      await runner.drainGitBlocked(TASK.id)
+      const blocked = store
+        .events({ taskId: TASK.id })
+        .filter((e): e is Extract<StoredEvent, { type: 'git.blocked' }> => e.type === 'git.blocked')
+      expect(blocked.map((e) => e.argv)).toEqual([
+        ['commit', '-m', 'x'],
+        ['push', 'origin', 'main'],
+      ])
+      expect(existsSync(join(dir, 'rejected-git.jsonl'))).toBe(false)
+    })
+  })
+
+  test('a missing log is a no-op', async () => {
+    await withStateHome(async (runner) => {
+      await runner.drainGitBlocked(TASK.id)
+      expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'git.blocked')).toBe(false)
+    })
+  })
+})
+
+describe('Runner git bypass check', () => {
+  const realGit = (cwd: string, args: string[]): string => {
+    const r = Bun.spawnSync(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr.toString()}`)
+    return r.stdout.toString().trim()
+  }
+  const bypassed = () =>
+    store
+      .events({ taskId: TASK.id, limit: 999 })
+      .filter((e): e is Extract<StoredEvent, { type: 'git.bypassed' }> => e.type === 'git.bypassed')
+
+  test('a stash made past the shim lands as git.bypassed and the run still opens a PR', async () => {
+    const stashes: Turn = {
+      effect: (cwd) => {
+        writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+        realGit(cwd, ['add', 'hello.txt'])
+        realGit(cwd, ['stash'])
+        realGit(cwd, ['stash', 'pop'])
+      },
+      events: [{ kind: 'text', text: 'stashed to compare against base' }],
+    }
+    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([stashes])).runOnce()
+    expect(result?.state).toBe('pr_open')
+    const events = bypassed()
+    expect(events).toHaveLength(1)
+    expect(events[0]?.entries.some((line) => line.endsWith('reset: moving to HEAD'))).toBe(true)
+  })
+
+  test('a commit recorded as commit.created during the run is not a bypass', async () => {
+    const requestsCommit: Turn = {
+      effect: (cwd) => {
+        writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+        realGit(cwd, ['add', '-A'])
+        realGit(cwd, ['commit', '-q', '-m', 'checkpoint'])
+        store.append(TASK.id, {
+          type: 'commit.created',
+          sha: realGit(cwd, ['rev-parse', 'HEAD']),
+          subject: `[${TASK.id}] ${TASK.title}`,
+        })
+      },
+    }
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([requestsCommit]),
+    ).runOnce()
+    expect(result?.state).toBe('pr_open')
+    expect(bypassed()).toEqual([])
   })
 })

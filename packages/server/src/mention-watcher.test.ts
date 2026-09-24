@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -36,15 +36,9 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
-function fakeExec(prs: PrInfo[]): Exec {
-  return async (cmd) =>
-    cmd.includes('pr') && cmd.includes('list')
-      ? { exitCode: 0, stdout: JSON.stringify(prs), stderr: '' }
-      : { exitCode: 0, stdout: '', stderr: '' }
-}
-
 class FakePr implements PrDriver {
   comments: PrComment[] = []
+  prs: PrInfo[] = []
   readonly posted: string[] = []
   listCalls = 0
   /** Throw on the nth postComment call (1-based) to simulate a failed response. */
@@ -57,7 +51,7 @@ class FakePr implements PrDriver {
     return 'open'
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
-    return []
+    return this.prs
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
@@ -120,9 +114,11 @@ afterEach(() => {
   rmSync(cacheDir, { recursive: true, force: true })
 })
 
+const noopExec: Exec = async () => ({ exitCode: 0, stdout: '', stderr: '' })
+
 const start = (
   driver: PrDriver,
-  exec: Exec,
+  exec: Exec = noopExec,
   over: Partial<Parameters<typeof startMentionWatcher>[0]> = {},
 ) => {
   const w = startMentionWatcher({
@@ -141,26 +137,25 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, string> =>
-  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'mentions', 'demo.watch.json'), 'utf8') as string)
-
 const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
-test('scans open PRs once and responds to each unhandled mention exactly once', async () => {
+test('scans every open PR each tick and responds to each unhandled mention exactly once', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
-  const w = start(driver, fakeExec([prInfo()]))
+  driver.prs = [prInfo()]
+  const w = start(driver)
 
   await Bun.sleep(60)
 
+  // Handled-set dedup: the mention is replied to once even though every tick
+  // re-lists comments.
   expect(driver.posted).toHaveLength(1)
-  expect(driver.listCalls).toBe(1)
+  expect(driver.listCalls).toBeGreaterThan(1)
   const activity = w.activity()
   expect(activity.ok).toBe(true)
-  expect(counter(w, 'scanned')).toBe(1)
+  expect(counter(w, 'scanned')).toBeGreaterThanOrEqual(1)
   expect(counter(w, 'responded')).toBe(1)
-  expect(stateFile()['7']).toBe('2026-09-21T10:00:00Z')
   expect(activity.runs).toBeGreaterThanOrEqual(1)
   expect(activity.successes).toBe(activity.runs)
   expect(activity.failures).toBe(0)
@@ -168,42 +163,41 @@ test('scans open PRs once and responds to each unhandled mention exactly once', 
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
-test('skips re-scanning PRs whose updatedAt has not changed', async () => {
+test('a new mention is noticed even when the PR updatedAt does not change', async () => {
   const driver = new FakePr()
-  driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
-  start(driver, fakeExec([prInfo()]))
+  driver.comments = []
+  driver.prs = [prInfo()]
+  start(driver)
 
   await Bun.sleep(60)
-  const postsAfterFirst = driver.posted.length
+  expect(driver.posted).toHaveLength(0)
 
-  await Bun.sleep(40)
-  expect(driver.listCalls).toBe(1)
-  expect(driver.posted.length).toBe(postsAfterFirst)
+  // A human mentions the agent, but the forge never moves the PR's updatedAt.
+  // The watcher must still pick the mention up on the next tick.
+  driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
+  await Bun.sleep(60)
+
+  expect(driver.posted).toHaveLength(1)
 })
 
-test('only responds to mentions added after the last-seen comment when a PR changes', async () => {
+test('responds to fresh mentions added to an already-scanned PR', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
-  start(driver, fakeExec([prInfo()]))
+  driver.prs = [prInfo()]
+  const w = start(driver)
 
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(1)
 
-  // New activity on the PR: a fresh comment mentioning the agent.
+  // A new comment mentioning the agent lands; the next tick responds to it.
   driver.comments = [
     { id: '1', user: 'bob', body: '@chise-maru hi' },
     { id: '2', user: 'alice', body: '@chise-maru and this?' },
   ]
-  const w1 = watchers[0]
-  w1?.stop()
-  const w2 = start(driver, fakeExec([prInfo({ updatedAt: '2026-09-21T11:00:00Z' })]))
-
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(2)
-  const second = driver.posted[1]
-  expect(second).toContain('@alice')
-  expect(counter(w2, 'responded')).toBe(1)
-  expect(stateFile()['7']).toBe('2026-09-21T11:00:00Z')
+  expect(driver.posted[1]).toContain('@alice')
+  expect(counter(w, 'responded')).toBe(2)
 })
 
 test('a later mention in a lower-numbered id space (issue comment) is not skipped by a higher review id', async () => {
@@ -213,11 +207,11 @@ test('a later mention in a lower-numbered id space (issue comment) is not skippe
     { id: '1', user: 'bob', body: '@chise-maru hi' },
     { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
   ]
-  start(driver, fakeExec([prInfo()]))
+  driver.prs = [prInfo()]
+  start(driver)
 
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(1)
-  expect(stateFile()['7']).toBeDefined()
 
   // New issue comment (smaller id than the review id) mentions the agent.
   driver.comments = [
@@ -225,22 +219,17 @@ test('a later mention in a lower-numbered id space (issue comment) is not skippe
     { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
     { id: '2', user: 'alice', body: '@chise-maru and this?' },
   ]
-  const w1 = watchers[0]
-  w1?.stop()
-  const w2 = start(driver, fakeExec([prInfo({ updatedAt: '2026-09-21T11:00:00Z' })]))
-
   await Bun.sleep(60)
   expect(driver.posted).toHaveLength(2)
-  const second = driver.posted[1]
-  expect(second).toContain('@alice')
-  expect(counter(w2, 'responded')).toBe(1)
+  expect(driver.posted[1]).toContain('@alice')
 })
 
 test('a failed response is retried on later ticks, not marked handled', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
+  driver.prs = [prInfo()]
   driver.failPost = 10
-  const w = start(driver, fakeExec([prInfo()]))
+  const w = start(driver)
 
   await Bun.sleep(60)
   // Every attempt fails: nothing posted, nothing recorded as handled.
@@ -248,21 +237,19 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   expect(w.activity().ok).toBe(true)
   expect(counter(w, 'responded')).toBe(0)
   expect(counter(w, 'scanned')).toBeGreaterThanOrEqual(1)
-  // State never advances, so the same PR is re-scanned each tick.
-  expect(readFileSync(join(cacheDir, 'amagi', 'mentions', 'demo.watch.json'), 'utf8')).toBe('{}')
 
   driver.failPost = 0
   await Bun.sleep(40)
   expect(driver.posted).toHaveLength(1)
   expect(counter(w, 'responded')).toBe(1)
-  expect(stateFile()['7']).toBeDefined()
 })
 
 test('a tick that throws is counted as a failure and keeps run totals consistent', async () => {
-  const exec: Exec = async () => {
+  const driver = new FakePr()
+  driver.listOpenPrs = async () => {
     throw new Error('boom')
   }
-  const w = start(new FakePr(), exec)
+  const w = start(driver)
 
   await Bun.sleep(30)
   const a = w.activity()
@@ -275,8 +262,9 @@ test('a tick that throws is counted as a failure and keeps run totals consistent
 test('records classification outcomes as mention.classified events when a store is wired', async () => {
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
+  driver.prs = [prInfo()]
   const store = new Store(openDatabase(':memory:'))
-  start(driver, fakeExec([prInfo()]), { store })
+  start(driver, noopExec, { store })
 
   await Bun.sleep(60)
 

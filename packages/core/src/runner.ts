@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -9,18 +9,20 @@ import {
   type AgentEvent,
   type AgentRole,
   type CheckResult,
+  currentAttemptEvents,
   isTerminal,
   type StoredEvent,
   type TaskState,
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
-import { runStateDir } from './paths.ts'
-import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
+import { rejectedGitLogPath, runStateDir } from './paths.ts'
+import { changesSinceBase, diffBase, formatPrBody, withAgentSections } from './pr-body.ts'
 import {
   answerPrompt,
   commitMessage,
   fixChecksPrompt,
+  implementAfterVerifyPrompt,
   implementPrompt,
   implementSystemPrompt,
   prTitle,
@@ -31,7 +33,7 @@ import {
   withRestartHandoff,
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
-import type { Store, TaskRow } from './store/store.ts'
+import type { ProjectedTask, Store } from './store/store.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 export type RunnerDeps = {
@@ -46,10 +48,16 @@ export type RunnerDeps = {
   forge?: PrDriver | undefined
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
+  /**
+   * True when a server channel exists (amagi serve), so the agent is told
+   * about ask and git-request. A standalone amagi run has no server to POST
+   * to, so its agent is not told about either.
+   */
+  channel?: boolean
 }
 
 export type RunOnceResult = {
-  task: TaskRow
+  task: ProjectedTask
   state: TaskState
 } | null
 
@@ -238,7 +246,7 @@ export class Runner {
   private cancelled = false
   private retryNowRequested = false
   private currentProcess: AgentProcess | null = null
-  /** Running peak input context (input + cached tokens) for the current task run. */
+  /** Running peak input context of a single model request in the current task run. */
   private peakContext = 0
   /** Whether the soft context limit has been flagged for the current task run. */
   private contextWarned = false
@@ -349,6 +357,11 @@ export class Runner {
         store.append(task.id, { type: 'error', message, fatal: true })
         this.transition(task.id, 'needs_human', message)
       }
+    } finally {
+      // Best effort: surface the shim's rejected git attempts next to the
+      // run's own commit/pr events, so a rule-fighting agent is visible
+      // without a chat session to discover it.
+      await this.drainGitBlocked(task.id)
     }
 
     const row = store.task(task.id)
@@ -403,7 +416,9 @@ export class Runner {
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
-    const prior = taskCost(store.events({ taskId: task.id, limit: 1_000_000 }))
+    const prior = taskCost(
+      currentAttemptEvents(store.events({ taskId: task.id, limit: 1_000_000 }), task.id),
+    )
     const budget = new TaskBudget(
       store.task(task.id)?.createdAt ?? Date.now(),
       config.loop.maxRunMinutes * 60_000,
@@ -494,7 +509,12 @@ export class Runner {
       task: currentTask,
       worktree: cwd,
       branch,
-      askCommand: 'amagi ask "<question>"',
+      // The channel commands only exist under amagi serve, so a standalone run
+      // is never told to use them.
+      ...(this.deps.channel ? { askCommand: 'amagi ask "<question>"' } : {}),
+      ...(this.deps.channel ? { gitRequestCommand: 'amagi git-request commit' } : {}),
+      baseBranch: config.repo.baseBranch,
+      checks: this.checkCommands(),
     }
 
     this.throwIfCancelled(task.id)
@@ -504,16 +524,23 @@ export class Runner {
     // repository, so a task already satisfied on the base branch is stopped
     // before the implement agent writes anything or a no-op PR is opened. A
     // resumed run skips the check: its worktree already holds in-progress work.
+    // Implement resumes the check's session so its exploration is not redone.
+    let verifySession: string | null = null
     if (!resume) {
-      const viable = await this.verifyViability(task, cwd, branch, budget)
-      if (!viable) return
+      const verified = await this.verifyViability(task, cwd, branch, budget)
+      if (verified === null) return
+      verifySession = verified.sessionId
     }
     const first = await this.runAgentWithRetry(
       task.id,
-      null,
+      verifySession,
       {
         cwd,
-        prompt: resume ? reclaimPrompt(promptCtx) : implementPrompt(promptCtx),
+        prompt: resume
+          ? reclaimPrompt(promptCtx)
+          : verifySession !== null
+            ? implementAfterVerifyPrompt(promptCtx)
+            : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
         ...harnessStartOpts(config.harness.implement),
       },
@@ -645,14 +672,15 @@ export class Runner {
    * task is not viable, in which case it is reported inside the task (a
    * tracker comment) and parked in `no_pr` before any code is written. Any
    * failure to check defaults to viable: a broken check must never kill a
-   * task, only a clear not-viable verdict does.
+   * task, only a clear not-viable verdict does. A viable verdict carries the
+   * check's session for implement to resume; a failed check carries none.
    */
   private async verifyViability(
     task: TrackerTask,
     cwd: string,
     branch: string,
     budget: TaskBudget,
-  ): Promise<boolean> {
+  ): Promise<{ sessionId: string | null } | null> {
     const { store, config } = this.deps
     const run = await this.runAgent(
       task.id,
@@ -670,10 +698,10 @@ export class Runner {
     if (!run.ok) {
       // A cancel mid-check must stop the run, not fall through to implement.
       this.throwIfCancelled(task.id)
-      return true
+      return { sessionId: null }
     }
     const decision = run.summary === null ? null : parseViabilityDecision(run.summary)
-    if (decision === null || decision.viable) return true
+    if (decision === null || decision.viable) return { sessionId: run.sessionId }
 
     const reason =
       decision.reason.trim() !== ''
@@ -692,7 +720,7 @@ export class Runner {
       })
     }
     this.transition(task.id, 'no_pr', reason)
-    return false
+    return null
   }
 
   /**
@@ -734,6 +762,23 @@ export class Runner {
     } catch {
       current = task
     }
+    let summary = fallbackSummary
+    const sections = withAgentSections(current.description, fallbackSummary)
+    if (sections !== null) {
+      summary = sections.summary
+      current = { ...current, description: sections.description }
+      if (this.deps.tracker.capabilities.edit) {
+        try {
+          await this.deps.tracker.updateTask(task.id, { description: sections.description })
+        } catch (err) {
+          store.append(task.id, {
+            type: 'error',
+            message: `writing the PR sections into ${task.id} failed: ${errMsg(err)}`,
+            fatal: false,
+          })
+        }
+      }
+    }
     const opts: CreatePrOptions = {
       cwd,
       branch,
@@ -751,7 +796,7 @@ export class Runner {
           model: model ?? config.harness.implement.model ?? null,
           effort: effort ?? config.harness.implement.effort ?? null,
         },
-        fallbackSummary,
+        summary,
       ),
       labels: amagiLabels(current.type),
     }
@@ -873,6 +918,9 @@ export class Runner {
         AMAGI_RUN_STATE: runState,
       },
     }
+    const reflogBefore = await this.headReflog(opts.cwd)
+    this.throwIfCancelled(taskId)
+    const seqBefore = store.recentEvents(taskId, 1)[0]?.seq ?? 0
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
@@ -930,7 +978,7 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        store.append(taskId, { type: 'agent.stream', role, event })
+        if (event.kind !== 'context') store.append(taskId, { type: 'agent.stream', role, event })
         if (this.observeContext(taskId, event)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true
@@ -983,6 +1031,43 @@ export class Runner {
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
+      await this.recordGitBypass(taskId, opts.cwd, reflogBefore, seqBefore)
+    }
+  }
+
+  /** HEAD reflog of `cwd` as `<sha> <subject>` lines, newest first; null when unreadable. */
+  private async headReflog(cwd: string): Promise<string[] | null> {
+    const r = await this.exec(['git', 'reflog', 'show', '--format=%H %gs', 'HEAD'], { cwd })
+    if (r.exitCode !== 0) return null
+    return r.stdout.split('\n').filter((l) => l !== '')
+  }
+
+  /**
+   * Records `git.bypassed` when the worktree's HEAD reflog grew during an agent
+   * run by entries the runner did not make. Commits recorded as `commit.created`
+   * since `sinceSeq` are the sanctioned `git-request` ones.
+   */
+  private async recordGitBypass(
+    taskId: string,
+    cwd: string,
+    before: string[] | null,
+    sinceSeq: number,
+  ): Promise<void> {
+    try {
+      const after = await this.headReflog(cwd)
+      if (before === null || after === null) return
+      const { store } = this.deps
+      const sanctioned = new Set(
+        store
+          .events({ taskId, sinceSeq, limit: 1_000_000 })
+          .flatMap((e) => (e.type === 'commit.created' ? [e.sha] : [])),
+      )
+      const entries = after
+        .slice(0, Math.max(0, after.length - before.length))
+        .filter((line) => !sanctioned.has(line.split(' ', 1)[0] ?? ''))
+      if (entries.length > 0) store.append(taskId, { type: 'git.bypassed', entries })
+    } catch {
+      // Best effort: the bypass check never fails the run.
     }
   }
 
@@ -1000,15 +1085,15 @@ export class Runner {
   }
 
   /**
-   * Folds a streamed usage event into the run's peak context and enforces the
+   * Folds a streamed context event into the run's peak context and enforces the
    * budget. Returns true when the hard limit was crossed, signalling the
    * caller to kill the agent.
    */
   private observeContext(taskId: string, event: AgentEvent): boolean {
-    if (event.kind !== 'usage') return false
+    if (event.kind !== 'context') return false
     const { store } = this.deps
     const { warnTokens, maxTokens } = this.contextLimits()
-    const context = event.inputTokens + (event.cachedTokens ?? 0)
+    const context = event.tokens
     if (context <= this.peakContext) return false
     this.peakContext = context
     store.append(taskId, { type: 'run.context', contextTokens: context })
@@ -1146,13 +1231,17 @@ export class Runner {
     }
   }
 
-  private async runChecks(cwd: string): Promise<CheckResult[]> {
-    const results: CheckResult[] = []
+  private checkCommands(): string[] {
     const { format, lint, commands } = this.deps.config.checks
     // The mandatory gate always runs before the configured commands, so a PR
     // cannot be pushed until the worktree is formatted and lint-clean.
     const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
-    for (const command of [...gate, ...commands]) {
+    return [...gate, ...commands]
+  }
+
+  private async runChecks(cwd: string): Promise<CheckResult[]> {
+    const results: CheckResult[] = []
+    for (const command of this.checkCommands()) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,
@@ -1259,15 +1348,7 @@ export class Runner {
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
   private async commit(task: TrackerTask, cwd: string, base: string): Promise<boolean> {
-    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-    if (status.stdout.trim() !== '') {
-      await this.exec(['git', 'add', '-A'], { cwd })
-      const message = commitMessage(task)
-      const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
-      if (commit.exitCode !== 0) {
-        throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
-      }
-    }
+    await this.stageAndCommit(task, cwd)
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
@@ -1282,5 +1363,88 @@ export class Runner {
       subject: `[${task.id}] ${task.title}`,
     })
     return true
+  }
+
+  /**
+   * Stages and commits the worktree with the same message format as the
+   * end-of-phase commit. `committed: false` means the worktree was already
+   * clean; a git failure throws, since the caller decides how to surface it.
+   */
+  private async stageAndCommit(
+    task: Pick<TrackerTask, 'id' | 'title'>,
+    cwd: string,
+  ): Promise<{ committed: false } | { committed: true; sha: string }> {
+    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
+    if (status.stdout.trim() === '') return { committed: false }
+    await this.exec(['git', 'add', '-A'], { cwd })
+    const changes = await changesSinceBase(this.exec, cwd, this.deps.config.repo.baseBranch, true)
+    const message = commitMessage(task, changes)
+    const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
+    if (commit.exitCode !== 0) {
+      throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
+    }
+    const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
+    return { committed: true, sha }
+  }
+
+  /**
+   * The one sanctioned git write an agent can cause, over the server channel:
+   * stages and commits the worktree, records `commit.created`, and returns
+   * the sha. A clean worktree or a git failure is returned as an error so the
+   * agent learns immediately. No state transition, so it is usable any number
+   * of times within a run.
+   */
+  async requestCommit(
+    taskId: string,
+    cwd: string,
+  ): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
+    const task = this.deps.store.task(taskId)
+    if (task === null) return { ok: false, error: `unknown task ${taskId}` }
+    try {
+      const staged = await this.stageAndCommit(task, cwd)
+      if (!staged.committed) return { ok: false, error: 'nothing to commit; the worktree is clean' }
+      this.deps.store.append(taskId, {
+        type: 'commit.created',
+        sha: staged.sha,
+        subject: `[${task.id}] ${task.title}`,
+      })
+      return { ok: true, sha: staged.sha }
+    } catch (err) {
+      return { ok: false, error: errMsg(err) }
+    }
+  }
+
+  /**
+   * Consumes the git shim's rejected-call log for this task into `git.blocked`
+   * events and clears the file. Best effort per line, so one malformed entry
+   * cannot stop the rest; a missing file is just no blocked calls.
+   */
+  async drainGitBlocked(taskId: string): Promise<void> {
+    const path = rejectedGitLogPath(taskId)
+    let lines: string[]
+    try {
+      lines = readFileSync(path, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim() !== '')
+    } catch {
+      return
+    }
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line) as { argv?: unknown }
+        const argv = Array.isArray(parsed.argv)
+          ? parsed.argv.filter((a): a is string => typeof a === 'string')
+          : []
+        if (argv.length === 0) continue
+        this.deps.store.append(taskId, { type: 'git.blocked', argv })
+      } catch {
+        // Best effort: a malformed line is skipped, never fatal.
+      }
+    }
+    try {
+      rmSync(path, { force: true })
+    } catch {
+      // Best effort: a stale file is harmless.
+    }
   }
 }

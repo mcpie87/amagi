@@ -7,14 +7,9 @@ import {
   type Projection,
   project,
 } from '../project.ts'
-import { openDatabase } from './db.ts'
 
 export { InvalidTransitionError } from '../project.ts'
 export type { ProjectedQuestion, ProjectedTask, Projection }
-
-/** The SQL projection rows are the very same shape the shared reducer produces. */
-export type TaskRow = ProjectedTask
-export type QuestionRow = ProjectedQuestion
 
 type RawTask = {
   id: string
@@ -35,6 +30,7 @@ type RawTask = {
   last_commit_subject: string | null
   checks: string | null
   checks_ok: number | null
+  attempt: number
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -73,6 +69,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
       : { sha: r.last_commit_sha, subject: r.last_commit_subject ?? '' },
   checks: r.checks === null ? null : (JSON.parse(r.checks) as CheckResult[]),
   checksOk: r.checks_ok === null ? null : r.checks_ok === 1,
+  attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 })
@@ -116,6 +113,7 @@ const taskRow = (t: ProjectedTask): Row => ({
   last_commit_subject: t.lastCommit?.subject ?? null,
   checks: t.checks === null ? null : JSON.stringify(t.checks),
   checks_ok: t.checksOk === null ? null : t.checksOk ? 1 : 0,
+  attempt: t.attempt,
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({
@@ -154,7 +152,7 @@ export type Listener = (event: StoredEvent) => void
 export class Store {
   private readonly listeners = new Set<Listener>()
 
-  constructor(readonly db: Database = openDatabase()) {}
+  constructor(readonly db: Database) {}
 
   append(taskId: string | null, body: EventBody): StoredEvent {
     let seq = 0
@@ -217,7 +215,7 @@ export class Store {
     return projection
   }
 
-  task(id: string): TaskRow | null {
+  task(id: string): ProjectedTask | null {
     const row = this.db.query('select * from tasks where id = ?').get(id) as RawTask | null
     return row ? toTask(row) : null
   }
@@ -226,7 +224,7 @@ export class Store {
    * `updated_at` is only millisecond resolution, so tasks touched in the same
    * tick need the rowid tie break or the queue view reshuffles between reads.
    */
-  tasks(opts: { states?: readonly TaskState[]; limit?: number } = {}): TaskRow[] {
+  tasks(opts: { states?: readonly TaskState[]; limit?: number } = {}): ProjectedTask[] {
     const limit = opts.limit ?? 200
     const order = 'order by updated_at desc, rowid desc limit ?'
     if (opts.states?.length) {
@@ -316,7 +314,7 @@ export class Store {
     }))
   }
 
-  question(id: string): QuestionRow | null {
+  question(id: string): ProjectedQuestion | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null
   }
@@ -362,7 +360,7 @@ export class Store {
     return token
   }
 
-  openQuestions(taskId?: string): QuestionRow[] {
+  openQuestions(taskId?: string): ProjectedQuestion[] {
     const rows = (
       taskId
         ? this.db
@@ -376,7 +374,7 @@ export class Store {
   }
 
   /** Questions still expecting an answer, including ones whose await poll timed out. */
-  unansweredQuestions(taskId?: string): QuestionRow[] {
+  unansweredQuestions(taskId?: string): ProjectedQuestion[] {
     const rows = (
       taskId
         ? this.db
@@ -390,26 +388,6 @@ export class Store {
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
-  }
-
-  /** Long lived streams leak the store if they forget to unsubscribe. */
-  get listenerCount(): number {
-    return this.listeners.size
-  }
-
-  /** Drops the projections and folds the whole log back over them. */
-  rebuild(): void {
-    this.db.transaction(() => {
-      this.db.exec('delete from tasks; delete from questions;')
-      const rows = this.db
-        .query('select seq, ts, task_id, body from events order by seq')
-        .all() as {
-        ts: number
-        task_id: string | null
-        body: string
-      }[]
-      for (const r of rows) this.apply(r.task_id, r.ts, JSON.parse(r.body) as EventBody)
-    })()
   }
 
   close(): void {

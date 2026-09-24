@@ -124,8 +124,8 @@ class FakeHarness implements Harness {
       effort: null,
     }
   }
-  resume(): AgentProcess {
-    throw new Error('no resume in run-service tests')
+  resume(_sessionId: string, opts: AgentStartOptions): AgentProcess {
+    return this.start(opts)
   }
   async listModels(): Promise<string[]> {
     return []
@@ -380,7 +380,7 @@ describe('RunService', () => {
     const service = makeService(new FakeTracker([TASK]), new ModelHarness(), 1)
     const started = await service.start()
     expect(started.ok).toBe(true)
-    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    await waitFor(() => store.currentAgent(TASK.id)?.model === 'fake-model')
 
     const status = await service.status()
     expect(status.tasks[TASK.id]).toEqual({
@@ -410,13 +410,19 @@ describe('RunService', () => {
   })
 
   test('setMaxParallel raises the ceiling for new launches', async () => {
-    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 1)
+    const harness = new BlockingHarness()
+    const service = makeService(new FakeTracker([TASK, TASK2]), harness, 1)
     expect((await service.start(TASK.id)).ok).toBe(true)
-    expect((await service.start(TASK2.id)).ok).toBe(false)
-    service.setMaxParallel(2)
-    expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
-    await service.stop(TASK.id)
-    await service.stop(TASK2.id)
+    await waitFor(() => harness.starts === 1)
+    try {
+      expect((await service.start(TASK2.id)).ok).toBe(false)
+      service.setMaxParallel(2)
+      expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
+      await waitFor(() => harness.starts === 2)
+    } finally {
+      await Promise.all([service.stop(TASK.id), service.stop(TASK2.id)])
+      service.dispose()
+    }
   })
 
   test('start launches the next ready task and it completes', async () => {
@@ -472,6 +478,36 @@ describe('RunService', () => {
       ok: false,
       status: 409,
       error: 'unknown harness "nope"; use a harness.definitions name or claude/codex/opencode',
+    })
+  })
+
+  test('start resolves a bare kind to the implement harness so its bin carries over', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const cfg = config({
+      harness: {
+        implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
+      },
+    })
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: cfg,
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (c) => {
+        captured = c
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, { harness: 'opencode' })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toMatchObject({
+      kind: 'opencode',
+      bin: 'opencode-unconfined',
+      permissions: 'bypass',
     })
   })
 

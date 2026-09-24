@@ -1,4 +1,4 @@
-import { isTerminal, type StoredEvent } from './events.ts'
+import { currentAttemptEvents, isTerminal, type StoredEvent, type TaskState } from './events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -15,9 +15,6 @@ export { emptyProjection, project }
  * the server uses to keep its SQL projection (`project` in project.ts), so a
  * client renders exactly what the API would answer, from events alone.
  */
-export type TaskView = ProjectedTask
-export type QuestionView = ProjectedQuestion
-
 export type DashboardState = Projection & {
   events: StoredEvent[]
   latestSeq: number
@@ -33,20 +30,40 @@ export function reduceState(state: DashboardState, event: StoredEvent): Dashboar
   return { ...project(state, event), events: [...state.events, event], latestSeq: event.seq }
 }
 
+/**
+ * The dashboard state as it stood at the end of one attempt of a task: the
+ * task's events are cut at the reset that started the next attempt and
+ * re-projected, so every per-task view renders that attempt unchanged.
+ * Other tasks keep their full history.
+ */
+export function stateAtAttempt(
+  state: DashboardState,
+  taskId: string,
+  attempt: number,
+): DashboardState {
+  let seen = 1
+  const events = state.events.filter((e) => {
+    if (e.taskId !== taskId) return true
+    if (e.type === 'task.reset') seen++
+    return seen <= attempt
+  })
+  return { ...events.reduce(project, emptyProjection()), events, latestSeq: state.latestSeq }
+}
+
 /** The queue view: every task still in flight, most recently touched first. */
-export function activeTasks(state: DashboardState): TaskView[] {
+export function activeTasks(state: DashboardState): ProjectedTask[] {
   return Object.values(state.tasks)
     .filter((t) => !isTerminal(t.state))
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-export function tasksNeedingAttention(state: DashboardState): TaskView[] {
+export function tasksNeedingAttention(state: DashboardState): ProjectedTask[] {
   return Object.values(state.tasks)
     .filter((t) => t.state === 'needs_human' || t.state === 'no_pr' || t.state === 'pr_flagged')
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-export function openQuestionsFor(state: DashboardState, taskId: string): QuestionView[] {
+export function openQuestionsFor(state: DashboardState, taskId: string): ProjectedQuestion[] {
   return Object.values(state.questions)
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)
     .sort((a, b) => a.askedAt - b.askedAt)
@@ -162,6 +179,74 @@ export function chatInFlight(state: DashboardState, taskId: string): boolean {
   return started
 }
 
+/** One state the task entered during an attempt, and how it got there. */
+export type StatusEntry = {
+  seq: number
+  ts: number
+  /** What moved the task: its claim, a transition, an operator reset or a reclaim. */
+  cause: 'claimed' | 'state' | 'reset' | 'reclaimed'
+  from: TaskState | null
+  to: TaskState
+  reason: string | null
+  /** Time spent in `to`: until the next entry, else until `now` while in flight, else null. */
+  durationMs: number | null
+}
+
+/**
+ * The status history of the task's current attempt, oldest first. Pass a null
+ * `now` for a settled view (a past attempt), so the last state gets no
+ * open-ended duration.
+ */
+export function statusLog(
+  state: DashboardState,
+  taskId: string,
+  now: number | null = Date.now(),
+): StatusEntry[] {
+  const entries: StatusEntry[] = []
+  let current: TaskState | null = null
+  const push = (
+    event: StoredEvent,
+    cause: StatusEntry['cause'],
+    to: TaskState,
+    reason?: string,
+  ) => {
+    entries.push({
+      seq: event.seq,
+      ts: event.ts,
+      cause,
+      from: current,
+      to,
+      reason: reason ?? null,
+      durationMs: null,
+    })
+    current = to
+  }
+  for (const event of currentAttemptEvents(state.events, taskId)) {
+    switch (event.type) {
+      case 'task.claimed':
+        push(event, 'claimed', 'claimed')
+        break
+      case 'task.state':
+        push(event, 'state', event.to, event.reason)
+        break
+      case 'task.reset':
+        push(event, 'reset', 'claimed', event.reason)
+        break
+      case 'task.reclaimed':
+        push(event, 'reclaimed', 'claimed', event.reason)
+        break
+      default:
+        break
+    }
+  }
+  for (const [i, entry] of entries.entries()) {
+    const next = entries[i + 1]
+    if (next !== undefined) entry.durationMs = next.ts - entry.ts
+    else if (now !== null && !isTerminal(entry.to)) entry.durationMs = now - entry.ts
+  }
+  return entries
+}
+
 /**
  * A task's run health as the guards see it: context against the soft/hard
  * limits, cost and elapsed against the task budgets, and every guard warning
@@ -200,8 +285,7 @@ export function runHealth(state: DashboardState, taskId: string, now = Date.now(
   let costUsd = 0
   let costSeen = false
   const warnings: string[] = []
-  for (const event of state.events) {
-    if (event.taskId !== taskId) continue
+  for (const event of currentAttemptEvents(state.events, taskId)) {
     switch (event.type) {
       case 'run.context':
         contextTokens = event.contextTokens

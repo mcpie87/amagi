@@ -6,6 +6,7 @@ import { checkPrsCommand } from './commands/check-prs.ts'
 import { cleanCommand } from './commands/clean.ts'
 import { configCommand } from './commands/config.ts'
 import { continueCommand } from './commands/continue.ts'
+import { gitRequestCommand } from './commands/git-request.ts'
 import { mergeablePrsCommand } from './commands/mergeable-prs.ts'
 import { newCommand } from './commands/new.ts'
 import { removeCommand } from './commands/remove.ts'
@@ -31,6 +32,7 @@ const main = defineCommand({
     config: configCommand,
     clean: cleanCommand,
     ask: askCommand,
+    'git-request': gitRequestCommand,
     serve: serveCommand,
     tui: tuiCommand,
     stop: stopCommand,

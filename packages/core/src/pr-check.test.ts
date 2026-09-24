@@ -6,11 +6,16 @@ import type { Exec, ExecResult } from './exec.ts'
 import {
   fetchPullHeads,
   isConflicting,
+  iterationLabel,
+  iterationsFromLabels,
   listOpenPrs,
+  mergeableToVerdict,
+  mergeTreeVerdict,
   type PrInfo,
   prepareConflictWorktree,
-  prMergeStatus,
   pushConflictFix,
+  stampIterationLabel,
+  taskIdFromAmagiBranch,
 } from './pr-check.ts'
 
 type Call = readonly string[]
@@ -146,23 +151,142 @@ describe('fetchPullHeads', () => {
     expect(result.fetched).toBe(true)
     expect(result.heads).toEqual({})
   })
+
+  test('flattens gh label objects into label names', async () => {
+    const { exec } = fake((c) =>
+      c.includes('list') && c.includes('pr')
+        ? ok(
+            JSON.stringify([
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/iterations:2' }] },
+            ]),
+          )
+        : undefined,
+    )
+    const prs = await listOpenPrs({ cwd: '/repo', exec })
+    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/iterations:2'])
+  })
 })
 
-describe('prMergeStatus', () => {
-  test('retries while GitHub reports UNKNOWN, then returns the resolved state', async () => {
-    const calls: Call[] = []
-    let n = 0
-    const exec: Exec = async (cmd) => {
-      calls.push(cmd)
-      n++
-      if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
-      return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
-    }
+describe('iterations', () => {
+  test('parses the amagi/iterations:N label, defaulting to 0', () => {
+    expect(iterationsFromLabels([])).toBe(0)
+    expect(iterationsFromLabels(undefined)).toBe(0)
+    expect(iterationsFromLabels(['amagi', 'amagi/iterations:3'])).toBe(3)
+    expect(iterationsFromLabels(['amagi/iterations:0'])).toBe(0)
+    expect(iterationsFromLabels(['amagi/iterations:oops'])).toBe(0)
+  })
 
-    const status = await prMergeStatus('/repo', 7, exec)
+  test('formats the iteration label', () => {
+    expect(iterationLabel(4)).toBe('amagi/iterations:4')
+  })
 
-    expect(status).toEqual({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })
-    expect(calls).toHaveLength(2)
+  test('taskIdFromAmagiBranch reads the task id from an amagi head branch', () => {
+    expect(taskIdFromAmagiBranch('amagi/am-19b.2-ask-cli-fallback')).toBe('am-19b.2')
+    expect(taskIdFromAmagiBranch('feature/foo')).toBeNull()
+  })
+
+  test('stamps the first iteration on an amagi PR with no prior label', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const stamped = await stampIterationLabel({
+      cwd: '/repo',
+      pr: pr({ labels: ['amagi'] }),
+      exec,
+    })
+
+    expect(stamped).toEqual({ taskId: 'am-1', iteration: 1 })
+    expect(calls).toContainEqual(['gh', 'label', 'create', 'amagi/iterations:1', '--force'])
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/iterations:1'])
+  })
+
+  test('stamps the next iteration and drops the stale label', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const stamped = await stampIterationLabel({
+      cwd: '/repo',
+      pr: pr({ labels: ['amagi/iterations:2'] }),
+      exec,
+    })
+
+    expect(stamped).toEqual({ taskId: 'am-1', iteration: 3 })
+    expect(calls).toContainEqual(['gh', 'label', 'create', 'amagi/iterations:3', '--force'])
+    expect(calls).toContainEqual([
+      'gh',
+      'pr',
+      'edit',
+      '7',
+      '--add-label',
+      'amagi/iterations:3',
+      '--remove-label',
+      'amagi/iterations:2',
+    ])
+  })
+
+  test('leaves non-amagi PRs untouched', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const stamped = await stampIterationLabel({
+      cwd: '/repo',
+      pr: pr({ headRefName: 'feature/foo' }),
+      exec,
+    })
+
+    expect(stamped).toBeNull()
+    expect(calls).toEqual([])
+  })
+})
+
+describe('mergeTreeVerdict', () => {
+  test('runs merge-tree with the pinned config and maps the exit code', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('merge-tree') ? { exitCode: 1, stdout: '', stderr: '' } : undefined,
+    )
+    const verdict = await mergeTreeVerdict({
+      repoRoot: '/repo',
+      base: 'origin/main',
+      head: 'refs/remotes/origin/pr/7/head',
+      exec,
+    })
+
+    expect(verdict).toBe('conflict')
+    expect(calls[0]).toEqual([
+      'git',
+      '-c',
+      'merge.renames=true',
+      '-c',
+      'merge.conflictStyle=merge',
+      '-c',
+      'merge.directoryRenames=conflicts',
+      'merge-tree',
+      '--write-tree',
+      '--quiet',
+      'origin/main',
+      'refs/remotes/origin/pr/7/head',
+    ])
+  })
+
+  test('reports clean on exit 0', async () => {
+    const { exec } = fake((c) => (c.includes('merge-tree') ? ok('') : undefined))
+    expect(await mergeTreeVerdict({ repoRoot: '/repo', base: 'main', head: 'head', exec })).toBe(
+      'clean',
+    )
+  })
+
+  test('treats a missing ref (exit 1 with stderr) as an error, never a conflict', async () => {
+    const { exec } = fake((c) =>
+      c.includes('merge-tree')
+        ? fail('merge-tree: nosuchref - not something we can merge')
+        : undefined,
+    )
+    await expect(
+      mergeTreeVerdict({ repoRoot: '/repo', base: 'main', head: 'nosuchref', exec }),
+    ).rejects.toThrow('nosuchref')
+  })
+})
+
+describe('mergeableToVerdict', () => {
+  test('maps CONFLICTING and MERGEABLE 1:1 and UNKNOWN to a third bucket', () => {
+    expect(mergeableToVerdict('CONFLICTING')).toBe('conflict')
+    expect(mergeableToVerdict('MERGEABLE')).toBe('clean')
+    expect(mergeableToVerdict('UNKNOWN')).toBe('unknown')
+    expect(mergeableToVerdict('')).toBe('unknown')
   })
 })
 

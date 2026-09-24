@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import type { QuestionRow } from '@amagi/core'
+import type { ProjectedQuestion } from '@amagi/core'
 import { serve } from '../../server/src/serve.ts'
 import { type TestWorkspaces, testWorkspaces } from '../../server/src/test-util.ts'
 import { askQuestion, taskIdFromBranch } from './ask.ts'
@@ -17,7 +17,7 @@ const implementing = (id: string) => {
   }
 }
 
-const waitForQuestion = async (taskId: string): Promise<QuestionRow> => {
+const waitForQuestion = async (taskId: string): Promise<ProjectedQuestion> => {
   for (let i = 0; i < 500; i++) {
     const q = store.openQuestions(taskId)[0]
     if (q) return q

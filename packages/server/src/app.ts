@@ -2,13 +2,17 @@ import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
+  canReset,
   classifyDifficulty,
   errMsg,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HarnessKind,
+  HUMAN_ONLY_LABEL,
   isTerminal,
+  type LiveRun,
   makeHarness,
+  mergeLiveRuns,
   type Notifier,
   type Question,
   type RegistryEntry,
@@ -17,6 +21,7 @@ import {
   reconcilePr,
   removeWorktree,
   type Store,
+  type StoredEvent,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
@@ -41,6 +46,7 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  GitRequestBody,
   IssueCreateBody,
   IssueUpdateBody,
   QuestionQuery,
@@ -65,6 +71,8 @@ export type ServerDeps = {
   runnerRepo?: string | undefined
   /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
   workers?: () => WorkerActivity[]
+  /** Foreground CLI workers (`just run`) outside the server runner, merged into /api/runner. */
+  liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
 }
@@ -181,6 +189,7 @@ export function createApp({
   runner,
   runnerRepo,
   workers,
+  liveRuns,
   chatHarnessFor,
 }: ServerDeps) {
   // One ChatService per workspace, so the in-flight guard survives requests.
@@ -250,6 +259,16 @@ export function createApp({
       const issue = await beads.getIssue(id)
       if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
       return c.json(issue)
+    })
+
+    .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const beads = beadsTracker(ws)
+      if (beads === null) {
+        return c.json({ error: `issue details are unavailable for ${repo}` }, 501)
+      }
+      return c.json(await beads.children(id))
     })
 
     .post(
@@ -460,6 +479,44 @@ export function createApp({
       return c.json({ task: ws.store.task(id) })
     })
 
+    .post('/api/repos/:repo/tasks/:id/reset', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (!canReset(task.state, task.worktree !== null)) {
+        return c.json({ error: `task ${id} cannot be reset from state ${task.state}` }, 409)
+      }
+      if (runner !== undefined) {
+        try {
+          await runner.stop(id)
+        } catch (err) {
+          console.warn(`stop on reset ${id}: ${errMsg(err)}`)
+        }
+      }
+      // Unlike close, the worktree removal is not best effort: a surviving
+      // worktree or branch would be resumed by the next run, which is exactly
+      // what the reset promises not to do.
+      if (task.worktree !== null) {
+        try {
+          await removeWorktree(ws.store, id, {
+            repoRoot: ws.root,
+            path: task.worktree,
+            branch: task.branch ?? null,
+          })
+        } catch (err) {
+          return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
+        }
+      }
+      try {
+        await ws.tracker.release(id)
+      } catch (err) {
+        console.warn(`release on reset ${id}: ${errMsg(err)}`)
+      }
+      ws.store.append(id, { type: 'task.reset', reason: 'operator reset' })
+      return c.json({ task: ws.store.task(id) })
+    })
+
     .post('/api/repos/:repo/tasks/:id/retry', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -500,6 +557,76 @@ export function createApp({
       await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, task)
       return c.json({ task: ws.store.task(id) })
     })
+
+    .post(
+      '/api/repos/:repo/tasks/:id/filed-as-error',
+      valid('param', RepoTaskIdParam),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        // The error-task retry path applies to a task parked for attention with
+        // an error to carry; a bare park (e.g. no_pr) has nothing to rerun from.
+        if (task.state !== 'needs_human') {
+          return c.json({ error: `task ${id} is not waiting for human attention` }, 409)
+        }
+        const reason = task.statusReason
+        if (reason === null || reason.trim() === '') {
+          return c.json({ error: `task ${id} has no recorded error to file` }, 409)
+        }
+        const createCap = capabilityError(ws.tracker, 'create')
+        if (createCap !== null) return c.json({ error: createCap }, 501)
+        const depCap = capabilityError(ws.tracker, 'dependencies')
+        if (depCap !== null) return c.json({ error: depCap }, 501)
+        // The same failure on the same task must not stack a second error bead:
+        // filing twice (a repeated recovery, a double-click) reuses the open
+        // error task already recorded for this exact reason.
+        const prior = ws.store
+          .events({ taskId: id })
+          .filter(
+            (e): e is Extract<StoredEvent, { type: 'retry.filed_as_error' }> =>
+              e.type === 'retry.filed_as_error',
+          )
+          .findLast((e) => e.reason === reason)
+        const priorTask = prior === undefined ? null : await ws.tracker.get(prior.errorTaskId)
+        const errorTask =
+          priorTask !== null && priorTask.status !== 'closed'
+            ? priorTask
+            : await ws.tracker.createTask({
+                title: `Error: ${task.title}`,
+                description:
+                  `The task ${id} errored out while the agent was implementing it.\n\n` +
+                  `${reason}\n\n` +
+                  `Resolve this task to rerun ${id} once its root cause is fixed.`,
+                acceptanceCriteria: null,
+                priority: null,
+                // The error task is the operator's to resolve, not the agent's.
+                labels: [HUMAN_ONLY_LABEL],
+                dependencies: [],
+                parent: null,
+              })
+        // The original blocks on the error task, so the runner skips it until
+        // the error task resolves, then reruns it from its preserved worktree.
+        await ws.tracker.updateTask(id, { dependencies: { add: [errorTask.id], remove: [] } })
+        // Best effort: release the tracker claim so the unblocked task re-enters
+        // the ready queue once the error task is closed and the auto-pick loop
+        // reruns it. A hiccup here only delays the rerun, never loses the work.
+        try {
+          await ws.tracker.release(id)
+        } catch (err) {
+          console.warn(
+            `release on filed-as-error ${id}: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+        ws.store.append(id, {
+          type: 'retry.filed_as_error',
+          errorTaskId: errorTask.id,
+          reason,
+        })
+        return c.json({ task: ws.store.task(id), errorTask })
+      },
+    )
 
     .post(
       '/api/repos/:repo/tasks/:id/close',
@@ -607,7 +734,8 @@ export function createApp({
 
     .get('/api/runner', async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const status = await runner.status()
+      let status = await runner.status()
+      if (liveRuns !== undefined) status = await mergeLiveRuns(status, liveRuns())
       if (workers === undefined) return c.json(status)
       return c.json({ ...status, workers: workers() })
     })
@@ -671,7 +799,11 @@ export function createApp({
         }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
-          if (runner !== undefined && runnerRepo === repo) runner.setAutoQueue(autoQueue)
+          if (runner !== undefined && runnerRepo === repo) {
+            const workersEnabled =
+              workspaces.list().find((entry) => entry.key === repo)?.workers === true
+            runner.setAutoQueue(autoQueue && workersEnabled)
+          }
         }
         return c.json({
           maxParallel: ws.config.loop.maxParallel,
@@ -804,6 +936,39 @@ export function createApp({
         }
         await resolveQuestionGate(ws.tracker, question.gateRef)
         return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) })
+      },
+    )
+
+    .post(
+      '/api/repos/:repo/tasks/:id/git-requests',
+      valid('param', RepoTaskIdParam),
+      valid('json', GitRequestBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { verb } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        if (!authorized(c, ws.store, id)) {
+          return c.json({ error: 'task token mismatch' }, 401)
+        }
+        if (task.worktree === null) {
+          return c.json({ error: `task ${id} has no worktree to commit` }, 409)
+        }
+        // The commit is synchronous, so it runs here and the sha returns in
+        // the same response; a separate await endpoint would add a round trip.
+        const runner = new Runner({
+          store: ws.store,
+          tracker: ws.tracker,
+          harness: makeHarness(ws.config.harness.implement),
+          config: ws.config,
+          repoRoot: ws.root,
+          repoName: ws.name,
+          ...(ws.forge === null ? {} : { forge: ws.forge }),
+        })
+        const result = await runner.requestCommit(id, task.worktree)
+        if (!result.ok) return c.json({ error: result.error }, 500)
+        return c.json({ verb, sha: result.sha })
       },
     )
 

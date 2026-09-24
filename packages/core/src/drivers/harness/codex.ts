@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
@@ -45,6 +45,81 @@ type CodexMessage = {
 
 type ItemPhase = 'started' | 'updated' | 'completed'
 
+type RolloutLine = {
+  type?: string
+  payload?: { type?: string; info?: { last_token_usage?: { input_tokens?: number } } | null }
+}
+
+/** Input context of a thread's latest model request, or null when unknown. */
+export type CodexContextReader = (threadId: string) => number | null
+
+const codexHome = (): string => process.env.CODEX_HOME ?? join(homedir(), '.codex')
+
+/**
+ * Tails codex's rollout file ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread
+ * id>.jsonl) for the `token_count` events it records after every model
+ * request. That file is the only place codex exposes a single request's
+ * context: `exec --json` reports usage once per turn, summed over every request
+ * of the thread, which overshoots the real window many times over.
+ */
+export class CodexRolloutContext {
+  private path: string | null = null
+  private nextLookup = 0
+  private offset = 0
+  private partial = ''
+  private latest: number | null = null
+
+  constructor(private readonly home = codexHome()) {}
+
+  read: CodexContextReader = (threadId) => {
+    const path = this.locate(threadId)
+    if (path === null) return this.latest
+    let fd: number
+    try {
+      fd = openSync(path, 'r')
+    } catch {
+      return this.latest
+    }
+    try {
+      const size = fstatSync(fd).size
+      if (size <= this.offset) return this.latest
+      const buf = Buffer.alloc(size - this.offset)
+      readSync(fd, buf, 0, buf.length, this.offset)
+      this.offset = size
+      const lines = (this.partial + buf.toString('utf8')).split('\n')
+      this.partial = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.includes('"token_count"')) continue
+        try {
+          const msg = JSON.parse(line) as RolloutLine
+          const tokens = msg.payload?.info?.last_token_usage?.input_tokens
+          if (msg.payload?.type === 'token_count' && typeof tokens === 'number') {
+            this.latest = tokens
+          }
+        } catch {
+          // a torn or foreign line must not drop the reading
+        }
+      }
+    } finally {
+      closeSync(fd)
+    }
+    return this.latest
+  }
+
+  private locate(threadId: string): string | null {
+    if (this.path !== null || Date.now() < this.nextLookup) return this.path
+    this.nextLookup = Date.now() + 5_000
+    const sessions = join(this.home, 'sessions')
+    if (!existsSync(sessions)) return null
+    const glob = new Bun.Glob(`**/rollout-*-${threadId}.jsonl`)
+    for (const match of glob.scanSync({ cwd: sessions, absolute: true })) {
+      this.path = match
+      break
+    }
+    return this.path
+  }
+}
+
 /**
  * Turns codex's `exec --json` dialect (the `ThreadEvent`/`ThreadItem` shapes
  * from codex-rs's `exec_events.rs`) into the shared AgentEvent union. Split
@@ -55,6 +130,9 @@ export class CodexTranslator {
   summary: string | null = null
   usage: AgentUsage | null = null
   ok = false
+  private lastContext: number | null = null
+
+  constructor(private readonly readContext: CodexContextReader | null = null) {}
 
   push(raw: unknown): AgentEvent[] {
     if (typeof raw !== 'object' || raw === null) return []
@@ -62,6 +140,18 @@ export class CodexTranslator {
 
     if (typeof msg.thread_id === 'string') this.sessionId = msg.thread_id
 
+    return [...this.fromContext(), ...this.translate(msg)]
+  }
+
+  private fromContext(): AgentEvent[] {
+    if (this.readContext === null || this.sessionId === null) return []
+    const tokens = this.readContext(this.sessionId)
+    if (tokens === null || tokens === this.lastContext) return []
+    this.lastContext = tokens
+    return [{ kind: 'context', tokens }]
+  }
+
+  private translate(msg: CodexMessage): AgentEvent[] {
     switch (msg.type) {
       case 'item.started':
         return msg.item ? this.fromItem(msg.item, 'started') : []
@@ -247,8 +337,7 @@ export class CodexHarness implements Harness {
     // codex has no `models` subcommand; it does maintain a local cache of the
     // model catalog it fetches for its own pickers, under $CODEX_HOME (the
     // same directory codex reads config.toml and auth.json from).
-    const home = process.env.CODEX_HOME ?? join(homedir(), '.codex')
-    const path = join(home, 'models_cache.json')
+    const path = join(codexHome(), 'models_cache.json')
     if (!existsSync(path)) return []
     try {
       const cache = JSON.parse(readFileSync(path, 'utf8')) as CodexModelCache
@@ -286,6 +375,11 @@ export class CodexHarness implements Harness {
     // config key that injects extra instructions as a separate message.
     if (opts.systemPrompt) argv.push('-c', `developer_instructions=${opts.systemPrompt}`)
     if (opts.effort) argv.push('-c', `model_reasoning_effort=${opts.effort}`)
+    // Before extraArgs so a repo can turn skills back on: a later -c wins.
+    argv.push('-c', 'skills.include_instructions=false')
+    // A repo's .codex/hooks.json (bd prime on SessionStart) is written for the
+    // operator's sessions and would inject tracker workflow into every turn.
+    argv.push('-c', 'features.hooks=false')
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')
@@ -301,11 +395,16 @@ export class CodexHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    return spawnAgent(argv, opts, new CodexTranslator(), {
-      // codex reports no resolved model over the stream, so the requested one
-      // is all the harness knows.
-      model: () => opts.model ?? null,
-      effort: opts.effort ?? null,
-    })
+    return spawnAgent(
+      argv,
+      opts,
+      new CodexTranslator(new CodexRolloutContext(opts.env?.CODEX_HOME ?? codexHome()).read),
+      {
+        // codex reports no resolved model over the stream, so the requested one
+        // is all the harness knows.
+        model: () => opts.model ?? null,
+        effort: opts.effort ?? null,
+      },
+    )
   }
 }

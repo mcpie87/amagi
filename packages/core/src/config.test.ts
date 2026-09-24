@@ -43,6 +43,7 @@ describe('loadConfig', () => {
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
     expect(config.loop.mentionWatchIntervalSec).toBe(300)
     expect(config.loop.prCheckIntervalSec).toBe(300)
+    expect(config.loop.mergeTreeCheck).toBe(false)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
     expect(config.loop.contextWarnTokens).toBe(160_000)

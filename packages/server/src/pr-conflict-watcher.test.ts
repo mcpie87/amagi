@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -7,6 +7,7 @@ import {
   type CreatePrOptions,
   type Exec,
   type Harness,
+  type MergeStatus,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -36,25 +37,22 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
-function fakeExec(prs: () => PrInfo[]): Exec {
+/** Serves the git side of a tick: ls-remote, worktree, merge. PRs come from the driver. */
+function fakeExec(): Exec {
   return async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return { exitCode: 0, stdout: JSON.stringify(prs()), stderr: '' }
-    }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    if (cmd.includes('view')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        stderr: '',
-      }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 1, stdout: '', stderr: '' }
     }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
 }
 
 class FakePr implements PrDriver {
+  prs: PrInfo[] = []
+  mergeStatus: MergeStatus = 'mergeable'
+  readonly mergeStatusCalls: number[] = []
   readonly addedLabels: string[] = []
   readonly removedLabels: string[] = []
   readonly postedComments: string[] = []
@@ -66,10 +64,11 @@ class FakePr implements PrDriver {
     return 'open'
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
-    return []
+    return this.prs
   }
-  async getMergeStatus(_cwd: string, _number: number) {
-    return 'mergeable' as const
+  async getMergeStatus(_cwd: string, number: number): Promise<MergeStatus> {
+    this.mergeStatusCalls.push(number)
+    return this.mergeStatus
   }
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     return ''
@@ -130,7 +129,7 @@ const fakeTracker = (): Tracker & { comments: { id: string; body: string }[] } =
   }
 }
 
-function fakeHarness(onStart: () => void): Harness {
+function fakeHarness(onStart: (opts: Parameters<Harness['start']>[0]) => void): Harness {
   const process = {
     pid: -1,
     events: async function* () {},
@@ -148,8 +147,8 @@ function fakeHarness(onStart: () => void): Harness {
   }
   return {
     kind: 'fake',
-    start: (_opts: { cwd: string; prompt: string; systemPrompt: string }) => {
-      onStart()
+    start: (opts: Parameters<Harness['start']>[0]) => {
+      onStart(opts)
       return process
     },
     resume: () => process,
@@ -198,19 +197,19 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, { headOid: string }> =>
-  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
+const stateFile = (): Record<
+  string,
+  { headOid: string; verdict?: { verdict: string; reasoning: string; proposal: string } }
+> => JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
 test('lists open PRs, resolves only conflicting ones, and records counters', async () => {
   let started = 0
-  const exec = fakeExec(() => [
-    pr(),
-    pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-  ])
-  const w = start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr(), pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
 
@@ -228,10 +227,31 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
+test('shows conflict resolution warnings in watcher activity', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const exec: Exec = async (cmd) => {
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  const w = start(exec, () => fakeHarness(() => {}), { driver, intervalMs: 100 })
+
+  await Bun.sleep(150)
+
+  expect(w.activity().detail).toContain(
+    'warnings: #7: base already contains the PR work; skipped the empty merge push',
+  )
+})
+
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
   let started = 0
-  const exec = fakeExec(() => [pr()])
-  const w = start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(1)
@@ -242,16 +262,48 @@ test('does not re-attempt a conflicting PR until its head SHA changes', async ()
   expect(counter(w, 'resolved')).toBeGreaterThanOrEqual(1)
 })
 
+test('stores the agent verdict with the head SHA it classified', async () => {
+  let started = 0
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(
+    fakeExec(),
+    () =>
+      fakeHarness((opts) => {
+        started++
+        const path = opts.prompt.match(/Verdict file: (.+)/)?.[1]
+        if (path !== undefined) {
+          writeFileSync(path, 'CLOSE TASK\nREASONING:\nBase has the work.\nPROPOSAL:\nClose am-1.')
+        }
+      }),
+    { driver },
+  )
+
+  await Bun.sleep(60)
+
+  expect(stateFile()['7']).toEqual({
+    headOid: 'deadbeef',
+    verdict: {
+      verdict: 'CLOSE TASK',
+      reasoning: 'Base has the work.',
+      proposal: 'Close am-1.',
+    },
+  })
+  expect(started).toBe(1)
+})
+
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
   let started = 0
   let head = 'deadbeef'
-  const exec = fakeExec(() => [pr({ headRefOid: head })])
-  start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr({ headRefOid: head })]
+  start(fakeExec(), () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(1)
 
   head = 'newsha'
+  driver.prs = [pr({ headRefOid: head })]
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(2)
   expect(stateFile()['7']).toEqual({ headOid: 'newsha' })
@@ -260,12 +312,16 @@ test('re-attempts a conflicting PR once its head SHA changes', async () => {
 test('a failed resolution is recorded so the same head is not retried', async () => {
   let started = 0
   const fail = true
-  const exec = fakeExec(() => [pr()])
-  const w = start(exec, () =>
-    fakeHarness(() => {
-      started++
-      if (fail) throw new Error('agent failed: model overloaded')
-    }),
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const w = start(
+    fakeExec(),
+    () =>
+      fakeHarness(() => {
+        started++
+        if (fail) throw new Error('agent failed: model overloaded')
+      }),
+    { driver },
   )
 
   await Bun.sleep(60)
@@ -280,18 +336,25 @@ test('a failed resolution is recorded so the same head is not retried', async ()
 
 test('a conflicting PR that stops conflicting drops out of the state file', async () => {
   let conflicting = true
-  const exec = fakeExec(() => [
+  const driver = new FakePr()
+  driver.prs = [
     pr({
       mergeable: conflicting ? 'CONFLICTING' : 'MERGEABLE',
       mergeStateStatus: conflicting ? 'DIRTY' : 'CLEAN',
     }),
-  ])
-  start(exec, () => fakeHarness(() => {}))
+  ]
+  start(fakeExec(), () => fakeHarness(() => {}), { driver })
 
   await Bun.sleep(60)
   expect(stateFile()['7']).toBeDefined()
 
   conflicting = false
+  driver.prs = [
+    pr({
+      mergeable: conflicting ? 'CONFLICTING' : 'MERGEABLE',
+      mergeStateStatus: conflicting ? 'DIRTY' : 'CLEAN',
+    }),
+  ]
   await Bun.sleep(60)
   expect(stateFile()['7']).toBeUndefined()
 })
@@ -304,21 +367,13 @@ test('fetches every open PR head each tick when a head moved', async () => {
     if (cmd.includes('ls-remote')) {
       return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
     }
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return { exitCode: 0, stdout: JSON.stringify([pr()]), stderr: '' }
-    }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    if (cmd.includes('view')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        stderr: '',
-      }
-    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  start(exec, () => fakeHarness(() => started++))
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(exec, () => fakeHarness(() => started++), { driver })
 
   await Bun.sleep(60)
   const fetches = calls.filter((c) => c[0] === 'git' && c[1] === 'fetch')
@@ -333,8 +388,12 @@ test('fetches every open PR head each tick when a head moved', async () => {
 })
 
 test('a tick that fails to list PRs reports the error and keeps the previous stamp', async () => {
-  const failing: Exec = async () => ({ exitCode: 1, stdout: '', stderr: 'gh: not logged in' })
-  const w = start(failing, () => fakeHarness(() => {}))
+  const driver = new FakePr()
+  driver.listOpenPrs = async () => {
+    throw new Error('not logged in')
+  }
+  const benign: Exec = async () => ({ exitCode: 0, stdout: '', stderr: '' })
+  const w = start(benign, () => fakeHarness(() => {}), { driver })
 
   await Bun.sleep(60)
 
@@ -342,6 +401,83 @@ test('a tick that fails to list PRs reports the error and keeps the previous sta
   expect(activity.ok).toBe(false)
   expect(activity.error).toContain('not logged in')
   expect(activity.lastRunAt).toBeGreaterThan(0)
+})
+
+const mergeTreeConfig = (): Config =>
+  Config.parse({
+    repo: { baseBranch: 'main', worktreeRoot: '/wt' },
+    checks: { commands: [] },
+    loop: { mergeTreeCheck: true },
+  })
+
+const mergeTreeLog = (): { pr: number; local: string; github: string; headOid: string }[] =>
+  readFileSync(join(cacheDir, 'amagi', 'merge-tree', 'demo.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .filter((l) => l !== '')
+    .map((l) => JSON.parse(l) as { pr: number; local: string; github: string; headOid: string })
+
+test('records merge-tree observations and divergences when the flag is on', async () => {
+  const local = new Map<number, 'conflict' | 'clean'>()
+  const exec: Exec = async (cmd) => {
+    if (cmd.includes('merge-tree')) {
+      const head = cmd[cmd.length - 1] ?? ''
+      const n = Number(head.match(/pr\/(\d+)\/head/)?.[1] ?? '0')
+      return local.get(n) === 'conflict'
+        ? { exitCode: 1, stdout: '', stderr: '' }
+        : { exitCode: 0, stdout: '', stderr: '' }
+    }
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  const driver = new FakePr()
+  driver.prs = [
+    pr({ number: 7, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+    pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+  ]
+  local.set(7, 'clean')
+  local.set(8, 'conflict')
+  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig(), driver })
+
+  await Bun.sleep(60)
+
+  // #8 conflicts locally while the forge reports it mergeable: the divergence.
+  expect(counter(w, 'divergent')).toBeGreaterThanOrEqual(1)
+  const rows = mergeTreeLog()
+  expect(rows.length).toBeGreaterThanOrEqual(2)
+  expect(rows.some((r) => r.pr === 7 && r.local === 'clean' && r.github === 'clean')).toBe(true)
+  expect(rows.some((r) => r.pr === 8 && r.local === 'conflict' && r.github === 'clean')).toBe(true)
+})
+
+test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', async () => {
+  const exec: Exec = async (cmd) => {
+    if (cmd.includes('merge-tree')) return { exitCode: 0, stdout: '', stderr: '' }
+    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  const driver = new FakePr()
+  driver.prs = [pr({ number: 7, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })]
+  const w = start(exec, () => fakeHarness(() => {}), { config: mergeTreeConfig(), driver })
+
+  await Bun.sleep(60)
+
+  expect(driver.mergeStatusCalls).toContain(7)
+  expect(counter(w, 'divergent')).toBe(0)
+  const rows = mergeTreeLog()
+  expect(rows.length).toBeGreaterThanOrEqual(1)
+  expect(rows.some((r) => r.pr === 7 && r.local === 'clean' && r.github === 'clean')).toBe(true)
+})
+
+test('merge-tree observations stay off when the flag is off', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(fakeExec(), () => fakeHarness(() => {}), { driver })
+
+  await Bun.sleep(60)
+
+  expect(existsSync(join(cacheDir, 'amagi', 'merge-tree', 'demo.jsonl'))).toBe(false)
 })
 
 const openPrTask = (store: Store): void => {
@@ -356,19 +492,11 @@ const openPrTask = (store: Store): void => {
   }
 }
 
-function fakeExecForPointless(diff: () => string, head: () => string = () => 'deadbeef'): Exec {
+/** Serves the pointless pass's `gh pr diff`; PRs come from the driver. */
+function fakeExecForPointless(diff: () => string): Exec {
   return async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          {
-            ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head() }),
-            labels: [{ name: 'amagi' }],
-          },
-        ]),
-        stderr: '',
-      }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 1, stdout: '', stderr: '' }
     }
     if (cmd.includes('diff')) return { exitCode: 0, stdout: diff(), stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
@@ -383,6 +511,7 @@ test('an amagi PR with an empty diff gets labelled, commented on and parked in p
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
   start(
     fakeExecForPointless(() => ''),
     () => fakeHarness(() => {}),
@@ -399,27 +528,53 @@ test('an amagi PR with an empty diff gets labelled, commented on and parked in p
   expect(pointlessStateFile()['7']).toEqual({ headOid: 'deadbeef', flagged: true })
 })
 
+test('an agent verdict on a pointless PR carries reasoning on the PR and the proposal on the tracker', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPrTask(store)
+  const tracker = fakeTracker()
+  const driver = new FakePr()
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
+  const verdict = [
+    'CLOSE TASK',
+    '',
+    'REASONING:',
+    'Base already contains this work.',
+    '',
+    'PROPOSAL:',
+    'Close bd-1: the task is done.',
+    '',
+  ].join('\n')
+  start(
+    fakeExecForPointless(() => ''),
+    () =>
+      fakeHarness(({ prompt }) => {
+        const outPath = prompt.match(/^file: (.+)$/m)?.[1]
+        if (outPath === undefined) throw new Error('pointless prompt has no verdict path')
+        writeFileSync(outPath, verdict)
+      }),
+    { store, tracker, driver },
+  )
+
+  await Bun.sleep(60)
+
+  expect(store.task('bd-1')?.state).toBe('pr_flagged')
+  expect(driver.addedLabels).toEqual(['amagi/needs-closing'])
+  expect(driver.postedComments).toEqual(['Base already contains this work.'])
+  expect(tracker.comments).toEqual([{ id: 'bd-1', body: 'Close bd-1: the task is done.' }])
+  expect(pointlessStateFile()['7']).toEqual({ headOid: 'deadbeef', flagged: true })
+})
+
 test('a PR without the amagi label is never flagged whatever its diff', async () => {
   const store = new Store(openDatabase(':memory:'))
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
-  const exec: Exec = async (cmd) => {
-    if (cmd.includes('gh') && cmd.includes('list')) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([
-          {
-            ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-            labels: [],
-          },
-        ]),
-        stderr: '',
-      }
-    }
-    return { exitCode: 0, stdout: '', stderr: '' }
-  }
-  start(exec, () => fakeHarness(() => {}), { store, tracker, driver })
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: [] }]
+  start(
+    fakeExecForPointless(() => ''),
+    () => fakeHarness(() => {}),
+    { store, tracker, driver },
+  )
 
   await Bun.sleep(60)
 
@@ -436,11 +591,14 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
   const driver = new FakePr()
   let diff = ''
   let head = 'deadbeef'
+  driver.prs = [
+    {
+      ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head }),
+      labels: ['amagi'],
+    },
+  ]
   start(
-    fakeExecForPointless(
-      () => diff,
-      () => head,
-    ),
+    fakeExecForPointless(() => diff),
     () => fakeHarness(() => {}),
     {
       store,
@@ -454,6 +612,12 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
 
   diff = 'a real diff\n'
   head = 'newsha'
+  driver.prs = [
+    {
+      ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head }),
+      labels: ['amagi'],
+    },
+  ]
   await Bun.sleep(60)
 
   expect(store.task('bd-1')?.state).toBe('pr_open')
@@ -469,6 +633,7 @@ test('an unchanged flagged PR is not re-commented on subsequent ticks', async ()
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
+  driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
   start(
     fakeExecForPointless(() => ''),
     () => fakeHarness(() => {}),

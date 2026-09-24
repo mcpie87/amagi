@@ -9,6 +9,7 @@ import { agentFailure } from './errors.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
+import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
@@ -82,26 +83,6 @@ export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrCom
   return comments.filter((c) => isAgentMention(c, opts.handle))
 }
 
-/** Last-seen updatedAt per open PR, so the watcher skips PRs that have not changed. */
-export type MentionWatchState = Record<string, string>
-
-export function mentionWatchPath(repoName: string): string {
-  return join(cacheHome(), 'amagi', 'mentions', `${repoName}.watch.json`)
-}
-
-export function readMentionWatch(path: string): MentionWatchState {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as MentionWatchState
-  } catch {
-    return {}
-  }
-}
-
-export function saveMentionWatch(path: string, state: MentionWatchState): void {
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, JSON.stringify(state))
-}
-
 /** Live progress of one mention response, for a status line while it works. */
 export type MentionProgress = {
   /** Human label of the phase currently running. */
@@ -138,6 +119,8 @@ export type RespondToMentionOptions = {
   onProgress?: (progress: MentionProgress) => void
   /** Called once classification settles, with the chosen kind and the raw reply. */
   onClassified?: (classified: MentionClassified) => void
+  /** Called when an agent moves HEAD outside the expected commit operation. */
+  onGitBypassed?: (entries: string[]) => void
 }
 
 /**
@@ -256,30 +239,37 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
   p.phase('fixing in worktree')
-  const proc = startImplementHarness(
-    mk,
-    opts.config.harness.implement,
+  const outcome = await withHeadReflogBypassCheck(
     wt.path,
-    respondToMentionPrompt({
-      pr: opts.pr,
-      mention: opts.mention,
-      worktree: wt.path,
-      branch: wt.branch,
-      baseBranch: opts.config.repo.baseBranch,
-      checks: opts.config.checks.commands,
-      conflicted: wt.conflicted,
-    }),
-    respondToMentionSystemPrompt({
-      pr: opts.pr,
-      mention: opts.mention,
-      worktree: wt.path,
-      branch: wt.branch,
-      baseBranch: opts.config.repo.baseBranch,
-      checks: opts.config.checks.commands,
-      conflicted: wt.conflicted,
-    }),
+    run,
+    () => {
+      const proc = startImplementHarness(
+        mk,
+        opts.config.harness.implement,
+        wt.path,
+        respondToMentionPrompt({
+          pr: opts.pr,
+          mention: opts.mention,
+          worktree: wt.path,
+          branch: wt.branch,
+          baseBranch: opts.config.repo.baseBranch,
+          checks: opts.config.checks.commands,
+          conflicted: wt.conflicted,
+        }),
+        respondToMentionSystemPrompt({
+          pr: opts.pr,
+          mention: opts.mention,
+          worktree: wt.path,
+          branch: wt.branch,
+          baseBranch: opts.config.repo.baseBranch,
+          checks: opts.config.checks.commands,
+          conflicted: wt.conflicted,
+        }),
+      )
+      return p.agent(proc, 'fixing in worktree')
+    },
+    opts.onGitBypassed,
   )
-  const outcome = await p.agent(proc, 'fixing in worktree')
   if (!outcome.ok) {
     throw new Error(`agent failed: ${agentFailure(outcome)}`)
   }
@@ -305,20 +295,27 @@ async function respondToExplain(
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')
-    const proc = startImplementHarness(
-      mk,
-      opts.config.harness.implement,
+    const { outcome, proc } = await withHeadReflogBypassCheck(
       wt.path,
-      explainMentionPrompt({
-        pr: opts.pr,
-        mention: opts.mention,
-        diff,
-        outPath,
-        conflicted: wt.conflicted,
-      }),
-      explainMentionSystemPrompt(),
+      run,
+      async () => {
+        const proc = startImplementHarness(
+          mk,
+          opts.config.harness.implement,
+          wt.path,
+          explainMentionPrompt({
+            pr: opts.pr,
+            mention: opts.mention,
+            diff,
+            outPath,
+            conflicted: wt.conflicted,
+          }),
+          explainMentionSystemPrompt(),
+        )
+        return { outcome: await p.agent(proc, 'explaining'), proc }
+      },
+      opts.onGitBypassed,
     )
-    const outcome = await p.agent(proc, 'explaining')
     if (!outcome.ok) {
       throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }
@@ -430,19 +427,26 @@ async function respondToTakeDown(
   let reason: string
   try {
     p.phase('judging')
-    const proc = startImplementHarness(
-      mk,
-      opts.config.harness.implement,
+    const outcome = await withHeadReflogBypassCheck(
       wt.path,
-      takeDownPrompt({
-        pr: opts.pr,
-        mention: opts.mention,
-        outPath,
-        conflicted: wt.conflicted,
-      }),
-      takeDownSystemPrompt(),
+      run,
+      () => {
+        const proc = startImplementHarness(
+          mk,
+          opts.config.harness.implement,
+          wt.path,
+          takeDownPrompt({
+            pr: opts.pr,
+            mention: opts.mention,
+            outPath,
+            conflicted: wt.conflicted,
+          }),
+          takeDownSystemPrompt(),
+        )
+        return p.agent(proc, 'judging')
+      },
+      opts.onGitBypassed,
     )
-    const outcome = await p.agent(proc, 'judging')
     if (!outcome.ok) {
       throw new Error(
         `agent failed: ${outcome.stderr.trim() || outcome.summary || `exit ${outcome.exitCode}`}`,

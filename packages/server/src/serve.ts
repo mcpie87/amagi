@@ -1,6 +1,6 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { errMsg } from '@amagi/core'
+import { errMsg, loadLiveRuns } from '@amagi/core'
 import { createApp } from './app.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
@@ -18,6 +18,8 @@ export type ServeOptions = {
   mentionWatchIntervalMs?: number
   prConflictWatchIntervalMs?: number
   stallWatchIntervalMs?: number
+  /** Poller supervisor interval, overridable for tests. */
+  repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
   /** When present, the launch/stop runner endpoints are live. */
@@ -60,12 +62,18 @@ function startRepoPollers(
     mentionIntervalMs,
     prConflictIntervalMs,
     stallIntervalMs,
+    runner,
+    runnerRepo,
+    supervisorIntervalMs,
   }: {
     gateIntervalMs?: number | undefined
     prIntervalMs?: number | undefined
     mentionIntervalMs?: number | undefined
     prConflictIntervalMs?: number | undefined
     stallIntervalMs?: number | undefined
+    runner?: { setAutoQueue(enabled: boolean): void }
+    runnerRepo?: string
+    supervisorIntervalMs?: number
   },
 ) {
   const pollers = new Map<
@@ -78,9 +86,21 @@ function startRepoPollers(
       stall: StallWatcher
     }
   >()
+  let autoQueueAllowed: boolean | undefined
 
   function ensure(): void {
-    const keys = new Set(workspaces.list().map((e) => e.key))
+    const entries = workspaces.list()
+    const byKey = new Map(entries.map((entry) => [entry.key, entry]))
+    const keys = new Set(entries.filter((entry) => entry.watchers).map((e) => e.key))
+    if (runner !== undefined && runnerRepo !== undefined) {
+      const entry = byKey.get(runnerRepo)
+      const ws = entry ? workspaces.get(runnerRepo) : null
+      const enabled = entry?.workers === true && ws?.config.loop.autoQueue === true
+      if (enabled !== autoQueueAllowed) {
+        autoQueueAllowed = enabled
+        runner.setAutoQueue(enabled)
+      }
+    }
     for (const key of [...pollers.keys()]) {
       if (keys.has(key)) continue
       const p = pollers.get(key)
@@ -166,7 +186,7 @@ function startRepoPollers(
   }
 
   ensure()
-  const supervisor = setInterval(ensure, 10_000)
+  const supervisor = setInterval(ensure, supervisorIntervalMs ?? 10_000)
   const workers = (): WorkerActivity[] =>
     [...pollers.values()].flatMap((p) => [
       ...(p.mention ? [p.mention.activity()] : []),
@@ -189,6 +209,20 @@ function startRepoPollers(
   }
 }
 
+/**
+ * Probes the bind up front so callers can refuse before doing expensive setup.
+ * A free port here can still be taken by the time the real bind happens, so
+ * this is a better error message, not a guarantee.
+ */
+export function portInUse(host: string, port: number): boolean {
+  try {
+    Bun.serve({ hostname: host, port, fetch: () => new Response('') }).stop(true)
+    return false
+  } catch {
+    return true
+  }
+}
+
 export function serve({
   workspaces,
   host,
@@ -199,6 +233,7 @@ export function serve({
   mentionWatchIntervalMs,
   prConflictWatchIntervalMs,
   stallWatchIntervalMs,
+  repoPollerSupervisorIntervalMs,
   staticDir,
   runner,
   runnerRepo,
@@ -209,6 +244,11 @@ export function serve({
     mentionIntervalMs: mentionWatchIntervalMs,
     prConflictIntervalMs: prConflictWatchIntervalMs,
     stallIntervalMs: stallWatchIntervalMs,
+    ...(runner === undefined ? {} : { runner }),
+    ...(runnerRepo === undefined ? {} : { runnerRepo }),
+    ...(repoPollerSupervisorIntervalMs === undefined
+      ? {}
+      : { supervisorIntervalMs: repoPollerSupervisorIntervalMs }),
   })
   const app = createApp({
     workspaces,
@@ -216,6 +256,7 @@ export function serve({
     runner,
     runnerRepo,
     workers: repoPollers.workers,
+    liveRuns: () => loadLiveRuns(),
   })
   const server = Bun.serve({
     hostname: host,

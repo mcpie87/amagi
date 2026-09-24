@@ -326,8 +326,11 @@ textarea::placeholder {
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(2px);
 }
+/* Preflight's universal `margin: 0` kills the UA's `margin: auto` that centers
+   a modal dialog; without this the dialog pins to the top-left corner. */
 .watcher-dialog {
   width: min(520px, calc(100vw - 32px));
+  margin: auto;
   border: 1px solid var(--color-line-strong);
   border-radius: 12px;
   background: var(--color-surface);
@@ -337,6 +340,21 @@ textarea::placeholder {
   box-shadow: 0 20px 50px var(--shadow-color);
 }
 .watcher-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+.ready-queue-dialog {
+  width: min(520px, calc(100vw - 32px));
+  margin: auto;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-fg);
+  padding: 0;
+  overflow: hidden;
+  box-shadow: 0 20px 50px var(--shadow-color);
+}
+.ready-queue-dialog::backdrop {
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(2px);
 }
@@ -462,10 +480,10 @@ textarea::placeholder {
   font-size: 12px;
 }
 
-.restart-run {
+.reset-run {
   position: relative;
 }
-.restart-error {
+.reset-error {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;

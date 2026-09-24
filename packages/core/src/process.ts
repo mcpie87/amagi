@@ -43,6 +43,17 @@ function signal(pid: number, sig: NodeJS.Signals): void {
   }
 }
 
+/** Whether a pid still exists; signal 0 checks liveness without delivering one. */
+export function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export type ProcessTreeStats = {
   processes: number
   rssBytes: number
