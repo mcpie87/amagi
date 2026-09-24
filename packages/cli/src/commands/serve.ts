@@ -76,6 +76,7 @@ export const serveCommand = defineCommand({
             config: ws.config,
             repoRoot: ws.root,
             repoName: ws.name,
+            autoQueue: ws.config.loop.autoQueue && primary.workers,
             ...(ws.forge === null ? {} : { forge: ws.forge }),
           })
         }

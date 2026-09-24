@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -10,6 +10,7 @@ import {
   removeRegistryEntry,
   repoKey,
   sanitizeRepoKey,
+  updateRegistryParticipation,
 } from './registry.ts'
 
 let dir: string
@@ -60,6 +61,8 @@ describe('addRegistryEntry', () => {
     expect(entry.path).toBe(repo)
     expect(entry.key).toBe('alpha')
     expect(entry.name).toBe('alpha')
+    expect(entry.workers).toBe(true)
+    expect(entry.watchers).toBe(true)
     expect(loadRegistry(registry)).toHaveLength(1)
   })
 
@@ -87,6 +90,28 @@ describe('addRegistryEntry', () => {
     const plain = join(dir, 'not-a-repo')
     mkdirSync(plain, { recursive: true })
     expect(() => addRegistryEntry(plain, undefined, registry)).toThrow(/not a git repository/)
+  })
+})
+
+describe('registry participation', () => {
+  test('defaults missing participation flags to enabled', () => {
+    writeFileSync(registry, JSON.stringify([{ key: 'alpha', name: 'alpha', path: '/repo/alpha' }]))
+    expect(loadRegistry(registry)).toEqual([
+      { key: 'alpha', name: 'alpha', path: '/repo/alpha', workers: true, watchers: true },
+    ])
+  })
+
+  test('updates flags without changing repo registration and reports missing keys', () => {
+    addRegistryEntry(makeRepo('alpha'), undefined, registry)
+    expect(
+      updateRegistryParticipation('alpha', { workers: false, watchers: false }, registry),
+    ).toBe(true)
+    expect(loadRegistry(registry)[0]).toMatchObject({
+      key: 'alpha',
+      workers: false,
+      watchers: false,
+    })
+    expect(updateRegistryParticipation('missing', { watchers: false }, registry)).toBe(false)
   })
 })
 

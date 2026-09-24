@@ -1,4 +1,4 @@
-import { currentAttemptEvents, isTerminal, type StoredEvent } from './events.ts'
+import { currentAttemptEvents, isTerminal, type StoredEvent, type TaskState } from './events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -177,6 +177,74 @@ export function chatInFlight(state: DashboardState, taskId: string): boolean {
     else if (event.type === 'agent.exited' && event.role === 'chat') started = false
   }
   return started
+}
+
+/** One state the task entered during an attempt, and how it got there. */
+export type StatusEntry = {
+  seq: number
+  ts: number
+  /** What moved the task: its claim, a transition, an operator reset or a reclaim. */
+  cause: 'claimed' | 'state' | 'reset' | 'reclaimed'
+  from: TaskState | null
+  to: TaskState
+  reason: string | null
+  /** Time spent in `to`: until the next entry, else until `now` while in flight, else null. */
+  durationMs: number | null
+}
+
+/**
+ * The status history of the task's current attempt, oldest first. Pass a null
+ * `now` for a settled view (a past attempt), so the last state gets no
+ * open-ended duration.
+ */
+export function statusLog(
+  state: DashboardState,
+  taskId: string,
+  now: number | null = Date.now(),
+): StatusEntry[] {
+  const entries: StatusEntry[] = []
+  let current: TaskState | null = null
+  const push = (
+    event: StoredEvent,
+    cause: StatusEntry['cause'],
+    to: TaskState,
+    reason?: string,
+  ) => {
+    entries.push({
+      seq: event.seq,
+      ts: event.ts,
+      cause,
+      from: current,
+      to,
+      reason: reason ?? null,
+      durationMs: null,
+    })
+    current = to
+  }
+  for (const event of currentAttemptEvents(state.events, taskId)) {
+    switch (event.type) {
+      case 'task.claimed':
+        push(event, 'claimed', 'claimed')
+        break
+      case 'task.state':
+        push(event, 'state', event.to, event.reason)
+        break
+      case 'task.reset':
+        push(event, 'reset', 'claimed', event.reason)
+        break
+      case 'task.reclaimed':
+        push(event, 'reclaimed', 'claimed', event.reason)
+        break
+      default:
+        break
+    }
+  }
+  for (const [i, entry] of entries.entries()) {
+    const next = entries[i + 1]
+    if (next !== undefined) entry.durationMs = next.ts - entry.ts
+    else if (now !== null && !isTerminal(entry.to)) entry.durationMs = now - entry.ts
+  }
+  return entries
 }
 
 /**

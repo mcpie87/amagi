@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import type { ProjectedTask } from '@amagi/core'
+import type { ProjectedTask, RunServiceApi } from '@amagi/core'
 import { portInUse, serve } from './serve.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
@@ -51,4 +51,51 @@ test('portInUse tracks whether the port is bound', async () => {
 
   await bound.stop(true)
   expect(portInUse('127.0.0.1', port)).toBe(false)
+})
+
+test('registry participation flags gate auto-queue and reconcile pollers live', async () => {
+  ws = testWorkspaces(['repo1'])
+  const workspace = ws.workspaces.get('repo1')
+  if (workspace === null) throw new Error('test workspace missing')
+  workspace.config.loop.autoQueue = true
+  ws.workspaces.updateParticipation('repo1', { workers: false, watchers: false })
+  const autoQueueChanges: boolean[] = []
+  const runner = {
+    status: async () => ({
+      name: 'repo1',
+      available: true,
+      capacity: 1,
+      running: [],
+      startedAt: {},
+      resources: {},
+      tasks: {},
+      autoQueue: false,
+    }),
+    start: async () => ({ ok: false as const, status: 409 as const, error: 'empty' }),
+    stop: async () => ({ ok: false as const, status: 404 as const, error: 'not running' }),
+    setMaxParallel: () => {},
+    retryNow: async () => ({ ok: false as const, status: 404 as const, error: 'not running' }),
+    setAutoQueue: (enabled: boolean) => {
+      if (autoQueueChanges.at(-1) !== enabled) autoQueueChanges.push(enabled)
+    },
+  } satisfies Partial<RunServiceApi>
+
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runner: runner as unknown as RunServiceApi,
+    runnerRepo: 'repo1',
+    repoPollerSupervisorIntervalMs: 10,
+  })
+  expect(autoQueueChanges).toEqual([false])
+  const endpoint = `http://127.0.0.1:${server.port}/api/runner`
+  expect(((await (await fetch(endpoint)).json()) as { workers: unknown[] }).workers).toEqual([])
+
+  ws.workspaces.updateParticipation('repo1', { workers: true, watchers: true })
+  await Bun.sleep(50)
+  expect(autoQueueChanges).toEqual([false, true])
+  expect(
+    ((await (await fetch(endpoint)).json()) as { workers: { name: string }[] }).workers,
+  ).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'stall-watcher' })]))
 })
