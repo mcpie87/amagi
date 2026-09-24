@@ -20,6 +20,10 @@ export type RepoInfo = {
   key: string
   name: string
   path: string
+  /** Whether the server's auto-queue may claim work from this repo. */
+  workers: boolean
+  /** Whether the server runs background pollers and watchers for this repo. */
+  watchers: boolean
   ready: { name: string; ok: boolean; detail?: string }[]
 }
 

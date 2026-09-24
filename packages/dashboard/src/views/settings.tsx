@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
+import { FleetSettings } from './fleet.tsx'
 
 const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -59,23 +60,20 @@ export function SettingsView() {
   }, [selected])
 
   return (
-    <section className="max-w-xl">
+    <section className="max-w-3xl">
       <h1 className="text-xl font-semibold">Settings</h1>
       <Appearance />
       {selected === null ? (
         <p className="mt-6 text-fg-faint">no repository selected</p>
       ) : (
-        <>
-          <p className="mt-6 text-sm text-fg-faint">
-            Worker capacity comes from the configured fleet.
+        loaded &&
+        staleMaxParallel && (
+          <p className="mt-6 text-sm text-amber-ink">
+            Notice: loop.maxParallel is ignored; configure workers in the global fleet.
           </p>
-          {loaded && staleMaxParallel && (
-            <p className="mt-3 text-sm text-amber-ink">
-              Notice: loop.maxParallel is ignored; configure workers in the global fleet.
-            </p>
-          )}
-        </>
+        )
       )}
+      <FleetSettings />
     </section>
   )
 }
