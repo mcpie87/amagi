@@ -223,9 +223,15 @@ class BlockingHarness implements Harness {
 class FakePr implements PrDriver {
   readonly calls: CreatePrOptions[] = []
   failWith: Error | null = null
+  failFirstWith: Error | null = null
 
   async createPr(opts: CreatePrOptions): Promise<PullRequest> {
     this.calls.push(opts)
+    if (this.failFirstWith !== null) {
+      const error = this.failFirstWith
+      this.failFirstWith = null
+      throw error
+    }
     if (this.failWith !== null) throw this.failWith
     return { url: 'https://example.com/demo/pull/7', number: 7 }
   }
@@ -721,15 +727,30 @@ describe('Runner.runOnce', () => {
     expect(stateReason(TASK.id)).toBe(diagnosis)
     expect(types(TASK.id)).toContain('commit.created')
     expect(types(TASK.id)).not.toContain('pr.created')
-    expect(pr.calls).toHaveLength(1)
+    expect(pr.calls).toHaveLength(2)
     expect(harness.calls).toHaveLength(2)
     expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
     expect(harness.calls[1]?.prompt).toContain('gh not authenticated')
-    expect(harness.calls[1]?.prompt).toContain('operator must do')
+    expect(harness.calls[1]?.prompt).toContain('Resolve the problem if you can')
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(
       errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
     ).toBe(true)
+  })
+
+  test('a recovery that resolves the PR failure retries and opens the pull request', async () => {
+    const pr = new FakePr()
+    pr.failFirstWith = new Error('temporary forge outage')
+    const recovery = 'The forge recovered after the first request failed; the retry opened the PR.'
+    const harness = new FakeHarness([writesAFile, { outcome: { summary: recovery } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('pr.created')
+    expect(pr.calls).toHaveLength(2)
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.prompt).toContain('temporary forge outage')
+    expect(harness.calls[1]?.prompt).toContain('runner will')
   })
 
   test('a failed PR diagnosis falls back to the forge error', async () => {
@@ -743,7 +764,7 @@ describe('Runner.runOnce', () => {
 
     expect(result?.state).toBe('needs_human')
     expect(stateReason(TASK.id)).toContain('remote unavailable')
-    expect(pr.calls).toHaveLength(1)
+    expect(pr.calls).toHaveLength(2)
   })
 
   test('an empty PR diagnosis falls back to the forge error', async () => {
@@ -754,7 +775,7 @@ describe('Runner.runOnce', () => {
 
     expect(result?.state).toBe('needs_human')
     expect(stateReason(TASK.id)).toContain('branch unavailable')
-    expect(pr.calls).toHaveLength(1)
+    expect(pr.calls).toHaveLength(2)
   })
 
   test('a committed task whose diff against base is empty goes to no_pr without a PR', async () => {

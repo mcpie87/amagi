@@ -49,19 +49,20 @@ const task = (title: string): TrackerTask => ({
 })
 
 describe('prFailurePrompt', () => {
-  test('asks for a read-only diagnosis and operator instructions', () => {
+  test('asks the agent to recover from PR creation or give the manual next step', () => {
     const prompt = prFailurePrompt(TASK, 'amagi/am-1-change', 'gh not authenticated')
     expect(prompt).toContain('gh not authenticated')
-    expect(prompt).toContain('exactly what the operator must do')
-    expect(prompt).toContain('Do not modify files, git state, branches, remotes, or forge state')
-    expect(prompt).not.toContain('fix what it can')
+    expect(prompt).toContain('Resolve the problem if you can')
+    expect(prompt).toContain('retry pull request creation once')
+    expect(prompt).toContain('exact manual\nnext step')
+    expect(prompt).toContain('Do not change project files, git history, branches, or remotes')
   })
 
-  test('sets strict read-only investigation rules', () => {
+  test('allows safe recovery actions without opening the PR directly', () => {
     const prompt = prFailureSystemPrompt()
-    expect(prompt).toContain('strictly read-only')
-    expect(prompt).toContain('Do not run writing git commands')
-    expect(prompt).toContain('Do not modify remotes')
+    expect(prompt).toContain('safely correct its cause')
+    expect(prompt).toContain('the runner will retry once')
+    expect(prompt).toContain('Do not commit or push')
   })
 })
 
