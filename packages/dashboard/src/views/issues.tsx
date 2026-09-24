@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { DetailRow, PILL } from '../badges.tsx'
+import { Markdown } from '../markdown.tsx'
 import { issuesRoute } from '../routes.tsx'
 import { useDashboard } from '../store.tsx'
 
@@ -586,9 +587,7 @@ export function IssuesView() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Description
           </h2>
-          <p className="whitespace-pre-wrap text-fg">
-            {selectedIssue.description || 'No description.'}
-          </p>
+          <Markdown text={selectedIssue.description || 'No description.'} />
         </div>
         {selectedIssue.acceptanceCriteria !== null && (
           <div className="mt-6">

@@ -139,8 +139,8 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Description
           </h2>
-          <Collapsible clampClass="description-clamp" noun="description">
-            <p className="whitespace-pre-wrap text-fg">{issue.description || 'No description.'}</p>
+          <Collapsible clampClass="summary-clamp" noun="description">
+            <Markdown text={issue.description || 'No description.'} />
           </Collapsible>
         </div>
       )}

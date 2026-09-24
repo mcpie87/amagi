@@ -564,14 +564,9 @@ textarea::placeholder {
   color: var(--color-fg);
   line-height: 1.6;
 }
-/* Five lines of .summary-markdown text (13px at 1.6 line height). */
+/* Five lines of Markdown text (.summary-markdown: 13px at 1.6 line height). */
 .summary-clamp {
   max-height: calc(13px * 1.6 * 5);
-  overflow: hidden;
-}
-/* Five lines of body text (1rem at 1.5 line height). */
-.description-clamp {
-  max-height: calc(1rem * 1.5 * 5);
   overflow: hidden;
 }
 .summary-markdown > :first-child {
