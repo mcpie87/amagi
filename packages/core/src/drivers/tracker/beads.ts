@@ -304,8 +304,14 @@ export class BeadsTracker implements Tracker {
     // Either way there is no claim to release, which is the state release() is
     // asking for, so report success instead of letting callers trip on it: the
     // stall watcher parks a task in needs_human on a release failure.
+    // An in_progress issue with no assignee (a crashed claim, a hand edit) is
+    // never listed by bd ready, so it must still go back to open.
     const issue = await this.getIssue(id)
-    if (issue !== null && (issue.status === 'closed' || issue.assignee === null)) return
+    if (issue === null || issue.status === 'closed') return
+    if (issue.assignee === null) {
+      if (issue.status === 'in_progress') await this.bd(['update', id, '--status', 'open'])
+      return
+    }
     await this.bd(['unclaim', id])
   }
 
