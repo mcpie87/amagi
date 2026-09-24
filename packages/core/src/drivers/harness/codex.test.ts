@@ -138,6 +138,8 @@ describe('CodexHarness argv', () => {
       '/wt',
       '-c',
       'skills.include_instructions=false',
+      '-c',
+      'features.hooks=false',
       '-s',
       'workspace-write',
       'do the thing',
@@ -154,6 +156,8 @@ describe('CodexHarness argv', () => {
       'sess-42',
       '-c',
       'skills.include_instructions=false',
+      '-c',
+      'features.hooks=false',
       'do the thing',
     ])
   })
@@ -188,7 +192,7 @@ describe('CodexHarness argv', () => {
       { ...base, systemPrompt: 'be terse', effort: 'xhigh' },
       null,
     )
-    expect(argv.filter((a) => a === '-c')).toHaveLength(3)
+    expect(argv.filter((a) => a === '-c')).toHaveLength(4)
     expect(argv).toContain('developer_instructions=be terse')
     expect(argv).toContain('model_reasoning_effort=xhigh')
   })

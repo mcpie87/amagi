@@ -67,7 +67,7 @@ describe('implementSystemPrompt', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('user-facing feature')
     expect(prompt).toContain('### How to use')
-    expect(prompt).toContain('description in the issue tracker')
+    expect(prompt).toContain('final message')
   })
 
   test('tells the agent not to pipe check or lint output through head/tail', () => {
@@ -76,10 +76,22 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('Redirect to a file instead')
   })
 
-  test('tells the agent bd is unavailable in the worktree and the issue text is embedded', () => {
+  test('keeps the agent off bd: the issue text is embedded and sections are written back', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
-    expect(prompt).toContain('tracker CLI (bd) is unavailable inside this worktree')
-    expect(prompt).toContain('embedded in the prompt')
+    expect(prompt).toContain('Never edit issues with the tracker CLI (bd)')
+    expect(prompt).toContain('embedded in the')
+    expect(prompt).toContain('writes the sections')
+  })
+
+  test('names the gate commands so the agent need not discover them', () => {
+    const prompt = implementSystemPrompt({
+      task: task('Add a flag'),
+      worktree: '/wt',
+      branch: 'b',
+      checks: ['just fmt', 'just lint', 'just check'],
+    })
+    expect(prompt).toContain('`just fmt`, `just lint`, `just check`')
+    expect(prompt).not.toContain('e.g. `just fmt`')
   })
 
   test('a clean tree is not a valid outcome for investigation-style tasks', () => {
@@ -88,10 +100,10 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('clean working tree is not a valid outcome')
   })
 
-  test('tells the agent to append a mandatory conclusion written against the real diff', () => {
+  test('asks for a mandatory conclusion in the final message, written against the real diff', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('### Conclusion')
-    expect(prompt).toContain('git diff <base>...HEAD')
+    expect(prompt).toContain('git diff --stat <base>')
     expect(prompt).toContain('file by file')
     expect(prompt).toContain('mandatory')
     expect(prompt).toContain('deviations from')

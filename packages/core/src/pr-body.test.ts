@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
-import { backtickFileRefs, changesSinceBase, formatPrBody, taskIdFromPrBody } from './pr-body.ts'
+import {
+  backtickFileRefs,
+  changesSinceBase,
+  formatPrBody,
+  taskIdFromPrBody,
+  withAgentSections,
+} from './pr-body.ts'
 
 type Call = readonly string[]
 
@@ -228,6 +234,33 @@ describe('formatPrBody', () => {
       effort: 'high',
     })
     expect(body.trimEnd().endsWith('amagi-task: am-1')).toBe(true)
+  })
+})
+
+describe('withAgentSections', () => {
+  test('is null when the final message has no sections', () => {
+    expect(withAgentSections('Write hello.txt', 'Did it.')).toBeNull()
+    expect(withAgentSections('Write hello.txt', null)).toBeNull()
+  })
+
+  test('appends the sections to the description and cuts them off the summary', () => {
+    const merged = withAgentSections(
+      'Write hello.txt',
+      'Added the file.\n\n### How to use\n\nRun `hello`\n\n### Conclusion\n\nOnly hello.txt changed.',
+    )
+    expect(merged).toEqual({
+      description:
+        'Write hello.txt\n\n### How to use\n\nRun `hello`\n\n### Conclusion\n\nOnly hello.txt changed.',
+      summary: 'Added the file.',
+    })
+  })
+
+  test('replaces sections an earlier attempt left in the description', () => {
+    const merged = withAgentSections(
+      'Write hello.txt\n\n### Conclusion\n\nstale',
+      'Done.\n\n### Conclusion\n\nfresh',
+    )
+    expect(merged?.description).toBe('Write hello.txt\n\n### Conclusion\n\nfresh')
   })
 })
 

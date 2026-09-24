@@ -1972,9 +1972,15 @@ describe('repo settings endpoints', () => {
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+    ws.workspaces.updateParticipation('repo1', { workers: false })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(applied).toEqual([true, false])
+    ws.workspaces.updateParticipation('repo1', { workers: true })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(applied).toEqual([true, false, true])
     // the toggle only reaches the runner bound to this repo
     expect((await patch('repo2', '{"autoQueue":false}')).status).toBe(200)
-    expect(applied).toEqual([true])
+    expect(applied).toEqual([true, false, true])
   })
 
   test('PATCH rejects worker counts outside the range and an empty body', async () => {
