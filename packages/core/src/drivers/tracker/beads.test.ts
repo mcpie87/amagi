@@ -351,15 +351,29 @@ describe('BeadsTracker', () => {
     expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
   })
 
-  test('release unclaims an in-progress issue', async () => {
+  test('release unclaims a claimed in-progress issue', async () => {
     const { exec, calls } = fake((c) =>
-      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+      c.includes('show')
+        ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress","assignee":"amagi"}]')
+        : undefined,
     )
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
     await tracker.release('tst-lmc')
 
     const unclaim = calls.find((c) => c.includes('unclaim'))
     expect(unclaim).toBeDefined()
+  })
+
+  // bd unclaim exits 1 on an unassigned issue, which the stall watcher turns
+  // into a needs_human park for a task that needed no human at all.
+  test('release is a no-op for an in-progress issue with no assignee', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
   })
 
   test('a closed gate reads as resolved', async () => {
@@ -470,6 +484,21 @@ describe('BeadsTracker', () => {
     expect(remove).toContain('tst-old')
     const returned = calls.filter((c) => c.includes('show'))
     expect(returned).toHaveLength(1)
+  })
+
+  test('setMetadata sets each key on the issue', async () => {
+    const { exec, calls } = fake(() => ok(''))
+    await new BeadsTracker({ cwd: '/repo', exec }).setMetadata('tst-1', {
+      iterations: '2',
+      difficulty: 'high',
+    })
+
+    const call = calls[0]
+    expect(call?.slice(0, 2)).toEqual(['bd', 'update'])
+    expect(call).toContain('tst-1')
+    expect(call).toContain('--set-metadata')
+    expect(call).toContain('iterations=2')
+    expect(call).toContain('difficulty=high')
   })
 
   test('children surfaces the child issues of a container', async () => {

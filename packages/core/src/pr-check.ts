@@ -1,8 +1,9 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import type { TrackerTask } from './drivers/types.ts'
-import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { cacheHome } from './paths.ts'
 import { applyPersona, branchExists } from './worktree.ts'
 
 export type PrInfo = {
@@ -128,6 +129,65 @@ export async function syncPrPriorityLabel(opts: SyncPrPriorityLabelOptions): Pro
       env: ghEnv(),
     })
   }
+}
+
+/** Label counting how many times a conflicting PR has been re-resolved. */
+export const ITERATION_LABEL_PREFIX = 'amagi/iterations:'
+
+export function iterationLabel(n: number): string {
+  return `${ITERATION_LABEL_PREFIX}${n}`
+}
+
+/** The amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
+export function iterationsFromLabels(labels: readonly string[] | undefined): number {
+  if (labels === undefined) return 0
+  const hit = labels.find((l) => l.startsWith(ITERATION_LABEL_PREFIX))
+  if (hit === undefined) return 0
+  const n = Number(hit.slice(ITERATION_LABEL_PREFIX.length))
+  return Number.isInteger(n) && n > 0 ? n : 0
+}
+
+/** The task id an amagi PR's head branch encodes (`amagi/<id>-...`), null for non-amagi PRs. */
+export function taskIdFromAmagiBranch(branch: string): string | null {
+  return branch.match(/^amagi\/(am-[a-z0-9.]+)/)?.[1] ?? null
+}
+
+export type StampedIteration = {
+  taskId: string
+  iteration: number
+}
+
+/**
+ * Bumps a conflicting amagi PR's resolution counter: reads the current
+ * amagi/iterations:N label (0 when absent), stamps amagi/iterations:N+1 on the
+ * PR, and reports the new count so the caller can mirror it onto the linked
+ * bead. Returns null for non-amagi PRs, which carry no iteration label.
+ */
+export async function stampIterationLabel(opts: {
+  cwd: string
+  pr: PrInfo
+  exec?: Exec
+}): Promise<StampedIteration | null> {
+  const run = opts.exec ?? defaultExec
+  const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
+  if (taskId === null) return null
+  const current = iterationsFromLabels(opts.pr.labels)
+  const iteration = current + 1
+  await execOk(run, ['gh', 'label', 'create', iterationLabel(iteration), '--force'], {
+    cwd: opts.cwd,
+    env: ghEnv(),
+  })
+  const edit = [
+    'gh',
+    'pr',
+    'edit',
+    String(opts.pr.number),
+    '--add-label',
+    iterationLabel(iteration),
+  ]
+  if (current > 0) edit.push('--remove-label', iterationLabel(current))
+  await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
+  return { taskId, iteration }
 }
 
 export type FetchPullHeadsOptions = {
@@ -268,27 +328,72 @@ export type PrMergeStatus = {
   mergeStateStatus: string
 }
 
+/** Pinned merge config so the local verdict is reproducible regardless of ambient git config. */
+const MERGE_TREE_ARGS = [
+  '-c',
+  'merge.renames=true',
+  '-c',
+  'merge.conflictStyle=merge',
+  '-c',
+  'merge.directoryRenames=conflicts',
+]
+
+export type MergeTreeVerdict = 'clean' | 'conflict'
+
+export type MergeTreeOptions = {
+  repoRoot: string
+  base: string
+  head: string
+  exec?: Exec
+}
+
 /**
- * Reads a PR's merge status. GitHub computes mergeability asynchronously: bulk
- * queries (`gh pr list`) report UNKNOWN until a single-PR query triggers it, so
- * retry briefly until the state resolves.
+ * Local conflict verdict for a PR via `git merge-tree --write-tree --quiet`:
+ * no worktree, no index, bare-repo safe, and the same ort machinery as
+ * `git merge`. Exit 0 is clean, exit 1 is conflict; any other non-zero exit
+ * (a missing ref) is an error, never a verdict.
  */
-export async function prMergeStatus(
-  cwd: string,
-  number: number,
-  exec?: Exec,
-): Promise<PrMergeStatus> {
-  const run = exec ?? defaultExec
-  let status: PrMergeStatus = { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const out = await execOk(
-      run,
-      ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-      { cwd, env: ghEnv() },
-    )
-    status = JSON.parse(out) as PrMergeStatus
-    if (status.mergeable !== 'UNKNOWN' && status.mergeStateStatus !== 'UNKNOWN') break
-    if (attempt < 4) await Bun.sleep(1000)
-  }
-  return status
+export async function mergeTreeVerdict(opts: MergeTreeOptions): Promise<MergeTreeVerdict> {
+  const run = opts.exec ?? defaultExec
+  const cmd = [
+    'git',
+    ...MERGE_TREE_ARGS,
+    'merge-tree',
+    '--write-tree',
+    '--quiet',
+    opts.base,
+    opts.head,
+  ]
+  const result = await run(cmd, { cwd: opts.repoRoot })
+  if (result.exitCode === 0) return 'clean'
+  if (result.exitCode === 1 && result.stderr === '') return 'conflict'
+  throw new CommandError(cmd, result)
+}
+
+/**
+ * Maps GitHub's `mergeable` onto the local verdict space. CONFLICTING and
+ * MERGEABLE map 1:1 onto git; UNKNOWN is a third bucket, never a divergence.
+ */
+export function mergeableToVerdict(mergeable: string): MergeTreeVerdict | 'unknown' {
+  if (mergeable === 'CONFLICTING') return 'conflict'
+  if (mergeable === 'MERGEABLE') return 'clean'
+  return 'unknown'
+}
+
+export type MergeTreeObservation = {
+  pr: number
+  headOid: string
+  local: MergeTreeVerdict
+  github: MergeTreeVerdict | 'unknown'
+  timestamp: string
+}
+
+export function mergeTreeLogPath(repoName: string): string {
+  return join(cacheHome(), 'amagi', 'merge-tree', `${repoName}.jsonl`)
+}
+
+/** Appends one observation; append-only, so the log stays a durable measurement trail. */
+export function recordMergeTreeObservation(path: string, row: MergeTreeObservation): void {
+  mkdirSync(dirname(path), { recursive: true })
+  appendFileSync(path, `${JSON.stringify(row)}\n`)
 }

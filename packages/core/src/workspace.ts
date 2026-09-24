@@ -9,7 +9,9 @@ import {
   addRegistryEntry,
   loadRegistry,
   type RegistryEntry,
+  type RegistryParticipation,
   removeRegistryEntry,
+  updateRegistryParticipation,
 } from './registry.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -106,6 +108,11 @@ export class Workspaces {
     const removed = removeRegistryEntry(key, this.opts.registryPath)
     this.cache.delete(key)
     return removed
+  }
+
+  /** Updates per-repository server participation flags in the global registry. */
+  updateParticipation(key: string, participation: RegistryParticipation): boolean {
+    return updateRegistryParticipation(key, participation, this.opts.registryPath)
   }
 
   /** Readiness diagnostics for one registered repo. */

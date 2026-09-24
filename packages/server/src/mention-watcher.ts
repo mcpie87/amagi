@@ -3,18 +3,14 @@ import {
   type Exec,
   errMsg,
   isAgentMention,
-  type MentionWatchState,
   type makeHarness,
   mentionsPath,
-  mentionWatchPath,
   type PrComment,
   type PrDriver,
   readHandledMentions,
-  readMentionWatch,
   respondToMention,
   type Store,
   saveHandledMentions,
-  saveMentionWatch,
   type Tracker,
   type WorkerActivity,
 } from '@amagi/core'
@@ -46,15 +42,20 @@ const DEFAULT_INTERVAL_MS = 300_000
 /**
  * Continuously scans open PRs for comments and reviews mentioning the agent
  * handle and responds to each exactly once (comment id dedup). Rate-limit
- * safety comes from two layers: the default 5 minute interval, and per-PR
- * last-seen state that skips fetching comments for PRs whose updatedAt has
- * not changed since the last scan. A PR's state only advances once every
- * mention on it was responded to, so a failed response is retried next tick.
+ * safety comes from the default 5 minute interval.
  *
- * Dedup is by exact comment id through the handled set, never by a numeric
- * watermark: `listComments` mixes issue comments, reviews and inline review
- * comments, which have separate id spaces, so comparing ids numerically would
- * silently drop mentions in a lower-numbered space.
+ * Every open PR is rescanned each tick: the forge's PR `updatedAt` is not a
+ * reliable signal that a conversation comment was added (a mention can sit on
+ * an "unchanged" PR forever), so there is no per-PR skip. Dedup is by exact
+ * comment id through the persisted handled set, so a response happens once
+ * per mention regardless of how many scans see it. A failed response is
+ * retried next tick, since the mention id is only added to the handled set
+ * after a successful reply.
+ *
+ * Dedup is by exact comment id, never by a numeric watermark:
+ * `listComments` mixes issue comments, reviews and inline review comments,
+ * which have separate id spaces, so comparing ids numerically would silently
+ * drop mentions in a lower-numbered space.
  */
 export function startMentionWatcher({
   repo,
@@ -73,6 +74,11 @@ export function startMentionWatcher({
   let responded = 0
   let runs = 0
   let failures = 0
+  let log: NonNullable<WorkerActivity['log']> = []
+  const logEvent = (message: string, level: 'info' | 'error' = 'info'): void => {
+    log = [...log, { ts: Date.now(), message, level }].slice(-100)
+    activity = { ...activity, log }
+  }
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'responded', value: responded },
@@ -95,6 +101,7 @@ export function startMentionWatcher({
 
   const { stop } = startPoller(intervalMs, async () => {
     runs++
+    logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
       lastRunAt: Date.now(),
@@ -111,22 +118,15 @@ export function startMentionWatcher({
     let respondedNow = 0
     try {
       const handledPath = mentionsPath(repoName)
-      const watchPath = mentionWatchPath(repoName)
       const handled = readHandledMentions(handledPath)
       const prs = await driver.listOpenPrs(root)
-      const state = readMentionWatch(watchPath)
-      const nextState: MentionWatchState = {}
       for (const pr of prs) {
-        const key = String(pr.number)
-        const seen = state[key]
-        if (seen !== undefined && seen === pr.updatedAt) {
-          nextState[key] = seen
-          continue
-        }
         let comments: PrComment[]
         try {
           comments = await driver.listComments(root, pr.number)
         } catch (err) {
+          const message = `PR #${pr.number}: failed to read comments: ${errMsg(err)}`
+          logEvent(message, 'error')
           console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
           continue
         }
@@ -135,7 +135,8 @@ export function startMentionWatcher({
         const mentions = comments.filter(
           (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
         )
-        let allOk = true
+        if (mentions.length > 0)
+          logEvent(`PR #${pr.number}: found ${mentions.length} new mention(s)`)
         for (const mention of mentions) {
           try {
             await respondToMention({
@@ -158,6 +159,8 @@ export function startMentionWatcher({
                         mentionId: mention.id,
                         ...c,
                       }),
+                    onGitBypassed: (entries) =>
+                      store.append(null, { type: 'git.bypassed', entries }),
                   }),
             })
             handled.add(mention.id)
@@ -165,15 +168,13 @@ export function startMentionWatcher({
             responded++
             respondedNow++
           } catch (err) {
-            allOk = false
+            logEvent(`PR #${pr.number}, mention ${mention.id}: ${errMsg(err)}`, 'error')
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
           }
         }
-        if (allOk) nextState[key] = pr.updatedAt
       }
-      // Dropping closed PRs from the state keeps the file bounded.
-      saveMentionWatch(watchPath, nextState)
       next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s)`
+      logEvent(`run ${runs} completed: ${next.detail}`)
     } catch (err) {
       failures++
       next.ok = false
@@ -181,9 +182,11 @@ export function startMentionWatcher({
       next.failures = failures
       next.successes = runs - failures
       next.detail = 'scan failed'
+      logEvent(`run ${runs} failed: ${next.error}`, 'error')
       console.warn(`mention watch: ${next.error}`)
     }
     next.counters = counters()
+    next.log = log
     activity = next
   })
 

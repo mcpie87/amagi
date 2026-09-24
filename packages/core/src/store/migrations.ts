@@ -91,4 +91,10 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
       alter table tasks add column pr_merge_status text;
     `,
   },
+  {
+    name: '008_attempt',
+    sql: `
+      alter table tasks add column attempt integer not null default 1;
+    `,
+  },
 ]

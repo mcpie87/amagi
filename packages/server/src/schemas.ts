@@ -48,11 +48,6 @@ export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
 })
 
-export const TaskQuestionParam = z.object({
-  id: z.string().min(1),
-  questionId: z.string().min(1),
-})
-
 export const AskBody = z.object({
   question: z.string().min(1),
   options: z.array(z.string()).default([]),
@@ -95,6 +90,19 @@ export const AnswerBody = z.object({
 })
 export type AnswerBody = z.infer<typeof AnswerBody>
 
+/**
+ * The closed set of git writes an agent can request. The runner never parses
+ * prose and never interprets anything outside this set; an unknown verb is
+ * rejected as a 400 before any work happens.
+ */
+export const GitRequestVerb = z.enum(['commit'])
+export type GitRequestVerb = z.infer<typeof GitRequestVerb>
+
+export const GitRequestBody = z.object({
+  verb: GitRequestVerb,
+})
+export type GitRequestBody = z.infer<typeof GitRequestBody>
+
 /** A message from the operator to the worker behind a parked task. */
 export const ChatBody = z.object({
   message: z.string().trim().min(1).max(4000),
@@ -116,11 +124,6 @@ export const AwaitQuery = z.object({
   deadlineMs: z.coerce.number().int().min(1).default(540_000),
 })
 export type AwaitQuery = z.infer<typeof AwaitQuery>
-
-export const ApiError = z.object({ error: z.string() })
-export type ApiError = z.infer<typeof ApiError>
-
-export const IssueIdParam = z.object({ id: z.string().min(1) })
 
 export const IssueCreateBody = z.object({
   title: z.string().trim().min(1).max(500),

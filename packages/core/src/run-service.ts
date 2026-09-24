@@ -70,6 +70,14 @@ export type WorkerActivity = {
   /** Tick cadence in ms. */
   intervalMs: number
   status: WorkerStatus
+  /** Recent run and event messages, newest entries last. */
+  log?: WorkerLogEntry[]
+}
+
+export type WorkerLogEntry = {
+  ts: number
+  message: string
+  level: 'info' | 'error'
 }
 
 /** One named counter a worker reports (e.g. scanned, responded, resolved). */
@@ -282,15 +290,22 @@ export class RunService implements RunServiceApi {
       if (named !== undefined) {
         base = named
       } else {
-        const parsed = HarnessConfig.safeParse({ kind: opts.harness })
-        if (!parsed.success) {
-          return {
-            ok: false,
-            status: 409,
-            error: `unknown harness "${opts.harness}"; use a harness.definitions name or claude/codex/opencode`,
+        // A bare kind keeps the implement harness's bin (e.g. a NixOS
+        // `opencode-unconfined` wrapper), not the harness's stock binary.
+        const implement = config.harness.implement
+        if (implement.kind === opts.harness) {
+          base = implement
+        } else {
+          const parsed = HarnessConfig.safeParse({ kind: opts.harness })
+          if (!parsed.success) {
+            return {
+              ok: false,
+              status: 409,
+              error: `unknown harness "${opts.harness}"; use a harness.definitions name or claude/codex/opencode`,
+            }
           }
+          base = parsed.data
         }
-        base = parsed.data
       }
     }
     if (opts.model !== undefined) base = { ...base, model: opts.model }
@@ -388,6 +403,8 @@ export class RunService implements RunServiceApi {
           : config,
       repoRoot,
       repoName,
+      // A server-side run has the ask and git-request channels to POST to.
+      channel: true,
       ...(exec === undefined ? {} : { exec }),
       ...(forge === undefined ? {} : { forge }),
     })

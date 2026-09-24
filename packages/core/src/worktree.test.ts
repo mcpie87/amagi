@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec, execOk } from './exec.ts'
-import { listWorktrees, removeWorktree } from './test-util.ts'
+import { listWorktrees, removeWorktreeGit } from './test-util.ts'
 import {
   branchName,
   createWorktree,
@@ -153,7 +153,7 @@ describe('createWorktree', () => {
 
   test('removal detaches the worktree', async () => {
     const wt = await create()
-    await removeWorktree(repo, wt.path, { force: true })
+    await removeWorktreeGit(repo, wt.path, { force: true })
     expect(existsSync(wt.path)).toBe(false)
     expect((await listWorktrees(repo)).map((w) => w.path)).not.toContain(wt.path)
   })

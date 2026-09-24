@@ -5,8 +5,8 @@ import {
   detectDoom,
   type Exec,
   errMsg,
+  type ProjectedTask,
   type Store,
-  type TaskRow,
   type TaskState,
   type Tracker,
   type TrackerTask,
@@ -109,6 +109,11 @@ export function startStallWatcher({
   let parked = 0
   let runs = 0
   let failures = 0
+  let log: NonNullable<WorkerActivity['log']> = []
+  const logEvent = (message: string, level: 'info' | 'error' = 'info'): void => {
+    log = [...log, { ts: Date.now(), message, level }].slice(-100)
+    activity = { ...activity, log }
+  }
   const counters = (): WorkerActivity['counters'] => [
     { label: 'recovered', value: recovered },
     { label: 'doom-stopped', value: stoppedDoom },
@@ -141,7 +146,7 @@ export function startStallWatcher({
     return bits.length > 0 ? bits.join(', ') : 'no stalled tasks'
   }
 
-  async function recoverDoom(task: TaskRow, signal: DoomSignal): Promise<void> {
+  async function recoverDoom(task: ProjectedTask, signal: DoomSignal): Promise<void> {
     diffSince.delete(task.id)
     try {
       await tracker.release(task.id)
@@ -153,6 +158,7 @@ export function startStallWatcher({
       kind: signal.kind,
       detail: signal.detail,
     })
+    logEvent(`task ${task.id}: stopped doom loop (${signal.detail})`, 'error')
     store.append(task.id, {
       type: 'task.state',
       from: task.state,
@@ -163,7 +169,7 @@ export function startStallWatcher({
   }
 
   /** Heuristic 3: a live worker whose worktree diff has not changed for the window. */
-  async function diffStaleSignal(task: TaskRow, nowMs: number): Promise<DoomSignal | null> {
+  async function diffStaleSignal(task: ProjectedTask, nowMs: number): Promise<DoomSignal | null> {
     if (doom === undefined || task.worktree === null) return null
     let snapshot: string
     try {
@@ -188,7 +194,7 @@ export function startStallWatcher({
     return null
   }
 
-  async function doomSignalFor(task: TaskRow, nowMs: number): Promise<DoomSignal | null> {
+  async function doomSignalFor(task: ProjectedTask, nowMs: number): Promise<DoomSignal | null> {
     if (doom === undefined) return null
     const recent = store.recentEvents(task.id, RECENT_EVENTS_LIMIT)
     const signal = detectDoom(recent, nowMs, {
@@ -224,6 +230,7 @@ export function startStallWatcher({
 
   async function tick(): Promise<void> {
     runs++
+    logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
       lastRunAt: Date.now(),
@@ -250,10 +257,12 @@ export function startStallWatcher({
         try {
           issue = await tracker.get(task.id)
         } catch (err) {
+          logEvent(`task ${task.id}: failed to read tracker issue: ${errMsg(err)}`, 'error')
           console.warn(`stall recover ${task.id}: ${errMsg(err)}`)
         }
         if (issue?.status === 'closed') {
           parkedCount++
+          logEvent(`task ${task.id}: parked because tracker issue is closed`, 'error')
           store.append(task.id, {
             type: 'task.state',
             from: task.state,
@@ -266,6 +275,7 @@ export function startStallWatcher({
           await tracker.release(task.id)
         } catch (err) {
           parkedCount++
+          logEvent(`task ${task.id}: failed to release tracker claim: ${errMsg(err)}`, 'error')
           console.warn(`stall recover ${task.id}: ${errMsg(err)}`)
           store.append(task.id, {
             type: 'task.state',
@@ -276,6 +286,7 @@ export function startStallWatcher({
           continue
         }
         reclaimed++
+        logEvent(`task ${task.id}: recovered after ${humanMs(timeoutMs)} without worker activity`)
         store.append(task.id, {
           type: 'task.reclaimed',
           reason: `recovered by stall watcher: no worker activity for ${humanMs(timeoutMs)}`,
@@ -289,6 +300,7 @@ export function startStallWatcher({
         try {
           doomCount = await scanDoomLoops(nowMs)
         } catch (err) {
+          logEvent(`doom loop scan failed: ${errMsg(err)}`, 'error')
           console.warn(`doom watch: ${errMsg(err)}`)
         }
       }
@@ -296,14 +308,17 @@ export function startStallWatcher({
 
       next.counters = counters()
       next.detail = detail()
+      logEvent(`run ${runs} completed: ${next.detail}`)
     } catch (err) {
       failures++
       next.ok = false
       next.error = errMsg(err)
       next.failures = failures
       next.successes = runs - failures
+      logEvent(`run ${runs} failed: ${next.error}`, 'error')
       console.warn(`stall watch: ${next.error}`)
     }
+    next.log = log
     activity = next
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }

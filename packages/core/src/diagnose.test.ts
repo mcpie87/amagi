@@ -19,7 +19,13 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-const entry = (): RegistryEntry => ({ key: 'repo', name: 'repo', path: repo })
+const entry = (): RegistryEntry => ({
+  key: 'repo',
+  name: 'repo',
+  path: repo,
+  workers: true,
+  watchers: true,
+})
 
 describe('diagnoseRepo', () => {
   test('reports a healthy repo with defaults', async () => {

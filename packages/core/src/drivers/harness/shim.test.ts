@@ -44,11 +44,24 @@ function makeRepo(dir: string): void {
   git(dir, ['commit', '-q', '-m', 'base'])
 }
 
+/**
+ * The test process env minus the AMAGI_* the shim reads. An agent running the
+ * project checks inherits its own AMAGI_RUN_STATE, and spreading it here files
+ * every fixture rejection below into that real task's git.blocked log.
+ */
+function baseEnv(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !k.startsWith('AMAGI_')) out[k] = v
+  }
+  return out
+}
+
 /** Runs the git shim like an agent shell would, in `cwd` with the given env. */
 function shimGit(cwd: string, args: string[], env: Record<string, string> = {}) {
   const r = Bun.spawnSync([join(shim, 'git'), ...args], {
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...baseEnv(), ...env },
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -62,6 +75,21 @@ function withWorktree(env: Record<string, string>): Record<string, string> {
     else out[k] = v
   }
   return out
+}
+
+/** PATH with every amagi git shim dir removed, so `git` is the real binary. */
+function pathWithoutShims(): string {
+  return (process.env.PATH ?? '')
+    .split(':')
+    .filter((dir) => {
+      if (dir === '') return false
+      try {
+        return !readFileSync(join(dir, 'git'), 'utf8').includes('REAL_GIT=')
+      } catch {
+        return true
+      }
+    })
+    .join(':')
 }
 
 let wt: string
@@ -171,16 +199,125 @@ describe('git shim', () => {
   })
 })
 
+describe('git shim repository resolution', () => {
+  const commits = (dir: string) => git(dir, ['rev-list', '--count', 'HEAD']).stdout.trim()
+
+  test('--work-tree elsewhere does not hide a write to the protected git dir', () => {
+    const r = shimGit(
+      wt,
+      ['--work-tree', other, 'commit', '--allow-empty', '-m', 'wt-flag'],
+      withWorktree({ AMAGI_WORKTREE: 'WT' }),
+    )
+    expect(r.exitCode).not.toBe(0)
+    expect(commits(wt)).toBe('1')
+  })
+
+  test('GIT_WORK_TREE env elsewhere does not hide a write to the protected git dir', () => {
+    const r = shimGit(wt, ['commit', '--allow-empty', '-m', 'wt-env'], {
+      ...withWorktree({ AMAGI_WORKTREE: 'WT' }),
+      GIT_WORK_TREE: other,
+    })
+    expect(r.exitCode).not.toBe(0)
+    expect(commits(wt)).toBe('1')
+  })
+
+  test('--git-dir at the protected repo from elsewhere is rejected', () => {
+    const r = shimGit(
+      other,
+      ['--git-dir', join(wt, '.git'), '--work-tree', other, 'commit', '--allow-empty', '-m', 'gd'],
+      withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_REPO_ROOT: 'WT' }),
+    )
+    expect(r.exitCode).not.toBe(0)
+    expect(commits(wt)).toBe('1')
+  })
+
+  test('GIT_DIR env at the protected repo from elsewhere is rejected', () => {
+    const r = shimGit(other, ['commit', '--allow-empty', '-m', 'gd-env'], {
+      ...withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_REPO_ROOT: 'WT' }),
+      GIT_DIR: join(wt, '.git'),
+      GIT_WORK_TREE: other,
+    })
+    expect(r.exitCode).not.toBe(0)
+    expect(commits(wt)).toBe('1')
+  })
+
+  test('a private --git-dir snapshotting the worktree passes, as opencode does', () => {
+    const snap = join(home, 'snapshot')
+    const env = withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_RUN_STATE: join(home, 'run') })
+    expect(shimGit(wt, ['--git-dir', snap, 'init', '-q'], env).exitCode).toBe(0)
+    const flags = ['--git-dir', snap, '--work-tree', wt]
+    expect(shimGit(wt, [...flags, 'config', 'core.autocrlf', 'false'], env).exitCode).toBe(0)
+    expect(shimGit(wt, [...flags, 'add', '.'], env).exitCode).toBe(0)
+    expect(shimGit(wt, [...flags, 'write-tree'], env).exitCode).toBe(0)
+    expect(existsSync(join(home, 'run', 'rejected-git.jsonl'))).toBe(false)
+    expect(commits(wt)).toBe('1')
+  })
+
+  test('a linked worktree of the protected repo is protected too', () => {
+    const linked = join(home, 'linked')
+    git(wt, ['worktree', 'add', '-q', '-b', 'side', linked])
+    const r = shimGit(
+      linked,
+      ['commit', '--allow-empty', '-m', 'x'],
+      withWorktree({ AMAGI_REPO_ROOT: 'WT' }),
+    )
+    expect(r.exitCode).not.toBe(0)
+  })
+
+  test('allows the reads harnesses issue on their own', () => {
+    git(wt, ['remote', 'add', 'origin', other])
+    for (const args of [
+      ['remote'],
+      ['remote', '-v'],
+      ['remote', 'get-url', 'origin'],
+      ['branch', '--show-current'],
+      ['branch', '--list', 'ma*'],
+      ['--no-optional-locks', '-c', 'core.quotepath=false', 'for-each-ref', '--format=%(refname)'],
+      ['config', 'user.name'],
+      ['config', '--get', 'user.name'],
+      ['stash', 'list'],
+      ['reflog'],
+      ['rev-list', '--count', 'HEAD'],
+      ['merge-base', 'HEAD', 'HEAD'],
+      ['ls-tree', 'HEAD'],
+      ['tag'],
+    ]) {
+      const r = shimGit(wt, args, withWorktree({ AMAGI_WORKTREE: 'WT' }))
+      expect(r.exitCode, `git ${args.join(' ')} should be allowed`).toBe(0)
+    }
+  })
+
+  test('rejects writes hiding behind read-looking verbs', () => {
+    for (const args of [
+      ['--no-pager', 'commit', '--allow-empty', '-m', 'x'],
+      ['branch', '-v', '-d', 'main'],
+      ['branch', 'new'],
+      ['tag', 'v1'],
+      ['tag', '-a', 'v1', '-m', 'x'],
+      ['remote', 'add', 'x', other],
+      ['config', 'user.name', 'Evil'],
+      ['config', '--unset', 'user.name'],
+      ['stash', 'pop'],
+      ['reflog', 'expire', '--all'],
+      ['init'],
+    ]) {
+      const r = shimGit(wt, args, withWorktree({ AMAGI_WORKTREE: 'WT' }))
+      expect(r.exitCode, `git ${args.join(' ')} should be rejected`).not.toBe(0)
+    }
+    expect(commits(wt)).toBe('1')
+  })
+})
+
 describe('defense-in-depth limits', () => {
   const commits = (dir: string) => git(dir, ['rev-list', '--count', 'HEAD']).stdout.trim()
 
   test('an absolute real git path bypasses the shim', () => {
-    const real = Bun.which('git')
+    const real = Bun.which('git', { PATH: pathWithoutShims() })
     expect(real).toBeTruthy()
     if (!real) throw new Error('git not found')
     const r = Bun.spawnSync([real, 'commit', '--allow-empty', '-m', 'abs'], {
       cwd: wt,
-      env: { ...process.env, ...withWorktree({ AMAGI_WORKTREE: 'WT' }) },
+      env: { ...baseEnv(), ...withWorktree({ AMAGI_WORKTREE: 'WT' }) },
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -191,57 +328,13 @@ describe('defense-in-depth limits', () => {
   test('a PATH without the shim resolves the real git', () => {
     const r = Bun.spawnSync(['git', 'commit', '--allow-empty', '-m', 'noshim'], {
       cwd: wt,
-      env: { ...process.env, ...withWorktree({ AMAGI_WORKTREE: 'WT' }) },
+      env: {
+        ...baseEnv(),
+        PATH: pathWithoutShims(),
+        ...withWorktree({ AMAGI_WORKTREE: 'WT' }),
+      },
       stdout: 'pipe',
       stderr: 'pipe',
-    })
-    expect(r.exitCode).toBe(0)
-    expect(commits(wt)).toBe('2')
-  })
-
-  test('--work-tree retargets the reported worktree, the write lands in the protected repo', () => {
-    const r = shimGit(
-      wt,
-      ['--work-tree', other, 'commit', '--allow-empty', '-m', 'wt-flag'],
-      withWorktree({ AMAGI_WORKTREE: 'WT' }),
-    )
-    expect(r.exitCode).toBe(0)
-    expect(commits(wt)).toBe('2')
-  })
-
-  test('GIT_WORK_TREE env retargets the reported worktree', () => {
-    const r = shimGit(wt, ['commit', '--allow-empty', '-m', 'wt-env'], {
-      ...withWorktree({ AMAGI_WORKTREE: 'WT' }),
-      GIT_WORK_TREE: other,
-    })
-    expect(r.exitCode).toBe(0)
-    expect(commits(wt)).toBe('2')
-  })
-
-  test('--git-dir and --work-tree from elsewhere target the protected repo', () => {
-    const r = shimGit(
-      other,
-      [
-        '--git-dir',
-        join(wt, '.git'),
-        '--work-tree',
-        other,
-        'commit',
-        '--allow-empty',
-        '-m',
-        'gd-flag',
-      ],
-      withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_REPO_ROOT: 'WT' }),
-    )
-    expect(r.exitCode).toBe(0)
-    expect(commits(wt)).toBe('2')
-  })
-
-  test('GIT_DIR and GIT_WORK_TREE env from elsewhere target the protected repo', () => {
-    const r = shimGit(other, ['commit', '--allow-empty', '-m', 'gd-env'], {
-      ...withWorktree({ AMAGI_WORKTREE: 'WT', AMAGI_REPO_ROOT: 'WT' }),
-      GIT_DIR: join(wt, '.git'),
-      GIT_WORK_TREE: other,
     })
     expect(r.exitCode).toBe(0)
     expect(commits(wt)).toBe('2')
@@ -269,5 +362,67 @@ describe('amagi shim', () => {
     for (const args of [[], ['run'], ['continue'], ['clean'], ['status'], ['--help']]) {
       expect(run(args).exitCode, `amagi ${args.join(' ')} should be rejected`).not.toBe(0)
     }
+  })
+})
+
+describe('git shim self-reference guard', () => {
+  test('prepareShim resolves the real git even when the shim dir is first on PATH', () => {
+    const saved = process.env.PATH
+    process.env.PATH = `${shim}:${saved ?? ''}`
+    try {
+      const dir = prepareShim()
+      const script = readFileSync(join(dir, 'git'), 'utf8')
+      const real = /^REAL_GIT='(.*)'$/m.exec(script)?.[1]
+      expect(real).toBeDefined()
+      expect(real).not.toBe(join(dir, 'git'))
+      expect(real).not.toBe('git')
+    } finally {
+      if (saved === undefined) delete process.env.PATH
+      else process.env.PATH = saved
+    }
+  })
+
+  // A shim that execs itself forks without bound until the host's pid table is
+  // full, so the generated script must refuse even when handed a poisoned
+  // REAL_GIT it did not write. Both cases run with no real git on PATH: a
+  // regression here hangs the test rather than bombing the machine.
+  test('a shim whose REAL_GIT points at itself refuses to run', () => {
+    const bin = join(home, 'poisoned')
+    mkdirSync(bin, { recursive: true })
+    const self = join(bin, 'git')
+    const script = readFileSync(join(shim, 'git'), 'utf8')
+      .replace(/^REAL_GIT='.*'$/m, `REAL_GIT='${self}'`)
+      .replace(/^SHIM_BIN='.*'$/m, `SHIM_BIN='${bin}'`)
+    writeFileSync(self, script)
+    chmodSync(self, 0o755)
+
+    const r = Bun.spawnSync([self, 'status'], {
+      cwd: wt,
+      env: { ...baseEnv(), PATH: bin },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).not.toBe(0)
+    expect(r.stderr.toString()).toContain('refusing to run')
+  })
+
+  test('an empty REAL_GIT falls back to a PATH scan that skips the shim dir', () => {
+    const bin = join(home, 'empty-real')
+    mkdirSync(bin, { recursive: true })
+    const self = join(bin, 'git')
+    const script = readFileSync(join(shim, 'git'), 'utf8')
+      .replace(/^REAL_GIT='.*'$/m, "REAL_GIT=''")
+      .replace(/^SHIM_BIN='.*'$/m, `SHIM_BIN='${bin}'`)
+    writeFileSync(self, script)
+    chmodSync(self, 0o755)
+
+    const r = Bun.spawnSync([self, 'status'], {
+      cwd: wt,
+      env: { ...baseEnv(), PATH: bin },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).not.toBe(0)
+    expect(r.stderr.toString()).toContain('refusing to run')
   })
 })

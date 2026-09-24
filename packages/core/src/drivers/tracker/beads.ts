@@ -255,6 +255,15 @@ export class BeadsTracker implements Tracker {
     return toTask(created)
   }
 
+  /** Set or replace metadata keys (e.g. difficulty, iterations), keeping the rest. */
+  async setMetadata(id: string, metadata: Record<string, string>): Promise<void> {
+    const pairs = Object.entries(metadata).flatMap(([key, value]) => [
+      '--set-metadata',
+      `${key}=${value}`,
+    ])
+    await this.bd(['update', id, ...pairs])
+  }
+
   async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
     const update: string[] = []
     if (input.title !== undefined) update.push('--title', input.title)
@@ -291,10 +300,12 @@ export class BeadsTracker implements Tracker {
   }
 
   async release(id: string): Promise<void> {
-    // A closed issue has no claim to release: bd unclaim exits 1 on it, so
-    // treat it as already released rather than let callers trip on the error.
-    const issue = await this.get(id)
-    if (issue !== null && issue.status === 'closed') return
+    // bd unclaim exits 1 both on a closed issue and on one with no assignee.
+    // Either way there is no claim to release, which is the state release() is
+    // asking for, so report success instead of letting callers trip on it: the
+    // stall watcher parks a task in needs_human on a release failure.
+    const issue = await this.getIssue(id)
+    if (issue !== null && (issue.status === 'closed' || issue.assignee === null)) return
     await this.bd(['unclaim', id])
   }
 
