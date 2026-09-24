@@ -55,6 +55,7 @@ bun run packages/cli/src/index.ts <command>
 | `stop <task-id>` | Interrupt a running task: park it in `cancelled` so its agent process is killed, then `continue` it (see [Interrupting and restarting a task](#interrupting-and-restarting-a-task)) |
 | `status` | Show the run queue and any open questions |
 | `ask` | Ask the human a question and block for the answer |
+| `answer <id> "<text>"` | Answer a waiting question shown by `status` |
 | `check-prs` | List GitHub PRs and dispatch an agent to resolve any conflicts against the base branch |
 | `respond-to-mentions` | Watch open PRs for @agent mentions; the LLM classifies each one and responds by fixing, explaining, logging a task, or asking for clarification |
 | `clean` | Remove worktrees and branches for terminal tasks (dry run by default) |
