@@ -160,15 +160,18 @@ export class ClaudeTranslator {
 
 export type ClaudeHarnessOptions = {
   bin?: string | undefined
+  seat?: string
 }
 
 export class ClaudeHarness implements Harness {
   readonly kind = 'claude'
   private readonly bin: string
+  private readonly seat: string | undefined
   private readonly defaultEffort: string | null
 
   constructor(opts: ClaudeHarnessOptions = {}) {
     this.bin = opts.bin ?? 'claude'
+    this.seat = opts.seat
     // claude does not report effort over the stream, so the harness reads the
     // same settings file claude reads to know what effort is in effect.
     this.defaultEffort = ClaudeHarness.effortFromSettings()
@@ -230,8 +233,11 @@ export class ClaudeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
+    const seat = opts.seat ?? this.seat ?? this.kind
+    opts = { ...opts, seat }
     const translator = new ClaudeTranslator()
     return spawnAgent(argv, opts, translator, {
+      seat,
       // claude reads its effort from the CLAUDE_EFFORT env var, not a flag.
       env: opts.effort ? { CLAUDE_EFFORT: opts.effort } : {},
       model: () => translator.model,

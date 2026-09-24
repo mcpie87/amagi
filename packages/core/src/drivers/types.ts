@@ -132,6 +132,8 @@ export type Permissions = 'workspace-write' | 'bypass'
 export type AgentStartOptions = {
   cwd: string
   prompt: string
+  /** Credential seat to hold for this process; defaults to the harness kind. */
+  seat?: string
   systemPrompt?: string
   model?: string | undefined
   /** Reasoning effort, passed to the harness when the harness honors it. */
@@ -159,6 +161,7 @@ export type AgentOutcome = {
 }
 
 export interface AgentProcess {
+  /** Zero while waiting for the seat, until the harness process starts. */
   readonly pid: number
   events(): AsyncIterable<AgentEvent>
   readonly done: Promise<AgentOutcome>

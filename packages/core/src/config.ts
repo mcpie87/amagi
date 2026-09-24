@@ -27,6 +27,8 @@ export const DifficultyConfig = z.object({
 
 export const HarnessConfig = z.object({
   kind: HarnessKind,
+  /** Credential seat shared by every process using this subscription. */
+  seat: z.string().min(1).optional(),
   /** Command used to invoke the harness. Defaults to the harness name. */
   bin: z.string().min(1).optional(),
   model: z.string().optional(),

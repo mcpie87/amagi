@@ -115,6 +115,7 @@ export async function resolveConflict(
           if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
           else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
           else if (event.kind === 'error') log('error', event.message)
+          else if (event.kind === 'status') log('info', event.message)
         }
         return proc.done
       },

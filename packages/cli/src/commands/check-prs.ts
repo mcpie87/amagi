@@ -94,6 +94,7 @@ async function resolveOne(
       if (event.kind === 'tool_use') console.log(dim(`  ${event.name}`))
       if (event.kind === 'text' && event.text.trim()) printBlock(event.text)
       if (event.kind === 'error') console.log(red(`  ${event.message}`))
+      if (event.kind === 'status') console.log(dim(`  ${event.message}`))
     }
     const outcome = await proc.done
     if (!outcome.ok) {

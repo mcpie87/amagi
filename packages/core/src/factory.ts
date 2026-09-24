@@ -29,11 +29,20 @@ export function makeTracker(config: Config, repoRoot: string, actor = 'amagi'): 
 export function makeHarness(config: Config['harness']['implement']): Harness {
   switch (config.kind) {
     case 'claude':
-      return new ClaudeHarness({ bin: config.bin })
+      return new ClaudeHarness({
+        bin: config.bin,
+        ...(config.seat === undefined ? {} : { seat: config.seat }),
+      })
     case 'opencode':
-      return new OpencodeHarness({ bin: config.bin })
+      return new OpencodeHarness({
+        bin: config.bin,
+        ...(config.seat === undefined ? {} : { seat: config.seat }),
+      })
     case 'codex':
-      return new CodexHarness({ bin: config.bin })
+      return new CodexHarness({
+        bin: config.bin,
+        ...(config.seat === undefined ? {} : { seat: config.seat }),
+      })
     default:
       throw new NotImplementedDriverError('harness', config.kind)
   }
@@ -47,14 +56,18 @@ export function makeHarness(config: Config['harness']['implement']): Harness {
 export function harnessStartOpts(
   cfg: Pick<
     Config['harness']['implement'],
-    'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs'
+    'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs' | 'seat'
   >,
-): Pick<AgentStartOptions, 'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs'> {
+): Pick<
+  AgentStartOptions,
+  'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs' | 'seat'
+> {
   return {
     model: cfg.model,
     effort: cfg.effort,
     ...(cfg.allowedTools === undefined ? {} : { allowedTools: cfg.allowedTools }),
     permissions: cfg.permissions,
     extraArgs: cfg.extraArgs,
+    ...(cfg.seat === undefined ? {} : { seat: cfg.seat }),
   }
 }

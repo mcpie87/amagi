@@ -61,12 +61,15 @@ export class ChatService {
       const proc = harness.resume(sessionId, {
         cwd,
         prompt: message,
+        ...(config.harness.implement.seat === undefined
+          ? {}
+          : { seat: config.harness.implement.seat }),
         permissions: config.harness.implement.permissions,
         extraArgs: config.harness.implement.extraArgs,
       })
       let started = false
       for await (const event of proc.events()) {
-        if (!started) {
+        if (!started && event.kind !== 'status') {
           started = true
           store.append(taskId, {
             type: 'agent.started',

@@ -31,6 +31,15 @@ export type SeatLockOptions = {
   onWaiting?: (message: string) => void
   /** Directory override for tests and isolated callers. */
   directory?: string
+  /** Stops a queued caller without waiting for the current holder to exit. */
+  signal?: AbortSignal
+}
+
+export class SeatAcquireAbortedError extends Error {
+  constructor(seat: string) {
+    super(`aborted while waiting for seat ${seat}`)
+    this.name = 'SeatAcquireAbortedError'
+  }
 }
 
 export type SeatLease = {
@@ -173,8 +182,16 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
     return ticketId
   })
 
+  if (options.signal?.aborted) {
+    rmSync(ticketPath(dir, id), { force: true })
+    throw new SeatAcquireAbortedError(seat)
+  }
   let waitingNotified = false
   while (Date.now() < deadline) {
+    if (options.signal?.aborted) {
+      rmSync(ticketPath(dir, id), { force: true })
+      throw new SeatAcquireAbortedError(seat)
+    }
     const holder = readHolder(dir)
     const queue = queuedTickets(dir)
     if (holder === undefined && queue[0]?.id === id) {
