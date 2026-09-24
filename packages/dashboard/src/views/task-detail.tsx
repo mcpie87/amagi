@@ -19,7 +19,7 @@ import {
   statusLog,
 } from '@amagi/core/view'
 import { Link, useParams } from '@tanstack/react-router'
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AgentLogView } from '../AgentLogView.tsx'
 import { apiBase } from '../api.ts'
 import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
@@ -27,7 +27,7 @@ import { fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import { taskRoute } from '../routes.tsx'
 import { useDashboard, useRunner } from '../store.tsx'
-import { Blockers, type Issue } from './issues.tsx'
+import { Blockers, fetchIssue, type Issue, Unblocks } from './issues.tsx'
 import {
   AnswerBox,
   AttemptSwitcher,
@@ -87,91 +87,82 @@ const VERDICT_STATES: readonly TaskState[] = [
   'done',
 ]
 
-/**
- * The tracker's full issue metadata behind a task - description, acceptance
- * criteria, priority, type, assignee, labels, parent, dependencies - fetched
- * on first expand and kept for the session.
- */
 /** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
 const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
 
+/**
+ * The tracker's full issue metadata behind a task - description, acceptance
+ * criteria, priority, type, assignee, labels, parent, blockers and dependents.
+ */
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
-  const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const toggle = () => {
-    if (open) {
-      setOpen(false)
-      return
+  useEffect(() => {
+    let active = true
+    setIssue(null)
+    setError(null)
+    fetchIssue(repo, issueId)
+      .then((detail) => {
+        if (active) setIssue(detail)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(errMsg(err))
+      })
+    return () => {
+      active = false
     }
-    setOpen(true)
-    if (issue === null && error === null) {
-      fetch(`${apiBase}/api/repos/${repo}/issues/${issueId}`)
-        .then(async (res) => {
-          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return res.json() as Promise<Issue>
-        })
-        .then(setIssue)
-        .catch((err: unknown) => setError(errMsg(err)))
-    }
-  }
+  }, [repo, issueId])
 
+  if (error !== null) return <p className="mt-6 text-sm text-red-ink">{error}</p>
+  if (issue === null) return <p className="mt-6 text-sm text-fg-faint">loading issue...</p>
   return (
     <div className="mt-6">
-      <button
-        type="button"
-        onClick={toggle}
-        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
-      >
-        {open ? 'hide issue details' : 'show issue details'}
-      </button>
-      {open &&
-        (error !== null ? (
-          <p className="mt-3 text-sm text-red-ink">{error}</p>
-        ) : issue === null ? (
-          <p className="mt-3 text-sm text-fg-faint">loading issue...</p>
-        ) : (
-          <div className="mt-3">
-            <dl className="rounded-lg border border-line bg-surface px-4 py-3">
-              <DetailRow
-                label="priority"
-                value={
-                  issue.priority === null
-                    ? null
-                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
-                }
-              />
-              <DetailRow label="type" value={issue.type} />
-              <DetailRow label="assignee" value={issue.assignee} />
-              <DetailRow label="labels" value={issue.labels.join(', ') || null} />
-              <DetailRow label="parent" value={issue.parent} />
-            </dl>
-            <Blockers issue={issue} />
-            <div className="mt-6">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                Description
-              </h2>
-              <p className="whitespace-pre-wrap text-fg">
-                {issue.description || 'No description.'}
-              </p>
-            </div>
-            {issue.acceptanceCriteria !== null && (
-              <div className="mt-6">
-                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                  Acceptance criteria
-                </h2>
-                <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
-              </div>
-            )}
-          </div>
-        ))}
+      <dl className="rounded-lg border border-line bg-surface px-4 py-3">
+        <DetailRow
+          label="priority"
+          value={
+            issue.priority === null
+              ? null
+              : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+          }
+        />
+        <DetailRow label="type" value={issue.type} />
+        <DetailRow label="assignee" value={issue.assignee} />
+        <DetailRow label="labels" value={issue.labels.join(', ') || null} />
+        <DetailRow label="parent" value={issue.parent} />
+      </dl>
+      <Blockers issue={issue} />
+      <Unblocks issue={issue} />
+      <div className="mt-6">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Description
+        </h2>
+        <p className="whitespace-pre-wrap text-fg">{issue.description || 'No description.'}</p>
+      </div>
+      {issue.acceptanceCriteria !== null && (
+        <div className="mt-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+            Acceptance criteria
+          </h2>
+          <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
+        </div>
+      )}
     </div>
   )
 }
 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
 function SummaryPanel({ task }: { task: ProjectedTask }) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflows, setOverflows] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  // Measured only while clamped: expanded, scrollHeight equals clientHeight.
+  useLayoutEffect(() => {
+    void task.statusReason
+    const el = bodyRef.current
+    if (el !== null && !expanded) setOverflows(el.scrollHeight > el.clientHeight)
+  }, [task.statusReason, expanded])
   const needsHuman = task.state === 'needs_human'
   const done = task.state === 'done'
   if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
@@ -194,7 +185,20 @@ function SummaryPanel({ task }: { task: ProjectedTask }) {
       >
         {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
-      {task.statusReason !== null && <Markdown text={task.statusReason} />}
+      {task.statusReason !== null && (
+        <div ref={bodyRef} className={expanded ? undefined : 'summary-clamp'}>
+          <Markdown text={task.statusReason} />
+        </div>
+      )}
+      {overflows && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="mt-1 text-sm text-sky-ink hover:underline"
+        >
+          {expanded ? 'show less' : 'show full summary'}
+        </button>
+      )}
     </div>
   )
 }
@@ -599,6 +603,8 @@ export function TaskDetailView() {
         </p>
       )}
 
+      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
+
       <SummaryPanel task={task} />
 
       <RetryPanel task={task} />
@@ -686,8 +692,6 @@ export function TaskDetailView() {
           </ul>
         </div>
       )}
-
-      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
       <div className="mt-6">
         {tabs.length > 1 && (
