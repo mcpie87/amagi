@@ -1,6 +1,7 @@
 import {
   type Config,
   isConflicting,
+  iterationsFromLabels,
   loadConfig,
   makePrDriver,
   makeTracker,
@@ -121,7 +122,13 @@ export const checkPrsCommand = defineCommand({
     const ordered = resolved
       .map((pr, i) => ({ pr, pri: priorities[i] }))
       .filter((x): x is { pr: PrInfo; pri: PrPriority } => x.pri !== undefined)
-      .sort((a, b) => a.pri.priority - b.pri.priority || a.pr.number - b.pr.number)
+      .sort(
+        (a, b) =>
+          a.pri.priority - b.pri.priority ||
+          Date.parse(b.pr.createdAt) - Date.parse(a.pr.createdAt) ||
+          iterationsFromLabels(a.pr.labels) - iterationsFromLabels(b.pr.labels) ||
+          a.pr.number - b.pr.number,
+      )
     const header = ['PR', 'MERGE', 'PRIORITY', 'BASE', 'HEAD', 'TITLE']
     const rows = ordered.map(({ pr, pri }) => [
       `#${pr.number}`,

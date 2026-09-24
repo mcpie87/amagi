@@ -26,6 +26,7 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
+  createdAt: '2026-09-20T10:00:00Z',
   updatedAt: '2026-09-21T10:00:00Z',
   labels: ['amagi'],
   ...over,
