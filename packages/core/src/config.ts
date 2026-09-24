@@ -326,12 +326,17 @@ type Json = Record<string, unknown>
 const isPlainObject = (v: unknown): v is Json =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** Later sources win. Arrays are replaced wholesale, never concatenated. */
+/**
+ * Later sources win. Arrays are replaced wholesale, never concatenated. A null
+ * in the overlay deletes the key: TOML has no null, so a patch uses it to clear
+ * an optional setting back to its default.
+ */
 function deepMerge(base: Json, overlay: Json): Json {
   const out: Json = { ...base }
   for (const [k, v] of Object.entries(overlay)) {
     const prev = out[k]
-    out[k] = isPlainObject(prev) && isPlainObject(v) ? deepMerge(prev, v) : v
+    if (v === null) delete out[k]
+    else out[k] = isPlainObject(v) ? deepMerge(isPlainObject(prev) ? prev : {}, v) : v
   }
   return out
 }
@@ -418,7 +423,7 @@ export function migrateFleet(): WorkerConfig[] {
   return workers
 }
 
-/** Global-config twin of `writeConfig`; arrays in the patch (e.g. `worker`) replace wholesale. */
+/** Global-config twin of `writeConfig`; arrays in the patch (e.g. `worker`) replace wholesale, nulls delete. */
 export function writeGlobalConfig(patch: Json): void {
   const path = globalConfigPath()
   mkdirSync(dirname(path), { recursive: true })

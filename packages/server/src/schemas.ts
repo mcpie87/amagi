@@ -1,4 +1,4 @@
-import { TaskState } from '@amagi/core'
+import { HarnessKind, TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -115,8 +115,50 @@ export const SettingsBody = z
   })
 export type SettingsBody = z.infer<typeof SettingsBody>
 
-export const WorkerOnBody = z.object({ on: z.boolean() })
-export type WorkerOnBody = z.infer<typeof WorkerOnBody>
+const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
+
+export const WorkerCreateBody = z.object({
+  name: z.string().trim().min(1),
+  kind: HarnessKind,
+  model: z.string().trim().min(1).optional(),
+  effort: z.string().trim().min(1).optional(),
+  seat: z.string().trim().min(1).optional(),
+  enabled: z.boolean().default(true),
+})
+export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
+
+/** A null clears an optional field back to the harness default. */
+export const WorkerUpdateBody = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    kind: HarnessKind.optional(),
+    model: z.string().trim().min(1).nullable().optional(),
+    effort: z.string().trim().min(1).nullable().optional(),
+    seat: z.string().trim().min(1).nullable().optional(),
+    enabled: z.boolean().optional(),
+    /** Runtime only: whether the auto-queue may dispatch to this worker. Never persisted. */
+    on: z.boolean().optional(),
+  })
+  .refine(nonEmpty, { message: 'provide at least one field' })
+export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>
+
+export const WatcherParam = z.object({ kind: z.enum(['mention', 'prConflict', 'stall']) })
+
+export const WatcherUpdateBody = z
+  .object({
+    enabled: z.boolean().optional(),
+    kind: HarnessKind.nullable().optional(),
+    model: z.string().trim().min(1).nullable().optional(),
+    effort: z.string().trim().min(1).nullable().optional(),
+    seat: z.string().trim().min(1).nullable().optional(),
+  })
+  .refine(nonEmpty, { message: 'provide at least one field' })
+export type WatcherUpdateBody = z.infer<typeof WatcherUpdateBody>
+
+export const ParticipationBody = z
+  .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })
+  .refine(nonEmpty, { message: 'provide workers or watchers' })
+export type ParticipationBody = z.infer<typeof ParticipationBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

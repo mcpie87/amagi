@@ -2,6 +2,7 @@ import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
+  Config,
   canReset,
   classifyDifficulty,
   errMsg,
@@ -11,9 +12,11 @@ import {
   hasStaleMaxParallel,
   isTerminal,
   type LiveRun,
+  loadGlobalConfig,
   makeHarness,
   mergeLiveRuns,
   type Notifier,
+  newWorkerId,
   type Question,
   type RegistryEntry,
   Runner,
@@ -28,9 +31,11 @@ import {
   Triage,
   type UpdateTrackerTask,
   type WorkerActivity,
+  WorkerConfig,
   type Workspace,
   type Workspaces,
   writeConfig,
+  writeGlobalConfig,
 } from '@amagi/core'
 import type { Harness } from '@amagi/core/drivers/types'
 import { zValidator } from '@hono/zod-validator'
@@ -49,6 +54,7 @@ import {
   GitRequestBody,
   IssueCreateBody,
   IssueUpdateBody,
+  ParticipationBody,
   QuestionQuery,
   RepoParam,
   RepoQuestionParam,
@@ -59,7 +65,10 @@ import {
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
-  WorkerOnBody,
+  WatcherParam,
+  WatcherUpdateBody,
+  WorkerCreateBody,
+  WorkerUpdateBody,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
 
@@ -210,6 +219,19 @@ export function createApp({
     const entry = workspaces.list()[0]
     return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
   }
+  // The global config on disk is the fleet's truth; the served runner reads its
+  // own workspace's copy, so a save has to replace that copy too to live-apply.
+  const saveFleet = (fleet: WorkerConfig[]): void => {
+    writeGlobalConfig({ worker: fleet })
+    if (runnerRepo !== undefined) resolveWorkspace(workspaces, runnerRepo).config.worker = fleet
+  }
+  const fleetView = async () => {
+    const live = runner === undefined ? [] : ((await runner.status()).fleet ?? [])
+    return loadGlobalConfig().worker.map((worker) => {
+      const state = live.find((w) => w.id === worker.id)
+      return { ...worker, on: state?.on ?? false, taskId: state?.taskId ?? null }
+    })
+  }
   return new Hono()
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -238,12 +260,21 @@ export function createApp({
       for (const entry of workspaces.list()) {
         try {
           const ready = await workspaces.diagnose(entry)
-          out.push({ key: entry.key, name: entry.name, path: entry.path, ready })
+          out.push({
+            key: entry.key,
+            name: entry.name,
+            path: entry.path,
+            workers: entry.workers,
+            watchers: entry.watchers,
+            ready,
+          })
         } catch (err) {
           out.push({
             key: entry.key,
             name: entry.name,
             path: entry.path,
+            workers: entry.workers,
+            watchers: entry.watchers,
             ready: [
               {
                 name: 'workspace',
@@ -816,13 +847,112 @@ export function createApp({
       },
     )
 
-    .patch('/api/workers/:id', valid('param', TaskIdParam), valid('json', WorkerOnBody), (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { id } = c.req.valid('param')
-      const { on } = c.req.valid('json')
-      runner.setWorkerOn(id, on)
-      return c.json({ id, on })
+    .patch(
+      '/api/repos/:repo/participation',
+      valid('param', RepoParam),
+      valid('json', ParticipationBody),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        const body = c.req.valid('json')
+        const participation = {
+          ...(body.workers === undefined ? {} : { workers: body.workers }),
+          ...(body.watchers === undefined ? {} : { watchers: body.watchers }),
+        }
+        if (!workspaces.updateParticipation(repo, participation)) {
+          return c.json({ error: `unknown repository ${repo}` }, 404)
+        }
+        if (body.workers !== undefined && runner !== undefined && runnerRepo === repo) {
+          runner.setAutoQueue(
+            resolveWorkspace(workspaces, repo).config.loop.autoQueue && body.workers,
+          )
+        }
+        const entry = workspaces.list().find((e) => e.key === repo)
+        return c.json({ workers: entry?.workers ?? false, watchers: entry?.watchers ?? false })
+      },
+    )
+
+    .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
+
+    .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
+      const fleet = loadGlobalConfig().worker
+      const worker = WorkerConfig.parse({
+        id: newWorkerId(fleet.map((w) => w.id)),
+        ...c.req.valid('json'),
+      })
+      const next = Config.shape.worker.safeParse([...fleet, worker])
+      if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
+      saveFleet(next.data)
+      return c.json({ ...worker, on: false, taskId: null }, 201)
     })
+
+    .patch(
+      '/api/workers/:id',
+      valid('param', TaskIdParam),
+      valid('json', WorkerUpdateBody),
+      async (c) => {
+        const { id } = c.req.valid('param')
+        const { on, ...fields } = c.req.valid('json')
+        const fleet = loadGlobalConfig().worker
+        const current = fleet.find((w) => w.id === id)
+        if (current === undefined) return c.json({ error: `unknown worker ${id}` }, 404)
+        if (on !== undefined && runner === undefined) {
+          return c.json({ error: 'runner service is unavailable' }, 501)
+        }
+        const merged: Record<string, unknown> = { ...current }
+        for (const [key, value] of Object.entries(fields)) {
+          if (value === null) delete merged[key]
+          else if (value !== undefined) merged[key] = value
+        }
+        const parsed = WorkerConfig.safeParse(merged)
+        if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
+        const worker = parsed.data
+        if (on === true && !worker.enabled) {
+          return c.json({ error: `worker ${id} is disabled; enable it before turning it on` }, 409)
+        }
+        // setWorkerOn ignores a disabled worker, so it has to go off before the save disables it.
+        if (!worker.enabled) runner?.setWorkerOn(id, false)
+        if (Object.keys(fields).length > 0) saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
+        if (on !== undefined) runner?.setWorkerOn(id, on)
+        return c.json((await fleetView()).find((w) => w.id === id))
+      },
+    )
+
+    .delete('/api/workers/:id', valid('param', TaskIdParam), async (c) => {
+      const { id } = c.req.valid('param')
+      const fleet = loadGlobalConfig().worker
+      if (!fleet.some((w) => w.id === id)) return c.json({ error: `unknown worker ${id}` }, 404)
+      const running = (await fleetView()).find((w) => w.id === id)?.taskId ?? null
+      if (running !== null) {
+        return c.json(
+          { error: `worker ${id} is running ${running}; stop that run before deleting the worker` },
+          409,
+        )
+      }
+      saveFleet(fleet.filter((w) => w.id !== id))
+      return c.json({ id })
+    })
+
+    .get('/api/watchers', (c) => c.json(loadGlobalConfig().watchers))
+
+    .patch(
+      '/api/watchers/:kind',
+      valid('param', WatcherParam),
+      valid('json', WatcherUpdateBody),
+      (c) => {
+        const { kind } = c.req.valid('param')
+        const patch = c.req.valid('json')
+        if (kind === 'stall' && Object.keys(patch).some((key) => key !== 'enabled')) {
+          return c.json(
+            { error: 'the stall watcher spawns no agent; only enabled can be set' },
+            400,
+          )
+        }
+        // No live mutation here: the serve supervisor re-reads watcher config
+        // from disk on every tick and starts or stops watchers to match.
+        writeGlobalConfig({ watchers: { [kind]: patch } })
+        return c.json(loadGlobalConfig().watchers[kind])
+      },
+    )
 
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)

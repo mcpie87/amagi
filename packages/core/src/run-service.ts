@@ -50,6 +50,8 @@ export type FleetWorkerStatus = {
   enabled: boolean
   on: boolean
   busy: boolean
+  /** The task this worker itself is running, as opposed to another worker on its seat. */
+  taskId: string | null
 }
 
 /** Lifecycle of a background worker: active = ticking, idle = waiting on the first tick, off = stopped. */
@@ -182,6 +184,7 @@ export class RunService implements RunServiceApi {
   setWorkerOn(workerId: string, on: boolean): void {
     if (this.opts.config.worker.some((worker) => worker.id === workerId && worker.enabled)) {
       this.workerOn.set(workerId, on)
+      if (on && this.autoQueue) this.scheduleAutoQueuePoll(0)
     }
   }
 
@@ -276,6 +279,7 @@ export class RunService implements RunServiceApi {
         enabled: worker.enabled,
         on: this.workerOn.get(worker.id) === true,
         busy: this.runsBySeat().has(this.workerSeat(worker)),
+        taskId: [...this.runs].find(([, run]) => run.workerId === worker.id)?.[0] ?? null,
       })),
     }
   }

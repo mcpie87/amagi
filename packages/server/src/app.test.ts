@@ -13,6 +13,7 @@ import type {
   CreateTrackerTask,
   EpicCloseEligible,
   EpicCloseResult,
+  FleetWorkerStatus,
   GateRef,
   Harness,
   PrComment,
@@ -32,7 +33,7 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { AsyncQueue, BeadsTracker, killTree, loadConfig } from '@amagi/core'
+import { AsyncQueue, BeadsTracker, killTree, loadConfig, loadGlobalConfig } from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -2039,6 +2040,158 @@ describe('repo settings endpoints', () => {
 
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/settings')).status).toBe(404)
+  })
+})
+
+describe('fleet endpoints', () => {
+  const savedXdg = process.env.XDG_CONFIG_HOME
+  let home: string
+  let fleet: FleetWorkerStatus[]
+  const toggled: { id: string; on: boolean }[] = []
+  const queued: boolean[] = []
+
+  const send = (method: string, path: string, body?: unknown) =>
+    app.request(path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  const create = async (body: unknown) =>
+    (await (await send('POST', '/api/workers', body)).json()) as { id: string }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'amagi-fleet-home-'))
+    process.env.XDG_CONFIG_HOME = home
+    ws = testWorkspaces(['repo1', 'repo2'])
+    store = ws.store('repo1')
+    fleet = []
+    toggled.length = 0
+    queued.length = 0
+    app = createApp({
+      workspaces: ws.workspaces,
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          startedAt: {},
+          resources: {},
+          tasks: {},
+          autoQueue: true,
+          fleet,
+        }),
+        start: async () => ({ ok: true, taskId: 'bd-1' }),
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        setWorkerOn: (id, on) => toggled.push({ id, on }),
+        setAutoQueue: (enabled) => queued.push(enabled),
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+      },
+      runnerRepo: 'repo1',
+    })
+  })
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true })
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = savedXdg
+  })
+
+  test('a created worker persists globally, reaches the runner, and starts off', async () => {
+    const res = await send('POST', '/api/workers', { name: 'Codex 1', kind: 'codex' })
+    expect(res.status).toBe(201)
+    const worker = (await res.json()) as { id: string }
+    expect(worker).toMatchObject({ name: 'Codex 1', kind: 'codex', enabled: true, on: false })
+    expect(loadGlobalConfig().worker.map((w) => w.id)).toEqual([worker.id])
+    expect(ws.workspaces.get('repo1')?.config.worker.map((w) => w.id)).toEqual([worker.id])
+    const list = (await (await app.request('/api/workers')).json()) as {
+      workers: { id: string; on: boolean; taskId: string | null }[]
+    }
+    expect(list.workers).toEqual([
+      expect.objectContaining({ id: worker.id, on: false, taskId: null }),
+    ])
+  })
+
+  test('an edit persists, a null clears a field, and a live run is left alone', async () => {
+    const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
+    fleet = [{ id, name: 'One', enabled: true, on: true, busy: true, taskId: 'bd-9' }]
+    const res = await send('PATCH', `/api/workers/${id}`, { name: 'Renamed', model: null })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ id, name: 'Renamed', on: true, taskId: 'bd-9' })
+    const saved = loadGlobalConfig().worker[0]
+    expect(saved).toMatchObject({ id, name: 'Renamed', seat: 'mine' })
+    expect(saved?.model).toBeUndefined()
+    expect(toggled).toEqual([])
+  })
+
+  test('on is a runtime toggle, refused for a disabled worker and dropped on disable', async () => {
+    const { id } = await create({ name: 'One', kind: 'claude' })
+    expect((await send('PATCH', `/api/workers/${id}`, { on: true })).status).toBe(200)
+    expect(toggled).toEqual([{ id, on: true }])
+    expect('on' in (loadGlobalConfig().worker[0] ?? {})).toBe(false)
+    expect((await send('PATCH', `/api/workers/${id}`, { enabled: false })).status).toBe(200)
+    expect(toggled).toEqual([
+      { id, on: true },
+      { id, on: false },
+    ])
+    const refused = await send('PATCH', `/api/workers/${id}`, { on: true })
+    expect(refused.status).toBe(409)
+    expect(((await refused.json()) as { error: string }).error).toContain('disabled')
+  })
+
+  test('deleting a worker mid-run is refused with the running task', async () => {
+    const { id } = await create({ name: 'One', kind: 'claude' })
+    fleet = [{ id, name: 'One', enabled: true, on: true, busy: true, taskId: 'bd-9' }]
+    const refused = await send('DELETE', `/api/workers/${id}`)
+    expect(refused.status).toBe(409)
+    expect(((await refused.json()) as { error: string }).error).toContain('bd-9')
+    fleet = []
+    expect((await send('DELETE', `/api/workers/${id}`)).status).toBe(200)
+    expect(loadGlobalConfig().worker).toEqual([])
+    expect(ws.workspaces.get('repo1')?.config.worker).toEqual([])
+  })
+
+  test('validation failures use the error shape and unknown workers 404', async () => {
+    const bad = await send('POST', '/api/workers', { name: 'x', kind: 'gpt' })
+    expect(bad.status).toBe(400)
+    expect(typeof ((await bad.json()) as { error: string }).error).toBe('string')
+    const { id } = await create({ name: 'One', kind: 'claude' })
+    expect((await send('PATCH', `/api/workers/${id}`, {})).status).toBe(400)
+    expect((await send('PATCH', '/api/workers/w-nope', { name: 'x' })).status).toBe(404)
+    expect((await send('DELETE', '/api/workers/w-nope')).status).toBe(404)
+  })
+
+  test('watchers are updated in the global config and the stall watcher takes only enabled', async () => {
+    const res = await send('PATCH', '/api/watchers/mention', { kind: 'codex', model: 'gpt-x' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ enabled: true, kind: 'codex', model: 'gpt-x' })
+    await send('PATCH', '/api/watchers/mention', { model: null, enabled: false })
+    expect(loadGlobalConfig().watchers.mention).toEqual({ enabled: false, kind: 'codex' })
+    expect((await send('PATCH', '/api/watchers/stall', { model: 'x' })).status).toBe(400)
+    expect((await send('PATCH', '/api/watchers/stall', { enabled: false })).status).toBe(200)
+    expect(loadGlobalConfig().watchers.stall.enabled).toBe(false)
+    expect((await send('PATCH', '/api/watchers/review', { enabled: false })).status).toBe(400)
+  })
+
+  test('participation flags persist, show on the repo list, and gate the served auto-queue', async () => {
+    const res = await send('PATCH', '/api/repos/repo1/participation', { workers: false })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ workers: false, watchers: true })
+    expect(queued).toEqual([false])
+    await send('PATCH', '/api/repos/repo2/participation', { watchers: false })
+    expect(queued).toEqual([false])
+    const repos = (await (await app.request('/api/repos')).json()) as {
+      key: string
+      workers: boolean
+      watchers: boolean
+    }[]
+    expect(repos.map(({ key, workers, watchers }) => ({ key, workers, watchers }))).toEqual([
+      { key: 'repo1', workers: false, watchers: true },
+      { key: 'repo2', workers: true, watchers: false },
+    ])
+    expect((await send('PATCH', '/api/repos/nope/participation', { workers: true })).status).toBe(
+      404,
+    )
   })
 })
 

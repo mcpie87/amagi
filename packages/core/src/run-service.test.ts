@@ -327,8 +327,8 @@ describe('RunService', () => {
       tasks: {},
       autoQueue: false,
       fleet: [
-        { id: 'worker-1', name: 'Worker 1', enabled: true, on: true, busy: false },
-        { id: 'worker-2', name: 'Worker 2', enabled: true, on: true, busy: false },
+        { id: 'worker-1', name: 'Worker 1', enabled: true, on: true, busy: false, taskId: null },
+        { id: 'worker-2', name: 'Worker 2', enabled: true, on: true, busy: false, taskId: null },
       ],
     })
     service.dispose()
@@ -448,6 +448,26 @@ describe('RunService', () => {
     service.dispose()
   })
 
+  test('turning a worker on dispatches without waiting out the idle backoff', async () => {
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new BlockingHarness(),
+      config: config({ worker: [{ id: 'one', name: 'One', kind: 'claude', seat: 'seat-a' }] }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      autoQueue: true,
+      autoQueueIdleMs: 60_000,
+    })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(store.task(TASK.id)).toBeNull()
+    service.setWorkerOn('one', true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
   test('manual dispatch accepts an off worker without turning it on and rejects disabled workers', async () => {
     const service = new RunService({
       store,
@@ -474,8 +494,8 @@ describe('RunService', () => {
       taskId: TASK.id,
     })
     expect((await service.status()).fleet).toEqual([
-      { id: 'off', name: 'Off', enabled: true, on: false, busy: true },
-      { id: 'disabled', name: 'Disabled', enabled: false, on: false, busy: false },
+      { id: 'off', name: 'Off', enabled: true, on: false, busy: true, taskId: TASK.id },
+      { id: 'disabled', name: 'Disabled', enabled: false, on: false, busy: false, taskId: null },
     ])
     await service.stop(TASK.id)
   })
