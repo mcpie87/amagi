@@ -89,7 +89,8 @@ export const serveCommand = defineCommand({
       host: config.server.host,
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
-      ...(runner === undefined || primary === undefined ? {} : { runner, runnerRepo: primary.key }),
+      runner,
+      runnerRepo: primary?.key,
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     for (const entry of workspaces.list()) {

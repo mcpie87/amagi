@@ -41,8 +41,8 @@ export type PrConflictWatcherOptions = {
   driver: PrDriver
   intervalMs?: number
   /** Test seams, forwarded to the resolver. */
-  exec?: Exec
-  makeHarnessFn?: typeof makeHarness
+  exec?: Exec | undefined
+  makeHarnessFn?: typeof makeHarness | undefined
 }
 
 export type PrConflictWatcher = {
@@ -234,8 +234,8 @@ export function startPrConflictWatcher({
           pr,
           config,
           driver,
-          ...(exec === undefined ? {} : { exec }),
-          ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+          exec,
+          makeHarnessFn,
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
         nextState[key] = {

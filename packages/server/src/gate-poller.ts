@@ -4,7 +4,7 @@ import { startPoller } from './poller.ts'
 export type GatePollerOptions = {
   store: Store
   tracker: Tracker
-  intervalMs?: number
+  intervalMs?: number | undefined
 }
 
 export type GatePoller = {

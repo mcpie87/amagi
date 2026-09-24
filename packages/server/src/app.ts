@@ -64,11 +64,11 @@ import { eventStream } from './stream.ts'
 
 export type ServerDeps = {
   workspaces: Workspaces
-  notify?: Notifier[]
+  notify?: Notifier[] | undefined
   /** When present, the launch/stop runner endpoints are live. */
-  runner?: RunServiceApi
+  runner?: RunServiceApi | undefined
   /** The repo key the runner is bound to, so settings apply live only to it. */
-  runnerRepo?: string
+  runnerRepo?: string | undefined
   /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
   workers?: () => WorkerActivity[]
   /** Foreground CLI workers (`just run`) outside the server runner, merged into /api/runner. */
@@ -303,17 +303,21 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const body = c.req.valid('json')
         const input: UpdateTrackerTask = {
-          ...(body.title === undefined ? {} : { title: body.title }),
-          ...(body.description === undefined ? {} : { description: body.description }),
-          ...(body.acceptanceCriteria === undefined
-            ? {}
-            : { acceptanceCriteria: body.acceptanceCriteria }),
-          ...(body.priority === undefined ? {} : { priority: body.priority }),
-          ...(body.labels === undefined ? {} : { labels: body.labels }),
+          title: body.title,
+          description: body.description,
+          acceptanceCriteria: body.acceptanceCriteria,
+          priority: body.priority,
+          labels: body.labels,
         }
         // Only the operation actually requested is gated, so a dependency-only
         // edit reports the dependency gap rather than a generic edit gap.
-        if (Object.keys(input).length > 0) {
+        const hasEditFields =
+          input.title !== undefined ||
+          input.description !== undefined ||
+          input.acceptanceCriteria !== undefined ||
+          input.priority !== undefined ||
+          input.labels !== undefined
+        if (hasEditFields) {
           const editCap = capabilityError(ws.tracker, 'edit')
           if (editCap !== null) return c.json({ error: editCap }, 501)
         }

@@ -373,6 +373,7 @@ describe('forgejoPr', () => {
               {
                 number: 3,
                 title: 'Do the thing',
+                body: 'Task: am-1',
                 html_url: 'https://git.example.com/owner/repo/pulls/3',
                 head: { ref: 'amagi/am-1' },
                 base: { ref: 'main' },
@@ -393,7 +394,7 @@ describe('forgejoPr', () => {
       {
         number: 3,
         title: 'Do the thing',
-        body: '',
+        body: 'Task: am-1',
         url: 'https://git.example.com/owner/repo/pulls/3',
         headRefName: 'amagi/am-1',
         baseRefName: 'main',

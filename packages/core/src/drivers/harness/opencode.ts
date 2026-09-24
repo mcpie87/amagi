@@ -138,7 +138,7 @@ export class OpencodeTranslator {
 }
 
 export type OpencodeHarnessOptions = {
-  bin?: string
+  bin?: string | undefined
   seat?: string
 }
 

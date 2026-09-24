@@ -38,7 +38,7 @@ export type WorkspacesOptions = {
   /** Overridable so tests use in-memory databases. */
   storeFor?: (key: string) => Store
   /** Overridable so tests can inject a fake tracker. */
-  trackerFor?: (config: Config, path: string) => Tracker
+  trackerFor?: ((config: Config, path: string) => Tracker) | undefined
   /** Overridable so tests can inject a fake forge driver. */
   forgeFor?: (config: Config, path: string) => PrDriver | null
 }

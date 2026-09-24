@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
+import type { TrackerTask } from './drivers/types.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { cacheHome } from './paths.ts'
 import { applyPersona, branchExists } from './worktree.ts'
@@ -19,13 +20,16 @@ export type PrInfo = {
   headRefOid: string | null
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
-  /** Label names, so the pointlessness pass can scope to the amagi provenance label. */
+  /** Label names, so the priority-label sync and pointlessness pass can read them off one list call. */
   labels: string[]
 }
 
+/** Priority labels stamped on amagi PRs, in dispatch order. */
+export const PRIORITY_LABELS = ['P0', 'P1', 'P2', 'P3', 'P4'] as const
+
 export type PrCheckOptions = {
   cwd: string
-  exec?: Exec
+  exec?: Exec | undefined
 }
 
 const GH_FIELDS =
@@ -40,9 +44,9 @@ export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
 }
 
 /**
- * Lists open PRs through gh. GitHub-only by design: the pollers and the
- * pointlessness pass that consume it share this binding rather than each
- * hammering a forge-specific endpoint.
+ * Lists open PRs through gh. GitHub-only by design: the pollers, the
+ * pointlessness pass, and the priority-label sync that consume it share this
+ * binding rather than each hammering a forge-specific endpoint.
  */
 export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
@@ -53,8 +57,78 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const raw = JSON.parse(out) as Array<
     Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
   >
-  // gh reports labels as objects; the pass only needs the names.
+  // gh reports labels as objects; the passes only need the names.
   return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
+}
+
+/** The task id in an amagi-authored branch `amagi/<id>-<slug>`, or null when the branch is not amagi's. */
+export function taskIdFromPrBranch(headRefName: string): string | null {
+  return headRefName.match(/^amagi\/([a-z]+-[a-z0-9.]+)-/)?.[1] ?? null
+}
+
+export type PrPriority = {
+  number: number
+  /** 0-4: the linked bead's priority, P4 when the bead is missing or closed. */
+  priority: number
+  /** The PR branch carries the amagi/<id>- prefix, so its labels are managed. */
+  amagi: boolean
+  /** An open linked bead exists, so its P<n> label is kept in sync. */
+  linked: boolean
+}
+
+/** Resolve each amagi PR's linked bead priority from the tracker; anything unlinked is P4. */
+export async function resolvePrPriorities(
+  prs: PrInfo[],
+  getTask: (id: string) => Promise<TrackerTask | null>,
+): Promise<PrPriority[]> {
+  return Promise.all(
+    prs.map(async (p) => {
+      const id = taskIdFromPrBranch(p.headRefName)
+      if (id === null) return { number: p.number, priority: 4, amagi: false, linked: false }
+      const task = await getTask(id)
+      const linked = task !== null && task.status !== 'closed'
+      return {
+        number: p.number,
+        priority: linked ? (task.priority ?? 4) : 4,
+        amagi: true,
+        linked,
+      }
+    }),
+  )
+}
+
+export type SyncPrPriorityLabelOptions = {
+  cwd: string
+  number: number
+  /** Labels already on the PR, from the list call. */
+  labels: string[]
+  /** Bead priority 0-4, or null to remove any P* label when the bead is gone or closed. */
+  priority: number | null
+  exec?: Exec
+}
+
+/**
+ * Brings a PR's P<n> label in line with its bead priority: removes every stale
+ * P0-P4 label, then adds the current one, creating it on demand. Writes are
+ * best effort, like PR label creation, so a lost write does not kill the run.
+ */
+export async function syncPrPriorityLabel(opts: SyncPrPriorityLabelOptions): Promise<void> {
+  const run = opts.exec ?? defaultExec
+  const want = opts.priority === null ? null : `P${opts.priority}`
+  const remove = PRIORITY_LABELS.filter((l) => l !== want && opts.labels.includes(l))
+  if (remove.length > 0) {
+    await run(
+      ['gh', 'pr', 'edit', String(opts.number), ...remove.flatMap((l) => ['--remove-label', l])],
+      { cwd: opts.cwd, env: ghEnv() },
+    )
+  }
+  if (want !== null && !opts.labels.includes(want)) {
+    await run(['gh', 'label', 'create', want, '--force'], { cwd: opts.cwd, env: ghEnv() })
+    await run(['gh', 'pr', 'edit', String(opts.number), '--add-label', want], {
+      cwd: opts.cwd,
+      env: ghEnv(),
+    })
+  }
 }
 
 /** Label counting how many times a conflicting PR has been re-resolved. */

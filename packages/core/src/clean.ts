@@ -13,14 +13,14 @@ export type CleanPlan = {
 export type CleanOptions = {
   repoRoot: string
   dryRun?: boolean
-  exec?: Exec
+  exec?: Exec | undefined
 }
 
 export type RemoveWorktreeOptions = {
   repoRoot: string
   path: string
   branch: string | null
-  exec?: Exec
+  exec?: Exec | undefined
 }
 
 /**
@@ -70,7 +70,7 @@ export async function cleanTerminalWorktrees(
       repoRoot: opts.repoRoot,
       path: plan.path,
       branch: plan.branch,
-      ...(opts.exec === undefined ? {} : { exec: opts.exec }),
+      exec: opts.exec,
     })
   }
 

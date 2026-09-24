@@ -19,7 +19,7 @@ export type EventStreamOptions = {
  * `seq <= cursor` check drops it if that page carried it too.
  */
 export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: EventStreamOptions) {
-  const scope = taskId === undefined ? {} : { taskId }
+  const scope = { taskId }
 
   return streamSSE(c, async (stream) => {
     const live = new AsyncQueue<StoredEvent | Tick>()

@@ -379,9 +379,12 @@ class FakeIssueTracker extends BeadsTracker {
     const issue = this.issues.get(id)
     if (issue === undefined) throw new Error(`unknown issue ${id}`)
     const { dependencies, ...fields } = input
+    const defined = Object.fromEntries(
+      Object.entries(fields).filter(([, v]) => v !== undefined),
+    ) as Partial<BeadsIssue>
     const next: BeadsIssue = {
       ...issue,
-      ...fields,
+      ...defined,
       // keep the seeded blocker objects when the ids are unchanged
       dependencies:
         dependencies === undefined

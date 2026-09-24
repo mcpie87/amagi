@@ -276,7 +276,9 @@ export class Store {
     }))
   }
 
-  events(opts: { taskId?: string; sinceSeq?: number; limit?: number } = {}): StoredEvent[] {
+  events(
+    opts: { taskId?: string | undefined; sinceSeq?: number; limit?: number } = {},
+  ): StoredEvent[] {
     const since = opts.sinceSeq ?? 0
     const limit = opts.limit ?? 500
     const rows = (

@@ -32,9 +32,9 @@ export type ResolveConflictOptions = {
   driver: PrDriver
   /** Store used to park the linked task at needs_human once iterations run out. */
   store?: Store
-  exec?: Exec
+  exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
-  makeHarnessFn?: typeof makeHarness
+  makeHarnessFn?: typeof makeHarness | undefined
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
   /** Called when the agent moves HEAD outside the expected commit operation. */
@@ -242,7 +242,7 @@ export async function resolveConflict(
 }
 
 /** Last-attempted head per conflicting PR, so the watcher can skip unchanged heads. */
-export type ConflictWatchState = Record<string, { headOid: string }>
+export type ConflictWatchState = Record<string, { headOid: string; verdict?: PointlessVerdict }>
 
 export function conflictWatchPath(repoName: string): string {
   return join(cacheHome(), 'amagi', 'conflicts', `${repoName}.json`)
