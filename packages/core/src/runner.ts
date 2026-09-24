@@ -277,7 +277,8 @@ export class Runner {
 
   /** The pid of the live agent process, or null between agent phases. */
   currentPid(): number | null {
-    return this.currentProcess?.pid ?? null
+    const pid = this.currentProcess?.pid
+    return pid !== undefined && pid > 0 ? pid : null
   }
 
   private throwIfCancelled(taskId: string): void {
@@ -909,6 +910,11 @@ export class Runner {
     mkdirSync(runState, { recursive: true })
     const spawn = {
       ...opts,
+      ...(opts.seat !== undefined
+        ? {}
+        : this.deps.config.harness.implement.seat === undefined
+          ? {}
+          : { seat: this.deps.config.harness.implement.seat }),
       env: {
         AMAGI_TASK_TOKEN: store.token(taskId),
         // The git shim scopes itself to the task worktree and the main
@@ -946,13 +952,14 @@ export class Runner {
     try {
       // The resolved model only exists once the harness reports it (claude's
       // init line), so the started event lands on the first stream event.
-      const model = proc.model ?? opts.model ?? null
       const effort = proc.effort ?? null
+      let model = opts.model ?? null
       let started = false
       let contextExceeded = false
       for await (const event of proc.events()) {
-        if (!started) {
+        if (!started && event.kind !== 'status') {
           started = true
+          model = proc.model ?? opts.model ?? null
           store.append(taskId, {
             type: 'agent.started',
             role,

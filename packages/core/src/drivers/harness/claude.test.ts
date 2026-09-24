@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
@@ -183,6 +184,41 @@ describe('ClaudeHarness process', () => {
     expect(seen).toEqual([])
     expect(outcome.ok).toBe(false)
     expect(outcome.exitCode).not.toBe(0)
+  })
+
+  test('waits for the configured seat before starting another process', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-seat-spawn-'))
+    const bin = join(dir, 'claude')
+    const started = join(dir, 'started')
+    writeFileSync(started, '')
+    writeFileSync(
+      bin,
+      `#!/bin/sh\necho started >> '${started}'\nsleep 0.2\nprintf '%s\\n' '{"type":"result","subtype":"success","result":"ok"}'\n`,
+    )
+    chmodSync(bin, 0o755)
+    const seat = `test-${randomUUID()}`
+    const harness = new ClaudeHarness({ bin, seat })
+
+    try {
+      const first = harness.start({ cwd: dir, prompt: 'first' })
+      const second = harness.start({ cwd: dir, prompt: 'second' })
+      const secondEvents: AgentEvent[] = []
+      for await (const event of second.events()) {
+        secondEvents.push(event)
+        if (event.kind === 'status') {
+          expect(event.message).toBe(`waiting for seat ${seat}`)
+          expect(
+            readFileSync(started, 'utf8').trim().split('\n').filter(Boolean).length,
+          ).toBeLessThan(2)
+        }
+      }
+      const outcomes = await Promise.all([first.done, second.done])
+      expect(secondEvents.some((event) => event.kind === 'status')).toBe(true)
+      expect(outcomes.every((outcome) => outcome.ok)).toBe(true)
+      expect(readFileSync(started, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
