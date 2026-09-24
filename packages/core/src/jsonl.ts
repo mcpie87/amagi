@@ -3,12 +3,17 @@
  * "no stdin data received" warning on stdout, for one), so anything that does
  * not parse is dropped rather than aborting the run.
  */
-export async function* jsonLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
+export async function* jsonLines(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<unknown> {
   const decoder = new TextDecoder()
   // Read through a reader rather than for-await: lib.dom's ReadableStream is
   // not typed as async iterable even though the runtime supports it.
   const reader = stream.getReader()
   let buffer = ''
+  const cancel = () => void reader.cancel()
+  signal?.addEventListener('abort', cancel, { once: true })
 
   try {
     while (true) {
@@ -26,6 +31,7 @@ export async function* jsonLines(stream: ReadableStream<Uint8Array>): AsyncGener
       }
     }
   } finally {
+    signal?.removeEventListener('abort', cancel)
     reader.releaseLock()
   }
 
