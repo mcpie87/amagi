@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from 'citty'
 import { addCommand } from './commands/add.ts'
+import { answerCommand } from './commands/answer.ts'
 import { askCommand } from './commands/ask.ts'
 import { checkPrsCommand } from './commands/check-prs.ts'
 import { cleanCommand } from './commands/clean.ts'
@@ -32,6 +33,7 @@ const main = defineCommand({
     config: configCommand,
     clean: cleanCommand,
     ask: askCommand,
+    answer: answerCommand,
     'git-request': gitRequestCommand,
     serve: serveCommand,
     tui: tuiCommand,
