@@ -748,10 +748,7 @@ export class Runner {
     return null
   }
 
-  /**
-   * Pushes the worktree branch and opens a pull request. A failed PR leaves the
-   * commit in place; a read-only diagnosis tells the operator how to proceed.
-   */
+  /** Pushes the worktree branch and opens a pull request, with one recovery attempt on failure. */
   private async openPullRequest(
     task: TrackerTask,
     cwd: string,
@@ -845,7 +842,7 @@ export class Runner {
       })
       let reason: string | null = null
       try {
-        const diagnosis = await this.runAgent(
+        const recovery = await this.runAgent(
           task.id,
           sessionId,
           {
@@ -854,16 +851,32 @@ export class Runner {
             systemPrompt: prFailureSystemPrompt(),
             ...harnessStartOpts(config.harness.implement),
           },
-          'PR failure diagnosis',
+          'PR failure recovery',
           budget,
-          'verify',
         )
         this.throwIfCancelled(task.id)
-        if (diagnosis.ok) reason = diagnosis.summary?.trim() || null
+        reason = recovery.summary?.trim() || null
       } catch {
         this.throwIfCancelled(task.id)
       }
-      this.transition(task.id, 'needs_human', reason ?? `${message}${hint}`)
+
+      try {
+        const pr = await forge.createPr(opts)
+        store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
+        this.transition(task.id, 'pr_open')
+      } catch (retryErr) {
+        this.throwIfCancelled(task.id)
+        const retryMessage = errMsg(retryErr)
+        const retryHint = /auth|login|token|not logged/i.test(retryMessage)
+          ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+          : ''
+        store.append(task.id, {
+          type: 'error',
+          message: `pull request retry: ${retryMessage}${retryHint}`,
+          fatal: false,
+        })
+        this.transition(task.id, 'needs_human', reason ?? `${retryMessage}${retryHint}`)
+      }
     }
   }
 

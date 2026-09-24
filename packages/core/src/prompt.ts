@@ -561,7 +561,7 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
   return parts.join('\n')
 }
 
-/** Explain a failed PR creation so the operator can finish it manually. */
+/** Recover from a failed PR creation or explain the manual next step. */
 export function prFailurePrompt(task: TrackerTask, branch: string, error: string): string {
   const parts = [
     `Task ${task.id}: ${task.title}`,
@@ -569,12 +569,15 @@ export function prFailurePrompt(task: TrackerTask, branch: string, error: string
     `The commit is on branch ${branch}, but the forge failed to create its pull request:`,
     error,
     '',
-    'Investigate the worktree and repository state using read-only commands. Explain',
-    'what happened and exactly what the operator must do to open the pull request by',
-    'hand. Be concrete and include relevant commands when useful.',
+    'Investigate why pull request creation failed. Resolve the problem if you can do',
+    'so safely with the available repository state and credentials. The runner will',
+    'retry pull request creation once after you finish, so do not open a pull request',
+    'yourself. If you cannot resolve it, explain what happened and the exact manual',
+    'next step. Be concrete and include relevant commands when useful.',
     '',
-    'Do not modify files, git state, branches, remotes, or forge state. Do not commit,',
-    'push, or retry pull request creation. Reply with the explanation only.',
+    'Do not change project files, git history, branches, or remotes. Do not commit,',
+    'push, or retry pull request creation. Reply with a concise summary of what you',
+    'investigated, any safe recovery action you took, and the outcome.',
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
   parts.push(...trackerContext(task))
@@ -583,16 +586,17 @@ export function prFailurePrompt(task: TrackerTask, branch: string, error: string
 
 export function prFailureSystemPrompt(): string {
   return [
-    'You are diagnosing why an autonomous coding agent could not open a pull request.',
-    'Your investigation is strictly read-only.',
+    'You are recovering from a failed pull request creation by an autonomous coding agent.',
+    'Investigate the failure, make a safe recovery action when possible, and summarize',
+    'the result for the operator if recovery does not work.',
     '',
     'Rules:',
-    '- Do not modify, create, or delete files.',
-    '- Do not run writing git commands, including add, commit, push, checkout, or reset.',
-    '- Do not modify remotes or use forge commands that change remote state.',
-    '- Inspect the worktree and report the evidence, what failed, and the exact action',
+    '- Do not change project files, git history, branches, or remotes.',
+    '- Do not commit or push, and do not create a pull request yourself; the runner will retry once.',
+    '- You may use available tools to inspect the failure and safely correct its cause.',
+    '- If you cannot resolve it, report the evidence, what failed, and the exact action',
     '  the operator must take to open the pull request manually.',
-    '- Reply with the explanation only, in plain language.',
+    '- Reply with a concise explanation in plain language.',
   ].join('\n')
 }
 
