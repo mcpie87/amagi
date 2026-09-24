@@ -1,4 +1,4 @@
-import { MAX_PARALLEL, TaskState } from '@amagi/core'
+import { TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -55,14 +55,11 @@ export const AskBody = z.object({
 export type AskBody = z.infer<typeof AskBody>
 
 /**
- * Empty body (or `{}`) launches the next ready task with the configured
- * defaults. `harness` is a harness.definitions name or a kind
- * (claude/codex/opencode); `model` and `effort` override the chosen harness.
- * An omitted field falls back to config.harness.implement.
+ * Empty body launches the next ready task; an optional workerId selects its worker.
  */
 export const RunBody = z.object({
   taskId: z.string().min(1).optional(),
-  harness: z.string().min(1).optional(),
+  workerId: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: z.string().min(1).optional(),
 })
@@ -111,13 +108,15 @@ export type ChatBody = z.infer<typeof ChatBody>
 
 export const SettingsBody = z
   .object({
-    maxParallel: z.number().int().min(1).max(MAX_PARALLEL).optional(),
     autoQueue: z.boolean().optional(),
   })
-  .refine((body) => body.maxParallel !== undefined || body.autoQueue !== undefined, {
-    message: 'provide at least one of maxParallel or autoQueue',
+  .refine((body) => body.autoQueue !== undefined, {
+    message: 'provide autoQueue',
   })
 export type SettingsBody = z.infer<typeof SettingsBody>
+
+export const WorkerOnBody = z.object({ on: z.boolean() })
+export type WorkerOnBody = z.infer<typeof WorkerOnBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

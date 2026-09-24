@@ -216,7 +216,11 @@ describe('CodexHarness argv', () => {
 describe('CodexHarness process', () => {
   test('a run that produces no json still resolves with the exit code', async () => {
     const harness = new CodexHarness({ bin: 'false' })
-    const proc = harness.start({ cwd: process.cwd(), prompt: 'x' })
+    const proc = harness.start({
+      cwd: process.cwd(),
+      prompt: 'x',
+      seat: `codex-test-${process.pid}-${Date.now()}`,
+    })
     const seen: AgentEvent[] = []
     for await (const e of proc.events()) seen.push(e)
     const outcome = await proc.done

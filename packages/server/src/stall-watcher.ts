@@ -62,7 +62,7 @@ export const DOOM_STATES: readonly TaskState[] = ['implementing', 'checks', 'ret
 
 /** Event tail the doom guard analyzes per task each tick; covers the tool window. */
 const RECENT_EVENTS_LIMIT = 2000
-/** Cap on the per-tick doom scan; runs are bounded by loop.maxParallel in practice. */
+/** Cap on the per-tick doom scan; active runs are bounded by the fleet in practice. */
 const DOOM_SCAN_LIMIT = 50
 const GIT_TIMEOUT_MS = 10_000
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadConfig, writeConfig } from './config.ts'
+import { hasStaleMaxParallel, loadConfig, migrateFleet, writeConfig } from './config.ts'
 
 let home: string
 let repo: string
@@ -38,7 +38,7 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
-    expect(config.loop.maxParallel).toBe(1)
+    expect(config.worker).toEqual([])
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
     expect(config.loop.mentionWatchIntervalSec).toBe(300)
@@ -63,12 +63,13 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.loop.questionTimeoutSec).toBeLessThan(600)
   })
 
-  test('repo config overrides global, key by key', () => {
+  test('stale maxParallel is ignored while other config resolves', () => {
     writeGlobal('[forge]\nkind = "github"\n\n[loop]\nmaxParallel = 4\n')
     writeRepo('[forge]\nkind = "forgejo"\n')
     const { config, sources } = loadConfig(repo)
     expect(config.forge.kind).toBe('forgejo')
-    expect(config.loop.maxParallel).toBe(4)
+    expect(config.loop.autoQueue).toBe(false)
+    expect(hasStaleMaxParallel(repo)).toBe(true)
     expect(sources).toHaveLength(2)
   })
 
@@ -109,17 +110,13 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
   })
 
-  test('accepts named harness definitions for the interactive picker', () => {
-    writeRepo(
-      '[harness.definitions.fast]\nkind = "opencode"\npermissions = "bypass"\nmodel = "local/x"\n',
-    )
-    const config = loadConfig(repo).config
-    expect(config.harness.definitions.fast).toMatchObject({
-      kind: 'opencode',
-      permissions: 'bypass',
-      model: 'local/x',
+  test('loads workers with stable identity and defaults enabled', () => {
+    writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
+    expect(loadConfig(repo).config.worker[0]).toMatchObject({
+      id: 'w-fast',
+      name: 'Fast',
+      enabled: true,
     })
-    expect(config.harness.implement.kind).toBe('claude')
   })
 
   test('accepts a per-harness tool allowlist', () => {
@@ -137,9 +134,11 @@ describe('loadConfig', () => {
     expect(() => loadConfig(repo)).toThrow()
   })
 
-  test('rejects maxParallel above the ceiling', () => {
-    writeRepo('[loop]\nmaxParallel = 100\n')
-    expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+  test('seeds one default worker without deriving fleet size from stale parallelism', () => {
+    writeGlobal('[harness.implement]\nkind = "codex"\nmodel = "m"\n\n[loop]\nmaxParallel = 2\n')
+    expect(migrateFleet()).toHaveLength(1)
+    expect(loadConfig(repo).config.worker).toHaveLength(1)
+    expect(migrateFleet()).toEqual([])
   })
 
   test('stall watcher keys are overridable', () => {
@@ -189,14 +188,14 @@ describe('loadConfig', () => {
 describe('writeConfig', () => {
   test('merges a patch into the repo config and preserves other keys', () => {
     writeRepo('[forge]\nkind = "forgejo"\n\n[loop]\nmaxParallel = 1\n')
-    writeConfig(repo, { loop: { maxParallel: 6 } })
+    writeConfig(repo, { loop: { autoQueue: true } })
     const { config } = loadConfig(repo)
-    expect(config.loop.maxParallel).toBe(6)
+    expect(config.loop.autoQueue).toBe(true)
     expect(config.forge.kind).toBe('forgejo')
   })
 
   test('creates the repo config file when absent', () => {
-    writeConfig(repo, { loop: { maxParallel: 3 } })
-    expect(loadConfig(repo).config.loop.maxParallel).toBe(3)
+    writeConfig(repo, { loop: { autoQueue: true } })
+    expect(loadConfig(repo).config.loop.autoQueue).toBe(true)
   })
 })

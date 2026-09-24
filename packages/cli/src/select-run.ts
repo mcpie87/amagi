@@ -42,10 +42,7 @@ function bareKind(kind: (typeof KINDS)[number], config: Config): Config['harness
   return implement.kind === kind ? implement : HarnessConfig.parse({ kind })
 }
 
-/**
- * Harness choices for the picker: named definitions, or the three known kinds.
- * Most-used first, by the kind recorded in each run.
- */
+/** Harness choices for the picker, most-used kind first. */
 export function harnessChoices(
   config: Config,
   counts: UsageCounts = emptyCounts(),
@@ -54,10 +51,6 @@ export function harnessChoices(
     a: SelectOption<Config['harness']['implement']>,
     b: SelectOption<Config['harness']['implement']>,
   ) => (counts.harness[b.value.kind] ?? 0) - (counts.harness[a.value.kind] ?? 0)
-  const defs = Object.entries(config.harness.definitions)
-  if (defs.length > 0) {
-    return defs.map(([name, cfg]) => ({ label: name, value: cfg })).sort(byUsage)
-  }
   return KINDS.map((kind) => ({ label: kind, value: bareKind(kind, config) })).sort(byUsage)
 }
 
@@ -86,9 +79,8 @@ export async function pickRunSelection(
   counts: UsageCounts = emptyCounts(),
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
-    const named = config.harness.definitions[flags.harness]
     const known = KINDS.find((kind) => kind === flags.harness)
-    const harness = named ?? (known === undefined ? undefined : bareKind(known, config))
+    const harness = known === undefined ? undefined : bareKind(known, config)
     if (harness === undefined) throw new Error(`unknown harness "${flags.harness}"`)
     return {
       harness: withEffort(withModel(harness, flags.model), flags.effort),

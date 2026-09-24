@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
-import { MAX_PARALLEL } from './limits.ts'
+import { MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
@@ -48,7 +49,25 @@ export const HarnessConfig = z.object({
   extraArgs: z.array(z.string()).default([]),
 })
 
+export const WorkerConfig = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/),
+  name: z.string().min(1),
+  kind: HarnessKind,
+  model: z.string().optional(),
+  effort: z.string().optional(),
+  seat: z.string().min(1).optional(),
+  enabled: z.boolean().default(true),
+})
+export type WorkerConfig = z.infer<typeof WorkerConfig>
+
 export const Config = z.object({
+  worker: z
+    .array(WorkerConfig)
+    .max(MAX_WORKERS)
+    .default([])
+    .refine((workers) => new Set(workers.map((worker) => worker.id)).size === workers.length, {
+      message: 'worker ids must be unique',
+    }),
   repo: z
     .object({
       baseBranch: z.string().default('main'),
@@ -73,20 +92,12 @@ export const Config = z.object({
     .prefault({}),
   harness: z
     .object({
-      /**
-       * Named harness definitions offered by the `amagi run` interactive
-       * picker, e.g. `[harness.definitions.fast]`. Each is a full harness
-       * config; the picker falls back to the three known kinds when empty.
-       */
-      definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
-      review: HarnessConfig.prefault({ kind: 'codex' }),
       triage: HarnessConfig.prefault({ kind: 'claude' }),
     })
     .prefault({}),
   loop: z
     .object({
-      maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
       /**
@@ -267,6 +278,14 @@ export type LoadedConfig = {
   sources: string[]
 }
 
+export function hasStaleMaxParallel(repoRoot: string): boolean {
+  const paths = [globalConfigPath(), repoConfigPath(repoRoot)]
+  return paths.some((path) => {
+    const raw = readToml(path)
+    return isPlainObject(raw.loop) && 'maxParallel' in raw.loop
+  })
+}
+
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
@@ -297,6 +316,47 @@ export function loadGlobalConfig(): Config {
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return config
+}
+
+const HARNESS_LABEL: Record<z.infer<typeof HarnessKind>, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+}
+
+export function newWorkerId(taken: Iterable<string>): string {
+  const used = new Set(taken)
+  for (;;) {
+    const id = `w-${randomUUID().slice(0, 6)}`
+    if (!used.has(id)) return id
+  }
+}
+
+/** Seed a default worker fleet for installations that predate worker configuration. */
+export function migrateFleet(): WorkerConfig[] {
+  const raw = readToml(globalConfigPath())
+  if ('worker' in raw) return []
+  const config = loadGlobalConfig()
+  const { kind, model, effort, seat } = config.harness.implement
+  const workers: WorkerConfig[] = [
+    {
+      id: newWorkerId([]),
+      name: `${HARNESS_LABEL[kind]} 1`,
+      kind,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      seat: seat ?? kind,
+      enabled: true,
+    },
+  ]
+  writeGlobalConfig({ worker: workers })
+  return workers
+}
+
+export function writeGlobalConfig(patch: Json): void {
+  const path = globalConfigPath()
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, stringifyToml(deepMerge(readToml(path), patch)))
 }
 
 /**

@@ -988,7 +988,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setMaxParallel: () => {},
+        setWorkerOn: () => {},
         retryNow: async (id) => {
           retried.push(id)
           return { ok: true, taskId: id }
@@ -1256,7 +1256,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           store.append(id, { type: 'task.state', from: 'implementing', to: 'cancelled' })
           return { ok: true, taskId: id }
         },
-        setMaxParallel: () => {},
+        setWorkerOn: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -1311,7 +1311,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           store.append(id, { type: 'task.state', from: 'retrying', to: 'cancelled' })
           return { ok: true, taskId: id }
         },
-        setMaxParallel: () => {},
+        setWorkerOn: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -1633,7 +1633,7 @@ describe('runner endpoints', () => {
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
-    setMaxParallel: () => {},
+    setWorkerOn: () => {},
     retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
     setAutoQueue: () => {},
     ...over,
@@ -1813,7 +1813,7 @@ describe('runner endpoints', () => {
     expect((await post('/api/runs', '{"taskId":123}')).status).toBe(400)
   })
 
-  test('POST /api/runs forwards harness/model/effort overrides', async () => {
+  test('POST /api/runs forwards worker and model/effort overrides', async () => {
     const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
     app = createApp({
       workspaces: ws.workspaces,
@@ -1826,11 +1826,11 @@ describe('runner endpoints', () => {
     })
     const res = await post(
       '/api/runs',
-      '{"taskId":"bd-1","harness":"fast","model":"gpt-5.6-luna","effort":"high"}',
+      '{"taskId":"bd-1","workerId":"w-fast","model":"gpt-5.6-luna","effort":"high"}',
     )
     expect(res.status).toBe(201)
     expect(received).toEqual([
-      { taskId: 'bd-1', opts: { harness: 'fast', model: 'gpt-5.6-luna', effort: 'high' } },
+      { taskId: 'bd-1', opts: { workerId: 'w-fast', model: 'gpt-5.6-luna', effort: 'high' } },
     ])
   })
 
@@ -1849,25 +1849,25 @@ describe('runner endpoints', () => {
     expect(received).toEqual([{ taskId: undefined, opts: {} }])
   })
 
-  test('GET /api/runner/options lists harnesses, models, efforts and the default', async () => {
+  test('GET /api/runner/options lists fleet workers and the default worker', async () => {
     app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
     const res = await app.request('/api/runner/options')
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
-      harnesses: { name: string; kind: string }[]
-      default: { kind: string } | null
+      harnesses: { name: string; workerId: string; kind: string }[]
+      default: string | null
     }
-    expect(body.harnesses).toEqual([
-      { name: 'claude', kind: 'claude' },
-      { name: 'codex', kind: 'codex' },
-      { name: 'opencode', kind: 'opencode' },
-    ])
-    // The default mirrors the host's global config, so only its shape is asserted.
-    const dflt = body.default
-    expect(dflt).not.toBeNull()
-    if (dflt !== null) {
-      expect(['claude', 'codex', 'opencode']).toContain(dflt.kind)
-    }
+    const workers = ws.workspaces.get('repo1')?.config.worker ?? []
+    expect(body.harnesses).toEqual(
+      workers.map((worker) => ({
+        name: worker.name,
+        workerId: worker.id,
+        kind: worker.kind,
+        ...(worker.model === undefined ? {} : { model: worker.model }),
+        ...(worker.effort === undefined ? {} : { effort: worker.effort }),
+      })),
+    )
+    expect(body.default).toBe(workers.find((worker) => worker.enabled)?.id ?? null)
   })
 
   test('GET /api/runner/options is empty without a runner', async () => {
@@ -1924,23 +1924,23 @@ describe('repo settings endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET returns the current worker count and auto-queue state', async () => {
+  test('GET returns the auto-queue state and stale maxParallel notice flag', async () => {
     const res = await app.request('/api/repos/repo1/settings')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 1, autoQueue: false })
+    expect(await res.json()).toEqual({ autoQueue: false, staleMaxParallel: false })
   })
 
-  test('PATCH persists, updates the workspace config, and is re-readable', async () => {
-    const res = await patch('repo1', '{"maxParallel":4}')
+  test('PATCH persists auto-queue and updates the workspace config', async () => {
+    const res = await patch('repo1', '{"autoQueue":true}')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ maxParallel: 4, autoQueue: false })
+    expect(await res.json()).toEqual({ autoQueue: true })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
-      maxParallel: 4,
-      autoQueue: false,
+      autoQueue: true,
+      staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
-    expect(loadConfig(entry.path).config.loop.maxParallel).toBe(4)
+    expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
   })
 
   test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
@@ -1960,7 +1960,7 @@ describe('repo settings endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setMaxParallel: () => {},
+        setWorkerOn: () => {},
         setAutoQueue: (enabled) => applied.push(enabled),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
@@ -1969,8 +1969,8 @@ describe('repo settings endpoints', () => {
     expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
     expect(applied).toEqual([true])
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
-      maxParallel: 1,
       autoQueue: true,
+      staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
@@ -1986,16 +1986,11 @@ describe('repo settings endpoints', () => {
     expect(applied).toEqual([true, false, true])
   })
 
-  test('PATCH rejects worker counts outside the range and an empty body', async () => {
-    for (const maxParallel of [0, -1, 17, 2.5, 'x', null]) {
-      const res = await patch('repo1', JSON.stringify({ maxParallel }))
-      expect(res.status).toBe(400)
-    }
+  test('PATCH rejects an empty body', async () => {
     expect((await patch('repo1', '{}')).status).toBe(400)
   })
 
-  test('PATCH live-applies the runner only for the repo it serves', async () => {
-    const applied: number[] = []
+  test('PATCH rejects unknown settings instead of persisting a worker count', async () => {
     app = createApp({
       workspaces: ws.workspaces,
       runner: {
@@ -2011,16 +2006,13 @@ describe('repo settings endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setMaxParallel: (n) => applied.push(n),
+        setWorkerOn: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
       runnerRepo: 'repo1',
     })
-    expect((await patch('repo1', '{"maxParallel":3}')).status).toBe(200)
-    expect(applied).toEqual([3])
-    expect((await patch('repo2', '{"maxParallel":2}')).status).toBe(200)
-    expect(applied).toEqual([3])
+    expect((await patch('repo1', '{"maxParallel":3}')).status).toBe(400)
   })
 
   test('404s for an unknown repo', async () => {
@@ -2434,22 +2426,55 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
 })
 
 describe('POST /api/repos/:repo/run', () => {
-  test('starts a run in the background for the repo', async () => {
-    const tracker = new FakeGateTracker()
-    ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
-    const res = await app.request('/api/repos/repo1/run', { method: 'POST' })
+  test('dispatches the named worker through the runner service', async () => {
+    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
+    ws = testWorkspaces(['repo1'])
+    app = createApp({
+      workspaces: ws.workspaces,
+      runnerRepo: 'repo1',
+      runner: {
+        status: async () => ({
+          name: 'repo1',
+          available: true,
+          capacity: 1,
+          running: [],
+          startedAt: {},
+          resources: {},
+          tasks: {},
+          autoQueue: false,
+        }),
+        start: async (taskId, opts) => {
+          received.push({ taskId, opts })
+          return { ok: true, taskId: 'bd-1' }
+        },
+        stop: async () => ({ ok: true, taskId: 'bd-1' }),
+        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
+        setWorkerOn: () => {},
+        setAutoQueue: () => {},
+      },
+    })
+    const res = await app.request('/api/repos/repo1/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"workerId":"w-1"}',
+    })
     expect(res.status).toBe(202)
-    await Bun.sleep(20)
-    // the fake tracker has nothing ready, so the run ends without events
-    expect(tracker.released).toEqual([])
+    expect(await res.json()).toEqual({ repo: 'repo1', taskId: 'bd-1', started: true })
+    expect(received).toEqual([{ taskId: undefined, opts: { workerId: 'w-1' } }])
   })
 
   test('404s for an unknown repo', async () => {
     ws = testWorkspaces(['repo1'])
     app = createApp({ workspaces: ws.workspaces })
-    expect((await app.request('/api/repos/nope/run', { method: 'POST' })).status).toBe(404)
+    expect(
+      (
+        await app.request('/api/repos/nope/run', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+      ).status,
+    ).toBe(404)
   })
 })
 
