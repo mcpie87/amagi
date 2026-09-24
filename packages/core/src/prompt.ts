@@ -26,6 +26,7 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
+    '- Inspect the base with read-only commands such as `git show <base>:<path>` and `git diff <base>`; do not use `git stash`.',
     '- Follow the conventions already present in the code you are changing.',
     ...(checks.length > 0
       ? [

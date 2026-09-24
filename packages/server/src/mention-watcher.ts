@@ -149,6 +149,8 @@ export function startMentionWatcher({
                         mentionId: mention.id,
                         ...c,
                       }),
+                    onGitBypassed: (entries) =>
+                      store.append(null, { type: 'git.bypassed', entries }),
                   }),
             })
             handled.add(mention.id)

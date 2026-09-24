@@ -306,8 +306,23 @@ describe('listPrMentions', () => {
 
 describe('respondToMention', () => {
   test('a fix-pr mention runs the agent in a worktree and pushes to the PR head', async () => {
-    const { exec, calls } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
+    let reflogCalls = 0
+    const { exec, calls } = fake((c) => {
+      if (c.includes('reflog')) {
+        reflogCalls++
+        return {
+          exitCode: 0,
+          stdout:
+            reflogCalls === 1
+              ? 'aaa checkout: initial\n'
+              : 'bbb reset: unexpected\naaa checkout: initial\n',
+          stderr: '',
+        }
+      }
+      return c.includes('rev-parse') ? fail('') : undefined
+    })
     const driver = new FakeDriver()
+    const bypassed: string[][] = []
     const kind = await respondToMention({
       root: '/repo',
       repoName: 'amagi',
@@ -317,6 +332,7 @@ describe('respondToMention', () => {
       driver,
       exec,
       makeHarnessFn: () => fakeHarness({ summary: 'fix-pr' }),
+      onGitBypassed: (entries) => bypassed.push(entries),
     })
 
     expect(kind).toBe('fix-pr')
@@ -328,6 +344,7 @@ describe('respondToMention', () => {
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
     expect(driver.posted).toHaveLength(0)
+    expect(bypassed).toEqual([['bbb reset: unexpected']])
   })
 
   test('an explain mention posts the agent explanation as a comment', async () => {

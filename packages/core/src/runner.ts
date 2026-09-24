@@ -1044,11 +1044,8 @@ export class Runner {
 
   /**
    * Records `git.bypassed` when the worktree's HEAD reflog grew during an agent
-   * run by entries the runner did not make. The shim only sees git reached
-   * through PATH; this catches the rest after the fact. Commits recorded as
-   * `commit.created` since `sinceSeq` are the sanctioned `git-request` ones,
-   * made by the server's own Runner, so they are matched through the store.
-   * Best effort: an unreadable reflog records nothing.
+   * run by entries the runner did not make. Commits recorded as `commit.created`
+   * since `sinceSeq` are the sanctioned `git-request` ones.
    */
   private async recordGitBypass(
     taskId: string,

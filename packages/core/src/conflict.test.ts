@@ -160,12 +160,22 @@ describe('resolveConflict', () => {
 
   test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
     const started: string[] = []
+    let reflogCalls = 0
     const { exec, calls } = fake((c) => {
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
+      if (c.includes('reflog')) {
+        reflogCalls++
+        return ok(
+          reflogCalls === 1
+            ? 'aaa checkout: initial\n'
+            : 'bbb reset: unexpected\naaa checkout: initial\n',
+        )
+      }
       return undefined
     })
     const logs: { level: ConflictLogLevel; text: string }[] = []
+    const bypassed: string[][] = []
     const driver = fakeDriver()
     const result = await resolveConflict({
       repoRoot: '/repo',
@@ -179,6 +189,7 @@ describe('resolveConflict', () => {
         return fakeHarness()
       },
       onLog: (level, text) => logs.push({ level, text }),
+      onGitBypassed: (entries) => bypassed.push(entries),
     })
 
     expect(result.ok).toBe(true)
@@ -191,6 +202,7 @@ describe('resolveConflict', () => {
     ])
     expect(driver.calls).toContain(7)
     expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
+    expect(bypassed).toEqual([['bbb reset: unexpected']])
   })
 
   test('blocks an empty merge diff regardless of the agent verdict', async () => {

@@ -227,6 +227,7 @@ export function startPrConflictWatcher({
           driver,
           ...(exec === undefined ? {} : { exec }),
           ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+          onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
         nextState[key] = {
           headOid,
