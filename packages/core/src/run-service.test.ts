@@ -380,7 +380,7 @@ describe('RunService', () => {
     const service = makeService(new FakeTracker([TASK]), new ModelHarness(), 1)
     const started = await service.start()
     expect(started.ok).toBe(true)
-    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    await waitFor(() => store.currentAgent(TASK.id)?.model === 'fake-model')
 
     const status = await service.status()
     expect(status.tasks[TASK.id]).toEqual({
@@ -410,13 +410,19 @@ describe('RunService', () => {
   })
 
   test('setMaxParallel raises the ceiling for new launches', async () => {
-    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 1)
+    const harness = new BlockingHarness()
+    const service = makeService(new FakeTracker([TASK, TASK2]), harness, 1)
     expect((await service.start(TASK.id)).ok).toBe(true)
-    expect((await service.start(TASK2.id)).ok).toBe(false)
-    service.setMaxParallel(2)
-    expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
-    await service.stop(TASK.id)
-    await service.stop(TASK2.id)
+    await waitFor(() => harness.starts === 1)
+    try {
+      expect((await service.start(TASK2.id)).ok).toBe(false)
+      service.setMaxParallel(2)
+      expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
+      await waitFor(() => harness.starts === 2)
+    } finally {
+      await Promise.all([service.stop(TASK.id), service.stop(TASK2.id)])
+      service.dispose()
+    }
   })
 
   test('start launches the next ready task and it completes', async () => {

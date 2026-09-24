@@ -891,6 +891,7 @@ export class Runner {
       },
     }
     const reflogBefore = await this.headReflog(opts.cwd)
+    this.throwIfCancelled(taskId)
     const seqBefore = store.recentEvents(taskId, 1)[0]?.seq ?? 0
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
