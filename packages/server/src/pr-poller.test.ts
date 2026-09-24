@@ -61,8 +61,11 @@ class FakeTracker implements Tracker {
   async claim(): Promise<TrackerTask | null> {
     return null
   }
-  async get(): Promise<TrackerTask | null> {
-    return null
+  readonly open = new Set<string>()
+
+  async get(id: string): Promise<TrackerTask | null> {
+    if (!this.open.has(id)) return null
+    return { id, title: id, description: '', status: 'open', priority: null, type: null, url: null }
   }
   async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
     throw new Error('unsupported')
@@ -124,6 +127,25 @@ test('a merged pr settles the task as done and closes the tracker issue', async 
   expect(store.tasks({ states: ['pr_open'] })).toHaveLength(0)
   expect(tracker.closed.map((c) => c.id)).toEqual(['bd-1'])
   expect(tracker.closed[0]?.reason).toBe('PR merged')
+})
+
+test('a merged pr closes the error tasks filed against it', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  store.append('bd-1', { type: 'retry.filed_as_error', errorTaskId: 'bd-err', reason: 'boom' })
+  store.append('bd-1', { type: 'retry.filed_as_error', errorTaskId: 'bd-gone', reason: 'old' })
+  const forge = new FakePr()
+  forge.state = 'merged'
+  const tracker = new FakeTracker()
+  tracker.open.add('bd-err')
+
+  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(tracker.closed).toEqual([
+    { id: 'bd-1', reason: 'PR merged' },
+    { id: 'bd-err', reason: 'bd-1 merged' },
+  ])
 })
 
 test('a closed pr settles the task as abandoned and closes the tracker issue', async () => {
