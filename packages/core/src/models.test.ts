@@ -139,22 +139,37 @@ describe('listModelsCached', () => {
   })
 
   test('an empty listing is not cached, so it retries next time', async () => {
-    expect(await listModelsCached('claude', () => Promise.resolve([]), dir)).toEqual([])
-    expect(existsSync(cachePath('claude'))).toBe(false)
+    expect(await listModelsCached('opencode', () => Promise.resolve([]), dir)).toEqual([])
+    expect(existsSync(cachePath('opencode'))).toBe(false)
   })
 
-  test('curated kinds skip the disk cache and return the live curated list', async () => {
+  test('curated kinds skip the disk cache and return the configured models', async () => {
     writeCache('claude', Date.now(), ['stale-generic'])
-    let called = false
-    const models = await listModelsCached(
+    writeCache('codex', Date.now(), ['stale-generic'])
+    const called: string[] = []
+    const claude = await listModelsCached(
       'claude',
       () => {
-        called = true
-        return Promise.resolve(['claude-opus-5'])
+        called.push('claude')
+        return Promise.resolve(['live-claude'])
       },
       dir,
     )
-    expect(models).toEqual(['claude-opus-5'])
-    expect(called).toBe(true)
+    const codex = await listModelsCached(
+      'codex',
+      () => {
+        called.push('codex')
+        return Promise.resolve(['live-codex'])
+      },
+      dir,
+    )
+    expect(claude).toEqual([
+      'claude-fable-5-1',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-haiku-4-5',
+    ])
+    expect(codex).toEqual(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'])
+    expect(called).toEqual([])
   })
 })
