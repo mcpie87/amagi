@@ -25,6 +25,8 @@ import {
   implementAfterVerifyPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prFailurePrompt,
+  prFailureSystemPrompt,
   prTitle,
   reclaimPrompt,
   verifyViabilityPrompt,
@@ -675,7 +677,16 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, current.model, current.effort, current.summary)
+    await this.openPullRequest(
+      task,
+      cwd,
+      branch,
+      current.sessionId,
+      budget,
+      current.model,
+      current.effort,
+      current.summary,
+    )
     this.throwIfCancelled(task.id)
   }
 
@@ -738,14 +749,15 @@ export class Runner {
   }
 
   /**
-   * Pushes the worktree branch and opens a pull request. A failed PR (gh not
-   * authenticated, remote gone) leaves the commit in place and escalates, so
-   * the operator can push and open it by hand.
+   * Pushes the worktree branch and opens a pull request. A failed PR leaves the
+   * commit in place; a read-only diagnosis tells the operator how to proceed.
    */
   private async openPullRequest(
     task: TrackerTask,
     cwd: string,
     branch: string,
+    sessionId: string | null,
+    budget: TaskBudget,
     model: string | null,
     effort: string | null,
     fallbackSummary?: string | null,
@@ -831,7 +843,27 @@ export class Runner {
         message: `pull request: ${message}${hint}`,
         fatal: false,
       })
-      this.transition(task.id, 'needs_human', 'pull request creation failed')
+      let reason: string | null = null
+      try {
+        const diagnosis = await this.runAgent(
+          task.id,
+          sessionId,
+          {
+            cwd,
+            prompt: prFailurePrompt(current, branch, `${message}${hint}`),
+            systemPrompt: prFailureSystemPrompt(),
+            ...harnessStartOpts(config.harness.implement),
+          },
+          'PR failure diagnosis',
+          budget,
+          'verify',
+        )
+        this.throwIfCancelled(task.id)
+        if (diagnosis.ok) reason = diagnosis.summary?.trim() || null
+      } catch {
+        this.throwIfCancelled(task.id)
+      }
+      this.transition(task.id, 'needs_human', reason ?? `${message}${hint}`)
     }
   }
 

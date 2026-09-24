@@ -561,6 +561,41 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
   return parts.join('\n')
 }
 
+/** Explain a failed PR creation so the operator can finish it manually. */
+export function prFailurePrompt(task: TrackerTask, branch: string, error: string): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    `The commit is on branch ${branch}, but the forge failed to create its pull request:`,
+    error,
+    '',
+    'Investigate the worktree and repository state using read-only commands. Explain',
+    'what happened and exactly what the operator must do to open the pull request by',
+    'hand. Be concrete and include relevant commands when useful.',
+    '',
+    'Do not modify files, git state, branches, remotes, or forge state. Do not commit,',
+    'push, or retry pull request creation. Reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  parts.push(...trackerContext(task))
+  return parts.join('\n')
+}
+
+export function prFailureSystemPrompt(): string {
+  return [
+    'You are diagnosing why an autonomous coding agent could not open a pull request.',
+    'Your investigation is strictly read-only.',
+    '',
+    'Rules:',
+    '- Do not modify, create, or delete files.',
+    '- Do not run writing git commands, including add, commit, push, checkout, or reset.',
+    '- Do not modify remotes or use forge commands that change remote state.',
+    '- Inspect the worktree and report the evidence, what failed, and the exact action',
+    '  the operator must take to open the pull request manually.',
+    '- Reply with the explanation only, in plain language.',
+  ].join('\n')
+}
+
 /**
  * Pre-implement viability check: a read-only agent pass that catches tasks
  * already satisfied by the current repository before the full implement run

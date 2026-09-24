@@ -5,6 +5,8 @@ import {
   commitMessage,
   implementPrompt,
   implementSystemPrompt,
+  prFailurePrompt,
+  prFailureSystemPrompt,
   prTitle,
 } from './prompt.ts'
 
@@ -44,6 +46,23 @@ const task = (title: string): TrackerTask => ({
   priority: null,
   type: 'task',
   url: null,
+})
+
+describe('prFailurePrompt', () => {
+  test('asks for a read-only diagnosis and operator instructions', () => {
+    const prompt = prFailurePrompt(TASK, 'amagi/am-1-change', 'gh not authenticated')
+    expect(prompt).toContain('gh not authenticated')
+    expect(prompt).toContain('exactly what the operator must do')
+    expect(prompt).toContain('Do not modify files, git state, branches, remotes, or forge state')
+    expect(prompt).not.toContain('fix what it can')
+  })
+
+  test('sets strict read-only investigation rules', () => {
+    const prompt = prFailureSystemPrompt()
+    expect(prompt).toContain('strictly read-only')
+    expect(prompt).toContain('Do not run writing git commands')
+    expect(prompt).toContain('Do not modify remotes')
+  })
 })
 
 describe('prTitle', () => {

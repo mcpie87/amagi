@@ -711,20 +711,49 @@ describe('Runner.runOnce', () => {
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')
-    const result = await makeRunner(
-      new FakeTracker([TASK]),
-      new FakeHarness([writesAFile]),
-      config(),
-      pr,
-    ).runOnce()
+    const diagnosis =
+      'The branch is committed locally, but gh has no active login. Run gh auth login, then open the pull request from this branch.'
+    const harness = new FakeHarness([writesAFile, { outcome: { summary: diagnosis } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
 
     expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toBe(diagnosis)
     expect(types(TASK.id)).toContain('commit.created')
     expect(types(TASK.id)).not.toContain('pr.created')
+    expect(pr.calls).toHaveLength(1)
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('gh not authenticated')
+    expect(harness.calls[1]?.prompt).toContain('operator must do')
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(
       errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
     ).toBe(true)
+  })
+
+  test('a failed PR diagnosis falls back to the forge error', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('remote unavailable')
+    const harness = new FakeHarness([
+      writesAFile,
+      { outcome: { ok: false, exitCode: 1, summary: null, stderr: 'diagnosis failed' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('remote unavailable')
+    expect(pr.calls).toHaveLength(1)
+  })
+
+  test('an empty PR diagnosis falls back to the forge error', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('branch unavailable')
+    const harness = new FakeHarness([writesAFile, { outcome: { summary: '' } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('branch unavailable')
+    expect(pr.calls).toHaveLength(1)
   })
 
   test('a committed task whose diff against base is empty goes to no_pr without a PR', async () => {
