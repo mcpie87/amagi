@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import {
   fetchPullHeads,
@@ -14,8 +15,11 @@ import {
   type PrInfo,
   prepareConflictWorktree,
   pushConflictFix,
+  resolvePrPriorities,
   stampIterationLabel,
+  syncPrPriorityLabel,
   taskIdFromAmagiBranch,
+  taskIdFromPrBranch,
 } from './pr-check.ts'
 
 type Call = readonly string[]
@@ -78,7 +82,7 @@ describe('listOpenPrs', () => {
       c.includes('list') && c.includes('pr')
         ? ok(
             JSON.stringify([
-              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/bug' }] },
+              { ...pr(), labels: [{ name: 'amagi' }, { name: 'P2' }] },
               pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
             ]),
           )
@@ -98,7 +102,7 @@ describe('listOpenPrs', () => {
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
     // gh reports labels as objects; listOpenPrs reduces them to names
-    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/bug'])
+    expect(prs[0]?.labels).toEqual(['amagi', 'P2'])
     expect(prs[1]?.labels).toEqual([])
   })
 })
@@ -287,6 +291,117 @@ describe('mergeableToVerdict', () => {
     expect(mergeableToVerdict('MERGEABLE')).toBe('clean')
     expect(mergeableToVerdict('UNKNOWN')).toBe('unknown')
     expect(mergeableToVerdict('')).toBe('unknown')
+  })
+})
+
+describe('taskIdFromPrBranch', () => {
+  test('parses the task id out of an amagi branch', () => {
+    expect(taskIdFromPrBranch('amagi/am-1-do-the-thing')).toBe('am-1')
+    expect(taskIdFromPrBranch('amagi/am-19b.2-ask-cli-fallback')).toBe('am-19b.2')
+    expect(taskIdFromPrBranch('amagi/bd-a1b2-add-sse-endpoint')).toBe('bd-a1b2')
+  })
+
+  test('returns null for branches that are not amagi PRs', () => {
+    expect(taskIdFromPrBranch('main')).toBeNull()
+    expect(taskIdFromPrBranch('feature/am-1-x')).toBeNull()
+  })
+})
+
+describe('resolvePrPriorities', () => {
+  const task = (over: Partial<TrackerTask> = {}): TrackerTask => ({
+    id: 'am-1',
+    title: 't',
+    description: '',
+    status: 'open',
+    priority: null,
+    type: null,
+    url: null,
+    ...over,
+  })
+
+  test('reads bead priority and defaults P4 when the bead has none', async () => {
+    const out = await resolvePrPriorities(
+      [
+        pr({ number: 7, headRefName: 'amagi/am-1-do-the-thing' }),
+        pr({ number: 8, headRefName: 'amagi/am-2-x' }),
+      ],
+      async (id) => (id === 'am-1' ? task({ priority: 1 }) : task({ priority: null })),
+    )
+    expect(out).toEqual([
+      { number: 7, priority: 1, amagi: true, linked: true },
+      { number: 8, priority: 4, amagi: true, linked: true },
+    ])
+  })
+
+  test('treats closed or missing beads and external branches as unlinked P4', async () => {
+    const out = await resolvePrPriorities(
+      [
+        pr({ number: 7, headRefName: 'amagi/am-1-do-the-thing' }),
+        pr({ number: 8, headRefName: 'amagi/am-2-x' }),
+        pr({ number: 9, headRefName: 'feature/foo' }),
+      ],
+      async (id) => (id === 'am-1' ? task({ status: 'closed', priority: 2 }) : null),
+    )
+    expect(out).toEqual([
+      { number: 7, priority: 4, amagi: true, linked: false },
+      { number: 8, priority: 4, amagi: true, linked: false },
+      { number: 9, priority: 4, amagi: false, linked: false },
+    ])
+  })
+})
+
+describe('syncPrPriorityLabel', () => {
+  test('removes stale P* labels and adds the current one', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await syncPrPriorityLabel({
+      cwd: '/repo',
+      number: 7,
+      labels: ['amagi', 'P1', 'P3'],
+      priority: 2,
+      exec,
+    })
+
+    expect(calls).toContainEqual([
+      'gh',
+      'pr',
+      'edit',
+      '7',
+      '--remove-label',
+      'P1',
+      '--remove-label',
+      'P3',
+    ])
+    expect(calls).toContainEqual(['gh', 'label', 'create', 'P2', '--force'])
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'P2'])
+  })
+
+  test('leaves a matching label alone', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await syncPrPriorityLabel({
+      cwd: '/repo',
+      number: 7,
+      labels: ['amagi', 'P4'],
+      priority: 4,
+      exec,
+    })
+
+    expect(calls.some((c) => c.includes('edit'))).toBe(false)
+    expect(calls.some((c) => c.includes('--add-label'))).toBe(false)
+    expect(calls.some((c) => c.includes('label') && c.includes('create'))).toBe(false)
+  })
+
+  test('removes any P* label when the bead is unlinked', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await syncPrPriorityLabel({
+      cwd: '/repo',
+      number: 7,
+      labels: ['amagi', 'P2'],
+      priority: null,
+      exec,
+    })
+
+    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--remove-label', 'P2'])
+    expect(calls.some((c) => c.includes('--add-label'))).toBe(false)
   })
 })
 

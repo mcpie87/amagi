@@ -8,13 +8,16 @@ import {
   makeTracker,
   type PrDriver,
   type PrInfo,
+  type PrPriority,
   prepareConflictWorktree,
   pushConflictFix,
   repoName,
   repoRoot,
   resolveConflictPrompt,
   resolveConflictSystemPrompt,
+  resolvePrPriorities,
   stampIterationLabel,
+  syncPrPriorityLabel,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, table, yellow } from '../format.ts'
@@ -160,13 +163,21 @@ export const checkPrsCommand = defineCommand({
 
     const base = config.repo.baseBranch
     const resolved = await resolveMergeStatuses(root, prs, driver)
-    const header = ['PR', 'MERGE', 'BASE', 'HEAD', 'TITLE']
-    const rows = resolved.map((p) => [
-      `#${p.number}`,
-      mergeLabel(p, base),
-      p.baseRefName,
-      p.headRefName,
-      p.title,
+    const tracker = makeTracker(config, root)
+    const priorities = await resolvePrPriorities(resolved, (id) => tracker.get(id))
+    // Priority is the first sort key of the dispatch order; P0 first, oldest PR first within a band.
+    const ordered = resolved
+      .map((pr, i) => ({ pr, pri: priorities[i] }))
+      .filter((x): x is { pr: PrInfo; pri: PrPriority } => x.pri !== undefined)
+      .sort((a, b) => a.pri.priority - b.pri.priority || a.pr.number - b.pr.number)
+    const header = ['PR', 'MERGE', 'PRIORITY', 'BASE', 'HEAD', 'TITLE']
+    const rows = ordered.map(({ pr, pri }) => [
+      `#${pr.number}`,
+      mergeLabel(pr, base),
+      `P${pri.priority}`,
+      pr.baseRefName,
+      pr.headRefName,
+      pr.title,
     ])
     console.log(
       table([header, ...rows], (row, i) => {
@@ -176,7 +187,20 @@ export const checkPrsCommand = defineCommand({
       }),
     )
 
-    const conflicts = resolved.filter((p) => isConflicting(p, base))
+    if (!args['dry-run']) {
+      for (const { pr, pri } of ordered) {
+        if (!pri.amagi) continue
+        await syncPrPriorityLabel({
+          cwd: root,
+          number: pr.number,
+          labels: pr.labels,
+          // A PR whose bead is gone or closed carries no priority label.
+          priority: pri.linked ? pri.priority : null,
+        })
+      }
+    }
+
+    const conflicts = ordered.filter(({ pr }) => isConflicting(pr, base))
     if (conflicts.length === 0) {
       console.log(dim('\nno merge conflicts'))
       return
@@ -191,8 +215,7 @@ export const checkPrsCommand = defineCommand({
     console.log(
       `\n${yellow(`${conflicts.length} conflicting PR(s), dispatching resolution agents:`)}`,
     )
-    const tracker = makeTracker(config, root)
-    for (const pr of conflicts) {
+    for (const { pr } of conflicts) {
       try {
         const stamped = await stampIterationLabel({ cwd: root, pr })
         if (stamped !== null) {
