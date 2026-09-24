@@ -261,6 +261,16 @@ export function createApp({
       return c.json(issue)
     })
 
+    .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const beads = beadsTracker(ws)
+      if (beads === null) {
+        return c.json({ error: `issue details are unavailable for ${repo}` }, 501)
+      }
+      return c.json(await beads.children(id))
+    })
+
     .post(
       '/api/repos/:repo/issues',
       valid('param', RepoParam),

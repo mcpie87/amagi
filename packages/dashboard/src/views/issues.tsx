@@ -391,6 +391,10 @@ export function IssuesView() {
   const [issues, setIssues] = useState<Issue[]>([])
   const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
+  const [selectedEpic, setSelectedEpic] = useState<EligibleEpic | null>(null)
+  const [epicChildren, setEpicChildren] = useState<Issue[]>([])
+  const [epicChildrenLoading, setEpicChildrenLoading] = useState(false)
+  const [epicChildrenError, setEpicChildrenError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
   const [search, setSearch] = useState('')
@@ -422,6 +426,7 @@ export function IssuesView() {
       repoRef.current = selected
       setIssues([])
       setSelectedIssue(null)
+      setSelectedEpic(null)
     }
     setError(null)
     fetch(`${apiBase}/api/repos/${selected}/issues`)
@@ -437,6 +442,31 @@ export function IssuesView() {
       })
       .catch((err: unknown) => setError(errMsg(err)))
   }, [selected, refresh])
+
+  useEffect(() => {
+    if (selected === null || selectedEpic === null) return
+    let active = true
+    setEpicChildren([])
+    setEpicChildrenLoading(true)
+    setEpicChildrenError(null)
+    fetch(`${apiBase}/api/repos/${selected}/issues/${selectedEpic.id}/children`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+        return res.json() as Promise<Issue[]>
+      })
+      .then((children) => {
+        if (active) setEpicChildren(children)
+      })
+      .catch((err: unknown) => {
+        if (active) setEpicChildrenError(errMsg(err))
+      })
+      .finally(() => {
+        if (active) setEpicChildrenLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [selected, selectedEpic, refresh])
 
   useEffect(() => {
     if (selected === null) return
@@ -474,7 +504,7 @@ export function IssuesView() {
           onClick={() => setSelectedIssue(null)}
           className="text-sm text-sky-ink hover:underline"
         >
-          &larr; tasks
+          &larr; {selectedEpic === null ? 'tasks' : 'epic'}
         </button>
         <div className="mt-3 flex items-center gap-3">
           <h1 className="text-xl font-semibold">{selectedIssue.title}</h1>
@@ -527,6 +557,56 @@ export function IssuesView() {
             onClose={() => setForm(null)}
             onSaved={saved}
           />
+        )}
+      </section>
+    )
+  }
+  if (selectedEpic !== null) {
+    return (
+      <section>
+        <button
+          type="button"
+          onClick={() => setSelectedEpic(null)}
+          className="text-sm text-sky-ink hover:underline"
+        >
+          &larr; tasks
+        </button>
+        <h1 className="mt-3 text-xl font-semibold">{selectedEpic.title}</h1>
+        <p className="mt-1 text-sm text-fg-faint">
+          {selectedEpic.id} · {selectedEpic.closedChildren}/{selectedEpic.totalChildren} children
+          done
+        </p>
+        <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Child tasks ({epicChildren.length})
+        </h2>
+        {epicChildrenError !== null ? (
+          <p className="text-sm text-red-ink">{epicChildrenError}</p>
+        ) : epicChildrenLoading ? (
+          <p className="text-sm text-fg-faint">Loading child tasks...</p>
+        ) : epicChildren.length === 0 ? (
+          <p className="text-sm text-fg-faint">No child tasks.</p>
+        ) : (
+          <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+            {epicChildren.map((child) => (
+              <li key={child.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelectedIssue(child)}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
+                >
+                  <IssueBadge issue={child} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{child.title}</span>
+                    <span className="block truncate text-xs text-fg-faint">
+                      {child.id}
+                      {child.priority === null ? '' : ` · P${child.priority}`}
+                      {child.type === null ? '' : ` · ${child.type}`}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
     )
@@ -601,12 +681,16 @@ export function IssuesView() {
           <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
             {eligibleEpics.map((epic) => (
               <li key={epic.id} className="flex items-center gap-3 px-4 py-3">
-                <span className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => setSelectedEpic(epic)}
+                  className="min-w-0 flex-1 text-left hover:text-sky-ink"
+                >
                   <span className="block truncate font-medium">{epic.title}</span>
                   <span className="block truncate text-xs text-fg-faint">
                     {epic.id} · {epic.closedChildren}/{epic.totalChildren} children done
                   </span>
-                </span>
+                </button>
                 <CloseEpicButton repo={selected} epic={epic} onClosed={saved} />
               </li>
             ))}
