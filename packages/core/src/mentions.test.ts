@@ -405,6 +405,34 @@ describe('respondToMention', () => {
     expect(prompts.join('\n')).toContain('drift')
   })
 
+  test('classification uses the mention watcher harness overrides', async () => {
+    const cfg = config()
+    cfg.harness.implement.model = 'base-model'
+    cfg.watchers.mention.kind = 'codex'
+    cfg.watchers.mention.model = 'mention-model'
+    cfg.watchers.mention.effort = 'high'
+    cfg.watchers.mention.seat = 'mention-seat'
+    let startedWith: ReturnType<typeof config>['harness']['implement'] | undefined
+    await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: 'watcher-config', user: 'bob', body: 'what should happen?' },
+      config: cfg,
+      driver: new FakeDriver(),
+      makeHarnessFn: (harnessConfig) => {
+        startedWith = harnessConfig
+        return fakeHarness({ summary: 'ambiguous' })
+      },
+    })
+    expect(startedWith).toMatchObject({
+      kind: 'codex',
+      model: 'mention-model',
+      effort: 'high',
+      seat: 'mention-seat',
+    })
+  })
+
   test('an add-a-task mention creates a tracker task and posts a confirmation', async () => {
     const tracker = fakeTracker(true)
     const driver = new FakeDriver()

@@ -48,6 +48,18 @@ export const HarnessConfig = z.object({
   extraArgs: z.array(z.string()).default([]),
 })
 
+const WatcherHarnessConfig = z.object({
+  kind: HarnessKind.optional(),
+  model: z.string().optional(),
+  effort: z.string().optional(),
+  seat: z.string().min(1).optional(),
+})
+
+const AgentWatcherConfig = z.object({
+  enabled: z.boolean().default(true),
+  ...WatcherHarnessConfig.shape,
+})
+
 export const Config = z.object({
   repo: z
     .object({
@@ -82,6 +94,13 @@ export const Config = z.object({
       implement: HarnessConfig.prefault({ kind: 'claude' }),
       review: HarnessConfig.prefault({ kind: 'codex' }),
       triage: HarnessConfig.prefault({ kind: 'claude' }),
+    })
+    .prefault({}),
+  watchers: z
+    .object({
+      mention: AgentWatcherConfig.prefault({ enabled: true }),
+      prConflict: AgentWatcherConfig.prefault({ enabled: true }),
+      stall: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
     })
     .prefault({}),
   loop: z
@@ -246,6 +265,20 @@ export const Config = z.object({
     .prefault({}),
 })
 export type Config = z.infer<typeof Config>
+
+export type AgentWatcherKind = 'mention' | 'prConflict'
+
+export function watcherHarnessConfig(
+  config: Config,
+  watcher: AgentWatcherKind,
+): Config['harness']['implement'] {
+  const { enabled: _enabled, ...overrides } = config.watchers[watcher]
+  return {
+    ...config.harness.implement,
+    ...overrides,
+    kind: overrides.kind ?? config.harness.implement.kind,
+  }
+}
 
 type Json = Record<string, unknown>
 
