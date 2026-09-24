@@ -263,6 +263,16 @@ describe('Store', () => {
     expect(stalled.map((t) => t.id)).toEqual(['bd-2'])
   })
 
+  test('stalledTasks ignores a previous attempt heartbeat once the task is claimed again', () => {
+    claim('bd-1')
+    store.heartbeat('bd-1')
+    store.db
+      .query('update tasks set last_heartbeat_at = ? where id = ?')
+      .run(Date.now() - 7_200_000, 'bd-1')
+    store.append('bd-1', { type: 'task.reclaimed', reason: 'stalled' })
+    expect(store.stalledTasks(['claimed'], Date.now() - 60_000)).toHaveLength(0)
+  })
+
   test('task.reclaimed carries the reason into statusReason', () => {
     claim()
     store.append('bd-1', {

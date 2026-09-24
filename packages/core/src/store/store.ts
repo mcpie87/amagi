@@ -260,7 +260,7 @@ export class Store {
     const rows = this.db
       .query(
         `select id, state, updated_at, last_heartbeat_at from tasks
-         where state in (${holes}) and coalesce(last_heartbeat_at, updated_at) < ?`,
+         where state in (${holes}) and max(coalesce(last_heartbeat_at, 0), updated_at) < ?`,
       )
       .all(...states, beforeMs) as {
       id: string
