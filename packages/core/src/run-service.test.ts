@@ -327,8 +327,30 @@ describe('RunService', () => {
       tasks: {},
       autoQueue: false,
       fleet: [
-        { id: 'worker-1', name: 'Worker 1', enabled: true, on: true, busy: false, taskId: null },
-        { id: 'worker-2', name: 'Worker 2', enabled: true, on: true, busy: false, taskId: null },
+        {
+          id: 'worker-1',
+          name: 'Worker 1',
+          kind: 'claude',
+          model: null,
+          effort: null,
+          seat: 'seat-1',
+          enabled: true,
+          on: true,
+          busy: false,
+          taskId: null,
+        },
+        {
+          id: 'worker-2',
+          name: 'Worker 2',
+          kind: 'claude',
+          model: null,
+          effort: null,
+          seat: 'seat-2',
+          enabled: true,
+          on: true,
+          busy: false,
+          taskId: null,
+        },
       ],
     })
     service.dispose()
@@ -386,6 +408,10 @@ describe('RunService', () => {
     const status = await service.status()
     expect(status.tasks[TASK.id]).toEqual({
       title: 'Add a greeting file',
+      workerId: 'worker-1',
+      workerName: 'Worker 1',
+      seat: 'claude',
+      waitingOnSeat: false,
       harness: 'claude',
       model: null,
       effort: null,
@@ -406,7 +432,12 @@ describe('RunService', () => {
     expect(started.ok).toBe(true)
     await waitFor(() => store.task(TASK.id)?.state === 'implementing')
 
-    expect((await service.status()).tasks[TASK.id]?.harness).toBe('codex')
+    expect((await service.status()).tasks[TASK.id]).toMatchObject({
+      harness: 'codex',
+      workerId: 'worker-codex',
+      workerName: 'Codex',
+      seat: 'codex',
+    })
     await service.stop(TASK.id)
   })
 
@@ -419,6 +450,10 @@ describe('RunService', () => {
     const status = await service.status()
     expect(status.tasks[TASK.id]).toEqual({
       title: 'Add a greeting file',
+      workerId: 'worker-1',
+      workerName: 'Worker 1',
+      seat: 'claude',
+      waitingOnSeat: false,
       harness: 'claude',
       model: 'fake-model',
       effort: 'high',
@@ -494,8 +529,30 @@ describe('RunService', () => {
       taskId: TASK.id,
     })
     expect((await service.status()).fleet).toEqual([
-      { id: 'off', name: 'Off', enabled: true, on: false, busy: true, taskId: TASK.id },
-      { id: 'disabled', name: 'Disabled', enabled: false, on: false, busy: false, taskId: null },
+      {
+        id: 'off',
+        name: 'Off',
+        kind: 'claude',
+        model: null,
+        effort: null,
+        seat: 'seat-off',
+        enabled: true,
+        on: false,
+        busy: true,
+        taskId: TASK.id,
+      },
+      {
+        id: 'disabled',
+        name: 'Disabled',
+        kind: 'codex',
+        model: null,
+        effort: null,
+        seat: 'codex',
+        enabled: false,
+        on: false,
+        busy: false,
+        taskId: null,
+      },
     ])
     await service.stop(TASK.id)
   })

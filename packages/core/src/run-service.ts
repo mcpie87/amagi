@@ -19,6 +19,13 @@ export type RunnerResource = {
  *  channel like rss/cpu instead of relying on the SSE projection. */
 export type RunnerTask = {
   title: string
+  workerId?: string | null
+  workerName?: string | null
+  seat?: string
+  /** True until a harness emits agent.started after blocking on its seat. */
+  waitingOnSeat?: boolean
+  /** True for a foreground run that does not match a configured worker. */
+  adHoc?: boolean
   /** The configured implement harness for the run. */
   harness: string
   model: string | null
@@ -47,6 +54,10 @@ export type RunnerStatus = {
 export type FleetWorkerStatus = {
   id: string
   name: string
+  kind: WorkerConfig['kind']
+  model: string | null
+  effort: string | null
+  seat: string
   enabled: boolean
   on: boolean
   busy: boolean
@@ -251,8 +262,28 @@ export class RunService implements RunServiceApi {
         }
         const task = this.opts.store.task(id)
         const agent = this.opts.store.currentAgent(id)
+        const worker = this.opts.config.worker.find((candidate) => candidate.id === entry?.workerId)
+        const latestEvents = this.opts.store.recentEvents(id, 100)
+        const waitingSeatEvent = [...latestEvents]
+          .reverse()
+          .find(
+            (event) =>
+              event.type === 'agent.stream' &&
+              event.event.kind === 'status' &&
+              event.event.message.startsWith('waiting for seat '),
+          )
+        const latestAgentStart = [...latestEvents]
+          .reverse()
+          .find((event) => event.type === 'agent.started')
+        const waitingOnSeat =
+          waitingSeatEvent !== undefined &&
+          (latestAgentStart === undefined || waitingSeatEvent.seq > latestAgentStart.seq)
         tasks[id] = {
           title: task?.title ?? id,
+          workerId: worker?.id ?? null,
+          workerName: worker?.name ?? null,
+          seat: entry?.seat ?? worker?.seat ?? worker?.kind ?? this.opts.harness.kind,
+          waitingOnSeat,
           // The configured harness is known at launch; only the model/effort
           // wait for the agent run to report them.
           harness:
@@ -276,6 +307,10 @@ export class RunService implements RunServiceApi {
       fleet: this.opts.config.worker.map((worker) => ({
         id: worker.id,
         name: worker.name,
+        kind: worker.kind,
+        model: worker.model ?? null,
+        effort: worker.effort ?? null,
+        seat: this.workerSeat(worker),
         enabled: worker.enabled,
         on: this.workerOn.get(worker.id) === true,
         busy: this.runsBySeat().has(this.workerSeat(worker)),
