@@ -1,6 +1,7 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { CheckResult } from './events.ts'
 import type { PrChange } from './pr-body.ts'
+import { NOT_VIABLE_VERDICTS, VERDICTS, verdictPromptLines } from './verdict.ts'
 
 export type PromptContext = {
   task: TrackerTask
@@ -66,6 +67,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '   task: what the changes do file by file and anything the reviewer needs to know',
     '   (deviations from the task, what was left out, why a file that looks unrelated',
     '   was touched).',
+    '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
+    '   opens no pull request, so the verdict is what tells the operator what to do next.',
+    ...verdictPromptLines().map((l) => `   ${l}`),
     'It is rendered as markdown, so wrap paths, identifiers and commands in `backticks`.',
   ]
 
@@ -548,7 +552,9 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
     'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
     'the reason no PR was opened, so be concrete.',
     '',
-    'Do not modify any files; reply with the explanation only.',
+    ...verdictPromptLines(),
+    '',
+    'Do not modify any files; reply with the explanation and the verdict line only.',
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
   parts.push(...trackerContext(task))
@@ -578,8 +584,13 @@ export function verifyViabilitySystemPrompt(): string {
     'Reply with exactly one JSON object and nothing else:',
     '{',
     '  "viable": true | false,',
-    '  "reason": "one short sentence justifying the decision"',
+    '  "reason": "one short sentence justifying the decision",',
+    `  "verdict": ${NOT_VIABLE_VERDICTS.map((v) => `"${v}"`).join(' | ')}`,
     '}',
+    'verdict is required when viable is false and says what should happen to the task:',
+    ...VERDICTS.filter((v) => NOT_VIABLE_VERDICTS.includes(v.label)).map(
+      (v) => `- ${v.label}: ${v.meaning}`,
+    ),
   ].join('\n')
 }
 

@@ -103,6 +103,8 @@ describe('implementSystemPrompt', () => {
   test('asks for a mandatory conclusion in the final message, written against the real diff', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('### Conclusion')
+    expect(prompt).toContain('Verdict: <label>')
+    expect(prompt).toContain('`close-task`')
     expect(prompt).toContain('git diff --stat <base>')
     expect(prompt).toContain('file by file')
     expect(prompt).toContain('mandatory')

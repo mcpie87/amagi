@@ -476,6 +476,7 @@ describe('Runner.runOnce', () => {
 
     expect(result?.state).toBe('no_pr')
     expect(stateReason(TASK.id)).toContain('already done on base')
+    expect(stateReason(TASK.id)).toStartWith('Verdict: close-task')
     // The implement agent never runs, so nothing is written and no PR is opened.
     expect(harness.verifyCalls).toHaveLength(1)
     expect(harness.calls).toHaveLength(0)
@@ -485,6 +486,7 @@ describe('Runner.runOnce', () => {
     // The verdict is reported inside the task as a tracker comment.
     expect(tracker.comments).toHaveLength(1)
     expect(tracker.comments[0]?.body).toContain('already done on base')
+    expect(tracker.comments[0]?.body).toContain('Verdict: close-task')
     // The check itself is recorded under the verify role.
     const started = store
       .events({ taskId: TASK.id, limit: 999 })
@@ -553,6 +555,18 @@ describe('Runner.runOnce', () => {
     expect(result?.state).toBe('pr_open')
     expect(harness.verifyCalls).toHaveLength(0)
     expect(harness.calls[0]?.prompt).toContain('resumed')
+  })
+
+  test('a not-viable check that picks a verdict leads the no_pr reason with it', async () => {
+    const harness = new FakeHarness([], {
+      outcome: {
+        summary: '{"viable": false, "reason": "waits on am-1", "verdict": "postpone"}',
+      },
+    })
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(stateReason(TASK.id)).toBe('Verdict: postpone\n\nwaits on am-1')
   })
 
   test('a not-viable verdict on a task with no session leaves a usable no_pr reason', async () => {
@@ -738,6 +752,9 @@ describe('Runner.runOnce', () => {
     expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
       'diff against main is empty',
     )
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toStartWith(
+      'Verdict: close-task',
+    )
   })
 
   test('the commit lands in the worktree branch, not the main checkout', async () => {
@@ -775,7 +792,11 @@ describe('Runner.runOnce', () => {
 
   test('an agent that changes nothing lands in no_pr with its summary as the reason', async () => {
     const harness = new FakeHarness([
-      { outcome: { summary: 'already implemented upstream: nothing to do' } },
+      {
+        outcome: {
+          summary: 'already implemented upstream: nothing to do\n\nVerdict: close-task',
+        },
+      },
     ])
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
     expect(result?.state).toBe('no_pr')
@@ -783,9 +804,31 @@ describe('Runner.runOnce', () => {
     const stateEvent = store
       .events({ taskId: TASK.id, limit: 999 })
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
-    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
-      'already implemented upstream',
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toBe(
+      'Verdict: close-task\n\nalready implemented upstream: nothing to do',
     )
+    expect(harness.calls).toHaveLength(1)
+  })
+
+  test('no_pr sends the agent back to classify a summary that has no verdict', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: 'the flaky test passes now' } },
+      { outcome: { summary: 'The flake is gone after am-9.\n\nVerdict: close-task' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.prompt).toContain('Verdict: <label>')
+    expect(stateReason(TASK.id)).toBe('Verdict: close-task\n\nThe flake is gone after am-9.')
+  })
+
+  test('no_pr keeps the summary under a needs-human verdict when the agent never classifies', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: 'the flaky test passes now' } },
+      { outcome: { summary: null } },
+    ])
+    await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(stateReason(TASK.id)).toBe('Verdict: needs-human\n\nthe flaky test passes now')
   })
 
   test('no_pr asks the agent why when it left no summary and uses that as the reason', async () => {
@@ -815,6 +858,9 @@ describe('Runner.runOnce', () => {
       .events({ taskId: TASK.id, limit: 999 })
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
     expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toStartWith(
+      'Verdict: needs-human',
+    )
     expect(harness.calls).toHaveLength(1)
   })
 
