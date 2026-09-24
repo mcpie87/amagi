@@ -71,6 +71,32 @@ export const WorkerConfig = z.object({
 })
 export type WorkerConfig = z.infer<typeof WorkerConfig>
 
+/** Resolves a harness kind while preserving repo-specific settings for the configured implement kind. */
+export function resolveHarnessKind(
+  config: Config,
+  kind: WorkerConfig['kind'],
+): Config['harness']['implement'] {
+  return kind === config.harness.implement.kind
+    ? config.harness.implement
+    : HarnessConfig.parse({ kind })
+}
+
+/** Resolves a worker profile for one run without changing the stored fleet. */
+export function resolveWorkerHarness(
+  config: Config,
+  worker: WorkerConfig,
+  overrides: { kind?: WorkerConfig['kind']; model?: string; effort?: string } = {},
+): Config['harness']['implement'] {
+  const kind = overrides.kind ?? worker.kind
+  const base = resolveHarnessKind(config, kind)
+  return {
+    ...base,
+    model: overrides.model ?? worker.model ?? base.model,
+    effort: overrides.effort ?? worker.effort ?? base.effort,
+    seat: worker.seat ?? worker.kind,
+  }
+}
+
 const AgentWatcherConfig = z.object({
   enabled: z.boolean().default(true),
   ...WatcherHarnessConfig.shape,

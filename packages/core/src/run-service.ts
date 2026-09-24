@@ -1,4 +1,4 @@
-import { type Config, HarnessConfig, type WorkerConfig } from './config.ts'
+import { type Config, resolveWorkerHarness, type WorkerConfig } from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -298,17 +298,7 @@ export class RunService implements RunServiceApi {
     worker: WorkerConfig,
     opts: RunOptions = {},
   ): Config['harness']['implement'] {
-    const { config } = this.opts
-    const base =
-      worker.kind === config.harness.implement.kind
-        ? config.harness.implement
-        : HarnessConfig.parse({ kind: worker.kind })
-    return {
-      ...base,
-      model: opts.model ?? worker.model ?? base.model,
-      effort: opts.effort ?? worker.effort ?? base.effort,
-      seat: worker.seat ?? worker.kind,
-    }
+    return resolveWorkerHarness(this.opts.config, worker, opts)
   }
 
   private workerSeat(worker: WorkerConfig): string {

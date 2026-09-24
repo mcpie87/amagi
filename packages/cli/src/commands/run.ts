@@ -1,4 +1,5 @@
 import {
+  type Config,
   dropLiveRun,
   isTerminal,
   listModelsCached,
@@ -9,12 +10,13 @@ import {
   recordLiveRun,
   repoName,
   repoRoot,
+  type WorkerConfig,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
 import { currentRepo } from '../repo.ts'
-import { pickRunSelection, type RunSelection, usageCounts } from '../select-run.ts'
+import { pickRunSelection, pickWorkerSelection, usageCounts } from '../select-run.ts'
 
 const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
@@ -29,26 +31,41 @@ const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
 export async function workOneTask(opts: {
   root: string
   taskId?: string
-  flags: { harness?: string; model?: string; effort?: string }
+  useFleet?: boolean
+  flags: { worker?: string; harness?: string; model?: string; effort?: string }
 }): Promise<void> {
   const { root, taskId } = opts
   const { config } = loadConfig(root)
   const { key, name, store } = currentRepo()
-  const selection: RunSelection = await pickRunSelection(
-    config,
-    opts.flags,
-    interactive() ? picker : null,
-    listModelsFor,
-    usageCounts(store.events()),
-  )
-
-  const implement = selection.harness
-  if (selection.interactive) {
+  let implement: Config['harness']['implement']
+  let selectedWorker: WorkerConfig | undefined
+  let selectionInteractive: boolean
+  if (opts.useFleet) {
+    const selection = await pickWorkerSelection(config, opts.flags, interactive() ? picker : null)
+    implement = selection.harness
+    selectedWorker = selection.worker
+    selectionInteractive = selection.interactive
+  } else {
+    const selection = await pickRunSelection(
+      config,
+      opts.flags,
+      interactive() ? picker : null,
+      listModelsFor,
+      usageCounts(store.events()),
+    )
+    implement = selection.harness
+    selectionInteractive = selection.interactive
+  }
+  if (selectionInteractive) {
     const bits = [
       implement.model ? `model ${implement.model}` : null,
       implement.effort ? `effort ${implement.effort}` : null,
     ].filter(Boolean)
-    console.log(dim(`harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`))
+    console.log(
+      dim(
+        `${selectedWorker ? `worker: ${selectedWorker.name} (${selectedWorker.id}), ` : ''}harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`,
+      ),
+    )
   }
 
   const runner = new Runner({
@@ -163,6 +180,7 @@ export const runCommand = defineCommand({
   meta: { name: 'run', description: 'Claim the next ready task and work it in its own worktree' },
   args: {
     once: { type: 'boolean', description: 'Work a single task and exit', default: true },
+    worker: { type: 'string', description: 'Worker id from the global fleet' },
     harness: {
       type: 'string',
       description: 'Harness kind to use (claude/codex/opencode)',
@@ -173,7 +191,8 @@ export const runCommand = defineCommand({
   async run({ args }) {
     await workOneTask({
       root: repoRoot(),
-      flags: { harness: args.harness, model: args.model, effort: args.effort },
+      useFleet: true,
+      flags: { worker: args.worker, harness: args.harness, model: args.model, effort: args.effort },
     })
   },
 })
