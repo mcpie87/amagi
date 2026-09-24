@@ -316,6 +316,7 @@ export class CodexTranslator {
 
 export type CodexHarnessOptions = {
   bin?: string
+  seat?: string
 }
 
 type CodexModelCacheEntry = { slug?: string; visibility?: string }
@@ -324,9 +325,11 @@ type CodexModelCache = { models?: CodexModelCacheEntry[] }
 export class CodexHarness implements Harness {
   readonly kind = 'codex'
   private readonly bin: string
+  private readonly seat: string | undefined
 
   constructor(opts: CodexHarnessOptions = {}) {
     this.bin = opts.bin ?? 'codex'
+    this.seat = opts.seat
   }
 
   start(opts: AgentStartOptions): AgentProcess {
@@ -395,11 +398,14 @@ export class CodexHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
+    const seat = opts.seat ?? this.seat ?? this.kind
+    opts = { ...opts, seat }
     return spawnAgent(
       argv,
       opts,
       new CodexTranslator(new CodexRolloutContext(opts.env?.CODEX_HOME ?? codexHome()).read),
       {
+        seat,
         // codex reports no resolved model over the stream, so the requested one
         // is all the harness knows.
         model: () => opts.model ?? null,

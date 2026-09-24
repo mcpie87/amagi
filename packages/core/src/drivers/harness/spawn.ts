@@ -3,6 +3,7 @@ import { errMsg } from '../../errors.ts'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
 import { killTree } from '../../process.ts'
+import { acquireSeat } from '../../seat-lock.ts'
 import type { AgentOutcome, AgentProcess, AgentStartOptions, AgentUsage } from '../types.ts'
 import { harnessEnv } from './env.ts'
 
@@ -38,6 +39,8 @@ type Translator = {
 }
 
 export type SpawnAgentOptions = {
+  /** Resolved credential seat. Every harness provides it before entering this path. */
+  seat?: string
   /** Extra env vars, layered over harnessEnv and opts.env (claude's CLAUDE_EFFORT). */
   env?: Record<string, string>
   /** Emits the closing events once stdout ends, for streams without a terminal message. */
@@ -61,6 +64,69 @@ export function spawnAgent(
   opts: AgentStartOptions,
   translator: Translator,
   options: SpawnAgentOptions = {},
+): AgentProcess {
+  const seat = options.seat ?? opts.seat
+  if (seat === undefined || seat.trim() === '') throw new Error('harness spawn requires a seat')
+  const queue = new AsyncQueue<AgentEvent>()
+  const abort = new AbortController()
+  let child: AgentProcess | undefined
+  let cancelled = false
+
+  const done: Promise<AgentOutcome> = (async () => {
+    let lease: Awaited<ReturnType<typeof acquireSeat>> | undefined
+    try {
+      lease = await acquireSeat(seat, {
+        signal: abort.signal,
+        onWaiting: (message) => queue.push({ kind: 'status', message }),
+      })
+      if (cancelled) {
+        lease.release()
+        return cancelledOutcome()
+      }
+      child = spawnUnlocked(argv, opts, translator, options)
+      lease.bind(child.pid)
+      for await (const event of child.events()) queue.push(event)
+      return await child.done
+    } catch (err) {
+      if (!cancelled) queue.push({ kind: 'error', message: errMsg(err) })
+      return cancelled ? cancelledOutcome() : failedOutcome(errMsg(err))
+    } finally {
+      lease?.release()
+      queue.close()
+    }
+  })()
+
+  return {
+    get pid() {
+      return child?.pid ?? 0
+    },
+    events: () => queue,
+    done,
+    kill: async () => {
+      cancelled = true
+      abort.abort()
+      await child?.kill()
+    },
+    get model() {
+      return child?.model ?? (options.model ? options.model() : null)
+    },
+    effort: options.effort ?? null,
+  }
+}
+
+function cancelledOutcome(): AgentOutcome {
+  return { exitCode: 130, ok: false, sessionId: null, summary: null, usage: null, stderr: '' }
+}
+
+function failedOutcome(message: string): AgentOutcome {
+  return { exitCode: 1, ok: false, sessionId: null, summary: message, usage: null, stderr: message }
+}
+
+function spawnUnlocked(
+  argv: string[],
+  opts: AgentStartOptions,
+  translator: Translator,
+  options: SpawnAgentOptions,
 ): AgentProcess {
   const proc = Bun.spawn(argv, {
     cwd: opts.cwd,

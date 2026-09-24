@@ -107,6 +107,7 @@ export async function draftTask(
   let prompt = draftPrompt(idea)
   const opts = {
     cwd,
+    ...(implement.seat === undefined ? {} : { seat: implement.seat }),
     ...(implement.model === undefined ? {} : { model: implement.model }),
     ...(implement.effort === undefined ? {} : { effort: implement.effort }),
     permissions: implement.permissions,

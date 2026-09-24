@@ -88,6 +88,8 @@ export function linesForAgentEvent(event: AgentEvent): string[] {
       return [event.summary ?? (event.ok ? 'done' : 'failed')]
     case 'error':
       return [event.message]
+    case 'status':
+      return splitLines(event.message)
   }
 }
 

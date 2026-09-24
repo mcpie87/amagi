@@ -265,7 +265,7 @@ export class Triage {
     const effort = proc.effort ?? null
     let started = false
     for await (const event of proc.events()) {
-      if (!started) {
+      if (!started && event.kind !== 'status') {
         started = true
         this.store.append(issue.id, {
           type: 'agent.started',

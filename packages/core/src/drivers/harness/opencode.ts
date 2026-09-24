@@ -139,14 +139,17 @@ export class OpencodeTranslator {
 
 export type OpencodeHarnessOptions = {
   bin?: string
+  seat?: string
 }
 
 export class OpencodeHarness implements Harness {
   readonly kind = 'opencode'
   private readonly bin: string
+  private readonly seat: string | undefined
 
   constructor(opts: OpencodeHarnessOptions = {}) {
     this.bin = opts.bin ?? 'opencode'
+    this.seat = opts.seat
   }
 
   start(opts: AgentStartOptions): AgentProcess {
@@ -198,8 +201,11 @@ export class OpencodeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
+    const seat = opts.seat ?? this.seat ?? this.kind
+    opts = { ...opts, seat }
     const translator = new OpencodeTranslator()
     return spawnAgent(argv, opts, translator, {
+      seat,
       finalize: () => translator.finalize(),
       effort: opts.effort ?? null,
       stdin: OpencodeHarness.message(opts),
