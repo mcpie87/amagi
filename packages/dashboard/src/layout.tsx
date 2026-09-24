@@ -145,8 +145,12 @@ function CommandPalette() {
           ⌘K
         </kbd>
       </button>
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: Escape handles keyboard dismissal for the native dialog. */}
       <dialog
         ref={dialogRef}
+        onClick={(event) => {
+          if (event.target === dialogRef.current) close()
+        }}
         onCancel={(event) => {
           event.preventDefault()
           close()
