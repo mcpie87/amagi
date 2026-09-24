@@ -75,13 +75,21 @@ export class ChatService {
             type: 'agent.started',
             role: 'chat',
             harness: harness.kind,
+            seat: config.harness.implement.seat ?? harness.kind,
             model: proc.model ?? null,
             effort: proc.effort ?? null,
             cwd,
             resumed: true,
           })
         }
-        store.append(taskId, { type: 'agent.stream', role: 'chat', event })
+        store.append(taskId, {
+          type: 'agent.stream',
+          role: 'chat',
+          event:
+            event.kind === 'usage'
+              ? { ...event, seat: config.harness.implement.seat ?? harness.kind }
+              : event,
+        })
       }
       const outcome = await proc.done
       store.append(taskId, {

@@ -964,6 +964,7 @@ export class Runner {
             type: 'agent.started',
             role,
             harness: harness.kind,
+            seat: spawn.seat ?? harness.kind,
             model,
             effort,
             cwd: opts.cwd,
@@ -985,7 +986,13 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        if (event.kind !== 'context') store.append(taskId, { type: 'agent.stream', role, event })
+        if (event.kind !== 'context') {
+          store.append(taskId, {
+            type: 'agent.stream',
+            role,
+            event: event.kind === 'usage' ? { ...event, seat: spawn.seat ?? harness.kind } : event,
+          })
+        }
         if (this.observeContext(taskId, event)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true

@@ -97,4 +97,8 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
       alter table tasks add column attempt integer not null default 1;
     `,
   },
+  {
+    name: '009_event_timestamp_index',
+    sql: `create index events_ts_idx on events (ts, seq);`,
+  },
 ]

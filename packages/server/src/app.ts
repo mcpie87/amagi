@@ -213,6 +213,25 @@ export function createApp({
 
     .get('/api/health', (c) => c.json({ ok: true }))
 
+    .get('/api/usage-rates', (c) => {
+      const windowMs = 60_000
+      const since = Date.now() - windowMs
+      const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        for (const event of ws.store.eventsSince(since)) {
+          if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue
+          const seat = event.event.seat ?? 'Unassigned / seat not recorded'
+          const group = groups.get(seat) ?? { seat, calls: 0, tokens: 0 }
+          group.calls++
+          group.tokens += event.event.inputTokens + event.event.outputTokens
+          groups.set(seat, group)
+        }
+      }
+      return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
     .get('/api/repos', async (c) => {
       const out = []
       for (const entry of workspaces.list()) {
