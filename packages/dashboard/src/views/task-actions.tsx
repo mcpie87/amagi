@@ -136,7 +136,10 @@ export function ReclaimButton({
   const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   // A retrying task is still owned by its runner, which will retry on its own;
   // reclaiming it here would hand the tracker claim to a second worker.
-  if (worktree === null || isTerminal(state) || state === 'retrying') return null
+  // A queued task already has no tracker claim to release.
+  if (worktree === null || isTerminal(state) || state === 'retrying' || state === 'queued') {
+    return null
+  }
 
   const reclaim = async () => {
     setBusy(true)

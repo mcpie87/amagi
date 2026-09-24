@@ -6,6 +6,7 @@ export const MergeStatus = z.enum(MERGE_STATUSES)
 export type MergeStatus = z.infer<typeof MergeStatus>
 
 export const TASK_STATES = [
+  'queued',
   'claimed',
   'worktree_ready',
   'implementing',
@@ -55,6 +56,7 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
  * listed here.
  */
 const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
+  queued: ['worktree_ready'],
   claimed: ['worktree_ready'],
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],

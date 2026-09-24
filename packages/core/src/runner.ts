@@ -358,7 +358,7 @@ export class Runner {
         // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
         // or another worker took over). Stop before colliding with the new
         // owner and leave the task where the reclaim parked it: either the new
-        // worker drives it, or the next one resumes it from `claimed`, so no
+        // worker drives it, or the next one resumes its recorded worktree, so no
         // human attention is needed.
         store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
       } else {

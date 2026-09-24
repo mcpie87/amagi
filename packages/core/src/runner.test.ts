@@ -548,6 +548,7 @@ describe('Runner.runOnce', () => {
     store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
     store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
     store.append(TASK.id, { type: 'task.reclaimed' })
+    expect(store.task(TASK.id)?.state).toBe('queued')
 
     const harness = new FakeHarness([writesAFile])
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
@@ -961,8 +962,8 @@ describe('Runner.runOnce', () => {
 
     const result = await makeRunner(tracker, harness, config(), new FakePr(), exec, 50).runOnce()
 
-    expect(result?.state).toBe('claimed')
-    expect(store.task(TASK.id)?.state).toBe('claimed')
+    expect(result?.state).toBe('queued')
+    expect(store.task(TASK.id)?.state).toBe('queued')
     expect(store.task(TASK.id)?.lastError).toContain('claim lease was reclaimed')
     expect(types(TASK.id)).not.toContain('needs_human')
     // The claim was already reclaimed, so the runner must not release it again.

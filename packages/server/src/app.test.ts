@@ -695,7 +695,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { task: ProjectedTask }
-    expect(body.task.state).toBe('claimed')
+    expect(body.task.state).toBe('queued')
     expect(body.task.worktree).toBe('/tmp/wt/bd-1')
     expect(body.task.branch).toBe('amagi/bd-1-x')
     expect(tracker.released).toEqual(['bd-1'])
@@ -707,7 +707,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     expect((await res.json()) as { task: ProjectedTask }).toMatchObject({
-      task: { state: 'claimed' },
+      task: { state: 'queued' },
     })
   })
 
@@ -725,7 +725,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { task: ProjectedTask }
-    expect(body.task.state).toBe('claimed')
+    expect(body.task.state).toBe('queued')
     expect(body.task.worktree).toBeNull()
     expect(tracker.released).toEqual(['bd-1'])
   })
@@ -747,7 +747,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { task: ProjectedTask }
-    expect(body.task.state).toBe('claimed')
+    expect(body.task.state).toBe('queued')
     expect(body.task.worktree).toBe('/tmp/wt/bd-1')
     expect(tracker.released).toEqual(['bd-1'])
   })
@@ -764,7 +764,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
       const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
       expect(res.status).toBe(200)
       const body = (await res.json()) as { task: ProjectedTask }
-      expect(body.task.state).toBe('claimed')
+      expect(body.task.state).toBe('queued')
       expect(body.task.worktree).toBe('/tmp/wt/bd-1')
       expect(tracker.released).toEqual(['bd-1'])
     },
