@@ -165,7 +165,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
       if (current) {
         tasks[event.taskId] = {
           ...current,
-          state: 'claimed',
+          state: 'queued',
           statusReason: event.reason ?? null,
           updatedAt: event.ts,
         }

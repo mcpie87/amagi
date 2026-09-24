@@ -119,7 +119,7 @@ test('recovers a stalled implementing task, keeping its worktree, and reports it
 
   expect(tracker.released).toEqual(['bd-1'])
   const task = store.task('bd-1')
-  expect(task?.state).toBe('claimed')
+  expect(task?.state).toBe('queued')
   expect(task?.worktree).toBe('/tmp/wt/x')
   expect(task?.statusReason).toContain('recovered by stall watcher')
   expect(watcher.activity().detail).toBe('recovered 1 stalled task')

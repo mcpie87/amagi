@@ -119,10 +119,10 @@ describe('dashboard state reducer', () => {
       ev(4, 'am-1', 1300, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
       ev(5, 'am-1', 1400, { type: 'task.reclaimed' }),
     ].reduce(reduceState, initialDashboardState())
-    expect(state.tasks['am-1']?.state).toBe('claimed')
+    expect(state.tasks['am-1']?.state).toBe('queued')
     expect(state.tasks['am-1']?.worktree).toBe('/tmp/am-1')
     expect(state.tasks['am-1']?.branch).toBe('x')
-    expect(activeTasks(state).map((t) => t.id)).toEqual(['am-1'])
+    expect(activeTasks(state).map((t) => t.id)).toEqual([])
   })
 
   test('reset starts a fresh attempt and keeps the earlier one browsable', () => {
@@ -743,7 +743,7 @@ describe('status log', () => {
     expect(statusLog(state, 'am-1', null).map((e) => [e.cause, e.from, e.to, e.reason])).toEqual([
       ['reset', null, 'claimed', 'start over'],
       ['state', 'claimed', 'needs_human', null],
-      ['reclaimed', 'needs_human', 'claimed', 'stale lease'],
+      ['reclaimed', 'needs_human', 'queued', 'stale lease'],
     ])
   })
 

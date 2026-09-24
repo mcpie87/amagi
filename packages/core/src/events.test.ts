@@ -2,6 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import { canTransition, isTerminal, TASK_STATES } from './events.ts'
 
 describe('state machine', () => {
+  test('queued tasks are non-terminal and can start work', () => {
+    expect(isTerminal('queued')).toBe(false)
+    expect(canTransition('queued', 'worktree_ready')).toBe(true)
+  })
+
   test('happy path walks claimed to pr_open, then settles to done', () => {
     const hops = [
       ['claimed', 'worktree_ready'],
