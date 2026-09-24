@@ -476,6 +476,7 @@ describe('Runner.runOnce', () => {
 
     expect(result?.state).toBe('no_pr')
     expect(stateReason(TASK.id)).toContain('already done on base')
+    expect(stateReason(TASK.id)).toStartWith('Verdict: close-task')
     // The implement agent never runs, so nothing is written and no PR is opened.
     expect(harness.verifyCalls).toHaveLength(1)
     expect(harness.calls).toHaveLength(0)
@@ -485,6 +486,7 @@ describe('Runner.runOnce', () => {
     // The verdict is reported inside the task as a tracker comment.
     expect(tracker.comments).toHaveLength(1)
     expect(tracker.comments[0]?.body).toContain('already done on base')
+    expect(tracker.comments[0]?.body).toContain('Verdict: close-task')
     // The check itself is recorded under the verify role.
     const started = store
       .events({ taskId: TASK.id, limit: 999 })
@@ -546,6 +548,7 @@ describe('Runner.runOnce', () => {
     store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
     store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
     store.append(TASK.id, { type: 'task.reclaimed' })
+    expect(store.task(TASK.id)?.state).toBe('queued')
 
     const harness = new FakeHarness([writesAFile])
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
@@ -553,6 +556,18 @@ describe('Runner.runOnce', () => {
     expect(result?.state).toBe('pr_open')
     expect(harness.verifyCalls).toHaveLength(0)
     expect(harness.calls[0]?.prompt).toContain('resumed')
+  })
+
+  test('a not-viable check that picks a verdict leads the no_pr reason with it', async () => {
+    const harness = new FakeHarness([], {
+      outcome: {
+        summary: '{"viable": false, "reason": "waits on am-1", "verdict": "postpone"}',
+      },
+    })
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(stateReason(TASK.id)).toBe('Verdict: postpone\n\nwaits on am-1')
   })
 
   test('a not-viable verdict on a task with no session leaves a usable no_pr reason', async () => {
@@ -697,20 +712,49 @@ describe('Runner.runOnce', () => {
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
     pr.failWith = new Error('gh not authenticated')
-    const result = await makeRunner(
-      new FakeTracker([TASK]),
-      new FakeHarness([writesAFile]),
-      config(),
-      pr,
-    ).runOnce()
+    const diagnosis =
+      'The branch is committed locally, but gh has no active login. Run gh auth login, then open the pull request from this branch.'
+    const harness = new FakeHarness([writesAFile, { outcome: { summary: diagnosis } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
 
     expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toBe(diagnosis)
     expect(types(TASK.id)).toContain('commit.created')
     expect(types(TASK.id)).not.toContain('pr.created')
+    expect(pr.calls).toHaveLength(1)
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
+    expect(harness.calls[1]?.prompt).toContain('gh not authenticated')
+    expect(harness.calls[1]?.prompt).toContain('operator must do')
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(
       errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
     ).toBe(true)
+  })
+
+  test('a failed PR diagnosis falls back to the forge error', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('remote unavailable')
+    const harness = new FakeHarness([
+      writesAFile,
+      { outcome: { ok: false, exitCode: 1, summary: null, stderr: 'diagnosis failed' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('remote unavailable')
+    expect(pr.calls).toHaveLength(1)
+  })
+
+  test('an empty PR diagnosis falls back to the forge error', async () => {
+    const pr = new FakePr()
+    pr.failWith = new Error('branch unavailable')
+    const harness = new FakeHarness([writesAFile, { outcome: { summary: '' } }])
+    const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('branch unavailable')
+    expect(pr.calls).toHaveLength(1)
   })
 
   test('a committed task whose diff against base is empty goes to no_pr without a PR', async () => {
@@ -737,6 +781,9 @@ describe('Runner.runOnce', () => {
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
     expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
       'diff against main is empty',
+    )
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toStartWith(
+      'Verdict: close-task',
     )
   })
 
@@ -775,7 +822,11 @@ describe('Runner.runOnce', () => {
 
   test('an agent that changes nothing lands in no_pr with its summary as the reason', async () => {
     const harness = new FakeHarness([
-      { outcome: { summary: 'already implemented upstream: nothing to do' } },
+      {
+        outcome: {
+          summary: 'already implemented upstream: nothing to do\n\nVerdict: close-task',
+        },
+      },
     ])
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
     expect(result?.state).toBe('no_pr')
@@ -783,9 +834,31 @@ describe('Runner.runOnce', () => {
     const stateEvent = store
       .events({ taskId: TASK.id, limit: 999 })
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
-    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain(
-      'already implemented upstream',
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toBe(
+      'Verdict: close-task\n\nalready implemented upstream: nothing to do',
     )
+    expect(harness.calls).toHaveLength(1)
+  })
+
+  test('no_pr sends the agent back to classify a summary that has no verdict', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: 'the flaky test passes now' } },
+      { outcome: { summary: 'The flake is gone after am-9.\n\nVerdict: close-task' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(result?.state).toBe('no_pr')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.prompt).toContain('Verdict: <label>')
+    expect(stateReason(TASK.id)).toBe('Verdict: close-task\n\nThe flake is gone after am-9.')
+  })
+
+  test('no_pr keeps the summary under a needs-human verdict when the agent never classifies', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: 'the flaky test passes now' } },
+      { outcome: { summary: null } },
+    ])
+    await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+    expect(stateReason(TASK.id)).toBe('Verdict: needs-human\n\nthe flaky test passes now')
   })
 
   test('no_pr asks the agent why when it left no summary and uses that as the reason', async () => {
@@ -815,6 +888,9 @@ describe('Runner.runOnce', () => {
       .events({ taskId: TASK.id, limit: 999 })
       .find((e) => e.type === 'task.state' && e.to === 'no_pr')
     expect(stateEvent?.type === 'task.state' && stateEvent.reason).toContain('no changes')
+    expect(stateEvent?.type === 'task.state' && stateEvent.reason).toStartWith(
+      'Verdict: needs-human',
+    )
     expect(harness.calls).toHaveLength(1)
   })
 
@@ -915,8 +991,8 @@ describe('Runner.runOnce', () => {
 
     const result = await makeRunner(tracker, harness, config(), new FakePr(), exec, 50).runOnce()
 
-    expect(result?.state).toBe('claimed')
-    expect(store.task(TASK.id)?.state).toBe('claimed')
+    expect(result?.state).toBe('queued')
+    expect(store.task(TASK.id)?.state).toBe('queued')
     expect(store.task(TASK.id)?.lastError).toContain('claim lease was reclaimed')
     expect(types(TASK.id)).not.toContain('needs_human')
     // The claim was already reclaimed, so the runner must not release it again.

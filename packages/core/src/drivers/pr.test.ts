@@ -30,6 +30,7 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
   headRefOid: 'deadbeef',
+  createdAt: '2026-09-20T10:00:00Z',
   updatedAt: '2026-09-21T10:00:00Z',
   labels: ['amagi'],
   ...over,
@@ -249,7 +250,7 @@ describe('githubPr', () => {
       '--state',
       'open',
       '--json',
-      'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels',
+      'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,createdAt,updatedAt,labels',
     ])
     expect(prs).toHaveLength(2)
     expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
@@ -379,6 +380,7 @@ describe('forgejoPr', () => {
                 base: { ref: 'main' },
                 mergeable: true,
                 mergeable_state: 'clean',
+                created_at: '2026-09-20T10:00:00Z',
                 updated_at: '2026-09-21T10:00:00Z',
               },
             ]),
@@ -399,6 +401,7 @@ describe('forgejoPr', () => {
         headRefName: 'amagi/am-1',
         baseRefName: 'main',
         headRefOid: null,
+        createdAt: '2026-09-20T10:00:00Z',
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         updatedAt: '2026-09-21T10:00:00Z',

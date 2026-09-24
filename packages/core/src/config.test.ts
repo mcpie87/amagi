@@ -1,8 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { hasStaleMaxParallel, loadConfig, migrateFleet, writeConfig } from './config.ts'
+import {
+  hasStaleMaxParallel,
+  loadConfig,
+  loadGlobalConfig,
+  migrateFleet,
+  newWorkerId,
+  watcherHarnessConfig,
+  workerSeat,
+  writeConfig,
+  writeGlobalConfig,
+} from './config.ts'
 
 let home: string
 let repo: string
@@ -39,6 +49,11 @@ describe('loadConfig', () => {
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
     expect(config.worker).toEqual([])
+    expect(config.watchers).toMatchObject({
+      mention: { enabled: true },
+      prConflict: { enabled: true },
+      stall: { enabled: true },
+    })
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
     expect(config.loop.mentionWatchIntervalSec).toBe(300)
@@ -110,6 +125,19 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
   })
 
+  test('accepts named harness definitions for the interactive picker', () => {
+    writeRepo(
+      '[harness.definitions.fast]\nkind = "opencode"\npermissions = "bypass"\nmodel = "local/x"\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.harness.definitions.fast).toMatchObject({
+      kind: 'opencode',
+      permissions: 'bypass',
+      model: 'local/x',
+    })
+    expect(config.harness.implement.kind).toBe('claude')
+  })
+
   test('loads workers with stable identity and defaults enabled', () => {
     writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
     expect(loadConfig(repo).config.worker[0]).toMatchObject({
@@ -124,6 +152,36 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
   })
 
+  test('watcher settings default on and inherit implement harness fields', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "claude"\nmodel = "base-model"\neffort = "medium"\nseat = "shared"\n\n' +
+        '[watchers.mention]\nenabled = false\nmodel = "mention-model"\nseat = "mention-seat"\n\n' +
+        '[watchers.prConflict]\neffort = "high"\n\n' +
+        '[watchers.stall]\nenabled = false\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.watchers.mention.enabled).toBe(false)
+    expect(config.watchers.mention).toMatchObject({
+      enabled: false,
+      model: 'mention-model',
+      seat: 'mention-seat',
+    })
+    expect(config.watchers.prConflict.enabled).toBe(true)
+    expect(config.watchers.stall.enabled).toBe(false)
+    expect(watcherHarnessConfig(config, 'mention')).toMatchObject({
+      kind: 'claude',
+      model: 'mention-model',
+      effort: 'medium',
+      seat: 'mention-seat',
+    })
+    expect(watcherHarnessConfig(config, 'prConflict')).toMatchObject({
+      kind: 'claude',
+      model: 'base-model',
+      effort: 'high',
+      seat: 'shared',
+    })
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
@@ -134,11 +192,10 @@ describe('loadConfig', () => {
     expect(() => loadConfig(repo)).toThrow()
   })
 
-  test('seeds one default worker without deriving fleet size from stale parallelism', () => {
-    writeGlobal('[harness.implement]\nkind = "codex"\nmodel = "m"\n\n[loop]\nmaxParallel = 2\n')
-    expect(migrateFleet()).toHaveLength(1)
-    expect(loadConfig(repo).config.worker).toHaveLength(1)
-    expect(migrateFleet()).toEqual([])
+  test('ignores stale maxParallel above the former ceiling', () => {
+    writeRepo('[loop]\nmaxParallel = 100\n')
+    expect(loadConfig(repo).config.loop.autoQueue).toBe(false)
+    expect(hasStaleMaxParallel(repo)).toBe(true)
   })
 
   test('stall watcher keys are overridable', () => {
@@ -197,5 +254,82 @@ describe('writeConfig', () => {
   test('creates the repo config file when absent', () => {
     writeConfig(repo, { loop: { autoQueue: true } })
     expect(loadConfig(repo).config.loop.autoQueue).toBe(true)
+  })
+})
+
+describe('worker fleet', () => {
+  const fleet = [
+    {
+      id: 'w-aaaaaa',
+      name: 'Claude 1',
+      kind: 'claude',
+      model: 'claude-opus-5-5',
+      seat: 'personal',
+      enabled: true,
+    },
+    { id: 'w-bbbbbb', name: 'Codex 1', kind: 'codex', effort: 'high', enabled: false },
+  ] as const
+
+  test('round-trips through writeGlobalConfig', () => {
+    writeGlobal('[server]\nport = 9000\n')
+    writeGlobalConfig({ worker: fleet })
+    const config = loadGlobalConfig()
+    expect(config.worker).toEqual([...fleet])
+    expect(config.server.port).toBe(9000)
+    expect(loadConfig(repo).config.worker).toEqual([...fleet])
+  })
+
+  test('seat defaults to the harness kind', () => {
+    writeGlobalConfig({ worker: fleet })
+    expect(loadGlobalConfig().worker.map(workerSeat)).toEqual(['personal', 'codex'])
+  })
+
+  test('renaming a worker keeps its id', () => {
+    writeGlobalConfig({ worker: fleet })
+    const renamed = loadGlobalConfig().worker.map((w) =>
+      w.id === 'w-aaaaaa' ? { ...w, name: 'Main' } : w,
+    )
+    writeGlobalConfig({ worker: renamed })
+    expect(loadGlobalConfig().worker.map((w) => [w.id, w.name])).toEqual([
+      ['w-aaaaaa', 'Main'],
+      ['w-bbbbbb', 'Codex 1'],
+    ])
+  })
+
+  test('rejects duplicate worker ids', () => {
+    writeGlobalConfig({ worker: [fleet[0], { ...fleet[1], id: fleet[0].id }] })
+    expect(() => loadGlobalConfig()).toThrow(/worker ids must be unique/)
+  })
+
+  test('rejects [[worker]] in a repo config, naming the global path', () => {
+    writeRepo('[[worker]]\nid = "w-1"\nname = "x"\nkind = "claude"\n')
+    expect(() => loadConfig(repo)).toThrow(join(home, 'amagi', 'config.toml'))
+  })
+
+  test('newWorkerId avoids taken ids', () => {
+    const taken = new Set<string>()
+    for (let i = 0; i < 50; i++) taken.add(newWorkerId(taken))
+    expect(taken.size).toBe(50)
+    for (const id of taken) expect(id).toMatch(/^w-[a-z0-9-]+$/)
+  })
+
+  test('migrates to one worker regardless of stale maxParallel, once', () => {
+    writeGlobal(
+      '[harness.implement]\nkind = "claude"\nmodel = "claude-sonnet-5"\n\n[loop]\nmaxParallel = 3\n',
+    )
+    const created = migrateFleet()
+    expect(created.map((w) => [w.name, w.kind, w.seat, w.model])).toEqual([
+      ['Claude 1', 'claude', 'claude', 'claude-sonnet-5'],
+    ])
+    expect(new Set(created.map((w) => w.id)).size).toBe(1)
+    expect(loadGlobalConfig().worker).toEqual(created)
+    const written = readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')
+    expect(migrateFleet()).toEqual([])
+    expect(readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')).toBe(written)
+  })
+
+  test('an explicitly empty fleet is not migrated again', () => {
+    writeGlobalConfig({ worker: [] })
+    expect(migrateFleet()).toEqual([])
   })
 })

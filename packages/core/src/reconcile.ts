@@ -50,6 +50,7 @@ export async function reconcilePr(
   try {
     if (to === 'done') {
       await tracker.close(task.id, 'PR merged')
+      await closeErrorTasks(store, tracker, task.id)
     } else {
       await tracker.setStatus(task.id, 'closed')
     }
@@ -57,6 +58,27 @@ export async function reconcilePr(
     console.warn(`pr reconcile ${task.id}: tracker settle failed: ${errMsg(err)}`)
   }
   return { taskId: task.id, to }
+}
+
+/**
+ * A merge resolves whatever the operator filed as an error for this task; left
+ * open, those `human` beads sit in the queue with nothing left to gate.
+ */
+async function closeErrorTasks(store: Store, tracker: Tracker, taskId: string): Promise<void> {
+  const ids = new Set<string>()
+  for (const e of store.events({ taskId })) {
+    if (e.type === 'retry.filed_as_error') ids.add(e.errorTaskId)
+  }
+  for (const id of ids) {
+    try {
+      const errorTask = await tracker.get(id)
+      if (errorTask !== null && errorTask.status !== 'closed') {
+        await tracker.close(id, `${taskId} merged`)
+      }
+    } catch (err) {
+      console.warn(`pr reconcile ${taskId}: closing error task ${id} failed: ${errMsg(err)}`)
+    }
+  }
 }
 
 /**

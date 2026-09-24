@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
-import type { ProjectedTask, RunServiceApi } from '@amagi/core'
+import type { PrDriver, ProjectedTask, RunServiceApi } from '@amagi/core'
+import { writeConfig } from '@amagi/core'
 import { portInUse, serve } from './serve.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
@@ -98,4 +99,56 @@ test('registry participation flags gate auto-queue and reconcile pollers live', 
   expect(
     ((await (await fetch(endpoint)).json()) as { workers: { name: string }[] }).workers,
   ).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'stall-watcher' })]))
+})
+
+test('watcher enable switches reconcile from config on the next supervisor scan', async () => {
+  ws = testWorkspaces(['repo1'], { forgeFor: () => ({}) as PrDriver })
+  const workspace = ws.workspaces.get('repo1')
+  if (workspace === null) throw new Error('test workspace missing')
+  const runner = {
+    status: async () => ({
+      name: 'repo1',
+      available: true,
+      capacity: 1,
+      running: [],
+      startedAt: {},
+      resources: {},
+      tasks: {},
+      autoQueue: false,
+    }),
+    start: async () => ({ ok: false as const, status: 409 as const, error: 'empty' }),
+    stop: async () => ({ ok: false as const, status: 404 as const, error: 'not running' }),
+    setMaxParallel: () => {},
+    retryNow: async () => ({ ok: false as const, status: 404 as const, error: 'not running' }),
+    setAutoQueue: () => {},
+  } satisfies Partial<RunServiceApi>
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runner: runner as unknown as RunServiceApi,
+    repoPollerSupervisorIntervalMs: 10,
+    mentionWatchIntervalMs: 60_000,
+    prConflictWatchIntervalMs: 60_000,
+    stallWatchIntervalMs: 60_000,
+  })
+  const endpoint = `http://127.0.0.1:${server.port}/api/runner`
+  const names = async () =>
+    ((await (await fetch(endpoint)).json()) as { workers: { name: string }[] }).workers.map(
+      (w) => w.name,
+    )
+  expect(await names()).toEqual(
+    expect.arrayContaining(['mention-watcher', 'pr-conflict-watcher', 'stall-watcher']),
+  )
+
+  writeConfig(workspace.root, {
+    watchers: { prConflict: { enabled: false }, stall: { enabled: false } },
+  })
+  await Bun.sleep(40)
+  expect(await names()).not.toContain('pr-conflict-watcher')
+  expect(await names()).not.toContain('stall-watcher')
+
+  writeConfig(workspace.root, { watchers: { prConflict: { enabled: true } } })
+  await Bun.sleep(40)
+  expect(await names()).toContain('pr-conflict-watcher')
 })

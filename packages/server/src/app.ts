@@ -214,6 +214,25 @@ export function createApp({
 
     .get('/api/health', (c) => c.json({ ok: true }))
 
+    .get('/api/usage-rates', (c) => {
+      const windowMs = 60_000
+      const since = Date.now() - windowMs
+      const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        for (const event of ws.store.eventsSince(since)) {
+          if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue
+          const seat = event.event.seat ?? 'Unassigned / seat not recorded'
+          const group = groups.get(seat) ?? { seat, calls: 0, tokens: 0 }
+          group.calls++
+          group.tokens += event.event.inputTokens + event.event.outputTokens
+          groups.set(seat, group)
+        }
+      }
+      return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
     .get('/api/repos', async (c) => {
       const out = []
       for (const entry of workspaces.list()) {
@@ -259,7 +278,7 @@ export function createApp({
       }
       const issue = await beads.getIssue(id)
       if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
-      return c.json(issue)
+      return c.json({ ...issue, dependents: await beads.dependents(id) })
     })
 
     .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {

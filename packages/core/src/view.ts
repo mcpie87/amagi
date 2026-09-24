@@ -50,10 +50,10 @@ export function stateAtAttempt(
   return { ...events.reduce(project, emptyProjection()), events, latestSeq: state.latestSeq }
 }
 
-/** The queue view: every task still in flight, most recently touched first. */
+/** Tasks currently owned by a run, most recently touched first. */
 export function activeTasks(state: DashboardState): ProjectedTask[] {
   return Object.values(state.tasks)
-    .filter((t) => !isTerminal(t.state))
+    .filter((t) => t.state !== 'queued' && !isTerminal(t.state))
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
@@ -233,7 +233,7 @@ export function statusLog(
         push(event, 'reset', 'claimed', event.reason)
         break
       case 'task.reclaimed':
-        push(event, 'reclaimed', 'claimed', event.reason)
+        push(event, 'reclaimed', 'queued', event.reason)
         break
       default:
         break

@@ -19,6 +19,7 @@ class FakeTracker implements Tracker {
   readonly leaseTtlMs = 300_000
   readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   released: string[] = []
+  expiredClaimsReclaimed = 0
   /** When set, get() reports this status so recovery can react to the tracker. */
   issueStatus: TrackerStatus | null = null
 
@@ -55,6 +56,9 @@ class FakeTracker implements Tracker {
   async release(id: string): Promise<void> {
     this.released.push(id)
   }
+  async reclaimExpiredClaims(): Promise<void> {
+    this.expiredClaimsReclaimed++
+  }
   async close(): Promise<void> {}
   async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'gate-7', advisory: false }
@@ -78,6 +82,24 @@ const implementing = (store: Store, id = 'bd-1') => {
   }
 }
 
+test('reclaims expired tracker claims with no store record', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+
+  const watcher = startStallWatcher({
+    repo: 'repo1',
+    store,
+    tracker,
+    timeoutMs: 60_000,
+    intervalMs: 10,
+  })
+  watchers.push(watcher)
+  await Bun.sleep(40)
+
+  expect(tracker.expiredClaimsReclaimed).toBeGreaterThanOrEqual(1)
+  expect(watcher.activity().ok).toBe(true)
+})
+
 test('recovers a stalled implementing task, keeping its worktree, and reports it', async () => {
   const store = new Store(openDatabase(':memory:'))
   const tracker = new FakeTracker()
@@ -97,7 +119,7 @@ test('recovers a stalled implementing task, keeping its worktree, and reports it
 
   expect(tracker.released).toEqual(['bd-1'])
   const task = store.task('bd-1')
-  expect(task?.state).toBe('claimed')
+  expect(task?.state).toBe('queued')
   expect(task?.worktree).toBe('/tmp/wt/x')
   expect(task?.statusReason).toContain('recovered by stall watcher')
   expect(watcher.activity().detail).toBe('recovered 1 stalled task')

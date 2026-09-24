@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { childPids, killTree, processTree, processTreeStats } from './process.ts'
+import { childPids, killTree, pidAlive, processTree, processTreeStats } from './process.ts'
 
 const alive = (pid: number): boolean => {
   try {
@@ -43,6 +43,20 @@ describe('process tree', () => {
     await Bun.sleep(200)
 
     expect(tree.filter(alive)).toEqual([])
+  })
+
+  test.skipIf(process.platform !== 'linux')('a zombie is not alive', async () => {
+    const proc = Bun.spawn(['sh', '-c', 'true & exec sleep 30'], { stdout: 'ignore' })
+    try {
+      await Bun.sleep(300)
+      const [zombie] = await childPids(proc.pid)
+      if (zombie === undefined) throw new Error('no unreaped child left behind')
+      expect(alive(zombie)).toBe(true)
+      expect(pidAlive(zombie)).toBe(false)
+      expect(pidAlive(proc.pid)).toBe(true)
+    } finally {
+      await killTree(proc.pid, { graceMs: 50 })
+    }
   })
 
   test('killing an already dead process is not an error', async () => {

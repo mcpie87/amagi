@@ -19,7 +19,15 @@ import {
   statusLog,
 } from '@amagi/core/view'
 import { Link, useParams } from '@tanstack/react-router'
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { AgentLogView } from '../AgentLogView.tsx'
 import { apiBase } from '../api.ts'
 import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
@@ -27,7 +35,7 @@ import { fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import { taskRoute } from '../routes.tsx'
 import { useDashboard, useRunner } from '../store.tsx'
-import { Blockers, type Issue } from './issues.tsx'
+import { Blockers, fetchIssue, type Issue, Unblocks } from './issues.tsx'
 import {
   AnswerBox,
   AttemptSwitcher,
@@ -35,9 +43,7 @@ import {
   FileAsErrorButton,
   RecheckPrButton,
   ReclaimButton,
-  RequeueButton,
   ResetButton,
-  RetryButton,
   RetryNowButton,
   StopButton,
 } from './task-actions.tsx'
@@ -87,86 +93,124 @@ const VERDICT_STATES: readonly TaskState[] = [
   'done',
 ]
 
-/**
- * The tracker's full issue metadata behind a task - description, acceptance
- * criteria, priority, type, assignee, labels, parent, dependencies - fetched
- * on first expand and kept for the session.
- */
 /** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
 const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
 
+/**
+ * The tracker's full issue metadata behind a task - description, acceptance
+ * criteria, priority, type, assignee, labels, parent, blockers and dependents.
+ */
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
-  const [open, setOpen] = useState(false)
   const [issue, setIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const toggle = () => {
-    if (open) {
-      setOpen(false)
-      return
+  useEffect(() => {
+    let active = true
+    setIssue(null)
+    setError(null)
+    fetchIssue(repo, issueId)
+      .then((detail) => {
+        if (active) setIssue(detail)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(errMsg(err))
+      })
+    return () => {
+      active = false
     }
-    setOpen(true)
-    if (issue === null && error === null) {
-      fetch(`${apiBase}/api/repos/${repo}/issues/${issueId}`)
-        .then(async (res) => {
-          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return res.json() as Promise<Issue>
-        })
-        .then(setIssue)
-        .catch((err: unknown) => setError(errMsg(err)))
-    }
-  }
+  }, [repo, issueId])
 
   return (
-    <div className="mt-6">
-      <button
-        type="button"
-        onClick={toggle}
-        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
-      >
-        {open ? 'hide issue details' : 'show issue details'}
-      </button>
-      {open &&
-        (error !== null ? (
-          <p className="mt-3 text-sm text-red-ink">{error}</p>
+    <>
+      <div className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">Issue</h2>
+        {error !== null ? (
+          <p className="text-sm text-red-ink">{error}</p>
         ) : issue === null ? (
-          <p className="mt-3 text-sm text-fg-faint">loading issue...</p>
+          <p className="text-sm text-fg-faint">loading issue...</p>
         ) : (
-          <div className="mt-3">
-            <dl className="rounded-lg border border-line bg-surface px-4 py-3">
-              <DetailRow
-                label="priority"
-                value={
-                  issue.priority === null
-                    ? null
-                    : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
-                }
-              />
-              <DetailRow label="type" value={issue.type} />
-              <DetailRow label="assignee" value={issue.assignee} />
-              <DetailRow label="labels" value={issue.labels.join(', ') || null} />
-              <DetailRow label="parent" value={issue.parent} />
-            </dl>
-            <Blockers issue={issue} />
-            <div className="mt-6">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                Description
-              </h2>
-              <p className="whitespace-pre-wrap text-fg">
-                {issue.description || 'No description.'}
-              </p>
-            </div>
-            {issue.acceptanceCriteria !== null && (
-              <div className="mt-6">
-                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                  Acceptance criteria
-                </h2>
-                <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
-              </div>
-            )}
-          </div>
-        ))}
-    </div>
+          <IssueBody issue={issue} />
+        )}
+      </div>
+      {issue !== null && (
+        <div className="mt-4 rounded-lg border border-line bg-surface px-4 py-4">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+            Description
+          </h2>
+          <Collapsible clampClass="summary-clamp" noun="description">
+            <Markdown text={issue.description || 'No description.'} />
+          </Collapsible>
+        </div>
+      )}
+    </>
+  )
+}
+
+function IssueBody({ issue }: { issue: Issue }) {
+  return (
+    <>
+      <dl>
+        <DetailRow
+          label="priority"
+          value={
+            issue.priority === null
+              ? null
+              : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
+          }
+        />
+        <DetailRow label="type" value={issue.type} />
+        <DetailRow label="assignee" value={issue.assignee} />
+        <DetailRow label="labels" value={issue.labels.join(', ') || null} />
+        <DetailRow label="parent" value={issue.parent} />
+      </dl>
+      <Blockers issue={issue} />
+      <Unblocks issue={issue} />
+      {issue.acceptanceCriteria !== null && (
+        <div className="mt-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+            Acceptance criteria
+          </h2>
+          <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
+        </div>
+      )}
+    </>
+  )
+}
+
+/** Clips its content to `clampClass` with a toggle that only shows when the content overflows. */
+function Collapsible({
+  clampClass,
+  noun,
+  children,
+}: {
+  clampClass: string
+  noun: string
+  children: ReactNode
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflows, setOverflows] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  // Measured on every render, and only while clamped: expanded, scrollHeight
+  // equals clientHeight and the toggle would vanish.
+  useLayoutEffect(() => {
+    const el = bodyRef.current
+    if (el !== null && !expanded) setOverflows(el.scrollHeight > el.clientHeight)
+  })
+  return (
+    <>
+      <div ref={bodyRef} className={expanded ? undefined : clampClass}>
+        {children}
+      </div>
+      {overflows && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="mt-1 text-sm text-sky-ink hover:underline"
+        >
+          {expanded ? 'show less' : `show full ${noun}`}
+        </button>
+      )}
+    </>
   )
 }
 
@@ -194,7 +238,11 @@ function SummaryPanel({ task }: { task: ProjectedTask }) {
       >
         {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
-      {task.statusReason !== null && <Markdown text={task.statusReason} />}
+      {task.statusReason !== null && (
+        <Collapsible clampClass="summary-clamp" noun="summary">
+          <Markdown text={task.statusReason} />
+        </Collapsible>
+      )}
     </div>
   )
 }
@@ -545,22 +593,6 @@ export function TaskDetailView() {
           />
         )}
         {selected !== null && !past && (
-          <RetryButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            worktree={task.worktree}
-          />
-        )}
-        {selected !== null && !past && (
-          <RequeueButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            worktree={task.worktree}
-          />
-        )}
-        {selected !== null && !past && (
           <FileAsErrorButton
             repo={selected}
             taskId={task.id}
@@ -592,6 +624,11 @@ export function TaskDetailView() {
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
 
+      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
+
+      <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+        {currentAttempt < 2 ? 'Attempt' : 'Attempts'}
+      </h2>
       <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
       {past && (
         <p className="mt-2 text-sm text-fg-muted">
@@ -686,8 +723,6 @@ export function TaskDetailView() {
           </ul>
         </div>
       )}
-
-      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
       <div className="mt-6">
         {tabs.length > 1 && (

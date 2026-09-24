@@ -6,6 +6,7 @@ export const PILL =
   'inline-block shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset'
 
 const stateBadge: Record<TaskState, string> = {
+  queued: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
   claimed: 'bg-neutral-soft text-fg ring-neutral-edge',
   worktree_ready: 'bg-sky-soft text-sky-ink ring-sky-edge',
   implementing: 'bg-blue-soft text-blue-ink ring-blue-edge',

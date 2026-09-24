@@ -6,6 +6,7 @@ export const MergeStatus = z.enum(MERGE_STATUSES)
 export type MergeStatus = z.infer<typeof MergeStatus>
 
 export const TASK_STATES = [
+  'queued',
   'claimed',
   'worktree_ready',
   'implementing',
@@ -55,6 +56,7 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
  * listed here.
  */
 const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
+  queued: ['worktree_ready'],
   claimed: ['worktree_ready'],
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
@@ -108,6 +110,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
     kind: z.literal('usage'),
     inputTokens: z.number().int(),
     outputTokens: z.number().int(),
+    seat: z.string().optional(),
     /** Input tokens served from the provider's prompt cache, when reported. */
     cachedTokens: z.number().int().optional(),
     costUsd: z.number().optional(),
@@ -174,6 +177,7 @@ export const EventBody = z.discriminatedUnion('type', [
     type: z.literal('agent.started'),
     role: AgentRole,
     harness: z.string(),
+    seat: z.string().optional(),
     /** The model the harness resolved at spawn, if it reports one. */
     model: z.string().nullable(),
     /** The reasoning effort the harness resolved at spawn, if known. */

@@ -137,11 +137,14 @@ function spawnUnlocked(
   })
 
   const queue = new AsyncQueue<AgentEvent>()
-  const stderr = new Response(proc.stderr).text()
+  const exitCode = proc.exited
+  const streams = new AbortController()
+  void exitCode.then(() => streams.abort())
+  const stderr = readText(proc.stderr, streams.signal)
 
   const done: Promise<AgentOutcome> = (async () => {
     try {
-      for await (const raw of jsonLines(proc.stdout)) {
+      for await (const raw of jsonLines(proc.stdout, streams.signal)) {
         for (const event of translator.push(raw)) queue.push(event)
       }
       for (const event of options.finalize?.() ?? []) queue.push(event)
@@ -151,10 +154,10 @@ function spawnUnlocked(
       queue.close()
     }
 
-    const exitCode = await proc.exited
+    const code = await exitCode
     return {
-      exitCode,
-      ok: translator.ok && exitCode === 0,
+      exitCode: code,
+      ok: translator.ok && code === 0,
       sessionId: translator.sessionId,
       summary: translator.summary,
       usage: translator.usage,
@@ -173,5 +176,24 @@ function spawnUnlocked(
       return options.model ? options.model() : null
     },
     effort: options.effort ?? null,
+  }
+}
+
+async function readText(stream: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<string> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  const cancel = () => void reader.cancel()
+  signal.addEventListener('abort', cancel, { once: true })
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+    }
+    return text + decoder.decode()
+  } finally {
+    signal.removeEventListener('abort', cancel)
+    reader.releaseLock()
   }
 }

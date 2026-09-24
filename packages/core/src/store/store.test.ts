@@ -54,7 +54,7 @@ describe('Store', () => {
     expect(once).toEqual(['bd-3', 'bd-2', 'bd-1'])
   })
 
-  test('reclaiming a stuck task returns it to claimed and keeps the worktree', () => {
+  test('reclaiming a stuck task returns it to queued and keeps the worktree', () => {
     claim()
     store.append('bd-1', {
       type: 'worktree.created',
@@ -65,7 +65,7 @@ describe('Store', () => {
     store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
     store.append('bd-1', { type: 'task.reclaimed' })
     const t = store.task('bd-1')
-    expect(t?.state).toBe('claimed')
+    expect(t?.state).toBe('queued')
     expect(t?.worktree).toBe('/tmp/wt/amagi-bd-1-add-sse')
     expect(t?.branch).toBe('amagi/bd-1-add-sse')
   })
@@ -263,13 +263,23 @@ describe('Store', () => {
     expect(stalled.map((t) => t.id)).toEqual(['bd-2'])
   })
 
+  test('stalledTasks ignores a previous attempt heartbeat once the task is claimed again', () => {
+    claim('bd-1')
+    store.heartbeat('bd-1')
+    store.db
+      .query('update tasks set last_heartbeat_at = ? where id = ?')
+      .run(Date.now() - 7_200_000, 'bd-1')
+    store.append('bd-1', { type: 'task.reclaimed', reason: 'stalled' })
+    expect(store.stalledTasks(['queued'], Date.now() - 60_000)).toHaveLength(0)
+  })
+
   test('task.reclaimed carries the reason into statusReason', () => {
     claim()
     store.append('bd-1', {
       type: 'task.reclaimed',
       reason: 'recovered by stall watcher: no worker activity for 1h',
     })
-    expect(store.task('bd-1')?.state).toBe('claimed')
+    expect(store.task('bd-1')?.state).toBe('queued')
     expect(store.task('bd-1')?.statusReason).toBe(
       'recovered by stall watcher: no worker activity for 1h',
     )

@@ -1,9 +1,11 @@
 import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { errMsg } from '@amagi/core/errors'
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { DetailRow, PILL } from '../badges.tsx'
+import { Markdown } from '../markdown.tsx'
+import { issuesRoute } from '../routes.tsx'
 import { useDashboard } from '../store.tsx'
 
 type Dependency = {
@@ -27,6 +29,15 @@ export type Issue = {
   labels: string[]
   parent: string | null
   dependencies: Dependency[]
+  /** Issues this one blocks; only the single-issue detail endpoint reports them. */
+  dependents?: Dependency[]
+}
+
+/** One issue with its blockers and dependents, from the tracker's detail view. */
+export async function fetchIssue(repo: string, id: string): Promise<Issue> {
+  const res = await fetch(`${apiBase}/api/repos/${repo}/issues/${id}`)
+  if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+  return res.json() as Promise<Issue>
 }
 
 /** One epic from /api/repos/:repo/epics/close-eligible (bd epic close-eligible --dry-run). */
@@ -390,7 +401,10 @@ export function IssuesView() {
   const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
   const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
-  const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
+  const { issue: selectedId } = useSearch({ from: issuesRoute.id })
+  const navigate = useNavigate()
+  const [issueDetail, setIssueDetail] = useState<Issue | null>(null)
+  const [issueError, setIssueError] = useState<string | null>(null)
   const [selectedEpic, setSelectedEpic] = useState<EligibleEpic | null>(null)
   const [epicChildren, setEpicChildren] = useState<Issue[]>([])
   const [epicChildrenLoading, setEpicChildrenLoading] = useState(false)
@@ -425,8 +439,8 @@ export function IssuesView() {
     if (repoRef.current !== selected) {
       repoRef.current = selected
       setIssues([])
-      setSelectedIssue(null)
       setSelectedEpic(null)
+      void navigate({ to: '/issues', search: {} })
     }
     setError(null)
     fetch(`${apiBase}/api/repos/${selected}/issues`)
@@ -434,14 +448,26 @@ export function IssuesView() {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
         return res.json() as Promise<Issue[]>
       })
-      .then((items) => {
-        setIssues(items)
-        setSelectedIssue((current) =>
-          current === null ? null : (items.find((i) => i.id === current.id) ?? null),
-        )
-      })
+      .then(setIssues)
       .catch((err: unknown) => setError(errMsg(err)))
-  }, [selected, refresh])
+  }, [selected, refresh, navigate])
+
+  useEffect(() => {
+    setIssueError(null)
+    if (selected === null || selectedId === undefined) return
+    void refresh
+    let active = true
+    fetchIssue(selected, selectedId)
+      .then((issue) => {
+        if (active) setIssueDetail(issue)
+      })
+      .catch((err: unknown) => {
+        if (active) setIssueError(errMsg(err))
+      })
+    return () => {
+      active = false
+    }
+  }, [selected, selectedId, refresh])
 
   useEffect(() => {
     if (selected === null || selectedEpic === null) return
@@ -487,6 +513,12 @@ export function IssuesView() {
     setRefresh((value) => value + 1)
   }
 
+  const openIssue = (id: string | null) =>
+    void navigate({ to: '/issues', search: id === null ? {} : { issue: id } })
+  // The previous detail stays up while a refresh refetches it, but never
+  // stands in for a different issue.
+  const selectedIssue = issueDetail?.id === selectedId ? issueDetail : null
+
   const q = search.trim().toLowerCase()
   const filtered = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
   const searched =
@@ -496,16 +528,33 @@ export function IssuesView() {
           (issue) => issue.title.toLowerCase().includes(q) || issue.id.toLowerCase().includes(q),
         )
 
+  const backToList = (
+    <button
+      type="button"
+      onClick={() => openIssue(null)}
+      className="text-sm text-sky-ink hover:underline"
+    >
+      &larr; {selectedEpic === null ? 'tasks' : 'epic'}
+    </button>
+  )
+
+  if (selectedId !== undefined && selectedIssue === null) {
+    return (
+      <section>
+        {backToList}
+        {issueError !== null ? (
+          <p className="mt-4 text-red-ink">{issueError}</p>
+        ) : (
+          <p className="mt-4 text-fg-faint">Loading {selectedId}...</p>
+        )}
+      </section>
+    )
+  }
+
   if (selectedIssue !== null) {
     return (
       <section>
-        <button
-          type="button"
-          onClick={() => setSelectedIssue(null)}
-          className="text-sm text-sky-ink hover:underline"
-        >
-          &larr; {selectedEpic === null ? 'tasks' : 'epic'}
-        </button>
+        {backToList}
         <div className="mt-3 flex items-center gap-3">
           <h1 className="text-xl font-semibold">{selectedIssue.title}</h1>
           <IssueBadge issue={selectedIssue} />
@@ -533,13 +582,12 @@ export function IssuesView() {
           <DetailRow label="labels" value={selectedIssue.labels.join(', ') || null} />
         </dl>
         <Blockers issue={selectedIssue} />
+        <Unblocks issue={selectedIssue} />
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Description
           </h2>
-          <p className="whitespace-pre-wrap text-fg">
-            {selectedIssue.description || 'No description.'}
-          </p>
+          <Markdown text={selectedIssue.description || 'No description.'} />
         </div>
         {selectedIssue.acceptanceCriteria !== null && (
           <div className="mt-6">
@@ -591,7 +639,7 @@ export function IssuesView() {
               <li key={child.id}>
                 <button
                   type="button"
-                  onClick={() => setSelectedIssue(child)}
+                  onClick={() => openIssue(child.id)}
                   className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
                 >
                   <IssueBadge issue={child} />
@@ -725,7 +773,7 @@ export function IssuesView() {
                     <li key={issue.id}>
                       <button
                         type="button"
-                        onClick={() => setSelectedIssue(issue)}
+                        onClick={() => openIssue(issue.id)}
                         className="issue-card w-full rounded border border-line bg-sunken px-3 py-2 text-left hover:bg-raised"
                       >
                         <span className="block text-xs text-fg-faint">{issue.id}</span>
@@ -754,7 +802,7 @@ export function IssuesView() {
             <li key={issue.id}>
               <button
                 type="button"
-                onClick={() => setSelectedIssue(issue)}
+                onClick={() => openIssue(issue.id)}
                 className="issue-list-row flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
               >
                 <IssueBadge issue={issue} />
@@ -789,49 +837,67 @@ export function IssuesView() {
   )
 }
 
-/** Why a task cannot run: its dependency and human-only blockers, from issue detail. */
+const DEPENDENCY_TONE = {
+  red: {
+    heading: 'text-red-ink',
+    list: 'border-red-edge bg-red-soft',
+    chip: 'bg-red-soft-hover text-red-ink',
+  },
+  amber: {
+    heading: 'text-amber-ink',
+    list: 'border-amber-edge bg-amber-soft',
+    chip: 'bg-amber-soft-hover text-amber-ink',
+  },
+  emerald: {
+    heading: 'text-emerald-ink',
+    list: 'border-emerald-edge bg-emerald-soft',
+    chip: 'bg-emerald-soft-hover text-emerald-ink',
+  },
+} as const
+
+function DependencyList({
+  items,
+  tone,
+}: {
+  items: Dependency[]
+  tone: keyof typeof DEPENDENCY_TONE
+}) {
+  return (
+    <ul className={`rounded-lg border px-3 py-1 ${DEPENDENCY_TONE[tone].list}`}>
+      {items.map((d) => (
+        <li key={d.id}>
+          <Link
+            to="/issues"
+            search={{ issue: d.id }}
+            className="flex items-center gap-2 py-1 text-sm hover:underline"
+          >
+            <span className={`rounded px-1.5 py-0.5 text-xs ${DEPENDENCY_TONE[tone].chip}`}>
+              {d.status}
+            </span>
+            <span className="shrink-0 text-fg-faint">{d.id}</span>
+            <span className="min-w-0 truncate text-fg">{d.title}</span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** Why a task cannot run: the open issues it waits on, split by who resolves them. */
 export function Blockers({ issue }: { issue: Issue }) {
   const blocking = issue.dependencies.filter((d) => d.status !== 'closed')
   if (blocking.length === 0) return null
   const humanOnly = blocking.filter((d) => d.labels.includes(HUMAN_ONLY_LABEL))
-  const dependencies = blocking.filter((d) => !d.labels.includes(HUMAN_ONLY_LABEL))
+  const tasks = blocking.filter((d) => !d.labels.includes(HUMAN_ONLY_LABEL))
 
   const group = (title: string, items: Dependency[], tone: 'red' | 'amber') => (
     <div>
       <h3
-        className={`mb-1 text-xs font-semibold uppercase tracking-wide ${
-          tone === 'red' ? 'text-red-ink' : 'text-amber-ink'
-        }`}
+        className={`mb-1 text-xs font-semibold uppercase tracking-wide ${DEPENDENCY_TONE[tone].heading}`}
       >
         {title} ({items.length})
       </h3>
-      <ul
-        className={`rounded-lg border px-3 py-1 ${
-          tone === 'red' ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'
-        }`}
-      >
-        {items.map((d) => (
-          <li key={d.id}>
-            <Link
-              to="/tasks/$id"
-              params={{ id: d.id }}
-              className="flex items-center gap-2 py-1 text-sm hover:underline"
-            >
-              <span
-                className={`rounded px-1.5 py-0.5 text-xs ${
-                  tone === 'red'
-                    ? 'bg-red-soft-hover text-red-ink'
-                    : 'bg-amber-soft-hover text-amber-ink'
-                }`}
-              >
-                {d.status}
-              </span>
-              <span className="shrink-0 text-fg-faint">{d.id}</span>
-              <span className="min-w-0 truncate text-fg">{d.title}</span>
-            </Link>
-          </li>
-        ))}
-      </ul>
+      <DependencyList items={items} tone={tone} />
     </div>
   )
 
@@ -841,12 +907,27 @@ export function Blockers({ issue }: { issue: Issue }) {
         Blocked by
       </h2>
       <p className="mb-2 text-sm text-fg-faint">
-        This task cannot run until every blocker is resolved.
+        This task cannot run until every blocker is closed.
       </p>
       <div className="space-y-3">
-        {dependencies.length > 0 && group('Dependency blockers', dependencies, 'red')}
-        {humanOnly.length > 0 && group('Human-only blockers', humanOnly, 'amber')}
+        {tasks.length > 0 && group('Tasks', tasks, 'red')}
+        {humanOnly.length > 0 && group('Human-only', humanOnly, 'amber')}
       </div>
+    </div>
+  )
+}
+
+/** The open issues waiting on this one: closing it lets them run. */
+export function Unblocks({ issue }: { issue: Issue }) {
+  const waiting = (issue.dependents ?? []).filter((d) => d.status !== 'closed')
+  if (waiting.length === 0) return null
+  return (
+    <div className="mt-6">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-emerald-ink">
+        Unblocks ({waiting.length})
+      </h2>
+      <p className="mb-2 text-sm text-fg-faint">Closing this task lets these run.</p>
+      <DependencyList items={waiting} tone="emerald" />
     </div>
   )
 }

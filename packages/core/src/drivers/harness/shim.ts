@@ -3,9 +3,9 @@ import { join, resolve } from 'node:path'
 import { stateHome } from '../../paths.ts'
 
 /**
- * Directory prepended to the harness agent's PATH. The `git` and `amagi`
- * executables here are shims that mechanically enforce the read-only git rule
- * the system prompt only states as advice.
+ * Directory prepended to the harness agent's PATH. The `git`, `amagi` and `bd`
+ * executables here are shims that mechanically enforce the read-only git and
+ * tracker rules the system prompt only states as advice.
  *
  * Defense-in-depth, not an enforcement boundary: an agent that resolves git by
  * absolute path or rewrites its own PATH reaches the real binary untouched.
@@ -339,7 +339,64 @@ exec "$REAL_AMAGI" "$@"
 }
 
 /**
- * Writes the git and amagi shims once per env-prep, mirroring prepareAgentXdg:
+ * The bd shim: read verbs pass, every tracker write is rejected. The runner
+ * owns the claim; an agent that closes or updates its own issue drops the
+ * lease, and the runner then stops before committing, losing the work. The
+ * first non-flag argument is the verb, so a global flag taking a value (e.g.
+ * `--actor x show`) reads its value as the verb and fails closed. Same
+ * defense-in-depth caveat as the other shims.
+ */
+function bdShimScript(realBd: string, binDir: string): string {
+  return `#!/bin/sh
+# amagi: bd shim for harness agents. Read-only; the runner owns every tracker write.
+set -u
+
+REAL_BD='${realBd}'
+SHIM_BIN='${binDir}'
+
+if [ -z "$REAL_BD" ]; then
+  for d in $(printf '%s' "$PATH" | tr ':' ' '); do
+    [ -n "$d" ] || continue
+    if [ "$d" = "$SHIM_BIN" ]; then
+      continue
+    fi
+    if [ -x "$d/bd" ]; then
+      REAL_BD="$d/bd"
+      break
+    fi
+  done
+fi
+
+verb=''
+sub=''
+for a in "$@"; do
+  case "$a" in
+    -h|--help|--version) exec "$REAL_BD" "$@" ;;
+    -*) ;;
+    *)
+      if [ -z "$verb" ]; then verb="$a"; elif [ -z "$sub" ]; then sub="$a"; fi
+      ;;
+  esac
+done
+
+case "$verb" in
+  show|list|ready|search|blocked|children|count|diff|history|lint|stale|status|statuses|types|graph|info|prime|memories|query|where|help|version)
+    exec "$REAL_BD" "$@"
+    ;;
+  dep)
+    case "$sub" in
+      tree|list) exec "$REAL_BD" "$@" ;;
+    esac
+    verb="dep $sub"
+    ;;
+esac
+echo "bd: '$verb' is not allowed to agents; the tracker is read-only here and amagi owns claims, status and closing" >&2
+exit 1
+`
+}
+
+/**
+ * Writes the git, amagi and bd shims once per env-prep, mirroring prepareAgentXdg:
  * idempotent, cheap, and always fresh against the current PATH. Returns the
  * dir to prepend to PATH.
  */
@@ -348,9 +405,12 @@ export function prepareShim(): string {
   mkdirSync(dir, { recursive: true })
   const git = join(dir, 'git')
   const amagi = join(dir, 'amagi')
+  const bd = join(dir, 'bd')
   writeFileSync(git, gitShimScript(resolveBinary('git'), dir))
   writeFileSync(amagi, amagiShimScript(resolveBinary('amagi'), dir))
+  writeFileSync(bd, bdShimScript(resolveBinary('bd'), dir))
   chmodSync(git, 0o755)
   chmodSync(amagi, 0o755)
+  chmodSync(bd, 0o755)
   return dir
 }

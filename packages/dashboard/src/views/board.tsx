@@ -10,9 +10,8 @@ import { WorkersPanel } from './workers.tsx'
 /**
  * The dashboard board: ready work plus every recorded task, grouped by where
  * it sits in the run loop so the state of the whole repo is visible at a
- * glance instead of a flat list. The ready column is the tracker's unclaimed
- * FCFS queue (bd ready --sort oldest), everything else comes from the live
- * event projection.
+ * glance instead of a flat list. The ready column combines the tracker's
+ * unclaimed FCFS queue with reclaimed tasks waiting for a claim.
  */
 type KanbanColumn = {
   key: string
@@ -63,10 +62,28 @@ function ReadyCard({ task }: { task: TrackerTask }) {
   )
 }
 
+function QueuedCard({ task }: { task: ProjectedTask }) {
+  return (
+    <Link
+      to="/tasks/$id"
+      params={{ id: task.id }}
+      className="block rounded border border-zinc-800 bg-zinc-950 px-3 py-2 hover:bg-zinc-800"
+    >
+      <span className="flex items-center gap-1">
+        <Badge state={task.state} />
+        <span className="text-xs text-zinc-500">{task.id}</span>
+      </span>
+      <span className="mt-1 block break-words font-medium leading-snug">{task.title}</span>
+    </Link>
+  )
+}
+
 export function QueueView() {
   const { state } = useDashboard()
   const readyQueue = useReadyQueue()
   const allTasks = Object.values(state.tasks)
+  const queuedTasks = allTasks.filter((task) => task.state === 'queued')
+  const queuedIds = new Set(queuedTasks.map((task) => task.id))
 
   return (
     <section>
@@ -77,7 +94,7 @@ export function QueueView() {
           const states = column.states
           const tasks =
             states === null
-              ? readyQueue
+              ? [...readyQueue.filter((task) => !queuedIds.has(task.id)), ...queuedTasks]
               : allTasks
                   .filter((t) => (states as readonly TaskState[]).includes(t.state))
                   .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -96,11 +113,13 @@ export function QueueView() {
               </div>
               <ul className="flex flex-col gap-2 p-2">
                 {column.states === null
-                  ? (tasks as TrackerTask[]).map((task) => (
-                      <li key={task.id}>
-                        <ReadyCard task={task} />
-                      </li>
-                    ))
+                  ? readyQueue
+                      .filter((task) => !queuedIds.has(task.id))
+                      .map((task) => (
+                        <li key={task.id}>
+                          <ReadyCard task={task} />
+                        </li>
+                      ))
                   : (tasks as ProjectedTask[]).map((task) => (
                       <li key={task.id}>
                         <Link
@@ -143,6 +162,12 @@ export function QueueView() {
                         </Link>
                       </li>
                     ))}
+                {column.states === null &&
+                  queuedTasks.map((task) => (
+                    <li key={task.id}>
+                      <QueuedCard task={task} />
+                    </li>
+                  ))}
                 {tasks.length === 0 && (
                   <li className="px-1 py-2 text-xs text-zinc-600">Nothing here.</li>
                 )}

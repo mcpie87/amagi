@@ -43,15 +43,29 @@ function signal(pid: number, sig: NodeJS.Signals): void {
   }
 }
 
-/** Whether a pid still exists; signal 0 checks liveness without delivering one. */
+/** /proc/<pid>/stat state letter, or null off Linux; comm may contain spaces, so it follows the last ')'. */
+function procState(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.charAt(stat.lastIndexOf(')') + 2)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a pid is still running. Signal 0 alone succeeds on a zombie, and an
+ * exited agent its parent never reaped would then hold its seat forever.
+ */
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
-    return true
   } catch {
     return false
   }
+  const state = procState(pid)
+  return state !== 'Z' && state !== 'X'
 }
 
 export type ProcessTreeStats = {

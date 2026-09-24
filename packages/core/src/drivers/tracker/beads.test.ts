@@ -99,11 +99,20 @@ const SHOW_WITH_DEPS_JSON = `[
     ],
     "dependencies": [
       {
+        "id": "tst-epic",
+        "title": "Parent epic",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "epic",
+        "dependency_type": "parent-child"
+      },
+      {
         "id": "tst-abc",
         "title": "Blocker",
         "status": "blocked",
         "priority": 1,
-        "issue_type": "task"
+        "issue_type": "task",
+        "dependency_type": "blocks"
       },
       {
         "id": "tst-human",
@@ -111,7 +120,8 @@ const SHOW_WITH_DEPS_JSON = `[
         "status": "open",
         "priority": 3,
         "issue_type": "task",
-        "labels": ["human"]
+        "labels": ["human"],
+        "dependency_type": "blocks"
       }
     ]
   }
@@ -366,7 +376,7 @@ describe('BeadsTracker', () => {
 
   // bd unclaim exits 1 on an unassigned issue, which the stall watcher turns
   // into a needs_human park for a task that needed no human at all.
-  test('release is a no-op for an in-progress issue with no assignee', async () => {
+  test('release reopens an in-progress issue with no assignee without unclaiming', async () => {
     const { exec, calls } = fake((c) =>
       c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"in_progress"}]') : undefined,
     )
@@ -374,6 +384,25 @@ describe('BeadsTracker', () => {
     await tracker.release('tst-lmc')
 
     expect(calls.some((c) => c.includes('unclaim'))).toBe(false)
+    expect(calls.some((c) => c.join(' ').includes('update tst-lmc --status open'))).toBe(true)
+  })
+
+  test('release leaves an open unassigned issue alone', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('show') ? ok('[{"id":"tst-lmc","title":"x","status":"open"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.release('tst-lmc')
+
+    expect(calls.some((c) => c.includes('unclaim') || c.includes('update'))).toBe(false)
+  })
+
+  test('reclaims expired native claims', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.reclaimExpiredClaims()
+
+    expect(calls).toEqual([['bd', 'reclaim']])
   })
 
   test('a closed gate reads as resolved', async () => {
@@ -512,7 +541,7 @@ describe('BeadsTracker', () => {
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'children', 'tst-epic', '--json'])
   })
 
-  test('getIssue surfaces dependency blockers with their state and labels', async () => {
+  test('getIssue surfaces blocking dependencies with their state and labels, not the parent', async () => {
     const { exec } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
     const issue = await new BeadsTracker({ cwd: '/repo', exec }).getIssue('tst-1')
 
@@ -538,6 +567,28 @@ describe('BeadsTracker', () => {
         url: null,
         labels: ['human'],
       },
+    ])
+  })
+
+  test('dependents lists the issues this one blocks', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('dep')
+        ? ok(`[{"id": "tst-next", "title": "Next", "status": "open", "dependency_type": "blocks"}]`)
+        : undefined,
+    )
+    const dependents = await new BeadsTracker({ cwd: '/repo', exec }).dependents('tst-1')
+
+    expect(dependents.map((d) => d.id)).toEqual(['tst-next'])
+    expect(calls[0]).toEqual([
+      'bd',
+      'dep',
+      'list',
+      'tst-1',
+      '--direction',
+      'up',
+      '--type',
+      'blocks',
+      '--json',
     ])
   })
 

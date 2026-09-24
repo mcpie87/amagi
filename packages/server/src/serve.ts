@@ -83,7 +83,7 @@ function startRepoPollers(
       pr: PrPoller | null
       mention: MentionWatcher | null
       conflict: PrConflictWatcher | null
-      stall: StallWatcher
+      stall: StallWatcher | null
     }
   >()
   let autoQueueAllowed: boolean | undefined
@@ -108,63 +108,50 @@ function startRepoPollers(
       p?.pr?.stop()
       p?.mention?.stop()
       p?.conflict?.stop()
-      p?.stall.stop()
+      p?.stall?.stop()
       pollers.delete(key)
     }
     for (const key of keys) {
-      if (pollers.has(key)) continue
       let ws: Workspace | null
       try {
-        ws = workspaces.get(key)
+        ws = workspaces.refreshWatcherConfig(key)
       } catch (err) {
-        console.warn(`repo ${key}: pollers skipped: ${errMsg(err)}`)
+        console.warn(`repo ${key}: watcher config refresh failed: ${errMsg(err)}`)
         continue
       }
       if (!ws) continue
       const forge = ws.forge
-      pollers.set(key, {
-        gate: startGatePoller({
-          store: ws.store,
-          tracker: ws.tracker,
-          intervalMs: gateIntervalMs,
-        }),
-        pr:
-          forge === null
-            ? null
-            : startPrPoller({
-                store: ws.store,
-                forge,
-                tracker: ws.tracker,
-                cwd: ws.root,
-                intervalMs: prIntervalMs,
-              }),
-        mention:
-          forge === null
-            ? null
-            : startMentionWatcher({
-                repo: ws.key,
-                root: ws.root,
-                repoName: ws.name,
-                config: ws.config,
-                driver: forge,
-                tracker: ws.tracker,
-                store: ws.store,
-                intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
-              }),
-        conflict:
-          forge === null
-            ? null
-            : startPrConflictWatcher({
-                repo: ws.key,
-                root: ws.root,
-                repoName: ws.name,
-                config: ws.config,
-                store: ws.store,
-                tracker: ws.tracker,
-                driver: forge,
-                intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
-              }),
-        stall: startStallWatcher({
+      const mentionEnabled = forge !== null && ws.config.watchers.mention.enabled
+      const conflictEnabled = forge !== null && ws.config.watchers.prConflict.enabled
+      const stallEnabled = ws.config.watchers.stall.enabled
+      const startMention = () =>
+        forge === null
+          ? null
+          : startMentionWatcher({
+              repo: ws.key,
+              root: ws.root,
+              repoName: ws.name,
+              config: ws.config,
+              driver: forge,
+              tracker: ws.tracker,
+              store: ws.store,
+              intervalMs: mentionIntervalMs ?? ws.config.loop.mentionWatchIntervalSec * 1000,
+            })
+      const startConflict = () =>
+        forge === null
+          ? null
+          : startPrConflictWatcher({
+              repo: ws.key,
+              root: ws.root,
+              repoName: ws.name,
+              config: ws.config,
+              store: ws.store,
+              tracker: ws.tracker,
+              driver: forge,
+              intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
+            })
+      const startStall = () =>
+        startStallWatcher({
           repo: ws.key,
           store: ws.store,
           tracker: ws.tracker,
@@ -180,8 +167,46 @@ function startRepoPollers(
                 },
               }
             : {}),
-        }),
-      })
+        })
+      const existing = pollers.get(key)
+      if (existing === undefined) {
+        pollers.set(key, {
+          gate: startGatePoller({
+            store: ws.store,
+            tracker: ws.tracker,
+            intervalMs: gateIntervalMs,
+          }),
+          pr:
+            forge === null
+              ? null
+              : startPrPoller({
+                  store: ws.store,
+                  forge,
+                  tracker: ws.tracker,
+                  cwd: ws.root,
+                  intervalMs: prIntervalMs,
+                }),
+          mention: mentionEnabled ? startMention() : null,
+          conflict: conflictEnabled ? startConflict() : null,
+          stall: stallEnabled ? startStall() : null,
+        })
+        continue
+      }
+      if (mentionEnabled && existing.mention === null) existing.mention = startMention()
+      else if (!mentionEnabled && existing.mention !== null) {
+        existing.mention.stop()
+        existing.mention = null
+      }
+      if (conflictEnabled && existing.conflict === null) existing.conflict = startConflict()
+      else if (!conflictEnabled && existing.conflict !== null) {
+        existing.conflict.stop()
+        existing.conflict = null
+      }
+      if (stallEnabled && existing.stall === null) existing.stall = startStall()
+      else if (!stallEnabled && existing.stall !== null) {
+        existing.stall.stop()
+        existing.stall = null
+      }
     }
   }
 
@@ -191,7 +216,7 @@ function startRepoPollers(
     [...pollers.values()].flatMap((p) => [
       ...(p.mention ? [p.mention.activity()] : []),
       ...(p.conflict ? [p.conflict.activity()] : []),
-      p.stall.activity(),
+      ...(p.stall ? [p.stall.activity()] : []),
     ])
   return {
     workers,
@@ -202,7 +227,7 @@ function startRepoPollers(
         p.pr?.stop()
         p.mention?.stop()
         p.conflict?.stop()
-        p.stall.stop()
+        p.stall?.stop()
       }
       pollers.clear()
     },

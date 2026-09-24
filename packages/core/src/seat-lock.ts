@@ -6,6 +6,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
@@ -15,6 +16,13 @@ import { pidAlive } from './process.ts'
 const DEFAULT_WAIT_MS = 5 * 60 * 1000
 const POLL_MS = 25
 const ALLOCATOR_STALE_MS = 1000
+const TICKET_HEARTBEAT_MS = 1000
+/**
+ * A live pid does not prove a waiter is still waiting: bun --watch reloads the
+ * server in place, dropping its acquire loops but keeping the pid, and those
+ * orphaned tickets would block the queue forever.
+ */
+const TICKET_STALE_MS = 10 * 1000
 
 type SeatTicket = {
   id: string
@@ -122,7 +130,7 @@ async function withAllocator<T>(dir: string, deadline: number, work: () => T): P
   throw new Error('timed out allocating a seat queue ticket')
 }
 
-function queuedTickets(dir: string): SeatTicket[] {
+function queuedTickets(dir: string, holderId: string | undefined): SeatTicket[] {
   const queueDir = join(dir, 'queue')
   const tickets: SeatTicket[] = []
   for (const file of readdirSync(queueDir)) {
@@ -133,13 +141,21 @@ function queuedTickets(dir: string): SeatTicket[] {
       rmSync(path, { force: true })
       continue
     }
-    if (!pidAlive(ticket.pid)) {
+    if (!pidAlive(ticket.pid) || (ticket.id !== holderId && ticketStale(path))) {
       rmSync(path, { force: true })
       continue
     }
     tickets.push(ticket)
   }
   return tickets.sort((a, b) => a.id.localeCompare(b.id))
+}
+
+function ticketStale(path: string): boolean {
+  try {
+    return Date.now() - statSync(path).mtimeMs > TICKET_STALE_MS
+  } catch {
+    return true
+  }
 }
 
 function readHolder(dir: string): SeatHolder | undefined {
@@ -187,13 +203,19 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
     throw new SeatAcquireAbortedError(seat)
   }
   let waitingNotified = false
+  let lastHeartbeat = Date.now()
   while (Date.now() < deadline) {
     if (options.signal?.aborted) {
       rmSync(ticketPath(dir, id), { force: true })
       throw new SeatAcquireAbortedError(seat)
     }
+    if (Date.now() - lastHeartbeat >= TICKET_HEARTBEAT_MS) {
+      lastHeartbeat = Date.now()
+      const now = new Date()
+      utimesSync(ticketPath(dir, id), now, now)
+    }
     const holder = readHolder(dir)
-    const queue = queuedTickets(dir)
+    const queue = queuedTickets(dir, holder?.id)
     if (holder === undefined && queue[0]?.id === id) {
       const ticket = queue[0]
       if (!ticket) break

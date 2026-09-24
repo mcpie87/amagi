@@ -49,6 +49,17 @@ export const HarnessConfig = z.object({
   extraArgs: z.array(z.string()).default([]),
 })
 
+const WatcherHarnessConfig = z.object({
+  kind: HarnessKind.optional(),
+  model: z.string().optional(),
+  effort: z.string().optional(),
+  seat: z.string().min(1).optional(),
+})
+
+/**
+ * A named lane in the fleet. `id` is the identity (locks and run history key
+ * on it); `name` is a free-text label that may be renamed or duplicated.
+ */
 export const WorkerConfig = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string().min(1),
@@ -60,12 +71,18 @@ export const WorkerConfig = z.object({
 })
 export type WorkerConfig = z.infer<typeof WorkerConfig>
 
+const AgentWatcherConfig = z.object({
+  enabled: z.boolean().default(true),
+  ...WatcherHarnessConfig.shape,
+})
+
 export const Config = z.object({
+  /** The fleet: `[[worker]]` tables, global config only. */
   worker: z
     .array(WorkerConfig)
     .max(MAX_WORKERS)
     .default([])
-    .refine((workers) => new Set(workers.map((worker) => worker.id)).size === workers.length, {
+    .refine((ws) => new Set(ws.map((w) => w.id)).size === ws.length, {
       message: 'worker ids must be unique',
     }),
   repo: z
@@ -92,8 +109,22 @@ export const Config = z.object({
     .prefault({}),
   harness: z
     .object({
+      /**
+       * Named harness definitions offered by the `amagi run` interactive
+       * picker, e.g. `[harness.definitions.fast]`. Each is a full harness
+       * config; the picker falls back to the three known kinds when empty.
+       */
+      definitions: z.record(z.string().min(1), HarnessConfig).default({}),
       implement: HarnessConfig.prefault({ kind: 'claude' }),
+      review: HarnessConfig.prefault({ kind: 'codex' }),
       triage: HarnessConfig.prefault({ kind: 'claude' }),
+    })
+    .prefault({}),
+  watchers: z
+    .object({
+      mention: AgentWatcherConfig.prefault({ enabled: true }),
+      prConflict: AgentWatcherConfig.prefault({ enabled: true }),
+      stall: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
     })
     .prefault({}),
   loop: z
@@ -115,6 +146,13 @@ export const Config = z.object({
        * REST rate limits.
        */
       prCheckIntervalSec: z.number().int().min(1).default(300),
+      /**
+       * Max conflict-resolution agent dispatches per conflicting PR before the
+       * conflict checker parks the linked task at needs_human. A PR that keeps
+       * re-conflicting burns through its iterations and sinks in the dispatch
+       * order instead of being re-dispatched forever.
+       */
+      conflictMaxIterations: z.number().int().min(1).default(3),
       /**
        * Observation-only merge-tree audit: each tick, compare the local
        * `git merge-tree` verdict against GitHub's `mergeable` for every open
@@ -251,6 +289,38 @@ export const Config = z.object({
 })
 export type Config = z.infer<typeof Config>
 
+export type AgentWatcherKind = 'mention' | 'prConflict'
+
+export function watcherHarnessConfig(
+  config: Config,
+  watcher: AgentWatcherKind,
+): Config['harness']['implement'] {
+  const { enabled: _enabled, ...overrides } = config.watchers[watcher]
+  return {
+    ...config.harness.implement,
+    ...overrides,
+    kind: overrides.kind ?? config.harness.implement.kind,
+  }
+}
+
+export const workerSeat = (worker: Pick<WorkerConfig, 'kind' | 'seat'>): string =>
+  worker.seat ?? worker.kind
+
+const HARNESS_LABEL: Record<z.infer<typeof HarnessKind>, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+}
+
+/** Short slug not already taken by `taken`; never derived from the name, so a rename cannot move it. */
+export function newWorkerId(taken: Iterable<string>): string {
+  const used = new Set(taken)
+  for (;;) {
+    const id = `w-${randomUUID().slice(0, 6)}`
+    if (!used.has(id)) return id
+  }
+}
+
 type Json = Record<string, unknown>
 
 const isPlainObject = (v: unknown): v is Json =>
@@ -289,7 +359,13 @@ export function hasStaleMaxParallel(repoRoot: string): boolean {
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
-  const merged = candidates.reduce<Json>((acc, p) => deepMerge(acc, readToml(p)), {})
+  const repoToml = readToml(repoConfigPath(repoRoot))
+  if ('worker' in repoToml) {
+    throw new Error(
+      `${repoConfigPath(repoRoot)}: [[worker]] belongs in the global config (${globalConfigPath()}), not a repo config`,
+    )
+  }
+  const merged = deepMerge(readToml(globalConfigPath()), repoToml)
 
   const parsed = Config.safeParse(merged)
   if (!parsed.success) {
@@ -318,24 +394,13 @@ export function loadGlobalConfig(): Config {
   return config
 }
 
-const HARNESS_LABEL: Record<z.infer<typeof HarnessKind>, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  opencode: 'OpenCode',
-}
-
-export function newWorkerId(taken: Iterable<string>): string {
-  const used = new Set(taken)
-  for (;;) {
-    const id = `w-${randomUUID().slice(0, 6)}`
-    if (!used.has(id)) return id
-  }
-}
-
-/** Seed a default worker fleet for installations that predate worker configuration. */
+/**
+ * One-time migration: with no `[[worker]]` tables in the global config,
+ * synthesizes one worker from `harness.implement` and writes it there.
+ * Returns the created worker, empty when a fleet already exists.
+ */
 export function migrateFleet(): WorkerConfig[] {
-  const raw = readToml(globalConfigPath())
-  if ('worker' in raw) return []
+  if ('worker' in readToml(globalConfigPath())) return []
   const config = loadGlobalConfig()
   const { kind, model, effort, seat } = config.harness.implement
   const workers: WorkerConfig[] = [
@@ -353,6 +418,7 @@ export function migrateFleet(): WorkerConfig[] {
   return workers
 }
 
+/** Global-config twin of `writeConfig`; arrays in the patch (e.g. `worker`) replace wholesale. */
 export function writeGlobalConfig(patch: Json): void {
   const path = globalConfigPath()
   mkdirSync(dirname(path), { recursive: true })

@@ -25,6 +25,8 @@ import {
   implementAfterVerifyPrompt,
   implementPrompt,
   implementSystemPrompt,
+  prFailurePrompt,
+  prFailureSystemPrompt,
   prTitle,
   reclaimPrompt,
   verifyViabilityPrompt,
@@ -34,6 +36,7 @@ import {
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
+import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
 import { createWorktree, type WorktreeSpec } from './worktree.ts'
 
 export type RunnerDeps = {
@@ -142,7 +145,9 @@ function taskCost(events: StoredEvent[]): { costUsd: number; costSeen: boolean }
 }
 
 /** Best-effort JSON extraction of the viability decision; anything else is a null. */
-function parseViabilityDecision(reply: string): { viable: boolean; reason: string } | null {
+function parseViabilityDecision(
+  reply: string,
+): { viable: boolean; reason: string; verdict: Verdict | null } | null {
   const text = reply
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
@@ -156,7 +161,12 @@ function parseViabilityDecision(reply: string): { viable: boolean; reason: strin
     const viable = (parsed as { viable?: unknown }).viable
     if (typeof viable !== 'boolean') return null
     const reason = (parsed as { reason?: unknown }).reason
-    return { viable, reason: typeof reason === 'string' ? reason : '' }
+    const verdict = (parsed as { verdict?: unknown }).verdict
+    return {
+      viable,
+      reason: typeof reason === 'string' ? reason : '',
+      verdict: typeof verdict === 'string' ? parseVerdict(`Verdict: ${verdict}`) : null,
+    }
   } catch {
     return null
   }
@@ -350,7 +360,7 @@ export class Runner {
         // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
         // or another worker took over). Stop before colliding with the new
         // owner and leave the task where the reclaim parked it: either the new
-        // worker drives it, or the next one resumes it from `claimed`, so no
+        // worker drives it, or the next one resumes its recorded worktree, so no
         // human attention is needed.
         store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
       } else {
@@ -633,7 +643,9 @@ export class Runner {
     const committed = await this.commit(task, cwd, config.repo.baseBranch)
     if (!committed) {
       let reason = current.summary?.trim() !== '' ? current.summary : null
-      if (reason === null && current.sessionId !== null) {
+      // The verdict is what the operator acts on for a task with no PR, so a
+      // summary that skipped it sends the agent back to classify the outcome.
+      if (parseVerdict(reason) === null && current.sessionId !== null) {
         this.transition(task.id, 'implementing')
         const why = await this.runAgentWithRetry(
           task.id,
@@ -649,21 +661,32 @@ export class Runner {
           budget,
         )
         if (why.stopped) return
-        reason = why.summary?.trim() !== '' ? why.summary : null
+        if (why.summary?.trim()) reason = why.summary
       }
       // No changes AND no agent-written explanation: never read as "already done".
       this.transition(
         task.id,
         'no_pr',
-        reason ??
-          'the agent produced no changes and wrote no summary explaining why; treat ' +
-            'this as unverified rather than done — investigate before closing, it will ' +
-            'not be closed automatically',
+        withVerdictLine(
+          reason ??
+            'the agent produced no changes and wrote no summary explaining why; treat ' +
+              'this as unverified rather than done — investigate before closing, it will ' +
+              'not be closed automatically',
+        ),
       )
       return
     }
     this.transition(task.id, 'committed')
-    await this.openPullRequest(task, cwd, branch, current.model, current.effort, current.summary)
+    await this.openPullRequest(
+      task,
+      cwd,
+      branch,
+      current.sessionId,
+      budget,
+      current.model,
+      current.effort,
+      current.summary,
+    )
     this.throwIfCancelled(task.id)
   }
 
@@ -708,10 +731,11 @@ export class Runner {
       decision.reason.trim() !== ''
         ? decision.reason
         : 'the task is not viable against the current repository'
+    const verdict = decision.verdict ?? 'close-task'
     try {
       await this.deps.tracker.comment(
         task.id,
-        `amagi: task ${task.id} skipped as no longer viable - ${reason}`,
+        `amagi: task ${task.id} skipped as no longer viable - ${reason}\n\nVerdict: ${verdict}`,
       )
     } catch (err) {
       store.append(task.id, {
@@ -720,19 +744,20 @@ export class Runner {
         fatal: false,
       })
     }
-    this.transition(task.id, 'no_pr', reason)
+    this.transition(task.id, 'no_pr', withVerdictLine(reason, verdict))
     return null
   }
 
   /**
-   * Pushes the worktree branch and opens a pull request. A failed PR (gh not
-   * authenticated, remote gone) leaves the commit in place and escalates, so
-   * the operator can push and open it by hand.
+   * Pushes the worktree branch and opens a pull request. A failed PR leaves the
+   * commit in place; a read-only diagnosis tells the operator how to proceed.
    */
   private async openPullRequest(
     task: TrackerTask,
     cwd: string,
     branch: string,
+    sessionId: string | null,
+    budget: TaskBudget,
     model: string | null,
     effort: string | null,
     fallbackSummary?: string | null,
@@ -749,8 +774,11 @@ export class Runner {
       this.transition(
         task.id,
         'no_pr',
-        `the agent committed, but the diff against ${config.repo.baseBranch} is empty; ` +
-          `the work is probably already on ${config.repo.baseBranch}`,
+        withVerdictLine(
+          `the agent committed, but the diff against ${config.repo.baseBranch} is empty; ` +
+            `the work is probably already on ${config.repo.baseBranch}`,
+          'close-task',
+        ),
       )
       return
     }
@@ -815,7 +843,27 @@ export class Runner {
         message: `pull request: ${message}${hint}`,
         fatal: false,
       })
-      this.transition(task.id, 'needs_human', 'pull request creation failed')
+      let reason: string | null = null
+      try {
+        const diagnosis = await this.runAgent(
+          task.id,
+          sessionId,
+          {
+            cwd,
+            prompt: prFailurePrompt(current, branch, `${message}${hint}`),
+            systemPrompt: prFailureSystemPrompt(),
+            ...harnessStartOpts(config.harness.implement),
+          },
+          'PR failure diagnosis',
+          budget,
+          'verify',
+        )
+        this.throwIfCancelled(task.id)
+        if (diagnosis.ok) reason = diagnosis.summary?.trim() || null
+      } catch {
+        this.throwIfCancelled(task.id)
+      }
+      this.transition(task.id, 'needs_human', reason ?? `${message}${hint}`)
     }
   }
 
@@ -964,6 +1012,7 @@ export class Runner {
             type: 'agent.started',
             role,
             harness: harness.kind,
+            seat: spawn.seat ?? harness.kind,
             model,
             effort,
             cwd: opts.cwd,
@@ -985,7 +1034,13 @@ export class Runner {
             errorMessage = event.message
             break
         }
-        if (event.kind !== 'context') store.append(taskId, { type: 'agent.stream', role, event })
+        if (event.kind !== 'context') {
+          store.append(taskId, {
+            type: 'agent.stream',
+            role,
+            event: event.kind === 'usage' ? { ...event, seat: spawn.seat ?? harness.kind } : event,
+          })
+        }
         if (this.observeContext(taskId, event)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true

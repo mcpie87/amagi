@@ -260,7 +260,7 @@ export class Store {
     const rows = this.db
       .query(
         `select id, state, updated_at, last_heartbeat_at from tasks
-         where state in (${holes}) and coalesce(last_heartbeat_at, updated_at) < ?`,
+         where state in (${holes}) and max(coalesce(last_heartbeat_at, 0), updated_at) < ?`,
       )
       .all(...states, beforeMs) as {
       id: string
@@ -289,6 +289,21 @@ export class Store {
         : this.db.query('select * from events where seq > ? order by seq limit ?').all(since, limit)
     ) as { seq: number; ts: number; task_id: string | null; body: string }[]
 
+    return rows.map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
+  eventsSince(ts: number): StoredEvent[] {
+    const rows = this.db.query('select * from events where ts >= ? order by ts, seq').all(ts) as {
+      seq: number
+      ts: number
+      task_id: string | null
+      body: string
+    }[]
     return rows.map((r) => ({
       seq: r.seq,
       ts: r.ts,

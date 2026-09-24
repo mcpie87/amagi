@@ -1,6 +1,7 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { CheckResult } from './events.ts'
 import type { PrChange } from './pr-body.ts'
+import { NOT_VIABLE_VERDICTS, VERDICTS, verdictPromptLines } from './verdict.ts'
 
 export type PromptContext = {
   task: TrackerTask
@@ -66,6 +67,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '   task: what the changes do file by file and anything the reviewer needs to know',
     '   (deviations from the task, what was left out, why a file that looks unrelated',
     '   was touched).',
+    '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
+    '   opens no pull request, so the verdict is what tells the operator what to do next.',
+    ...verdictPromptLines().map((l) => `   ${l}`),
     'It is rendered as markdown, so wrap paths, identifiers and commands in `backticks`.',
   ]
 
@@ -213,6 +217,8 @@ export type ConflictPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
+  conflictFiles?: readonly string[]
   outPath?: string
 }
 
@@ -228,7 +234,7 @@ export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string 
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- Resolve conflicts by preserving the intent of both branches where possible. Inspect whether base already contains the PR work; do not reinstate a duplicate or fight the base version when it does.',
     "- The PR is another agent's completed task; do not rework its non-conflicting changes.",
-    '- Commit the resolved merge to finish the in-progress merge. Do not push; the dispatcher pushes.',
+    '- Resolve the conflicted files and stop; the runner commits the merge.',
   ]
   if (ctx.outPath !== undefined) {
     lines.splice(
@@ -247,6 +253,9 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
     'A merge of the base branch is in progress and currently conflicts. Resolve all conflicted files.',
     '',
     'Check whether base already contains the PR work. If it does, preserve base and do not reintroduce a duplicate or fight base’s version just to make the merge look like the PR.',
+    ...(ctx.conflictFiles === undefined
+      ? []
+      : ['', `Currently unresolved: ${ctx.conflictFiles.join(', ')}`]),
   ]
   if (ctx.outPath !== undefined) {
     parts.push(
@@ -266,11 +275,14 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
   if (ctx.checks.length > 0) {
     parts.push(
       '',
-      'Run the project checks and make sure they pass before committing:',
+      'Run the project checks and make sure they pass before stopping:',
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
-  parts.push('', 'Then finish the merge with `git add -A` and `git commit`, and stop.')
+  parts.push(
+    '',
+    'The runner stages and commits the resolved merge. Stop when the conflicts are resolved.',
+  )
   return parts.join('\n')
 }
 
@@ -330,7 +342,7 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   if (ctx.checks.length > 0) {
     parts.push(
       '',
-      'Run the project checks and make sure they pass before committing:',
+      'Run the project checks and make sure they pass before stopping:',
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
@@ -540,11 +552,48 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
     'unnecessary, or blocked? Your explanation is shown verbatim to the operator as',
     'the reason no PR was opened, so be concrete.',
     '',
-    'Do not modify any files; reply with the explanation only.',
+    ...verdictPromptLines(),
+    '',
+    'Do not modify any files; reply with the explanation and the verdict line only.',
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
   parts.push(...trackerContext(task))
   return parts.join('\n')
+}
+
+/** Explain a failed PR creation so the operator can finish it manually. */
+export function prFailurePrompt(task: TrackerTask, branch: string, error: string): string {
+  const parts = [
+    `Task ${task.id}: ${task.title}`,
+    '',
+    `The commit is on branch ${branch}, but the forge failed to create its pull request:`,
+    error,
+    '',
+    'Investigate the worktree and repository state using read-only commands. Explain',
+    'what happened and exactly what the operator must do to open the pull request by',
+    'hand. Be concrete and include relevant commands when useful.',
+    '',
+    'Do not modify files, git state, branches, remotes, or forge state. Do not commit,',
+    'push, or retry pull request creation. Reply with the explanation only.',
+  ]
+  if (task.description.trim() !== '') parts.push('', task.description.trim())
+  parts.push(...trackerContext(task))
+  return parts.join('\n')
+}
+
+export function prFailureSystemPrompt(): string {
+  return [
+    'You are diagnosing why an autonomous coding agent could not open a pull request.',
+    'Your investigation is strictly read-only.',
+    '',
+    'Rules:',
+    '- Do not modify, create, or delete files.',
+    '- Do not run writing git commands, including add, commit, push, checkout, or reset.',
+    '- Do not modify remotes or use forge commands that change remote state.',
+    '- Inspect the worktree and report the evidence, what failed, and the exact action',
+    '  the operator must take to open the pull request manually.',
+    '- Reply with the explanation only, in plain language.',
+  ].join('\n')
 }
 
 /**
@@ -570,8 +619,13 @@ export function verifyViabilitySystemPrompt(): string {
     'Reply with exactly one JSON object and nothing else:',
     '{',
     '  "viable": true | false,',
-    '  "reason": "one short sentence justifying the decision"',
+    '  "reason": "one short sentence justifying the decision",',
+    `  "verdict": ${NOT_VIABLE_VERDICTS.map((v) => `"${v}"`).join(' | ')}`,
     '}',
+    'verdict is required when viable is false and says what should happen to the task:',
+    ...VERDICTS.filter((v) => NOT_VIABLE_VERDICTS.includes(v.label)).map(
+      (v) => `- ${v.label}: ${v.meaning}`,
+    ),
   ].join('\n')
 }
 

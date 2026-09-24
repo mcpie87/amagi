@@ -131,29 +131,40 @@ export function ReclaimButton({
   state: TaskState
   worktree: string | null
 }) {
-  const { start } = useRunner()
+  const { status } = useRunner()
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   // A retrying task is still owned by its runner, which will retry on its own;
   // reclaiming it here would hand the tracker claim to a second worker.
-  if (worktree === null || isTerminal(state) || state === 'retrying') return null
+  // A queued task already has no tracker claim to release.
+  if (worktree === null || isTerminal(state) || state === 'retrying' || state === 'queued') {
+    return null
+  }
 
   const reclaim = async () => {
     setBusy(true)
-    setError(null)
+    setResult(null)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
         method: 'POST',
       })
       if (!res.ok) {
-        setError((await res.json())?.error ?? `HTTP ${res.status}`)
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        setResult({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
         return
       }
-      // Reclaim only releases the tracker claim; actually restart the run.
-      const run = await start(taskId)
-      if (!run.ok) setError(run.error ?? 'run failed to start')
+      const availability =
+        status === null
+          ? 'the runner is offline, so the task waits for a runner'
+          : status.available
+            ? 'the runner has a free slot'
+            : `the runner is busy (${status.running.length}/${status.capacity})`
+      setResult({
+        kind: 'ok',
+        text: `queued; ${availability}. The task waits for a slot.`,
+      })
     } catch {
-      setError('could not reach the amagi server')
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
     } finally {
       setBusy(false)
     }
@@ -165,12 +176,16 @@ export function ReclaimButton({
         type="button"
         disabled={busy}
         onClick={() => void reclaim()}
-        title="releases the tracker claim and immediately restarts the run, resuming its worktree"
+        title="releases the tracker claim back to the queue; the task waits for a free runner slot"
         className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
       >
         Reclaim
       </button>
-      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
     </div>
   )
 }
@@ -357,148 +372,10 @@ export function CloseButtons({
   )
 }
 
-export function RetryButton({
-  repo,
-  taskId,
-  state,
-  worktree,
-}: {
-  repo: string
-  taskId: string
-  state: TaskState
-  worktree: string | null
-}) {
-  const { start } = useRunner()
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
-
-  const retry = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        setError((await res.json())?.error ?? `HTTP ${res.status}`)
-        return
-      }
-      // Reclaim only releases the tracker claim; actually restart the run.
-      const run = await start(taskId)
-      if (!run.ok) setError(run.error ?? 'run failed to start')
-    } catch {
-      setError('could not reach the amagi server')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="ml-auto">
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void retry()}
-        title="re-claims the tracker ticket and immediately restarts the run now"
-        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
-      >
-        Retry
-      </button>
-      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
-    </div>
-  )
-}
-
-/**
- * Put a parked needs_human/no_pr task back in the tracker queue so the runner
- * can pick it up again, and tell the operator whether the runner is available
- * to do so. Unlike Retry this does not launch immediately: a requeued task
- * waits for a free slot (Run next on the queue), which is exactly why the
- * runner's availability is surfaced next to the action.
- */
-export function RequeueButton({
-  repo,
-  taskId,
-  state,
-  worktree,
-}: {
-  repo: string
-  taskId: string
-  state: TaskState
-  worktree: string | null
-}) {
-  const { status } = useRunner()
-  const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
-  if (worktree === null || (state !== 'needs_human' && state !== 'no_pr')) return null
-
-  const requeue = async () => {
-    setBusy(true)
-    setResult(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/reclaim`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null
-        setResult({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
-        return
-      }
-      const availability =
-        status === null
-          ? 'the runner is offline, so the task waits for a runner'
-          : status.available
-            ? 'the runner has a free slot'
-            : `the runner is busy (${status.running.length}/${status.capacity})`
-      setResult({
-        kind: 'ok',
-        text: `requeued; ${availability}. Launch it from the queue with Run next when ready.`,
-      })
-    } catch {
-      setResult({ kind: 'error', text: 'could not reach the amagi server' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const availability =
-    status === null
-      ? 'offline'
-      : status.available
-        ? `${status.running.length}/${status.capacity} free`
-        : `busy (${status.running.length}/${status.capacity})`
-
-  return (
-    <div className="ml-auto">
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void requeue()}
-        title="releases the tracker claim and puts the task back in the queue; it waits for a free runner slot instead of launching immediately"
-        className="rounded border border-amber-edge bg-amber-soft px-3 py-1 text-sm text-amber-ink hover:bg-amber-soft-hover disabled:opacity-50"
-      >
-        Requeue
-      </button>
-      <p
-        className="mt-1 text-right text-xs text-fg-faint"
-        title="whether the runner can pick up a requeued task"
-      >
-        runner: {availability}
-      </p>
-      {result !== null && (
-        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
-          {result.text}
-        </p>
-      )}
-    </div>
-  )
-}
-
 /**
  * The error-task retry path for a task parked at needs_human: file the recorded
  * error as its own tracker task, block this task on it, and release the claim
- * so it reruns once the error task is resolved. Unlike Retry/Requeue this does
+ * so it reruns once the error task is resolved. Unlike Reclaim this does
  * not resume the same work blindly; it hands the root cause to a human first.
  */
 export function FileAsErrorButton({

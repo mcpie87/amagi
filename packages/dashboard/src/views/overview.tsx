@@ -1,5 +1,6 @@
 import type { PrInfo } from '@amagi/core'
 import type { TrackerTask } from '@amagi/core/drivers/types'
+import { fmtTokens } from '@amagi/core/format'
 import { activeTasks, type ProjectedTask, tasksNeedingAttention } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
@@ -305,6 +306,75 @@ function MergeablePrsPanel() {
   )
 }
 
+type UsageRate = { seat: string; calls: number; tokens: number }
+
+function SeatUsagePanel() {
+  const [rates, setRates] = useState<UsageRate[] | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      fetch(`${apiBase}/api/usage-rates`)
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+        .then((data: { rates: UsageRate[] }) => {
+          if (alive) setRates(data.rates)
+        })
+        .catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, 10_000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  return (
+    <section className="mb-6">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Harness calls by seat
+        </h2>
+        <span className="text-xs text-fg-faint">
+          last 60s across registered repos; Claude/Codex turns, OpenCode steps; refreshed every 10s
+        </span>
+      </div>
+      {rates === null ? (
+        <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg-faint">
+          loading usage rates...
+        </p>
+      ) : rates.length === 0 ? (
+        <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg-faint">
+          No usage reported in the last minute.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-line bg-surface">
+          <table className="w-full text-sm">
+            <thead className="border-b border-line text-left text-xs text-fg-faint">
+              <tr>
+                <th className="px-4 py-2 font-medium">Seat</th>
+                <th className="px-4 py-2 text-right font-medium">Calls/min</th>
+                <th className="px-4 py-2 text-right font-medium">Tokens/min</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {[...rates]
+                .sort((a, b) => b.tokens - a.tokens)
+                .map((rate) => (
+                  <tr key={rate.seat}>
+                    <td className="px-4 py-2 font-medium text-fg">{rate.seat}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{rate.calls}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{fmtTokens(rate.tokens)}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export function OverviewView() {
   const { state, selected } = useDashboard()
   const { status } = useRunner()
@@ -363,6 +433,8 @@ export function OverviewView() {
       </div>
 
       <MergeablePrsPanel />
+
+      <SeatUsagePanel />
 
       <WorkersPanel />
 

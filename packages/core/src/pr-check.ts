@@ -18,6 +18,8 @@ export type PrInfo = {
   mergeStateStatus: string
   /** Head commit SHA, so the conflict watcher can skip PRs whose head has not changed. */
   headRefOid: string | null
+  /** Creation timestamp, used to prioritize newer conflicts first. */
+  createdAt: string
   /** Last activity timestamp, so pollers can skip PRs that have not changed. */
   updatedAt: string
   /** Label names, so the priority-label sync and pointlessness pass can read them off one list call. */
@@ -33,7 +35,7 @@ export type PrCheckOptions = {
 }
 
 const GH_FIELDS =
-  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,updatedAt,labels'
+  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,createdAt,updatedAt,labels'
 
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
@@ -166,13 +168,15 @@ export type StampedIteration = {
 export async function stampIterationLabel(opts: {
   cwd: string
   pr: PrInfo
+  /** Explicit count when multiple dispatches share a stale PR snapshot. */
+  iteration?: number
   exec?: Exec
 }): Promise<StampedIteration | null> {
   const run = opts.exec ?? defaultExec
   const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
   if (taskId === null) return null
   const current = iterationsFromLabels(opts.pr.labels)
-  const iteration = current + 1
+  const iteration = opts.iteration ?? current + 1
   await execOk(run, ['gh', 'label', 'create', iterationLabel(iteration), '--force'], {
     cwd: opts.cwd,
     env: ghEnv(),
@@ -185,7 +189,7 @@ export async function stampIterationLabel(opts: {
     '--add-label',
     iterationLabel(iteration),
   ]
-  if (current > 0) edit.push('--remove-label', iterationLabel(current))
+  if (current > 0 && current !== iteration) edit.push('--remove-label', iterationLabel(current))
   await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
   return { taskId, iteration }
 }

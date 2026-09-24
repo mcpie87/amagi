@@ -426,3 +426,52 @@ describe('git shim self-reference guard', () => {
     expect(r.stderr.toString()).toContain('refusing to run')
   })
 })
+
+describe('bd shim', () => {
+  test('passes reads and rejects every tracker write', () => {
+    const fakeBin = join(home, 'fakebin')
+    mkdirSync(fakeBin, { recursive: true })
+    const fake = join(fakeBin, 'bd')
+    writeFileSync(fake, '#!/bin/sh\necho "REAL: $*"\nexit 0\n')
+    chmodSync(fake, 0o755)
+    const savedPath = process.env.PATH
+    process.env.PATH = `${fakeBin}:${savedPath ?? ''}`
+    const bd = join(prepareShim(), 'bd')
+    process.env.PATH = savedPath
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` }
+
+    const run = (args: string[]) => {
+      const r = Bun.spawnSync([bd, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
+      return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }
+    }
+
+    for (const args of [
+      ['show', 'am-1', '--json'],
+      ['--json', 'list', '--status=open'],
+      ['ready'],
+      ['prime'],
+      ['dep', 'tree', 'am-1'],
+      ['close', '--help'],
+    ]) {
+      expect(run(args).stdout, `bd ${args.join(' ')} should pass`).toBe(`REAL: ${args.join(' ')}\n`)
+    }
+    for (const args of [
+      [],
+      ['close', 'am-1'],
+      ['update', 'am-1', '--status', 'open'],
+      ['update', 'am-1', '--notes', 'help'],
+      ['create', '--title', 'x'],
+      ['q', 'x'],
+      ['unclaim', 'am-1'],
+      ['reopen', 'am-1'],
+      ['comments', 'add', 'am-1', 'x'],
+      ['dep', 'add', 'am-1', 'am-2'],
+      ['orphans', '--fix'],
+      ['--actor', 'x', 'show', 'am-1'],
+    ]) {
+      const r = run(args)
+      expect(r.exitCode, `bd ${args.join(' ')} should be rejected`).not.toBe(0)
+      expect(r.stdout).toBe('')
+    }
+  })
+})
