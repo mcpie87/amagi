@@ -10,9 +10,14 @@ export type PromptContext = {
   askCommand?: string | null
   /** Set once the server channel exists, so the agent is told how to checkpoint. */
   gitRequestCommand?: string | null
+  baseBranch?: string
+  /** The gate the orchestrator runs after the agent, in order. */
+  checks?: readonly string[]
 }
 
 export function implementSystemPrompt(ctx: PromptContext): string {
+  const base = ctx.baseBranch ?? '<base>'
+  const checks = ctx.checks ?? []
   const lines = [
     'You are working inside a dedicated git worktree on a single tracked task.',
     `Worktree: ${ctx.worktree}`,
@@ -20,36 +25,48 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '',
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
-    '- Git is read-only in this worktree: do not commit, push, or otherwise write.',
-    '- The runner commits your work and opens the pull request.',
+    '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
+    '- Inspect the base with read-only commands such as `git show <base>:<path>` and `git diff <base>`; do not use `git stash`.',
     '- Follow the conventions already present in the code you are changing.',
-    "- Run the project's own checks if you are unsure a change is correct.",
-    '- Before finishing, run the project formatter then its lint check on your',
-    '  changes (e.g. `just fmt` then `just lint`) and fix every failure. The',
-    '  orchestrator runs the same commands as a mandatory gate and blocks the',
-    '  pull request on them.',
+    ...(checks.length > 0
+      ? [
+          '- When you finish, the orchestrator runs these checks in order as a mandatory',
+          `  gate and sends any failure back to you: ${checks.map((c) => `\`${c}\``).join(', ')}.`,
+          '  Run the formatter and lint check yourself before finishing and fix every',
+          '  failure; you do not need to run the slow ones to discover them.',
+        ]
+      : [
+          '- Before finishing, run the project formatter then its lint check on your',
+          '  changes (e.g. `just fmt` then `just lint`) and fix every failure. The',
+          '  orchestrator runs the same commands as a mandatory gate and blocks the',
+          '  pull request on them.',
+        ]),
+    '- While iterating, run the narrowest test that covers your change, not the whole suite.',
     '- Never pipe check or lint output through head/tail: it aborts the tool',
     '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
-    '- If your changes add a user-facing feature (new CLI command or flag, new config',
-    "  option, new API endpoint), append a short `### How to use` section to the task's",
-    '  description in the issue tracker: how to trigger it and what it does. The PR',
-    '  description is built from that description.',
-    '- The tracker CLI (bd) is unavailable inside this worktree; the full issue text',
-    '  (description, notes, comments) is embedded in the prompt instead.',
+    '- Keep your context small: locate code with grep first and read only the line',
+    '  ranges you need, do not re-read a file you already have, and check',
+    '  `git diff --stat` before reading a full diff, one file at a time.',
+    '- Never edit issues with the tracker CLI (bd), and do not re-read this task with',
+    '  it: the full issue text (description, notes, comments) is embedded in the',
+    '  prompt, and the orchestrator writes the sections of your final message back',
+    '  into the issue.',
     '- For investigation-style tasks ("determine whether ... and fix accordingly"), a',
     '  clean working tree is not a valid outcome: even when no code change is needed,',
-    '  still write your findings, evidence, and conclusion in your final summary.',
-    "- Once the work is finished, append a `### Conclusion` section to the task's",
-    '  description in the issue tracker, written against the real diff',
-    '  (`git diff <base>...HEAD`), not against the task: what the changes do',
-    '  file by file and anything the reviewer needs to know (deviations from the',
-    '  task, what was left out, why a file that looks unrelated was touched). It',
-    '  is mandatory for every PR.',
-    '- The task description is rendered verbatim into the PR body as markdown, so',
-    '  wrap paths, identifiers and commands in `backticks` where you mean code.',
-    '- End your final message with a short summary of what was done; when the task',
-    '  has no description it is used as the PR summary, and it is the reason when',
-    '  no pull request is opened.',
+    '  still write your findings, evidence, and conclusion in your final message.',
+    '',
+    'Your final message feeds the pull request description. Write it as:',
+    '1. A short summary of what was done. When the task has no description it is the',
+    '   PR summary, and it is the reason shown when no pull request is opened.',
+    '2. Only if your changes add a user-facing feature (new CLI command or flag, new',
+    '   config option, new API endpoint): a `### How to use` section saying how to',
+    '   trigger it and what it does.',
+    '3. A mandatory `### Conclusion` section written against the real change',
+    `   (\`git diff --stat ${base}\` plus \`git status\` for new files), not against the`,
+    '   task: what the changes do file by file and anything the reviewer needs to know',
+    '   (deviations from the task, what was left out, why a file that looks unrelated',
+    '   was touched).',
+    'It is rendered as markdown, so wrap paths, identifiers and commands in `backticks`.',
   ]
 
   if (ctx.askCommand) {
@@ -92,6 +109,21 @@ export function implementPrompt(ctx: PromptContext): string {
   return parts.join('\n')
 }
 
+/**
+ * Sent into the viability check's own session, so the agent keeps what it
+ * already read. The task text is repeated because a context restart replays
+ * this prompt into a fresh session.
+ */
+export function implementAfterVerifyPrompt(ctx: PromptContext): string {
+  return [
+    'The viability check is over and the task is still needed. The read-only rule and',
+    'the JSON reply format of the check no longer apply: follow the implementation rules and',
+    'implement the task, reusing what you already found instead of re-reading it.',
+    '',
+    implementPrompt(ctx),
+  ].join('\n')
+}
+
 /** A previously interrupted run was reclaimed and its worktree resumed. */
 export function reclaimPrompt(ctx: PromptContext): string {
   const parts = [
@@ -100,21 +132,9 @@ export function reclaimPrompt(ctx: PromptContext): string {
     'This task was interrupted mid-run and is being resumed. Existing work is',
     'already in the worktree and branch; inspect the current state, continue',
     'where it left off, and finish what is missing.',
-    '',
-    'Git is read-only in this worktree: do not commit, push, or otherwise write.',
-    'The runner commits your work and opens the pull request.',
   ]
   if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
   parts.push(...trackerContext(ctx.task))
-  if (ctx.gitRequestCommand) {
-    parts.push(
-      '',
-      'To checkpoint mid-run work, you may request a commit:',
-      ctx.gitRequestCommand,
-      'It blocks until the orchestrator commits the worktree and prints the commit sha',
-      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
-    )
-  }
   parts.push('', 'Continue this task completely, then stop.')
   return parts.join('\n')
 }
@@ -139,55 +159,23 @@ export function withRestartHandoff(prompt: string, handoff: string): string {
   ].join('\n')
 }
 
-export function answerPrompt(
-  question: string,
-  answer: string,
-  gitRequestCommand?: string | null,
-): string {
-  const lines = [
+export function answerPrompt(question: string, answer: string): string {
+  return [
     'A human answered the question you were waiting on. Continue the task.',
     '',
     `Question: ${question}`,
     `Answer: ${answer}`,
     '',
-    'Git is read-only in this worktree: do not commit, push, or otherwise write.',
-    'The runner commits your work and opens the pull request.',
-  ]
-  if (gitRequestCommand) {
-    lines.push(
-      '',
-      'To checkpoint mid-run work, you may request a commit:',
-      gitRequestCommand,
-      'It blocks until the orchestrator commits the worktree and prints the commit sha',
-      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
-    )
-  }
-  lines.push('', 'Apply the answer and finish the task, then stop.')
-  return lines.join('\n')
+    'Apply the answer and finish the task, then stop.',
+  ].join('\n')
 }
 
-export function fixChecksPrompt(
-  results: readonly CheckResult[],
-  gitRequestCommand?: string | null,
-): string {
-  const lines = [
-    'Git is read-only in this worktree: do not commit, push, or otherwise write.',
-    'The runner commits your work and opens the pull request.',
-    '',
-    'The project checks failed on your changes. Fix them, then stop.',
-  ]
-  if (gitRequestCommand) {
-    lines.push(
-      '',
-      'To checkpoint mid-run work, you may request a commit:',
-      gitRequestCommand,
-      'It blocks until the orchestrator commits the worktree and prints the commit sha',
-      'on stdout. It exits non-zero when there is nothing to commit or git fails.',
-    )
-  }
+export function fixChecksPrompt(results: readonly CheckResult[]): string {
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
-  return [...lines, '', ...blocks].join('\n')
+  return ['The project checks failed on your changes. Fix them, then stop.', '', ...blocks].join(
+    '\n',
+  )
 }
 
 export function commitMessage(
@@ -226,7 +214,8 @@ export type ConflictPromptContext = {
   baseBranch: string
   checks: readonly string[]
   /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
-  conflictFiles: readonly string[]
+  conflictFiles?: readonly string[]
+  outPath?: string
 }
 
 export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string {
@@ -239,10 +228,17 @@ export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string 
     '',
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
-    '- Resolve every conflict in favor of the pull request intent, keeping base branch changes where both are wanted.',
+    '- Resolve conflicts by preserving the intent of both branches where possible. Inspect whether base already contains the PR work; do not reinstate a duplicate or fight the base version when it does.',
     "- The PR is another agent's completed task; do not rework its non-conflicting changes.",
     '- Resolve the conflicted files and stop; the runner commits the merge.',
   ]
+  if (ctx.outPath !== undefined) {
+    lines.splice(
+      lines.length - 1,
+      0,
+      `- Classify the outcome and write a verdict to ${ctx.outPath}.`,
+    )
+  }
   return lines.join('\n')
 }
 
@@ -252,8 +248,26 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
     '',
     'A merge of the base branch is in progress and currently conflicts. Resolve all conflicted files.',
     '',
-    `Currently unresolved: ${ctx.conflictFiles.join(', ')}`,
+    'Check whether base already contains the PR work. If it does, preserve base and do not reintroduce a duplicate or fight base’s version just to make the merge look like the PR.',
+    ...(ctx.conflictFiles === undefined
+      ? []
+      : ['', `Currently unresolved: ${ctx.conflictFiles.join(', ')}`]),
   ]
+  if (ctx.outPath !== undefined) {
+    parts.push(
+      '',
+      'The dispatcher checks the final diff against base and will never push an empty diff.',
+      '',
+      'Classify the task using exactly one of these verdicts and write it as the first line to the verdict file:',
+      '- `RESOLVED` when the merge has real PR content and nothing is wrong.',
+      '- `CLOSE TASK` when base already contains this work.',
+      '- `NEW TASK` when base solved it differently and something remains.',
+      '- `REPHRASE TASK` when the task as written can no longer be satisfied.',
+      `Verdict file: ${ctx.outPath}`,
+      'After the verdict line, include `REASONING:` and `PROPOSAL:` sections following the pointless PR verdict format.',
+      '',
+    )
+  }
   if (ctx.checks.length > 0) {
     parts.push(
       '',
@@ -261,7 +275,10 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
-  parts.push('', 'Stage the resolved files with `git add`, then stop.')
+  parts.push(
+    '',
+    'The runner stages and commits the resolved merge. Stop when the conflicts are resolved.',
+  )
   return parts.join('\n')
 }
 
@@ -295,8 +312,7 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
-    '- Git is read-only in this worktree: do not commit, push, or otherwise write.',
-    '- Resolve conflicts or make the requested fix, then stop; the runner commits and pushes it.',
+    '- Commit your changes. Do not push; the dispatcher pushes.',
   ]
   if (ctx.conflicted) {
     lines.push(
@@ -326,7 +342,10 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
-  parts.push('', 'Address the feedback with the smallest change that satisfies it, then stop.')
+  parts.push(
+    '',
+    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+  )
   return parts.join('\n')
 }
 

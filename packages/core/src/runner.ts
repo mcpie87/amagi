@@ -9,6 +9,7 @@ import {
   type AgentEvent,
   type AgentRole,
   type CheckResult,
+  currentAttemptEvents,
   isTerminal,
   type StoredEvent,
   type TaskState,
@@ -16,11 +17,12 @@ import {
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
-import { changesSinceBase, diffBase, formatPrBody } from './pr-body.ts'
+import { changesSinceBase, diffBase, formatPrBody, withAgentSections } from './pr-body.ts'
 import {
   answerPrompt,
   commitMessage,
   fixChecksPrompt,
+  implementAfterVerifyPrompt,
   implementPrompt,
   implementSystemPrompt,
   prTitle,
@@ -414,7 +416,9 @@ export class Runner {
   private async drive(task: TrackerTask): Promise<void> {
     const { store, config } = this.deps
 
-    const prior = taskCost(store.events({ taskId: task.id, limit: 1_000_000 }))
+    const prior = taskCost(
+      currentAttemptEvents(store.events({ taskId: task.id, limit: 1_000_000 }), task.id),
+    )
     const budget = new TaskBudget(
       store.task(task.id)?.createdAt ?? Date.now(),
       config.loop.maxRunMinutes * 60_000,
@@ -509,6 +513,8 @@ export class Runner {
       // is never told to use them.
       ...(this.deps.channel ? { askCommand: 'amagi ask "<question>"' } : {}),
       ...(this.deps.channel ? { gitRequestCommand: 'amagi git-request commit' } : {}),
+      baseBranch: config.repo.baseBranch,
+      checks: this.checkCommands(),
     }
 
     this.throwIfCancelled(task.id)
@@ -518,16 +524,23 @@ export class Runner {
     // repository, so a task already satisfied on the base branch is stopped
     // before the implement agent writes anything or a no-op PR is opened. A
     // resumed run skips the check: its worktree already holds in-progress work.
+    // Implement resumes the check's session so its exploration is not redone.
+    let verifySession: string | null = null
     if (!resume) {
-      const viable = await this.verifyViability(task, cwd, branch, budget)
-      if (!viable) return
+      const verified = await this.verifyViability(task, cwd, branch, budget)
+      if (verified === null) return
+      verifySession = verified.sessionId
     }
     const first = await this.runAgentWithRetry(
       task.id,
-      null,
+      verifySession,
       {
         cwd,
-        prompt: resume ? reclaimPrompt(promptCtx) : implementPrompt(promptCtx),
+        prompt: resume
+          ? reclaimPrompt(promptCtx)
+          : verifySession !== null
+            ? implementAfterVerifyPrompt(promptCtx)
+            : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
         ...harnessStartOpts(config.harness.implement),
       },
@@ -599,7 +612,7 @@ export class Runner {
         current.sessionId,
         {
           cwd,
-          prompt: fixChecksPrompt(results, this.deps.channel ? 'amagi git-request commit' : null),
+          prompt: fixChecksPrompt(results),
           permissions: config.harness.implement.permissions,
           extraArgs: config.harness.implement.extraArgs,
         },
@@ -659,14 +672,15 @@ export class Runner {
    * task is not viable, in which case it is reported inside the task (a
    * tracker comment) and parked in `no_pr` before any code is written. Any
    * failure to check defaults to viable: a broken check must never kill a
-   * task, only a clear not-viable verdict does.
+   * task, only a clear not-viable verdict does. A viable verdict carries the
+   * check's session for implement to resume; a failed check carries none.
    */
   private async verifyViability(
     task: TrackerTask,
     cwd: string,
     branch: string,
     budget: TaskBudget,
-  ): Promise<boolean> {
+  ): Promise<{ sessionId: string | null } | null> {
     const { store, config } = this.deps
     const run = await this.runAgent(
       task.id,
@@ -684,10 +698,10 @@ export class Runner {
     if (!run.ok) {
       // A cancel mid-check must stop the run, not fall through to implement.
       this.throwIfCancelled(task.id)
-      return true
+      return { sessionId: null }
     }
     const decision = run.summary === null ? null : parseViabilityDecision(run.summary)
-    if (decision === null || decision.viable) return true
+    if (decision === null || decision.viable) return { sessionId: run.sessionId }
 
     const reason =
       decision.reason.trim() !== ''
@@ -706,7 +720,7 @@ export class Runner {
       })
     }
     this.transition(task.id, 'no_pr', reason)
-    return false
+    return null
   }
 
   /**
@@ -748,6 +762,23 @@ export class Runner {
     } catch {
       current = task
     }
+    let summary = fallbackSummary
+    const sections = withAgentSections(current.description, fallbackSummary)
+    if (sections !== null) {
+      summary = sections.summary
+      current = { ...current, description: sections.description }
+      if (this.deps.tracker.capabilities.edit) {
+        try {
+          await this.deps.tracker.updateTask(task.id, { description: sections.description })
+        } catch (err) {
+          store.append(task.id, {
+            type: 'error',
+            message: `writing the PR sections into ${task.id} failed: ${errMsg(err)}`,
+            fatal: false,
+          })
+        }
+      }
+    }
     const opts: CreatePrOptions = {
       cwd,
       branch,
@@ -765,7 +796,7 @@ export class Runner {
           model: model ?? config.harness.implement.model ?? null,
           effort: effort ?? config.harness.implement.effort ?? null,
         },
-        fallbackSummary,
+        summary,
       ),
       labels: amagiLabels(current.type),
     }
@@ -834,11 +865,7 @@ export class Runner {
           sessionId,
           {
             cwd,
-            prompt: answerPrompt(
-              question.question,
-              q.answer,
-              this.deps.channel ? 'amagi git-request commit' : null,
-            ),
+            prompt: answerPrompt(question.question, q.answer),
             permissions: config.harness.implement.permissions,
             extraArgs: config.harness.implement.extraArgs,
           },
@@ -891,6 +918,9 @@ export class Runner {
         AMAGI_RUN_STATE: runState,
       },
     }
+    const reflogBefore = await this.headReflog(opts.cwd)
+    this.throwIfCancelled(taskId)
+    const seqBefore = store.recentEvents(taskId, 1)[0]?.seq ?? 0
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
@@ -1001,6 +1031,43 @@ export class Runner {
     } finally {
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
+      await this.recordGitBypass(taskId, opts.cwd, reflogBefore, seqBefore)
+    }
+  }
+
+  /** HEAD reflog of `cwd` as `<sha> <subject>` lines, newest first; null when unreadable. */
+  private async headReflog(cwd: string): Promise<string[] | null> {
+    const r = await this.exec(['git', 'reflog', 'show', '--format=%H %gs', 'HEAD'], { cwd })
+    if (r.exitCode !== 0) return null
+    return r.stdout.split('\n').filter((l) => l !== '')
+  }
+
+  /**
+   * Records `git.bypassed` when the worktree's HEAD reflog grew during an agent
+   * run by entries the runner did not make. Commits recorded as `commit.created`
+   * since `sinceSeq` are the sanctioned `git-request` ones.
+   */
+  private async recordGitBypass(
+    taskId: string,
+    cwd: string,
+    before: string[] | null,
+    sinceSeq: number,
+  ): Promise<void> {
+    try {
+      const after = await this.headReflog(cwd)
+      if (before === null || after === null) return
+      const { store } = this.deps
+      const sanctioned = new Set(
+        store
+          .events({ taskId, sinceSeq, limit: 1_000_000 })
+          .flatMap((e) => (e.type === 'commit.created' ? [e.sha] : [])),
+      )
+      const entries = after
+        .slice(0, Math.max(0, after.length - before.length))
+        .filter((line) => !sanctioned.has(line.split(' ', 1)[0] ?? ''))
+      if (entries.length > 0) store.append(taskId, { type: 'git.bypassed', entries })
+    } catch {
+      // Best effort: the bypass check never fails the run.
     }
   }
 
@@ -1164,13 +1231,17 @@ export class Runner {
     }
   }
 
-  private async runChecks(cwd: string): Promise<CheckResult[]> {
-    const results: CheckResult[] = []
+  private checkCommands(): string[] {
     const { format, lint, commands } = this.deps.config.checks
     // The mandatory gate always runs before the configured commands, so a PR
     // cannot be pushed until the worktree is formatted and lint-clean.
     const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
-    for (const command of [...gate, ...commands]) {
+    return [...gate, ...commands]
+  }
+
+  private async runChecks(cwd: string): Promise<CheckResult[]> {
+    const results: CheckResult[] = []
+    for (const command of this.checkCommands()) {
       const r = await this.exec(['sh', '-c', command], { cwd })
       results.push({
         command,

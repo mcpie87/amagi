@@ -1,5 +1,6 @@
 import {
   type Config,
+  type ConflictWatchState,
   conflictWatchPath,
   exec as defaultExec,
   type Exec,
@@ -86,6 +87,11 @@ export function startPrConflictWatcher({
   let cleared = 0
   /** PRs whose local merge-tree verdict disagreed with GitHub's mergeable, cumulative. */
   let divergent = 0
+  let log: NonNullable<WorkerActivity['log']> = []
+  const logEvent = (message: string, level: 'info' | 'error' = 'info'): void => {
+    log = [...log, { ts: Date.now(), message, level }].slice(-100)
+    activity = { ...activity, log }
+  }
   /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
   let unknownCursor = 0
   const counters = (): WorkerActivity['counters'] => [
@@ -156,6 +162,7 @@ export function startPrConflictWatcher({
           exec: run,
         })
       } catch (err) {
+        logEvent(`PR #${p.number}: merge-tree check failed: ${errMsg(err)}`, 'error')
         console.warn(`merge-tree #${p.number}: ${errMsg(err)}`)
         continue
       }
@@ -173,6 +180,7 @@ export function startPrConflictWatcher({
 
   async function tick(): Promise<void> {
     runs++
+    logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
       lastRunAt: Date.now(),
@@ -200,15 +208,18 @@ export function startPrConflictWatcher({
         try {
           await observeMergeTree(prs, run)
         } catch (err) {
+          logEvent(`merge-tree observation failed: ${errMsg(err)}`, 'error')
           console.warn(`merge-tree observation: ${errMsg(err)}`)
         }
       }
       const statePath = conflictWatchPath(repoName)
       const state = readConflictWatch(statePath)
-      const nextState: Record<string, { headOid: string }> = {}
+      const nextState: ConflictWatchState = {}
       const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
       conflicting = conflicts.length
+      if (conflicts.length > 0) logEvent(`found ${conflicts.length} conflicting PR(s)`)
       let resolvedNow = 0
+      const warnings: string[] = []
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
@@ -225,13 +236,24 @@ export function startPrConflictWatcher({
           driver,
           ...(exec === undefined ? {} : { exec }),
           ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+          onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
-        nextState[key] = { headOid }
+        nextState[key] = {
+          headOid,
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+        }
+        if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
+          console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
+          warnings.push(`#${pr.number}: agent verdict ${result.verdict.verdict}`)
+        }
         if (result.ok) {
           resolved++
           resolvedNow++
+          logEvent(`PR #${pr.number}: conflict resolution dispatched`)
         } else {
+          logEvent(`PR #${pr.number}: ${result.message}`, 'error')
           console.warn(`pr conflict #${pr.number}: ${result.message}`)
+          warnings.push(`#${pr.number}: ${result.message}`)
         }
       }
       // Only PRs that are still conflicting stay tracked; the rest drop out.
@@ -249,7 +271,10 @@ export function startPrConflictWatcher({
       })
       flagged += pointless.flagged
       cleared += pointless.cleared
-      next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}`
+      next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}${
+        warnings.length === 0 ? '' : `; warnings: ${warnings.join('; ')}`
+      }`
+      logEvent(`run ${runs} completed: scanned ${prs.length} PRs, ${next.detail}`)
     } catch (err) {
       failures++
       next.ok = false
@@ -257,9 +282,11 @@ export function startPrConflictWatcher({
       next.failures = failures
       next.successes = runs - failures
       next.detail = 'scan failed'
+      logEvent(`run ${runs} failed: ${next.error}`, 'error')
       console.warn(`pr conflict watch: ${next.error}`)
     }
     next.counters = counters()
+    next.log = log
     activity = next
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }

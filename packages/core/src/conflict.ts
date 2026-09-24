@@ -1,11 +1,15 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
+import { type PointlessVerdict, parsePointlessVerdict } from './pointless.ts'
 import {
   iterationsFromLabels,
   type PrInfo,
@@ -33,6 +37,8 @@ export type ResolveConflictOptions = {
   makeHarnessFn?: typeof makeHarness
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
+  /** Called when the agent moves HEAD outside the expected commit operation. */
+  onGitBypassed?: (entries: string[]) => void
 }
 
 export type ResolveConflictResult = {
@@ -40,9 +46,18 @@ export type ResolveConflictResult = {
   message: string
   /** Conflict-resolution dispatches this call ran for the PR, for the caller to mirror onto the linked task. */
   iteration: number
+  /** The agent's task verdict, saved by the watcher for this PR head. */
+  verdict?: PointlessVerdict
 }
 
 /** Paths still unmerged (in conflict); empty once every conflict is resolved. */
+async function conflictDiffEmpty(cwd: string, baseBranch: string, run: Exec): Promise<boolean> {
+  const diff = await run(['git', 'diff', '--quiet', `origin/${baseBranch}..HEAD`], { cwd })
+  if (diff.exitCode === 0) return true
+  if (diff.exitCode === 1) return false
+  throw new Error(diff.stderr.trim() || `git diff origin/${baseBranch}..HEAD failed`)
+}
+
 async function unmergedPaths(run: Exec, cwd: string): Promise<string[]> {
   const out = await execOk(run, ['git', 'diff', '--name-only', '--diff-filter=U'], { cwd })
   return out
@@ -94,6 +109,7 @@ export async function resolveConflict(
   const mk = opts.makeHarnessFn ?? makeHarness
   const log = (level: ConflictLogLevel, text: string): void => opts.onLog?.(level, text)
   let iteration = 0
+  let verdict: PointlessVerdict | undefined
 
   try {
     const wt = await prepareConflictWorktree({
@@ -107,8 +123,14 @@ export async function resolveConflict(
     })
     log('info', `worktree: ${wt.path}`)
     iteration = iterationsFromLabels(opts.pr.labels)
+    const verdictPath = join(tmpdir(), `amagi-conflict-${opts.pr.number}-${randomUUID()}.md`)
 
     if (!wt.conflicted) {
+      if (await conflictDiffEmpty(wt.path, opts.config.repo.baseBranch, run)) {
+        const message = 'base already contains the PR work; skipped the empty merge push'
+        log('warn', message)
+        return { ok: false, message, iteration }
+      }
       await pushConflictFix({
         cwd: wt.path,
         branch: wt.branch,
@@ -144,30 +166,53 @@ export async function resolveConflict(
         baseBranch: opts.config.repo.baseBranch,
         checks: opts.config.checks.commands,
         conflictFiles: unmerged,
+        outPath: verdictPath,
       }
       const harness = mk(opts.config.harness.implement)
-      const proc = harness.start({
-        cwd: wt.path,
-        prompt: resolveConflictPrompt(ctx),
-        systemPrompt: resolveConflictSystemPrompt(ctx),
-        ...harnessStartOpts(opts.config.harness.implement),
-      })
       log('info', `agent: ${harness.kind} (${wt.branch})`)
-
-      for await (const event of proc.events()) {
-        if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
-        else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
-        else if (event.kind === 'error') log('error', event.message)
-      }
-      const outcome = await proc.done
+      const outcome = await withHeadReflogBypassCheck(
+        wt.path,
+        run,
+        async () => {
+          const proc = harness.start({
+            cwd: wt.path,
+            prompt: resolveConflictPrompt(ctx),
+            systemPrompt: resolveConflictSystemPrompt(ctx),
+            ...harnessStartOpts(opts.config.harness.implement),
+          })
+          for await (const event of proc.events()) {
+            if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
+            else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
+            else if (event.kind === 'error') log('error', event.message)
+          }
+          return proc.done
+        },
+        opts.onGitBypassed,
+      )
       if (!outcome.ok) {
         const message = `agent failed: ${agentFailure(outcome)}`
         log('error', message)
+        rmSync(verdictPath, { force: true })
         return { ok: false, message, iteration }
       }
     }
 
+    try {
+      const rawVerdict = readFileSync(verdictPath, 'utf8').trim()
+      if (rawVerdict !== '') verdict = parsePointlessVerdict(rawVerdict)
+    } catch {
+      // Missing verdicts do not block a real merge from being pushed.
+    } finally {
+      rmSync(verdictPath, { force: true })
+    }
+
     await finishMerge(run, wt.path)
+    if (await conflictDiffEmpty(wt.path, opts.config.repo.baseBranch, run)) {
+      const classification = verdict?.verdict ? ` (${verdict.verdict})` : ''
+      const message = `base already contains the PR work; skipped the empty merge push${classification}`
+      log('warn', message)
+      return { ok: false, message, iteration, ...(verdict === undefined ? {} : { verdict }) }
+    }
     await pushConflictFix({
       cwd: wt.path,
       branch: wt.branch,
@@ -177,11 +222,17 @@ export async function resolveConflict(
     })
     const status = await opts.driver.getMergeStatus(opts.repoRoot, opts.pr.number)
     const ok = status === 'mergeable'
+    const classification =
+      verdict?.verdict && verdict.verdict !== 'RESOLVED'
+        ? `; agent verdict: ${verdict.verdict}`
+        : ''
     const message = ok
-      ? 'resolved and pushed; PR is mergeable'
-      : `pushed; the forge reports ${status}`
-    log(ok ? 'ok' : 'warn', message)
-    return { ok, message, iteration }
+      ? `resolved and pushed; PR is mergeable${classification}`
+      : `pushed; the forge reports ${status}${classification}`
+    const level =
+      ok && (verdict?.verdict === undefined || verdict.verdict === 'RESOLVED') ? 'ok' : 'warn'
+    log(level, message)
+    return { ok, message, iteration, ...(verdict === undefined ? {} : { verdict }) }
   } catch (err) {
     const message = errMsg(err)
     log('error', message)

@@ -213,6 +213,9 @@ export class ClaudeHarness implements Harness {
     if (opts.model) argv.push('--model', opts.model)
     if (opts.systemPrompt) argv.push('--append-system-prompt', opts.systemPrompt)
     argv.push('--disable-slash-commands')
+    // A repo's .claude/settings.json hooks (bd prime on SessionStart) are
+    // written for the operator's sessions, not for workers.
+    argv.push('--settings', JSON.stringify({ disableAllHooks: true }))
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-skip-permissions')

@@ -59,6 +59,16 @@ const RUNNER = {
       error: null,
       counters: [],
       detail: 'scanned 3 PRs',
+      status: 'active',
+      runs: 2,
+      successes: 1,
+      failures: 1,
+      nextRunAt: 1_700_000_004_000,
+      intervalMs: 4_000,
+      log: [
+        { ts: 1_700_000_000_000, message: 'run 2 started', level: 'info' },
+        { ts: 1_700_000_001_000, message: 'PR #12: failed to read comments', level: 'error' },
+      ],
     },
   ],
 }
@@ -125,6 +135,26 @@ describe('App', () => {
       expect(frame).toContain('mergeable')
       expect(frame).toContain('Stuck task')
       expect(frame).toContain('needs_human')
+    } finally {
+      instance.unmount()
+    }
+  })
+
+  test('opens a watcher activity log and returns to the overview', async () => {
+    globalThis.fetch = streamMock(EVENTS)
+
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    try {
+      await waitFor(() => (instance.lastFrame() ?? '').includes('mention-watcher'))
+      instance.stdin.write('\r')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('activity log'))
+      const frame = instance.lastFrame() ?? ''
+      expect(frame).toContain('2 runs')
+      expect(frame).toContain('run 2 started')
+      expect(frame).toContain('PR #12: failed to read comments')
+
+      instance.stdin.write('\u001b')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
     } finally {
       instance.unmount()
     }

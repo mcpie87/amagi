@@ -70,6 +70,14 @@ export type WorkerActivity = {
   /** Tick cadence in ms. */
   intervalMs: number
   status: WorkerStatus
+  /** Recent run and event messages, newest entries last. */
+  log?: WorkerLogEntry[]
+}
+
+export type WorkerLogEntry = {
+  ts: number
+  message: string
+  level: 'info' | 'error'
 }
 
 /** One named counter a worker reports (e.g. scanned, responded, resolved). */

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { writeFileSync } from 'node:fs'
 import { Config } from './config.ts'
 import { type ConflictLogLevel, resolveConflict } from './conflict.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
@@ -14,6 +15,7 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
     calls.push(cmd)
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd[1] === 'diff') return { exitCode: 1, stdout: '', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls }
@@ -69,17 +71,26 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
-/** A merge into the PR worktree that always conflicts and leaves an unmerged file. */
+/** A merge into the PR worktree that conflicts until the agent resolves the file. */
+let unmergedReported = false
 const conflicted = (c: Call): ExecResult | undefined => {
-  if (c.includes('MERGE_HEAD')) return ok('')
-  if (c.includes('diff')) return ok('src/a.txt\n')
+  if (c.includes('MERGE_HEAD')) return ok('merge-head')
+  if (c.includes('rev-parse')) return fail('')
   if (c.includes('merge')) return fail('conflict')
+  if (c.includes('--diff-filter=U')) {
+    if (unmergedReported) return ok('')
+    unmergedReported = true
+    return ok('src/a.txt\n')
+  }
   return undefined
 }
 
 const emptyEvents = async function* (): AsyncGenerator<never> {}
 
-function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
+function fakeHarness(
+  over: Partial<AgentOutcome> = {},
+  onStart?: (opts: AgentStartOptions) => void,
+): Harness {
   const outcome: AgentOutcome = {
     exitCode: 0,
     ok: true,
@@ -99,7 +110,10 @@ function fakeHarness(over: Partial<AgentOutcome> = {}): Harness {
   }
   return {
     kind: 'fake',
-    start: (_opts: AgentStartOptions) => process,
+    start: (opts: AgentStartOptions) => {
+      onStart?.(opts)
+      return process
+    },
     resume: () => process,
     listModels: async () => [],
     listEfforts: async () => [],
@@ -113,6 +127,7 @@ const config = () =>
   })
 
 beforeEach(() => {
+  unmergedReported = false
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
 })
@@ -151,17 +166,30 @@ describe('resolveConflict', () => {
     expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
   })
 
-  test('dispatches the agent, commits the merge, pushes the fix, and reports the merge status', async () => {
-    let diffed = 0
+  test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
     const started: string[] = []
+    let reflogCalls = 0
     const { exec, calls } = fake((c) => {
-      if (c.includes('MERGE_HEAD')) return ok('')
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
-      if (c.includes('diff')) return diffed++ === 0 ? ok('src/a.txt\n') : ok('')
+      if (c.includes('--diff-filter=U')) {
+        if (unmergedReported) return ok('')
+        unmergedReported = true
+        return ok('src/a.txt\n')
+      }
+      if (c.includes('reflog')) {
+        reflogCalls++
+        return ok(
+          reflogCalls === 1
+            ? 'aaa checkout: initial\n'
+            : 'bbb reset: unexpected\naaa checkout: initial\n',
+        )
+      }
       return undefined
     })
     const logs: { level: ConflictLogLevel; text: string }[] = []
+    const bypassed: string[][] = []
     const driver = fakeDriver()
     const result = await resolveConflict({
       repoRoot: '/repo',
@@ -175,11 +203,11 @@ describe('resolveConflict', () => {
         return fakeHarness()
       },
       onLog: (level, text) => logs.push({ level, text }),
+      onGitBypassed: (entries) => bypassed.push(entries),
     })
 
     expect(result.ok).toBe(true)
     expect(started).toEqual(['claude'])
-    expect(calls).toContainEqual(['git', 'commit', '--no-edit'])
     expect(calls).toContainEqual([
       'git',
       'push',
@@ -187,32 +215,109 @@ describe('resolveConflict', () => {
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
     expect(driver.calls).toContain(7)
-    expect(result.iteration).toBe(1)
     expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
+    expect(bypassed).toEqual([['bbb reset: unexpected']])
   })
 
-  test('re-dispatches with the file list when unmerged paths remain, then parks the task at needs_human when iterations run out', async () => {
-    const { exec } = fake((c) => {
+  test('blocks an empty merge diff regardless of the agent verdict', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
-      if (c.includes('diff')) return ok('src/a.txt\nsrc/b.txt\n')
+      if (c.includes('--diff-filter=U')) {
+        if (unmergedReported) return ok('')
+        unmergedReported = true
+        return ok('src/a.txt\n')
+      }
+      if (c[1] === 'diff') return ok('')
       return undefined
     })
-    const logs: string[] = []
+    let verdictPath = ''
     const result = await resolveConflict({
       repoRoot: '/repo',
       repoName: 'amagi',
       pr: pr(),
-      config: Config.parse({ repo: { baseBranch: 'main', worktreeRoot: '/wt' } }),
+      config: config(),
       driver: fakeDriver(),
       exec,
-      makeHarnessFn: () => fakeHarness(),
-      onLog: (_level, text) => logs.push(text),
+      makeHarnessFn: () =>
+        fakeHarness({}, (opts) => {
+          const found = opts.prompt.match(/Verdict file: (.+)/)
+          verdictPath = found?.[1] ?? ''
+          writeFileSync(
+            verdictPath,
+            'CLOSE TASK\nREASONING:\nBase already has it.\nPROPOSAL:\nClose am-1.',
+          )
+        }),
     })
 
     expect(result.ok).toBe(false)
-    expect(result.message).toContain('unmerged paths remain')
-    expect(result.message).toContain('needs_human')
+    expect(result.message).toContain('skipped the empty merge push')
+    expect(result.verdict?.verdict).toBe('CLOSE TASK')
+    expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('pushes a real merge even when the agent verdict is not resolved', async () => {
+    const { exec, calls } = fake(conflicted)
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () =>
+        fakeHarness({}, (opts) => {
+          const found = opts.prompt.match(/Verdict file: (.+)/)
+          writeFileSync(
+            found?.[1] ?? '',
+            'NEW TASK\nREASONING:\nBase changed it.\nPROPOSAL:\nTrack remainder.',
+          )
+        }),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.verdict?.verdict).toBe('NEW TASK')
+    expect(result.message).toContain('agent verdict: NEW TASK')
+    expect(calls).toContainEqual([
+      'git',
+      'push',
+      'origin',
+      'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
+    ])
+  })
+
+  test('re-dispatches unresolved paths until the agent resolves them, then the runner commits', async () => {
+    let diffPass = 0
+    let launches = 0
+    const { exec, calls } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return fail('conflict')
+      if (c.includes('--diff-filter=U')) {
+        diffPass++
+        return ok(diffPass <= 2 ? 'src/a.txt\n' : '')
+      }
+      if (c.includes('reflog')) return ok('same head\n')
+      return undefined
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness()
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(launches).toBe(2)
+    expect(result.iteration).toBe(2)
+    expect(calls).toContainEqual(['git', 'commit', '--no-edit'])
   })
 
   test('reports a failed agent without pushing', async () => {

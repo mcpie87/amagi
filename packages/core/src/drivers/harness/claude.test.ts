@@ -145,6 +145,13 @@ describe('ClaudeHarness argv', () => {
     expect(new ClaudeHarness().argv(base, 'sess-42')).toContain('--disable-slash-commands')
   })
 
+  test('repo hooks are disabled so session-start context does not reach workers', () => {
+    const argv = new ClaudeHarness().argv(base, null)
+    expect(JSON.parse(argv[argv.indexOf('--settings') + 1] ?? '')).toEqual({
+      disableAllHooks: true,
+    })
+  })
+
   test('bypass drops the allowlist entirely', () => {
     const argv = new ClaudeHarness().argv({ ...base, permissions: 'bypass' }, null)
     expect(argv).toContain('--dangerously-skip-permissions')

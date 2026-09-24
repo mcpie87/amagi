@@ -47,6 +47,9 @@ function fakeExec(): Exec {
       unmerged = true
       return { exitCode: 1, stdout: '', stderr: 'conflict' }
     }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
+      return { exitCode: 1, stdout: '', stderr: '' }
+    }
     if (cmd.includes('--diff-filter=U')) {
       const stdout = unmerged ? 'src/a.ts\n' : ''
       unmerged = false

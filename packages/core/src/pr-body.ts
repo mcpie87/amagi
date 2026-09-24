@@ -75,6 +75,34 @@ function splitDescription(description: string): {
   return { summary, howToUse, conclusion }
 }
 
+function renderSections(howToUse: string | null, conclusion: string | null): string {
+  const parts: string[] = []
+  if (howToUse !== null) parts.push(`### How to use\n\n${howToUse}`)
+  if (conclusion !== null) parts.push(`### Conclusion\n\n${conclusion}`)
+  return parts.join('\n\n')
+}
+
+/**
+ * Moves the `### How to use` / `### Conclusion` sections the agent ended its
+ * final message with into the task description, replacing any an earlier
+ * attempt left there. Returns null when the summary carries neither; the
+ * returned summary is the message with the sections cut off.
+ */
+export function withAgentSections(
+  description: string,
+  finalMessage: string | null | undefined,
+): { description: string; summary: string } | null {
+  if (finalMessage === null || finalMessage === undefined) return null
+  const agent = splitDescription(finalMessage)
+  if (agent.howToUse === null && agent.conclusion === null) return null
+  const task = splitDescription(description)
+  const sections = renderSections(agent.howToUse, agent.conclusion)
+  return {
+    description: task.summary === '' ? sections : `${task.summary}\n\n${sections}`,
+    summary: agent.summary,
+  }
+}
+
 /** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
 const FILE_REF = /[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}/g
 

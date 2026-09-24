@@ -503,15 +503,28 @@ describe('Runner.runOnce', () => {
     expect(harness.calls[0]?.prompt).toContain('Implement this task')
   })
 
+  test('implement resumes the viability check session instead of starting cold', async () => {
+    const harness = new FakeHarness([writesAFile], {
+      events: [],
+      outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
+    })
+    await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(harness.calls[0]?.resumeFrom).toBe('verify-sess')
+    expect(harness.calls[0]?.prompt).toContain('viability check is over')
+    expect(harness.calls[0]?.prompt).toContain('Implement this task')
+  })
+
   test('a failed viability check defaults to continuing the task', async () => {
     const harness = new FakeHarness([writesAFile], {
-      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable' },
+      outcome: { ok: false, exitCode: 1, stderr: 'model unavailable', sessionId: 'broken' },
     })
     const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(result?.state).toBe('pr_open')
     expect(harness.verifyCalls).toHaveLength(1)
     expect(harness.calls).toHaveLength(1)
+    expect(harness.calls[0]?.resumeFrom).toBeNull()
   })
 
   test('an unparseable viability verdict defaults to continuing the task', async () => {
@@ -625,6 +638,29 @@ describe('Runner.runOnce', () => {
     expect(body.indexOf('### 🛠️ What changed')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
     expect(body).toContain('### 🧠 Conclusion')
     expect(body).toContain('Added `hello.txt` with a greeting.')
+  })
+
+  test('takes the sections from the final message and keeps them out of the summary', async () => {
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([{ ...TASK, description: '' }]),
+      new FakeHarness([
+        {
+          ...writesAFile,
+          outcome: {
+            summary:
+              'Wrote the greeting.\n\n### How to use\n\nRun `hello`\n\n### Conclusion\n\nOnly hello.txt changed.',
+          },
+        },
+      ]),
+      config(),
+      pr,
+    ).runOnce()
+
+    const body = pr.calls[0]?.body ?? ''
+    expect(body).toContain('### 📝 Summary\n\nWrote the greeting.\n\n### 🚀 How to use')
+    expect(body).toContain('### 🧠 Conclusion\n\nOnly `hello.txt` changed.')
+    expect(body.match(/Conclusion/g)).toHaveLength(1)
   })
 
   test('falls back to the run summary when the agent wrote no conclusion', async () => {
@@ -1872,5 +1908,55 @@ describe('Runner.drainGitBlocked', () => {
       await runner.drainGitBlocked(TASK.id)
       expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'git.blocked')).toBe(false)
     })
+  })
+})
+
+describe('Runner git bypass check', () => {
+  const realGit = (cwd: string, args: string[]): string => {
+    const r = Bun.spawnSync(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr.toString()}`)
+    return r.stdout.toString().trim()
+  }
+  const bypassed = () =>
+    store
+      .events({ taskId: TASK.id, limit: 999 })
+      .filter((e): e is Extract<StoredEvent, { type: 'git.bypassed' }> => e.type === 'git.bypassed')
+
+  test('a stash made past the shim lands as git.bypassed and the run still opens a PR', async () => {
+    const stashes: Turn = {
+      effect: (cwd) => {
+        writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+        realGit(cwd, ['add', 'hello.txt'])
+        realGit(cwd, ['stash'])
+        realGit(cwd, ['stash', 'pop'])
+      },
+      events: [{ kind: 'text', text: 'stashed to compare against base' }],
+    }
+    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([stashes])).runOnce()
+    expect(result?.state).toBe('pr_open')
+    const events = bypassed()
+    expect(events).toHaveLength(1)
+    expect(events[0]?.entries.some((line) => line.endsWith('reset: moving to HEAD'))).toBe(true)
+  })
+
+  test('a commit recorded as commit.created during the run is not a bypass', async () => {
+    const requestsCommit: Turn = {
+      effect: (cwd) => {
+        writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+        realGit(cwd, ['add', '-A'])
+        realGit(cwd, ['commit', '-q', '-m', 'checkpoint'])
+        store.append(TASK.id, {
+          type: 'commit.created',
+          sha: realGit(cwd, ['rev-parse', 'HEAD']),
+          subject: `[${TASK.id}] ${TASK.title}`,
+        })
+      },
+    }
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([requestsCommit]),
+    ).runOnce()
+    expect(result?.state).toBe('pr_open')
+    expect(bypassed()).toEqual([])
   })
 })

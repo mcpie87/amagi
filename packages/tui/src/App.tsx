@@ -52,7 +52,11 @@ function fmtCpu(ms: number): string {
 
 export type AppProps = { baseUrl: string; repo: string }
 
-type Screen = { name: 'overview' } | { name: 'queue' } | { name: 'detail'; taskId: string }
+type Screen =
+  | { name: 'overview' }
+  | { name: 'queue' }
+  | { name: 'detail'; taskId: string }
+  | { name: 'watcher'; watcherId: string }
 
 export function App({ baseUrl, repo }: AppProps) {
   const { exit } = useApp()
@@ -89,12 +93,22 @@ export function App({ baseUrl, repo }: AppProps) {
     )
   }
 
+  if (screen.name === 'watcher') {
+    const watcher = overview.runner?.workers?.find(
+      (w) => `${w.repo}/${w.name}` === screen.watcherId,
+    )
+    return (
+      <WatcherDetail watcher={watcher ?? null} onBack={() => setScreen({ name: 'overview' })} />
+    )
+  }
+
   if (screen.name === 'overview') {
     return (
       <OverviewScreen
         state={state}
         runner={overview.runner}
         ready={overview.ready}
+        onSelectWatcher={(watcherId) => setScreen({ name: 'watcher', watcherId })}
         onQueue={() => setScreen({ name: 'queue' })}
         onQuit={() => exit()}
       />
@@ -189,18 +203,30 @@ function OverviewScreen({
   state,
   runner,
   ready,
+  onSelectWatcher,
   onQueue,
   onQuit,
 }: {
   state: DashboardState
   runner: RunnerStatus | null
   ready: TrackerTask[]
+  onSelectWatcher: (watcherId: string) => void
   onQueue: () => void
   onQuit: () => void
 }) {
+  const [watcherIndex, setWatcherIndex] = useState(0)
+  const watchers = runner?.workers ?? []
   useInput((input, key) => {
     if (key.tab || input === 'o') onQueue()
     else if (input === 'q') onQuit()
+    else if (watchers.length > 0 && (key.upArrow || input === 'k')) {
+      setWatcherIndex((i) => Math.max(0, i - 1))
+    } else if (watchers.length > 0 && (key.downArrow || input === 'j')) {
+      setWatcherIndex((i) => Math.min(watchers.length - 1, i + 1))
+    } else if (watchers.length > 0 && key.return) {
+      const watcher = watchers[watcherIndex]
+      if (watcher !== undefined) onSelectWatcher(`${watcher.repo}/${watcher.name}`)
+    }
   })
 
   const running = runner?.running ?? []
@@ -256,15 +282,20 @@ function OverviewScreen({
       {runner?.workers !== undefined && runner.workers.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text bold>watchers</Text>
-          {runner.workers.map((w) => (
-            <Text key={`${w.repo}/${w.name}`} {...(w.error !== null ? { color: 'red' } : {})}>
-              {w.name} · {w.repo} · last run {w.lastRunAt === 0 ? 'never' : relTime(w.lastRunAt)}
-              {w.error === null
-                ? w.detail !== null && w.detail !== undefined
-                  ? ` · ${w.detail}`
-                  : w.counters.map((c) => ` · ${c.label} ${c.value}`).join('')
-                : ` · ${w.error}`}
-            </Text>
+          {watchers.map((w, i) => (
+            <Box key={`${w.repo}/${w.name}`} gap={1}>
+              <Text {...(i === watcherIndex ? { color: 'cyan' } : {})}>
+                {i === watcherIndex ? '>' : ' '}
+              </Text>
+              <Text {...(w.error !== null ? { color: 'red' } : {})}>
+                {w.name} · {w.repo} · last run {w.lastRunAt === 0 ? 'never' : relTime(w.lastRunAt)}
+                {w.error === null
+                  ? w.detail !== null && w.detail !== undefined
+                    ? ` · ${w.detail}`
+                    : w.counters.map((c) => ` · ${c.label} ${c.value}`).join('')
+                  : ` · ${w.error}`}
+              </Text>
+            </Box>
           ))}
         </Box>
       )}
@@ -318,7 +349,55 @@ function OverviewScreen({
       </Box>
 
       <Box marginTop={1}>
-        <Text dimColor>tab queue · q quit</Text>
+        <Text dimColor>
+          {watchers.length > 0 ? '↑/↓ select watcher · enter log · ' : ''}tab queue · q quit
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
+function WatcherDetail({
+  watcher,
+  onBack,
+}: {
+  watcher: NonNullable<RunnerStatus['workers']>[number] | null
+  onBack: () => void
+}) {
+  useInput((input, key) => {
+    if (key.escape || key.backspace || input === 'q') onBack()
+  })
+  return (
+    <Box flexDirection="column">
+      <Text bold>
+        {watcher === null ? 'watcher unavailable' : `${watcher.name} · ${watcher.repo}`}
+      </Text>
+      {watcher !== null && (
+        <>
+          <Text dimColor>
+            {watcher.status} · {watcher.runs} runs · {watcher.successes} successful ·{' '}
+            {watcher.failures} failed
+          </Text>
+          {watcher.error !== null && <Text color="red">current error: {watcher.error}</Text>}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>activity log</Text>
+            {(watcher.log ?? []).length === 0 ? (
+              <Text dimColor>no activity recorded yet</Text>
+            ) : (
+              (watcher.log ?? []).map((entry, i) => (
+                <Text
+                  key={`${entry.ts}-${i}`}
+                  {...(entry.level === 'error' ? { color: 'red' } : {})}
+                >
+                  {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+                </Text>
+              ))
+            )}
+          </Box>
+        </>
+      )}
+      <Box marginTop={1}>
+        <Text dimColor>updates every few seconds · esc back</Text>
       </Box>
     </Box>
   )
@@ -542,6 +621,7 @@ function TaskDetail({
             guard warnings
           </Text>
           {health.warnings.map((w, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: warnings are plain strings that may repeat.
             <Text key={i} wrap="truncate">
               {w}
             </Text>

@@ -74,6 +74,11 @@ export function startMentionWatcher({
   let responded = 0
   let runs = 0
   let failures = 0
+  let log: NonNullable<WorkerActivity['log']> = []
+  const logEvent = (message: string, level: 'info' | 'error' = 'info'): void => {
+    log = [...log, { ts: Date.now(), message, level }].slice(-100)
+    activity = { ...activity, log }
+  }
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'responded', value: responded },
@@ -96,6 +101,7 @@ export function startMentionWatcher({
 
   const { stop } = startPoller(intervalMs, async () => {
     runs++
+    logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
       lastRunAt: Date.now(),
@@ -119,6 +125,8 @@ export function startMentionWatcher({
         try {
           comments = await driver.listComments(root, pr.number)
         } catch (err) {
+          const message = `PR #${pr.number}: failed to read comments: ${errMsg(err)}`
+          logEvent(message, 'error')
           console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
           continue
         }
@@ -127,6 +135,8 @@ export function startMentionWatcher({
         const mentions = comments.filter(
           (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
         )
+        if (mentions.length > 0)
+          logEvent(`PR #${pr.number}: found ${mentions.length} new mention(s)`)
         for (const mention of mentions) {
           try {
             await respondToMention({
@@ -149,6 +159,8 @@ export function startMentionWatcher({
                         mentionId: mention.id,
                         ...c,
                       }),
+                    onGitBypassed: (entries) =>
+                      store.append(null, { type: 'git.bypassed', entries }),
                   }),
             })
             handled.add(mention.id)
@@ -156,11 +168,13 @@ export function startMentionWatcher({
             responded++
             respondedNow++
           } catch (err) {
+            logEvent(`PR #${pr.number}, mention ${mention.id}: ${errMsg(err)}`, 'error')
             console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
           }
         }
       }
       next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s)`
+      logEvent(`run ${runs} completed: ${next.detail}`)
     } catch (err) {
       failures++
       next.ok = false
@@ -168,9 +182,11 @@ export function startMentionWatcher({
       next.failures = failures
       next.successes = runs - failures
       next.detail = 'scan failed'
+      logEvent(`run ${runs} failed: ${next.error}`, 'error')
       console.warn(`mention watch: ${next.error}`)
     }
     next.counters = counters()
+    next.log = log
     activity = next
   })
 
