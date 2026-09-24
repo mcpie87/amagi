@@ -309,6 +309,12 @@ export class BeadsTracker implements Tracker {
     await this.bd(['unclaim', id])
   }
 
+  async reclaimExpiredClaims(): Promise<void> {
+    // bd's native lease reaper also finds claims made outside amagi or lost
+    // before the runner recorded its first event.
+    await this.bd(['reclaim'])
+  }
+
   async close(id: string, reason?: string): Promise<void> {
     await this.bd(reason === undefined ? ['close', id] : ['close', id, '--reason', reason])
   }

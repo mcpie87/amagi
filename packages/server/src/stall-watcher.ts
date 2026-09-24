@@ -300,6 +300,21 @@ export function startStallWatcher({
       recovered += reclaimed
       parked += parkedCount
 
+      if (tracker.reclaimExpiredClaims !== undefined) {
+        try {
+          await tracker.reclaimExpiredClaims()
+        } catch (err) {
+          const message = `tracker lease reclaim failed: ${errMsg(err)}`
+          failures++
+          next.ok = false
+          next.error = message
+          next.failures = failures
+          next.successes = runs - failures
+          logEvent(message, 'error')
+          console.warn(`stall recover: ${message}`)
+        }
+      }
+
       let doomCount = 0
       if (doom !== undefined) {
         try {
