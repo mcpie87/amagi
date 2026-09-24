@@ -7,8 +7,8 @@ import {
   errMsg,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
-  HarnessKind,
   HUMAN_ONLY_LABEL,
+  hasStaleMaxParallel,
   isTerminal,
   type LiveRun,
   makeHarness,
@@ -59,6 +59,7 @@ import {
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
+  WorkerOnBody,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
 
@@ -764,26 +765,17 @@ export function createApp({
         return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
       }
       const ws = resolveWorkspace(workspaces, runnerRepo)
-      const defs = Object.entries(ws.config.harness.definitions)
-      const harnesses = defs.map(([name, cfg]) => ({
-        name,
-        kind: cfg.kind,
-        ...(cfg.model === undefined ? {} : { model: cfg.model }),
-        ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
-      }))
-      const current = ws.config.harness.implement
       return c.json({
-        harnesses:
-          harnesses.length > 0
-            ? harnesses
-            : HarnessKind.options.map((kind) => ({ name: kind, kind })),
+        harnesses: ws.config.worker.map((worker) => ({
+          name: worker.name,
+          workerId: worker.id,
+          kind: worker.kind,
+          ...(worker.model === undefined ? {} : { model: worker.model }),
+          ...(worker.effort === undefined ? {} : { effort: worker.effort }),
+        })),
         models: HARDCODED_MODELS,
         efforts: HARDCODED_EFFORTS,
-        default: {
-          kind: current.kind,
-          ...(current.model === undefined ? {} : { model: current.model }),
-          ...(current.effort === undefined ? {} : { effort: current.effort }),
-        },
+        default: ws.config.worker.find((worker) => worker.enabled)?.id ?? null,
       })
     })
 
@@ -791,8 +783,8 @@ export function createApp({
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
       return c.json({
-        maxParallel: ws.config.loop.maxParallel,
         autoQueue: ws.config.loop.autoQueue,
+        staleMaxParallel: hasStaleMaxParallel(ws.root),
       })
     })
 
@@ -803,19 +795,8 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { maxParallel, autoQueue } = c.req.valid('json')
-        // Persist first so a restart keeps the value, then live-apply: the
-        // cached workspace config and, when this repo owns the runner, its
-        // capacity and automatic dispatch. In-flight runs are untouched, both
-        // gate and poll only affect new launches.
-        const patch: Record<string, unknown> = {}
-        if (maxParallel !== undefined) patch.maxParallel = maxParallel
-        if (autoQueue !== undefined) patch.autoQueue = autoQueue
-        writeConfig(ws.root, { loop: patch })
-        if (maxParallel !== undefined) {
-          ws.config.loop.maxParallel = maxParallel
-          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
-        }
+        const { autoQueue } = c.req.valid('json')
+        writeConfig(ws.root, { loop: { autoQueue } })
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           if (runner !== undefined && runnerRepo === repo) {
@@ -824,18 +805,23 @@ export function createApp({
             runner.setAutoQueue(autoQueue && workersEnabled)
           }
         }
-        return c.json({
-          maxParallel: ws.config.loop.maxParallel,
-          autoQueue: ws.config.loop.autoQueue,
-        })
+        return c.json({ autoQueue: ws.config.loop.autoQueue })
       },
     )
 
+    .patch('/api/workers/:id', valid('param', TaskIdParam), valid('json', WorkerOnBody), (c) => {
+      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const { id } = c.req.valid('param')
+      const { on } = c.req.valid('json')
+      runner.setWorkerOn(id, on)
+      return c.json({ id, on })
+    })
+
     .post('/api/runs', valid('json', RunBody), async (c) => {
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { taskId, harness, model, effort } = c.req.valid('json')
+      const { taskId, workerId, model, effort } = c.req.valid('json')
       const opts = {
-        ...(harness === undefined ? {} : { harness }),
+        ...(workerId === undefined ? {} : { workerId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
       }
@@ -1025,26 +1011,29 @@ export function createApp({
       },
     )
 
-    .post('/api/repos/:repo/run', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const runner = new Runner({
-        store: ws.store,
-        tracker: ws.tracker,
-        harness: makeHarness(ws.config.harness.implement),
-        config: ws.config,
-        repoRoot: ws.root,
-        repoName: ws.name,
-        ...(ws.forge === null ? {} : { forge: ws.forge }),
-      })
-      // A full agent run takes minutes, so the request returns immediately and
-      // the run reports through the repo's own event stream.
-      void runner.runOnce().catch((err) => {
-        const message = err instanceof Error ? err.message : String(err)
-        ws.store.append(null, { type: 'error', message, fatal: false })
-      })
-      return c.json({ repo, started: true }, 202)
-    })
+    .post(
+      '/api/repos/:repo/run',
+      valid('param', RepoParam),
+      (c, next) => {
+        resolveWorkspace(workspaces, c.req.valid('param').repo)
+        return next()
+      },
+      valid('json', RunBody),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        if (runner === undefined || runnerRepo !== repo) {
+          return c.json({ error: 'runner service is unavailable for this repository' }, 501)
+        }
+        const { taskId, workerId, model, effort } = c.req.valid('json')
+        const result = await runner.start(taskId, {
+          ...(workerId === undefined ? {} : { workerId }),
+          ...(model === undefined ? {} : { model }),
+          ...(effort === undefined ? {} : { effort }),
+        })
+        if (!result.ok) return c.json({ error: result.error }, result.status)
+        return c.json({ repo, taskId: result.taskId, started: true }, 202)
+      },
+    )
 
     .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')

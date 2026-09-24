@@ -45,8 +45,10 @@ export const serveCommand = defineCommand({
         // not inside a repo; the dashboard can onboard one
       }
     }
-    for (const w of migrateFleet()) {
-      console.log(`${bold('amagi')} created worker ${w.name} (${w.id}) on seat ${w.seat}`)
+    for (const worker of migrateFleet()) {
+      console.log(
+        `${bold('amagi')} created worker ${worker.name} (${worker.id}) on seat ${worker.seat}`,
+      )
     }
     const config = loadGlobalConfig()
     // Checked before the dashboard build so a second `amagi serve` fails in a

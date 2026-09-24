@@ -165,7 +165,7 @@ export const runCommand = defineCommand({
     once: { type: 'boolean', description: 'Work a single task and exit', default: true },
     harness: {
       type: 'string',
-      description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
+      description: 'Harness kind to use (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
     effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },

@@ -63,7 +63,7 @@ tui:
 # `just run -- --harness claude --model <model>` or `just run --harness claude`.
 [arg('model', long='model', help='model to pass to the harness')]
 [arg('effort', long='effort', help='reasoning effort to pass to the harness')]
-[arg('harness', long='harness', help='harness.definitions name or a kind (claude/codex/opencode)')]
+[arg('harness', long='harness', help='harness kind (claude/codex/opencode)')]
 run harness='' model='' effort='' *extra:
     bun run packages/cli/src/index.ts run \
         {{ if harness != '' { '--harness ' + harness } else { '' } }} \

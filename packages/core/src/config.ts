@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
-import { MAX_PARALLEL } from './limits.ts'
+import { MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
@@ -80,7 +80,7 @@ export const Config = z.object({
   /** The fleet: `[[worker]]` tables, global config only. */
   worker: z
     .array(WorkerConfig)
-    .max(MAX_PARALLEL)
+    .max(MAX_WORKERS)
     .default([])
     .refine((ws) => new Set(ws.map((w) => w.id)).size === ws.length, {
       message: 'worker ids must be unique',
@@ -129,7 +129,6 @@ export const Config = z.object({
     .prefault({}),
   loop: z
     .object({
-      maxParallel: z.number().int().min(1).max(MAX_PARALLEL).default(1),
       /** Extra attempts handed back to the implementer when project checks fail. */
       maxCheckRounds: z.number().int().min(0).default(2),
       /**
@@ -349,6 +348,14 @@ export type LoadedConfig = {
   sources: string[]
 }
 
+export function hasStaleMaxParallel(repoRoot: string): boolean {
+  const paths = [globalConfigPath(), repoConfigPath(repoRoot)]
+  return paths.some((path) => {
+    const raw = readToml(path)
+    return isPlainObject(raw.loop) && 'maxParallel' in raw.loop
+  })
+}
+
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
@@ -389,25 +396,24 @@ export function loadGlobalConfig(): Config {
 
 /**
  * One-time migration: with no `[[worker]]` tables in the global config,
- * synthesizes `loop.maxParallel` workers from `harness.implement` and writes
- * them there. Returns the created workers, empty when a fleet already exists.
+ * synthesizes one worker from `harness.implement` and writes it there.
+ * Returns the created worker, empty when a fleet already exists.
  */
 export function migrateFleet(): WorkerConfig[] {
   if ('worker' in readToml(globalConfigPath())) return []
   const config = loadGlobalConfig()
   const { kind, model, effort, seat } = config.harness.implement
-  const workers: WorkerConfig[] = []
-  for (let i = 1; i <= config.loop.maxParallel; i++) {
-    workers.push({
-      id: newWorkerId(workers.map((w) => w.id)),
-      name: `${HARNESS_LABEL[kind]} ${i}`,
+  const workers: WorkerConfig[] = [
+    {
+      id: newWorkerId([]),
+      name: `${HARNESS_LABEL[kind]} 1`,
       kind,
       ...(model === undefined ? {} : { model }),
       ...(effort === undefined ? {} : { effort }),
       seat: seat ?? kind,
       enabled: true,
-    })
-  }
+    },
+  ]
   writeGlobalConfig({ worker: workers })
   return workers
 }

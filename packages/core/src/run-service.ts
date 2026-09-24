@@ -1,4 +1,4 @@
-import { type Config, HarnessConfig } from './config.ts'
+import { type Config, HarnessConfig, type WorkerConfig } from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -39,8 +39,17 @@ export type RunnerStatus = {
   tasks: Record<string, RunnerTask>
   /** Whether automatic dispatch is on: ready tasks launch themselves on free slots. */
   autoQueue: boolean
+  fleet?: FleetWorkerStatus[]
   /** Activity of background workers (e.g. the mention watcher), when any. */
   workers?: WorkerActivity[]
+}
+
+export type FleetWorkerStatus = {
+  id: string
+  name: string
+  enabled: boolean
+  on: boolean
+  busy: boolean
 }
 
 /** Lifecycle of a background worker: active = ticking, idle = waiting on the first tick, off = stopped. */
@@ -87,12 +96,10 @@ export type StartResult = { ok: true; taskId: string } | { ok: false; status: 40
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }
 
 /**
- * Per-launch overrides for harness/model/effort. `harness` is a
- * harness.definitions name or a kind; model/effort override the chosen
- * harness. An omitted field falls back to config.harness.implement.
+ * Manual dispatch targets a named worker; model and effort may override its profile.
  */
 export type RunOptions = {
-  harness?: string
+  workerId?: string
   model?: string
   effort?: string
 }
@@ -102,8 +109,7 @@ export interface RunServiceApi {
   status(): Promise<RunnerStatus>
   start(taskId?: string, opts?: RunOptions): Promise<StartResult>
   stop(taskId: string): Promise<StopResult>
-  /** Live capacity change; only affects new launches, never in-flight runs. */
-  setMaxParallel(n: number): void
+  setWorkerOn(workerId: string, on: boolean): void
   /**
    * Skip the backoff of a task currently deferring an automatic retry and
    * start the next attempt immediately. 404 when the task runs elsewhere.
@@ -129,8 +135,6 @@ export type RunServiceOptions = {
    * Defaults to makeHarness; tests stub it to capture the resolved config.
    */
   makeHarness?: (cfg: Config['harness']['implement']) => Harness
-  /** Overrides config.loop.maxParallel, mainly for tests. */
-  maxParallel?: number
   /** Overrides config.loop.autoQueue, mainly for tests. */
   autoQueue?: boolean
   /** Overrides config.loop.autoQueueIdleSec, mainly for tests. */
@@ -146,10 +150,15 @@ export type RunServiceOptions = {
  * checked against the tracker before taking the task.
  */
 export class RunService implements RunServiceApi {
-  private capacity: number
   private readonly runs = new Map<
     string,
-    { runner: Runner; startedAt: number; done: Promise<RunOnceResult> }
+    {
+      runner: Runner
+      startedAt: number
+      done: Promise<RunOnceResult>
+      workerId: string
+      seat: string
+    }
   >()
   /** Serializes launches so two concurrent requests cannot claim the same task. */
   private launchQueue: Promise<void> = Promise.resolve()
@@ -160,22 +169,20 @@ export class RunService implements RunServiceApi {
   private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
   private autoQueuePolling = false
   private stopped = false
+  private readonly workerOn = new Map<string, boolean>()
 
   constructor(private readonly opts: RunServiceOptions) {
-    this.capacity = opts.maxParallel ?? opts.config.loop.maxParallel
+    for (const worker of opts.config.worker) this.workerOn.set(worker.id, false)
     this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
     this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
     this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
     if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
-  /**
-   * Live capacity change: `status()` and new launches read the new value, runs
-   * already in flight are untouched. The floor keeps a buggy caller from
-   * zeroing out the runner; the upper bound is enforced at the config/API layer.
-   */
-  setMaxParallel(n: number): void {
-    this.capacity = Math.max(1, n)
+  setWorkerOn(workerId: string, on: boolean): void {
+    if (this.opts.config.worker.some((worker) => worker.id === workerId && worker.enabled)) {
+      this.workerOn.set(workerId, on)
+    }
   }
 
   /**
@@ -219,7 +226,7 @@ export class RunService implements RunServiceApi {
     this.autoQueuePolling = true
     try {
       if (!this.autoQueue || this.stopped) return
-      const result = await this.start()
+      const result = await this.start(undefined, undefined, true)
       const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
       if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
     } finally {
@@ -234,7 +241,8 @@ export class RunService implements RunServiceApi {
     const tasks: Record<string, RunnerTask> = {}
     await Promise.all(
       running.map(async (id) => {
-        const pid = this.runs.get(id)?.runner.currentPid()
+        const entry = this.runs.get(id)
+        const pid = entry?.runner.currentPid()
         if (pid !== null && pid !== undefined && pid > 0) {
           resources[id] = await processTreeStats(pid)
         }
@@ -244,7 +252,9 @@ export class RunService implements RunServiceApi {
           title: task?.title ?? id,
           // The configured harness is known at launch; only the model/effort
           // wait for the agent run to report them.
-          harness: this.opts.harness.kind,
+          harness:
+            this.opts.config.worker.find((worker) => worker.id === entry?.workerId)?.kind ??
+            this.opts.harness.kind,
           model: agent?.model ?? null,
           effort: agent?.effort ?? null,
         }
@@ -253,18 +263,25 @@ export class RunService implements RunServiceApi {
     for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
-      available: running.length < this.capacity,
-      capacity: this.capacity,
+      available: this.availableCapacity(true) > 0,
+      capacity: this.availableCapacity(true),
       running,
       startedAt,
       resources,
       tasks,
       autoQueue: this.autoQueue,
+      fleet: this.opts.config.worker.map((worker) => ({
+        id: worker.id,
+        name: worker.name,
+        enabled: worker.enabled,
+        on: this.workerOn.get(worker.id) === true,
+        busy: this.runsBySeat().has(this.workerSeat(worker)),
+      })),
     }
   }
 
-  start(taskId?: string, opts?: RunOptions): Promise<StartResult> {
-    const result = this.launchQueue.then(() => this.tryStart(taskId, opts))
+  start(taskId?: string, opts?: RunOptions, automatic = false): Promise<StartResult> {
+    const result = this.launchQueue.then(() => this.tryStart(taskId, opts, automatic))
     this.launchQueue = result.then(
       () => undefined,
       () => undefined,
@@ -272,68 +289,71 @@ export class RunService implements RunServiceApi {
     return result
   }
 
-  /**
-   * Resolves the run's harness config from the launch overrides: a named
-   * definition or kind wins over the configured default, then model/effort
-   * override the result. `changed` is true when any override was given, so the
-   * launcher can swap in a harness built for it instead of the default.
-   */
+  /** Resolves the selected worker profile into the harness config for a run. */
   private resolveHarness(
+    worker: WorkerConfig,
     opts: RunOptions = {},
-  ):
-    | { ok: true; implement: Config['harness']['implement']; changed: boolean }
-    | { ok: false; status: 409; error: string } {
+  ): Config['harness']['implement'] {
     const { config } = this.opts
-    let base = config.harness.implement
-    if (opts.harness !== undefined) {
-      const named = config.harness.definitions[opts.harness]
-      if (named !== undefined) {
-        base = named
-      } else {
-        // A bare kind keeps the implement harness's bin (e.g. a NixOS
-        // `opencode-unconfined` wrapper), not the harness's stock binary.
-        const implement = config.harness.implement
-        if (implement.kind === opts.harness) {
-          base = implement
-        } else {
-          const parsed = HarnessConfig.safeParse({ kind: opts.harness })
-          if (!parsed.success) {
-            return {
-              ok: false,
-              status: 409,
-              error: `unknown harness "${opts.harness}"; use a harness.definitions name or claude/codex/opencode`,
-            }
-          }
-          base = parsed.data
-        }
-      }
+    const base =
+      worker.kind === config.harness.implement.kind
+        ? config.harness.implement
+        : HarnessConfig.parse({ kind: worker.kind })
+    return {
+      ...base,
+      model: opts.model ?? worker.model ?? base.model,
+      effort: opts.effort ?? worker.effort ?? base.effort,
+      seat: worker.seat ?? worker.kind,
     }
-    if (opts.model !== undefined) base = { ...base, model: opts.model }
-    if (opts.effort !== undefined) base = { ...base, effort: opts.effort }
-    const changed =
-      opts.harness !== undefined || opts.model !== undefined || opts.effort !== undefined
-    return { ok: true, implement: base, changed }
   }
 
-  private async tryStart(taskId?: string, opts?: RunOptions): Promise<StartResult> {
+  private workerSeat(worker: WorkerConfig): string {
+    return worker.seat ?? worker.kind
+  }
+
+  private runsBySeat(): Map<string, string> {
+    return new Map([...this.runs].map(([id, run]) => [run.seat, id]))
+  }
+
+  private availableWorkers(automatic: boolean): WorkerConfig[] {
+    const busy = this.runsBySeat()
+    return this.opts.config.worker.filter(
+      (worker) =>
+        worker.enabled &&
+        (!automatic || this.workerOn.get(worker.id) === true) &&
+        !busy.has(this.workerSeat(worker)),
+    )
+  }
+
+  private availableCapacity(automatic: boolean): number {
+    return new Set(this.availableWorkers(automatic).map((worker) => this.workerSeat(worker))).size
+  }
+
+  private async tryStart(
+    taskId?: string,
+    opts?: RunOptions,
+    automatic = false,
+  ): Promise<StartResult> {
     if (taskId !== undefined && this.runs.has(taskId)) {
       return { ok: false, status: 409, error: `task ${taskId} is already running` }
     }
-    if (this.runs.size >= this.capacity) {
-      return {
-        ok: false,
-        status: 409,
-        error: `runner at capacity (${this.runs.size}/${this.capacity})`,
-      }
+    const selected =
+      opts?.workerId === undefined
+        ? this.availableWorkers(automatic)[0]
+        : this.opts.config.worker.find((worker) => worker.id === opts.workerId)
+    if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
+    if (!selected.enabled)
+      return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
+    if (automatic && this.workerOn.get(selected.id) !== true) {
+      return { ok: false, status: 409, error: `worker ${selected.id} is off` }
     }
-    const resolved = this.resolveHarness(opts)
-    if (!resolved.ok) return resolved
-    const { implement, changed } = resolved
+    if (this.runsBySeat().has(this.workerSeat(selected))) {
+      return { ok: false, status: 409, error: `worker ${selected.id} seat is busy` }
+    }
+    const implement = this.resolveHarness(selected, opts)
     // Difficulty gating reads the model the worker would actually run, so the
     // override config (not the stored default) is what gates the claim.
-    const runConfig = changed
-      ? { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }
-      : this.opts.config
+    const runConfig = { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }
     if (taskId !== undefined) {
       const ready = await this.opts.tracker.ready()
       const target = ready.find((t) => t.id === taskId)
@@ -346,7 +366,7 @@ export class RunService implements RunServiceApi {
       }
       const task = await this.opts.tracker.claim(taskId)
       if (task === null) return { ok: false, status: 409, error: 'no ready task to claim' }
-      this.launch(task, implement, changed)
+      this.launch(task, selected, implement)
       return { ok: true, taskId: task.id }
     }
     const skipped: string[] = []
@@ -360,7 +380,7 @@ export class RunService implements RunServiceApi {
       const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''
       return { ok: false, status: 409, error: `no ready task to claim${detail}` }
     }
-    this.launch(task, implement, changed)
+    this.launch(task, selected, implement)
     return { ok: true, taskId: task.id }
   }
 
@@ -385,22 +405,20 @@ export class RunService implements RunServiceApi {
 
   private launch(
     task: TrackerTask,
-    implement?: Config['harness']['implement'],
-    changed = false,
+    worker: WorkerConfig,
+    implement: Config['harness']['implement'],
   ): void {
-    const { store, tracker, harness, config, repoRoot, repoName, exec, forge } = this.opts
+    const { store, tracker, config, repoRoot, repoName, exec, forge } = this.opts
     const makeHarnessFn = this.opts.makeHarness ?? makeHarness
+    const harness =
+      makeHarnessFn === makeHarness && implement.kind === config.harness.implement.kind
+        ? this.opts.harness
+        : makeHarnessFn(implement)
     const runner = new Runner({
       store,
       tracker,
-      // Without overrides the runner keeps the default harness the service was
-      // built with (tests inject fakes); with overrides it is built from the
-      // resolved config so a picked kind/model/effort actually take effect.
-      harness: changed && implement !== undefined ? makeHarnessFn(implement) : harness,
-      config:
-        changed && implement !== undefined
-          ? { ...config, harness: { ...config.harness, implement } }
-          : config,
+      harness,
+      config: { ...config, harness: { ...config.harness, implement } },
       repoRoot,
       repoName,
       // A server-side run has the ask and git-request channels to POST to.
@@ -408,7 +426,8 @@ export class RunService implements RunServiceApi {
       exec,
       forge,
     })
+    const seat = this.workerSeat(worker)
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
-    this.runs.set(task.id, { runner, startedAt: Date.now(), done })
+    this.runs.set(task.id, { runner, startedAt: Date.now(), done, workerId: worker.id, seat })
   }
 }

@@ -1,5 +1,4 @@
-import { MAX_PARALLEL } from '@amagi/core/limits'
-import { type FormEvent, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
@@ -44,55 +43,20 @@ function Appearance() {
 
 export function SettingsView() {
   const { selected } = useDashboard()
-  const [value, setValue] = useState('')
   const [loaded, setLoaded] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  const [staleMaxParallel, setStaleMaxParallel] = useState(false)
 
   useEffect(() => {
     if (selected === null) return
     setLoaded(false)
-    setMessage(null)
     fetch(`${apiBase}/api/repos/${selected}/settings`)
-      .then((res) => (res.ok ? (res.json() as Promise<{ maxParallel: number }>) : null))
+      .then((res) => (res.ok ? (res.json() as Promise<{ staleMaxParallel: boolean }>) : null))
       .then((body) => {
         setLoaded(true)
-        setValue(body === null ? '' : String(body.maxParallel))
+        setStaleMaxParallel(body?.staleMaxParallel ?? false)
       })
       .catch(() => setLoaded(true))
   }, [selected])
-
-  const save = async (event: FormEvent) => {
-    event.preventDefault()
-    if (selected === null || busy) return
-    const n = Number(value)
-    if (!Number.isInteger(n) || n < 1 || n > MAX_PARALLEL) {
-      setMessage({
-        kind: 'error',
-        text: `workers must be an integer between 1 and ${MAX_PARALLEL}`,
-      })
-      return
-    }
-    setBusy(true)
-    setMessage(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${selected}/settings`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ maxParallel: n }),
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null
-        setMessage({ kind: 'error', text: body?.error ?? `HTTP ${res.status}` })
-        return
-      }
-      setMessage({ kind: 'ok', text: `saved: up to ${n} concurrent workers` })
-    } catch {
-      setMessage({ kind: 'error', text: 'could not reach the amagi server' })
-    } finally {
-      setBusy(false)
-    }
-  }
 
   return (
     <section className="max-w-xl">
@@ -101,41 +65,16 @@ export function SettingsView() {
       {selected === null ? (
         <p className="mt-6 text-fg-faint">no repository selected</p>
       ) : (
-        <form onSubmit={save} className="mt-6 rounded-lg border border-line bg-surface p-4">
-          <label htmlFor="max-workers" className="mb-1 block text-sm text-fg-muted">
-            Concurrent workers
-          </label>
-          <p className="mb-3 text-sm text-fg-faint">
-            How many tasks run at once for {selected}. Applied live; in-flight runs are unaffected.
+        <>
+          <p className="mt-6 text-sm text-fg-faint">
+            Worker capacity comes from the configured fleet.
           </p>
-          <div className="flex items-center gap-2">
-            <input
-              id="max-workers"
-              type="number"
-              min={1}
-              max={MAX_PARALLEL}
-              step={1}
-              value={value}
-              disabled={!loaded}
-              onChange={(e) => setValue(e.target.value)}
-              className="w-28 rounded border border-line-strong bg-sunken px-3 py-1.5 text-sm"
-            />
-            <button
-              type="submit"
-              disabled={busy || !loaded}
-              className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-            >
-              Save
-            </button>
-          </div>
-          {message !== null && (
-            <p
-              className={`mt-3 text-sm ${message.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}
-            >
-              {message.text}
+          {loaded && staleMaxParallel && (
+            <p className="mt-3 text-sm text-amber-ink">
+              Notice: loop.maxParallel is ignored; configure workers in the global fleet.
             </p>
           )}
-        </form>
+        </>
       )}
     </section>
   )
