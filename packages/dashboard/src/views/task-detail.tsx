@@ -114,11 +114,24 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
     }
   }, [repo, issueId])
 
-  if (error !== null) return <p className="mt-6 text-sm text-red-ink">{error}</p>
-  if (issue === null) return <p className="mt-6 text-sm text-fg-faint">loading issue...</p>
   return (
-    <div className="mt-6">
-      <dl className="rounded-lg border border-line bg-surface px-4 py-3">
+    <div className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">Issue</h2>
+      {error !== null ? (
+        <p className="text-sm text-red-ink">{error}</p>
+      ) : issue === null ? (
+        <p className="text-sm text-fg-faint">loading issue...</p>
+      ) : (
+        <IssueBody issue={issue} />
+      )}
+    </div>
+  )
+}
+
+function IssueBody({ issue }: { issue: Issue }) {
+  return (
+    <>
+      <dl>
         <DetailRow
           label="priority"
           value={
@@ -148,7 +161,7 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
           <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
         </div>
       )}
-    </div>
+    </>
   )
 }
 
@@ -596,14 +609,17 @@ export function TaskDetailView() {
       </div>
       <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
 
+      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
+
+      <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+        {currentAttempt < 2 ? 'Attempt' : 'Attempts'}
+      </h2>
       <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
       {past && (
         <p className="mt-2 text-sm text-fg-muted">
           Viewing attempt #{attempt}, which was reset. Actions apply to the current attempt.
         </p>
       )}
-
-      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
       <SummaryPanel task={task} />
 
