@@ -569,6 +569,11 @@ textarea::placeholder {
   max-height: calc(13px * 1.6 * 5);
   overflow: hidden;
 }
+/* Five lines of body text (1rem at 1.5 line height). */
+.description-clamp {
+  max-height: calc(1rem * 1.5 * 5);
+  overflow: hidden;
+}
 .summary-markdown > :first-child {
   margin-top: 0;
 }

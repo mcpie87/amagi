@@ -19,7 +19,15 @@ import {
   statusLog,
 } from '@amagi/core/view'
 import { Link, useParams } from '@tanstack/react-router'
-import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { AgentLogView } from '../AgentLogView.tsx'
 import { apiBase } from '../api.ts'
 import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
@@ -115,16 +123,28 @@ function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) 
   }, [repo, issueId])
 
   return (
-    <div className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">Issue</h2>
-      {error !== null ? (
-        <p className="text-sm text-red-ink">{error}</p>
-      ) : issue === null ? (
-        <p className="text-sm text-fg-faint">loading issue...</p>
-      ) : (
-        <IssueBody issue={issue} />
+    <>
+      <div className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">Issue</h2>
+        {error !== null ? (
+          <p className="text-sm text-red-ink">{error}</p>
+        ) : issue === null ? (
+          <p className="text-sm text-fg-faint">loading issue...</p>
+        ) : (
+          <IssueBody issue={issue} />
+        )}
+      </div>
+      {issue !== null && (
+        <div className="mt-4 rounded-lg border border-line bg-surface px-4 py-4">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+            Description
+          </h2>
+          <Collapsible clampClass="description-clamp" noun="description">
+            <p className="whitespace-pre-wrap text-fg">{issue.description || 'No description.'}</p>
+          </Collapsible>
+        </div>
       )}
-    </div>
+    </>
   )
 }
 
@@ -147,12 +167,6 @@ function IssueBody({ issue }: { issue: Issue }) {
       </dl>
       <Blockers issue={issue} />
       <Unblocks issue={issue} />
-      <div className="mt-6">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-          Description
-        </h2>
-        <p className="whitespace-pre-wrap text-fg">{issue.description || 'No description.'}</p>
-      </div>
       {issue.acceptanceCriteria !== null && (
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
@@ -165,17 +179,45 @@ function IssueBody({ issue }: { issue: Issue }) {
   )
 }
 
-/** Why a task stopped, in plain language, when the operator actually needs it. */
-function SummaryPanel({ task }: { task: ProjectedTask }) {
+/** Clips its content to `clampClass` with a toggle that only shows when the content overflows. */
+function Collapsible({
+  clampClass,
+  noun,
+  children,
+}: {
+  clampClass: string
+  noun: string
+  children: ReactNode
+}) {
   const [expanded, setExpanded] = useState(false)
   const [overflows, setOverflows] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
-  // Measured only while clamped: expanded, scrollHeight equals clientHeight.
+  // Measured on every render, and only while clamped: expanded, scrollHeight
+  // equals clientHeight and the toggle would vanish.
   useLayoutEffect(() => {
-    void task.statusReason
     const el = bodyRef.current
     if (el !== null && !expanded) setOverflows(el.scrollHeight > el.clientHeight)
-  }, [task.statusReason, expanded])
+  })
+  return (
+    <>
+      <div ref={bodyRef} className={expanded ? undefined : clampClass}>
+        {children}
+      </div>
+      {overflows && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="mt-1 text-sm text-sky-ink hover:underline"
+        >
+          {expanded ? 'show less' : `show full ${noun}`}
+        </button>
+      )}
+    </>
+  )
+}
+
+/** Why a task stopped, in plain language, when the operator actually needs it. */
+function SummaryPanel({ task }: { task: ProjectedTask }) {
   const needsHuman = task.state === 'needs_human'
   const done = task.state === 'done'
   if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
@@ -199,18 +241,9 @@ function SummaryPanel({ task }: { task: ProjectedTask }) {
         {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
       {task.statusReason !== null && (
-        <div ref={bodyRef} className={expanded ? undefined : 'summary-clamp'}>
+        <Collapsible clampClass="summary-clamp" noun="summary">
           <Markdown text={task.statusReason} />
-        </div>
-      )}
-      {overflows && (
-        <button
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          className="mt-1 text-sm text-sky-ink hover:underline"
-        >
-          {expanded ? 'show less' : 'show full summary'}
-        </button>
+        </Collapsible>
       )}
     </div>
   )
