@@ -112,9 +112,9 @@ export type RespondToMentionOptions = {
   driver: PrDriver
   /** Tracker used to post take-down reasons and log add-a-task responses; optional so callers without one still reply on the PR. */
   tracker?: Tracker
-  exec?: Exec
+  exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
-  makeHarnessFn?: typeof makeHarness
+  makeHarnessFn?: typeof makeHarness | undefined
   /** Called with live progress while a response is produced, for a status line. */
   onProgress?: (progress: MentionProgress) => void
   /** Called once classification settles, with the chosen kind and the raw reply. */

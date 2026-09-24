@@ -29,7 +29,7 @@ export const PRIORITY_LABELS = ['P0', 'P1', 'P2', 'P3', 'P4'] as const
 
 export type PrCheckOptions = {
   cwd: string
-  exec?: Exec
+  exec?: Exec | undefined
 }
 
 const GH_FIELDS =

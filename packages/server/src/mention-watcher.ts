@@ -28,8 +28,8 @@ export type MentionWatcherOptions = {
   store?: Store
   intervalMs?: number
   /** Test seams, forwarded to the mention responder. */
-  exec?: Exec
-  makeHarnessFn?: typeof makeHarness
+  exec?: Exec | undefined
+  makeHarnessFn?: typeof makeHarness | undefined
 }
 
 export type MentionWatcher = {
@@ -147,8 +147,8 @@ export function startMentionWatcher({
               config,
               driver,
               tracker,
-              ...(exec === undefined ? {} : { exec }),
-              ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+              exec,
+              makeHarnessFn,
               ...(store === undefined
                 ? {}
                 : {

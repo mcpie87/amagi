@@ -8,7 +8,7 @@ export type PrPollerOptions = {
   tracker: Tracker
   /** Repo the open PRs live in, so the forge CLI can resolve them. */
   cwd: string
-  intervalMs?: number
+  intervalMs?: number | undefined
 }
 
 export type PrPoller = {

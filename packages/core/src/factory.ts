@@ -30,17 +30,17 @@ export function makeHarness(config: Config['harness']['implement']): Harness {
   switch (config.kind) {
     case 'claude':
       return new ClaudeHarness({
-        ...(config.bin === undefined ? {} : { bin: config.bin }),
+        bin: config.bin,
         ...(config.seat === undefined ? {} : { seat: config.seat }),
       })
     case 'opencode':
       return new OpencodeHarness({
-        ...(config.bin === undefined ? {} : { bin: config.bin }),
+        bin: config.bin,
         ...(config.seat === undefined ? {} : { seat: config.seat }),
       })
     case 'codex':
       return new CodexHarness({
-        ...(config.bin === undefined ? {} : { bin: config.bin }),
+        bin: config.bin,
         ...(config.seat === undefined ? {} : { seat: config.seat }),
       })
     default:
@@ -63,8 +63,8 @@ export function harnessStartOpts(
   'model' | 'effort' | 'permissions' | 'allowedTools' | 'extraArgs' | 'seat'
 > {
   return {
-    ...(cfg.model === undefined ? {} : { model: cfg.model }),
-    ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
+    model: cfg.model,
+    effort: cfg.effort,
     ...(cfg.allowedTools === undefined ? {} : { allowedTools: cfg.allowedTools }),
     permissions: cfg.permissions,
     extraArgs: cfg.extraArgs,

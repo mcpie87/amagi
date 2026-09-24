@@ -122,8 +122,8 @@ export type RunServiceOptions = {
   config: Config
   repoRoot: string
   repoName: string
-  exec?: Exec
-  forge?: PrDriver
+  exec?: Exec | undefined
+  forge?: PrDriver | undefined
   /**
    * Builds the harness for a launch that overrides harness/model/effort.
    * Defaults to makeHarness; tests stub it to capture the resolved config.
@@ -405,8 +405,8 @@ export class RunService implements RunServiceApi {
       repoName,
       // A server-side run has the ask and git-request channels to POST to.
       channel: true,
-      ...(exec === undefined ? {} : { exec }),
-      ...(forge === undefined ? {} : { forge }),
+      exec,
+      forge,
     })
     const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
     this.runs.set(task.id, { runner, startedAt: Date.now(), done })

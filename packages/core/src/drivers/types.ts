@@ -62,12 +62,12 @@ export type CreateTrackerTask = {
 }
 
 export type UpdateTrackerTask = Partial<{
-  title: string
-  description: string
-  acceptanceCriteria: string | null
-  priority: number | null
-  labels: string[]
-  dependencies: { add: string[]; remove: string[] }
+  title: string | undefined
+  description: string | undefined
+  acceptanceCriteria: string | null | undefined
+  priority: number | null | undefined
+  labels: string[] | undefined
+  dependencies: { add: string[]; remove: string[] } | undefined
 }>
 
 export const CAPABILITY_WORDS: Record<keyof TrackerCapabilities, string> = {
@@ -135,9 +135,9 @@ export type AgentStartOptions = {
   /** Credential seat to hold for this process; defaults to the harness kind. */
   seat?: string
   systemPrompt?: string
-  model?: string
+  model?: string | undefined
   /** Reasoning effort, passed to the harness when the harness honors it. */
-  effort?: string
+  effort?: string | undefined
   permissions?: Permissions
   allowedTools?: readonly string[]
   env?: Record<string, string>

@@ -315,7 +315,7 @@ export class CodexTranslator {
 }
 
 export type CodexHarnessOptions = {
-  bin?: string
+  bin?: string | undefined
   seat?: string
 }
 
