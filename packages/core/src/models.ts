@@ -100,9 +100,9 @@ const TTL_MS = 24 * 60 * 60 * 1000
 type CacheEntry = { cachedAt: number; models: string[] }
 
 /**
- * Runs the harness's own model listing through a per-kind disk cache so the
- * interactive picker stays fast and works offline: a fresh cache wins, a
- * failed listing falls back to whatever is cached (even stale), and nothing
+ * Returns curated models for claude/codex. Other harnesses use a per-kind
+ * disk cache so the picker stays fast and works offline: a fresh cache wins,
+ * a failed listing falls back to whatever is cached (even stale), and nothing
  * is cached until a listing actually succeeds.
  */
 export async function listModelsCached(
@@ -110,8 +110,8 @@ export async function listModelsCached(
   list: () => Promise<string[]>,
   cacheDir = join(cacheHome(), 'amagi', 'models'),
 ): Promise<string[]> {
-  // Curated kinds are instant and offline already; a disk cache can only serve stale names.
-  if (kind in HARDCODED_MODELS) return list()
+  const curated = HARDCODED_MODELS[kind]
+  if (curated !== undefined) return [...curated]
   const file = join(cacheDir, `${kind}.json`)
   const read = (): CacheEntry | null => {
     if (!existsSync(file)) return null
