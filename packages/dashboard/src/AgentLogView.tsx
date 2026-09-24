@@ -16,6 +16,7 @@ const kindClass: Record<AgentLogLine['kind'], string> = {
   context: 'text-fg-dim',
   result: 'text-emerald-ink',
   error: 'text-red-ink',
+  status: 'text-fg-dim',
 }
 
 /**

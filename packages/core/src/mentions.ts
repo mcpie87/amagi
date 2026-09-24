@@ -156,6 +156,8 @@ class Progress {
           }
         } else if (event.kind === 'tool_use') {
           this.tool = event.name
+        } else if (event.kind === 'status') {
+          this.emit(event.message)
         }
         this.emit(label)
       }

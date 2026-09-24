@@ -144,7 +144,7 @@ test('a pr_open task is not recovered: no worker drives it', async () => {
   expect(store.task('bd-1')?.state).toBe('pr_open')
 })
 
-test('a stalled task whose tracker issue is closed is parked, not reclaimed', async () => {
+test('a stalled task whose tracker issue is closed is parked for human review', async () => {
   const store = new Store(openDatabase(':memory:'))
   const tracker = new FakeTracker()
   tracker.issueStatus = 'closed'
@@ -164,12 +164,57 @@ test('a stalled task whose tracker issue is closed is parked, not reclaimed', as
   expect(tracker.released).toEqual([])
   const task = store.task('bd-1')
   expect(task?.state).toBe('needs_human')
-  expect(task?.statusReason).toContain('already closed')
+  expect(task?.statusReason).toContain('closed remotely')
   expect(watcher.activity().detail).toBe('parked 1 unrecoverable task')
   expect(watcher.activity().ok).toBe(true)
   expect(watcher.activity().failures).toBe(0)
   const reclaimed = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'task.reclaimed')
   expect(reclaimed).toBeUndefined()
+  const stateEvents = store.events({ taskId: 'bd-1' }).filter((e) => e.type === 'task.state')
+  expect(stateEvents.at(-1)).toMatchObject({
+    type: 'task.state',
+    from: 'implementing',
+    to: 'needs_human',
+    reason: 'tracker issue was closed remotely; human review needed',
+  })
+})
+
+test('a task already parked for human review stays parked when its tracker issue is closed', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+  tracker.issueStatus = 'closed'
+  implementing(store)
+  store.append('bd-1', {
+    type: 'task.state',
+    from: 'implementing',
+    to: 'needs_human',
+    reason: 'previously parked',
+  })
+
+  const watcher = startStallWatcher({
+    repo: 'repo1',
+    store,
+    tracker,
+    timeoutMs: 60_000,
+    intervalMs: 10,
+  })
+  watchers.push(watcher)
+  await Bun.sleep(40)
+
+  expect(tracker.released).toEqual([])
+  expect(store.task('bd-1')?.state).toBe('needs_human')
+  expect(store.task('bd-1')?.statusReason).toBe('previously parked')
+  expect(watcher.activity().detail).toBe('no stalled tasks')
+  const stateEvents = store.events({ taskId: 'bd-1' }).filter((e) => e.type === 'task.state')
+  expect(stateEvents.at(-1)).toMatchObject({
+    type: 'task.state',
+    from: 'implementing',
+    to: 'needs_human',
+    reason: 'previously parked',
+  })
+  expect(stateEvents.filter((e) => e.to === 'needs_human')).toHaveLength(1)
+  expect(stateEvents.some((e) => e.to === 'done')).toBe(false)
+  expect(store.events({ taskId: 'bd-1' }).some((e) => e.type === 'task.reclaimed')).toBe(false)
 })
 
 test('a stalled task whose release fails is parked, not reclaimed', async () => {

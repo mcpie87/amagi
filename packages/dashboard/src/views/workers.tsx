@@ -149,11 +149,15 @@ function WatcherDetailDialog({
           ? `${PILL} bg-raised text-fg-muted ring-line`
           : `${PILL} bg-red-soft text-red-ink ring-red-edge`
   return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc already closes via onCancel; this only handles backdrop clicks.
     <dialog
       ref={dialogRef}
       onCancel={(event) => {
         event.preventDefault()
         onClose()
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
       }}
       className="watcher-dialog"
     >

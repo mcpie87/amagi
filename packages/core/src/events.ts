@@ -120,6 +120,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('context'), tokens: z.number().int() }),
   z.object({ kind: z.literal('result'), ok: z.boolean(), summary: z.string().optional() }),
   z.object({ kind: z.literal('error'), message: z.string() }),
+  z.object({ kind: z.literal('status'), message: z.string() }),
 ])
 export type AgentEvent = z.infer<typeof AgentEvent>
 
