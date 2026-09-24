@@ -82,7 +82,7 @@ function humanMs(ms: number): string {
  * to resume. Releasing the claim also makes any surviving (hung) runner
  * detect the lost lease and stop itself. A stalled task whose tracker issue
  * is already closed cannot be recovered (nothing to release, no worker will
- * ever take it), so it is parked in `needs_human` for a human to settle.
+ * ever take it), so it is parked in `needs_human` for review.
  *
  * The same tick also runs the doom-loop guard (`doom` option): a worker that
  * keeps heartbeating but never progresses (repeated identical tool calls,
@@ -206,6 +206,17 @@ export function startStallWatcher({
     return diffStaleSignal(task, nowMs)
   }
 
+  function parkClosedIssue(task: Pick<ProjectedTask, 'id' | 'state'>): void {
+    const reason = 'tracker issue was closed remotely; human review needed'
+    logEvent(`task ${task.id}: parked because tracker issue is closed`)
+    store.append(task.id, {
+      type: 'task.state',
+      from: task.state,
+      to: 'needs_human',
+      reason,
+    })
+  }
+
   async function scanDoomLoops(nowMs: number): Promise<number> {
     if (doom === undefined) return 0
     const active = store.tasks({ states: DOOM_STATES, limit: DOOM_SCAN_LIMIT })
@@ -262,13 +273,7 @@ export function startStallWatcher({
         }
         if (issue?.status === 'closed') {
           parkedCount++
-          logEvent(`task ${task.id}: parked because tracker issue is closed`, 'error')
-          store.append(task.id, {
-            type: 'task.state',
-            from: task.state,
-            to: 'needs_human',
-            reason: 'stall recovered: tracker issue is already closed',
-          })
+          parkClosedIssue(task)
           continue
         }
         try {
