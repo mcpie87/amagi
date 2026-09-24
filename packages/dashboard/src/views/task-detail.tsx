@@ -35,9 +35,7 @@ import {
   FileAsErrorButton,
   RecheckPrButton,
   ReclaimButton,
-  RequeueButton,
   ResetButton,
-  RetryButton,
   RetryNowButton,
   StopButton,
 } from './task-actions.tsx'
@@ -538,22 +536,6 @@ export function TaskDetailView() {
         <Badge state={task.state} />
         {selected !== null && !past && (
           <ReclaimButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            worktree={task.worktree}
-          />
-        )}
-        {selected !== null && !past && (
-          <RetryButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            worktree={task.worktree}
-          />
-        )}
-        {selected !== null && !past && (
-          <RequeueButton
             repo={selected}
             taskId={task.id}
             state={task.state}
