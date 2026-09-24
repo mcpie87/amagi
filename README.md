@@ -114,9 +114,10 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 ## The runner service
 
 `amagi serve` also hosts an operator-facing runner service. It reports
-availability and capacity (`GET /api/runner`), launches a specific ready task
-or the next ready one (`POST /api/runs`, with an optional `{ "taskId": ... }`
-body), and stops a run it owns (`POST /api/runs/:id/stop`). Stop is graceful:
+availability and capacity (`GET /api/repos/:repo/runner`), launches a specific
+ready task or the next ready one (`POST /api/repos/:repo/runs`, with an optional
+`{ "taskId": ... }` body), and stops a run it owns
+(`POST /api/repos/:repo/runs/:id/stop`). Stop is graceful:
 the owned agent process is killed, the tracker lease is released, and the task
 is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
@@ -124,7 +125,7 @@ server runs up to `loop.maxParallel` tasks at once and refuses launch requests
 that would exceed that or claim a task that is already running. The dashboard
 surfaces all of this from the task board and task detail pages.
 
-`GET /api/runner` also carries per-task resource usage for the runner, summed
+The repo-scoped runner endpoint also carries per-task resource usage, summed
 over each running task's whole agent process tree from `/proc` on Linux: resident
 memory (`rssBytes`), CPU time (`cpuMs`), and process count (`processes`), keyed
 by task id under `resources` plus the repo `name` the runner is bound to. The
@@ -342,8 +343,8 @@ amagi continue bd-1234 --harness opencode --model local/...   # same worktree, d
 
 `amagi continue` re-claims the task and drives it in the worktree and branch
 already recorded for it, so no work is lost. The same stop/restart flow is
-available over the API (`POST /api/tasks/:id/stop` and
-`POST /api/tasks/:id/reclaim`) for the dashboard.
+available over the API (`POST /api/repos/:repo/tasks/:id/stop` and
+`POST /api/repos/:repo/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 

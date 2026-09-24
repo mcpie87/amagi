@@ -57,7 +57,6 @@ import {
   RunBody,
   SettingsBody,
   StreamQuery,
-  TaskIdParam,
   TaskListQuery,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
@@ -69,9 +68,13 @@ export type ServerDeps = {
   runner?: RunServiceApi | undefined
   /** The repo key the runner is bound to, so settings apply live only to it. */
   runnerRepo?: string | undefined
-  /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
+  /** Per-repository server runner, including workspaces registered at runtime. */
+  runnerForRepo?: (repo: string) => RunServiceApi | undefined
+  /** Synchronizes runner instances after registry changes. */
+  syncRunners?: () => void
+  /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
-  /** Foreground CLI workers (`just run`) outside the server runner, merged into /api/runner. */
+  /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
@@ -188,6 +191,8 @@ export function createApp({
   notify = [],
   runner,
   runnerRepo,
+  runnerForRepo,
+  syncRunners,
   workers,
   liveRuns,
   chatHarnessFor,
@@ -203,11 +208,11 @@ export function createApp({
     }
     return chat
   }
-  // The legacy non-scoped stop route predates the repo registry; it targets the
-  // first registered workspace, which is the default repo for single-repo use.
-  const defaultStore = (): Store | null => {
-    const entry = workspaces.list()[0]
-    return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
+  const runnerFor = (repo: string): RunServiceApi | undefined => {
+    const service = runnerForRepo?.(repo)
+    if (service !== undefined) return service
+    if (runnerRepo !== undefined) return runnerRepo === repo ? runner : undefined
+    return workspaces.list().length === 1 ? runner : undefined
   }
   return new Hono()
 
@@ -264,6 +269,7 @@ export function createApp({
       } catch (err) {
         return c.json({ error: errMsg(err) }, 400)
       }
+      syncRunners?.()
       const ready = await workspaces.diagnose(entry)
       return c.json({ ...entry, ready }, 201)
     })
@@ -362,9 +368,11 @@ export function createApp({
     )
 
     .delete('/api/repos/:repo', valid('param', RepoParam), (c) => {
-      if (!workspaces.remove(c.req.valid('param').repo)) {
-        return c.json({ error: `unknown repository ${c.req.valid('param').repo}` }, 404)
+      const repo = c.req.valid('param').repo
+      if (!workspaces.remove(repo)) {
+        return c.json({ error: `unknown repository ${repo}` }, 404)
       }
+      syncRunners?.()
       return c.json({ ok: true })
     })
 
@@ -416,10 +424,10 @@ export function createApp({
       return c.json(await beads.eligibleEpics())
     })
 
-    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
-      const store = defaultStore()
-      if (store === null) return c.json({ error: 'no repository registered' }, 409)
-      const { id } = c.req.valid('param')
+    .post('/api/repos/:repo/tasks/:id/stop', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const { store } = ws
       const task = store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
       if (isTerminal(task.state)) {
@@ -434,6 +442,7 @@ export function createApp({
         to: 'cancelled',
         reason: 'operator interrupt',
       })
+      void runnerFor(repo)?.stop(id)
       return c.json({ task: store.task(id) })
     })
 
@@ -506,6 +515,7 @@ export function createApp({
       if (!canReset(task.state, task.worktree !== null)) {
         return c.json({ error: `task ${id} cannot be reset from state ${task.state}` }, 409)
       }
+      const runner = runnerFor(repo)
       if (runner !== undefined) {
         try {
           await runner.stop(id)
@@ -546,6 +556,7 @@ export function createApp({
       if (task.state !== 'retrying') {
         return c.json({ error: `task ${id} is not deferring a retry` }, 409)
       }
+      const runner = runnerFor(repo)
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
       const result = await runner.retryNow(id)
       if (!result.ok) return c.json({ error: result.error }, result.status)
@@ -698,6 +709,7 @@ export function createApp({
         // parks a live run in cancelled, releasing the tracker claim, so the
         // close below retires it without racing the run. A task not running on
         // this server's runner (CLI run, another server) is simply not stopped.
+        const runner = runnerFor(repo)
         if (runner !== undefined) {
           try {
             await runner.stop(id)
@@ -751,19 +763,24 @@ export function createApp({
       },
     )
 
-    .get('/api/runner', async (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      let status = await runner.status()
-      if (liveRuns !== undefined) status = await mergeLiveRuns(status, liveRuns())
+    .get('/api/repos/:repo/runner', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const service = runnerFor(repo)
+      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      let status = await service.status()
+      if (liveRuns !== undefined) {
+        status = await mergeLiveRuns(status, liveRuns(), undefined, repo)
+      }
       if (workers === undefined) return c.json(status)
-      return c.json({ ...status, workers: workers() })
+      return c.json({ ...status, workers: workers().filter((worker) => worker.repo === repo) })
     })
 
-    .get('/api/runner/options', (c) => {
-      if (runner === undefined || runnerRepo === undefined) {
+    .get('/api/repos/:repo/runner/options', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (runnerFor(repo) === undefined) {
         return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
       }
-      const ws = resolveWorkspace(workspaces, runnerRepo)
       const defs = Object.entries(ws.config.harness.definitions)
       const harnesses = defs.map(([name, cfg]) => ({
         name,
@@ -814,14 +831,15 @@ export function createApp({
         writeConfig(ws.root, { loop: patch })
         if (maxParallel !== undefined) {
           ws.config.loop.maxParallel = maxParallel
-          if (runner !== undefined && runnerRepo === repo) runner.setMaxParallel(maxParallel)
+          runnerFor(repo)?.setMaxParallel(maxParallel)
         }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
-          if (runner !== undefined && runnerRepo === repo) {
+          const service = runnerFor(repo)
+          if (service !== undefined) {
             const workersEnabled =
               workspaces.list().find((entry) => entry.key === repo)?.workers === true
-            runner.setAutoQueue(autoQueue && workersEnabled)
+            service.setAutoQueue(autoQueue && workersEnabled)
           }
         }
         return c.json({
@@ -831,23 +849,25 @@ export function createApp({
       },
     )
 
-    .post('/api/runs', valid('json', RunBody), async (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+    .post('/api/repos/:repo/runs', valid('param', RepoParam), valid('json', RunBody), async (c) => {
+      const { repo } = c.req.valid('param')
+      const service = runnerFor(repo)
+      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
       const { taskId, harness, model, effort } = c.req.valid('json')
-      const opts = {
+      const result = await service.start(taskId, {
         ...(harness === undefined ? {} : { harness }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
-      }
-      const result = await runner.start(taskId, opts)
+      })
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })
 
-    .post('/api/runs/:id/stop', valid('param', TaskIdParam), async (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { id } = c.req.valid('param')
-      const result = await runner.stop(id)
+    .post('/api/repos/:repo/runs/:id/stop', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const service = runnerFor(repo)
+      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const result = await service.stop(id)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId })
     })

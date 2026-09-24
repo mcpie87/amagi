@@ -90,7 +90,7 @@ test('registry participation flags gate auto-queue and reconcile pollers live', 
     repoPollerSupervisorIntervalMs: 10,
   })
   expect(autoQueueChanges).toEqual([false])
-  const endpoint = `http://127.0.0.1:${server.port}/api/runner`
+  const endpoint = `http://127.0.0.1:${server.port}/api/repos/repo1/runner`
   expect(((await (await fetch(endpoint)).json()) as { workers: unknown[] }).workers).toEqual([])
 
   ws.workspaces.updateParticipation('repo1', { workers: true, watchers: true })
@@ -132,7 +132,7 @@ test('watcher enable switches reconcile from config on the next supervisor scan'
     prConflictWatchIntervalMs: 60_000,
     stallWatchIntervalMs: 60_000,
   })
-  const endpoint = `http://127.0.0.1:${server.port}/api/runner`
+  const endpoint = `http://127.0.0.1:${server.port}/api/repos/repo1/runner`
   const names = async () =>
     ((await (await fetch(endpoint)).json()) as { workers: { name: string }[] }).workers.map(
       (w) => w.name,

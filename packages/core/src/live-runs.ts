@@ -8,7 +8,7 @@ import type { RunnerStatus, RunnerTask } from './run-service.ts'
  * One task being worked by a runner that lives outside the server's own
  * RunService: a foreground `amagi run` / `just run` CLI process. The CLI
  * records it here at claim time and drops it on finish; the server reads the
- * file on every /api/runner poll and merges the survivors into the worker
+ * file on every repo-scoped runner poll and merges the survivors into the worker
  * slots, so a worker the operator spawned in a terminal shows up in the
  * dashboard Workers section alongside server-launched ones.
  */
@@ -109,6 +109,7 @@ export async function mergeLiveRuns(
   status: RunnerStatus,
   runs: LiveRun[],
   path = liveRunsPath(),
+  repoKey?: string,
 ): Promise<RunnerStatus> {
   const alive = runs.filter((r) => pidAlive(r.pid))
   if (alive.length !== runs.length) {
@@ -118,7 +119,12 @@ export async function mergeLiveRuns(
       warn(err)
     }
   }
-  const live = alive.filter((r) => r.taskId !== '' && !status.running.includes(r.taskId))
+  const live = alive.filter(
+    (r) =>
+      (repoKey === undefined || r.repoKey === repoKey) &&
+      r.taskId !== '' &&
+      !status.running.includes(r.taskId),
+  )
   if (live.length === 0) return status
   const running = [...status.running, ...live.map((r) => r.taskId)]
   const startedAt: Record<string, number> = { ...status.startedAt }

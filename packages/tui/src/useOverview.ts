@@ -23,7 +23,7 @@ export function useOverview(baseUrl: string, repo: string): OverviewData {
     let alive = true
     const load = async (): Promise<void> => {
       const [runner, ready] = await Promise.all([
-        fetch(`${baseUrl}/api/runner`)
+        fetch(`${baseUrl}/api/repos/${repo}/runner`)
           .then((res) => (res.ok ? (res.json() as Promise<RunnerStatus>) : null))
           .catch(() => null),
         fetch(`${baseUrl}/api/repos/${repo}/ready-queue`)
