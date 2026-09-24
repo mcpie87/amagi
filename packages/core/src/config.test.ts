@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadConfig, watcherHarnessConfig, writeConfig } from './config.ts'
+import {
+  loadConfig,
+  loadGlobalConfig,
+  migrateFleet,
+  newWorkerId,
+  watcherHarnessConfig,
+  workerSeat,
+  writeConfig,
+  writeGlobalConfig,
+} from './config.ts'
 
 let home: string
 let repo: string
@@ -233,5 +242,84 @@ describe('writeConfig', () => {
   test('creates the repo config file when absent', () => {
     writeConfig(repo, { loop: { maxParallel: 3 } })
     expect(loadConfig(repo).config.loop.maxParallel).toBe(3)
+  })
+})
+
+describe('worker fleet', () => {
+  const fleet = [
+    {
+      id: 'w-aaaaaa',
+      name: 'Claude 1',
+      kind: 'claude',
+      model: 'claude-opus-5-5',
+      seat: 'personal',
+      enabled: true,
+    },
+    { id: 'w-bbbbbb', name: 'Codex 1', kind: 'codex', effort: 'high', enabled: false },
+  ] as const
+
+  test('round-trips through writeGlobalConfig', () => {
+    writeGlobal('[server]\nport = 9000\n')
+    writeGlobalConfig({ worker: fleet })
+    const config = loadGlobalConfig()
+    expect(config.worker).toEqual([...fleet])
+    expect(config.server.port).toBe(9000)
+    expect(loadConfig(repo).config.worker).toEqual([...fleet])
+  })
+
+  test('seat defaults to the harness kind', () => {
+    writeGlobalConfig({ worker: fleet })
+    expect(loadGlobalConfig().worker.map(workerSeat)).toEqual(['personal', 'codex'])
+  })
+
+  test('renaming a worker keeps its id', () => {
+    writeGlobalConfig({ worker: fleet })
+    const renamed = loadGlobalConfig().worker.map((w) =>
+      w.id === 'w-aaaaaa' ? { ...w, name: 'Main' } : w,
+    )
+    writeGlobalConfig({ worker: renamed })
+    expect(loadGlobalConfig().worker.map((w) => [w.id, w.name])).toEqual([
+      ['w-aaaaaa', 'Main'],
+      ['w-bbbbbb', 'Codex 1'],
+    ])
+  })
+
+  test('rejects duplicate worker ids', () => {
+    writeGlobalConfig({ worker: [fleet[0], { ...fleet[1], id: fleet[0].id }] })
+    expect(() => loadGlobalConfig()).toThrow(/worker ids must be unique/)
+  })
+
+  test('rejects [[worker]] in a repo config, naming the global path', () => {
+    writeRepo('[[worker]]\nid = "w-1"\nname = "x"\nkind = "claude"\n')
+    expect(() => loadConfig(repo)).toThrow(join(home, 'amagi', 'config.toml'))
+  })
+
+  test('newWorkerId avoids taken ids', () => {
+    const taken = new Set<string>()
+    for (let i = 0; i < 50; i++) taken.add(newWorkerId(taken))
+    expect(taken.size).toBe(50)
+    for (const id of taken) expect(id).toMatch(/^w-[a-z0-9-]+$/)
+  })
+
+  test('migrates maxParallel into a fleet once', () => {
+    writeGlobal(
+      '[harness.implement]\nkind = "claude"\nmodel = "claude-sonnet-5"\n\n[loop]\nmaxParallel = 3\n',
+    )
+    const created = migrateFleet()
+    expect(created.map((w) => [w.name, w.kind, w.seat, w.model])).toEqual([
+      ['Claude 1', 'claude', 'claude', 'claude-sonnet-5'],
+      ['Claude 2', 'claude', 'claude', 'claude-sonnet-5'],
+      ['Claude 3', 'claude', 'claude', 'claude-sonnet-5'],
+    ])
+    expect(new Set(created.map((w) => w.id)).size).toBe(3)
+    expect(loadGlobalConfig().worker).toEqual(created)
+    const written = readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')
+    expect(migrateFleet()).toEqual([])
+    expect(readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')).toBe(written)
+  })
+
+  test('an explicitly empty fleet is not migrated again', () => {
+    writeGlobalConfig({ worker: [] })
+    expect(migrateFleet()).toEqual([])
   })
 })

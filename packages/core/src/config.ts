@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
@@ -55,12 +56,35 @@ const WatcherHarnessConfig = z.object({
   seat: z.string().min(1).optional(),
 })
 
+/**
+ * A named lane in the fleet. `id` is the identity (locks and run history key
+ * on it); `name` is a free-text label that may be renamed or duplicated.
+ */
+export const WorkerConfig = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/),
+  name: z.string().min(1),
+  kind: HarnessKind,
+  model: z.string().optional(),
+  effort: z.string().optional(),
+  seat: z.string().min(1).optional(),
+  enabled: z.boolean().default(true),
+})
+export type WorkerConfig = z.infer<typeof WorkerConfig>
+
 const AgentWatcherConfig = z.object({
   enabled: z.boolean().default(true),
   ...WatcherHarnessConfig.shape,
 })
 
 export const Config = z.object({
+  /** The fleet: `[[worker]]` tables, global config only. */
+  worker: z
+    .array(WorkerConfig)
+    .max(MAX_PARALLEL)
+    .default([])
+    .refine((ws) => new Set(ws.map((w) => w.id)).size === ws.length, {
+      message: 'worker ids must be unique',
+    }),
   repo: z
     .object({
       baseBranch: z.string().default('main'),
@@ -280,6 +304,24 @@ export function watcherHarnessConfig(
   }
 }
 
+export const workerSeat = (worker: Pick<WorkerConfig, 'kind' | 'seat'>): string =>
+  worker.seat ?? worker.kind
+
+const HARNESS_LABEL: Record<z.infer<typeof HarnessKind>, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+}
+
+/** Short slug not already taken by `taken`; never derived from the name, so a rename cannot move it. */
+export function newWorkerId(taken: Iterable<string>): string {
+  const used = new Set(taken)
+  for (;;) {
+    const id = `w-${randomUUID().slice(0, 6)}`
+    if (!used.has(id)) return id
+  }
+}
+
 type Json = Record<string, unknown>
 
 const isPlainObject = (v: unknown): v is Json =>
@@ -310,7 +352,13 @@ export type LoadedConfig = {
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
-  const merged = candidates.reduce<Json>((acc, p) => deepMerge(acc, readToml(p)), {})
+  const repoToml = readToml(repoConfigPath(repoRoot))
+  if ('worker' in repoToml) {
+    throw new Error(
+      `${repoConfigPath(repoRoot)}: [[worker]] belongs in the global config (${globalConfigPath()}), not a repo config`,
+    )
+  }
+  const merged = deepMerge(readToml(globalConfigPath()), repoToml)
 
   const parsed = Config.safeParse(merged)
   if (!parsed.success) {
@@ -337,6 +385,38 @@ export function loadGlobalConfig(): Config {
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   return config
+}
+
+/**
+ * One-time migration: with no `[[worker]]` tables in the global config,
+ * synthesizes `loop.maxParallel` workers from `harness.implement` and writes
+ * them there. Returns the created workers, empty when a fleet already exists.
+ */
+export function migrateFleet(): WorkerConfig[] {
+  if ('worker' in readToml(globalConfigPath())) return []
+  const config = loadGlobalConfig()
+  const { kind, model, effort, seat } = config.harness.implement
+  const workers: WorkerConfig[] = []
+  for (let i = 1; i <= config.loop.maxParallel; i++) {
+    workers.push({
+      id: newWorkerId(workers.map((w) => w.id)),
+      name: `${HARNESS_LABEL[kind]} ${i}`,
+      kind,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      seat: seat ?? kind,
+      enabled: true,
+    })
+  }
+  writeGlobalConfig({ worker: workers })
+  return workers
+}
+
+/** Global-config twin of `writeConfig`; arrays in the patch (e.g. `worker`) replace wholesale. */
+export function writeGlobalConfig(patch: Json): void {
+  const path = globalConfigPath()
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, stringifyToml(deepMerge(readToml(path), patch)))
 }
 
 /**

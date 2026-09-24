@@ -5,6 +5,7 @@ import {
   loadGlobalConfig,
   loadRegistry,
   makeHarness,
+  migrateFleet,
   RunService,
   repoRoot,
   Workspaces,
@@ -43,6 +44,9 @@ export const serveCommand = defineCommand({
       } catch {
         // not inside a repo; the dashboard can onboard one
       }
+    }
+    for (const w of migrateFleet()) {
+      console.log(`${bold('amagi')} created worker ${w.name} (${w.id}) on seat ${w.seat}`)
     }
     const config = loadGlobalConfig()
     // Checked before the dashboard build so a second `amagi serve` fails in a
