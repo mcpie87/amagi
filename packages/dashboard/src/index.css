@@ -458,7 +458,7 @@ textarea::placeholder {
   margin-top: 6px;
 }
 
-/* Matches the sibling Reclaim/Retry/Requeue buttons; without the explicit
+/* Matches the Reclaim button; without the explicit
    border-width the Tailwind reset would collapse this to a borderless box. */
 .stop-button {
   padding: 4px 12px;
