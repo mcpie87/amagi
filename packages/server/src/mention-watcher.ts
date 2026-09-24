@@ -99,96 +99,100 @@ export function startMentionWatcher({
     status: 'idle',
   }
 
-  const { stop } = startPoller(intervalMs, async () => {
-    runs++
-    logEvent(`run ${runs} started`)
-    const next: WorkerActivity = {
-      ...activity,
-      lastRunAt: Date.now(),
-      ok: true,
-      error: null,
-      runs,
-      successes: runs - failures,
-      failures,
-      nextRunAt: Date.now() + intervalMs,
-      intervalMs,
-      status: 'active',
-    }
-    let scannedNow = 0
-    let respondedNow = 0
-    try {
-      const handledPath = mentionsPath(repoName)
-      const handled = readHandledMentions(handledPath)
-      const prs = await driver.listOpenPrs(root)
-      for (const pr of prs) {
-        let comments: PrComment[]
-        try {
-          comments = await driver.listComments(root, pr.number)
-        } catch (err) {
-          const message = `PR #${pr.number}: failed to read comments: ${errMsg(err)}`
-          logEvent(message, 'error')
-          console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
-          continue
-        }
-        scanned++
-        scannedNow++
-        const mentions = comments.filter(
-          (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
-        )
-        if (mentions.length > 0)
-          logEvent(`PR #${pr.number}: found ${mentions.length} new mention(s)`)
-        for (const mention of mentions) {
+  const { stop } = startPoller(
+    intervalMs,
+    async () => {
+      runs++
+      logEvent(`run ${runs} started`)
+      const next: WorkerActivity = {
+        ...activity,
+        lastRunAt: Date.now(),
+        ok: true,
+        error: null,
+        runs,
+        successes: runs - failures,
+        failures,
+        nextRunAt: Date.now() + intervalMs,
+        intervalMs,
+        status: 'active',
+      }
+      let scannedNow = 0
+      let respondedNow = 0
+      try {
+        const handledPath = mentionsPath(repoName)
+        const handled = readHandledMentions(handledPath)
+        const prs = await driver.listOpenPrs(root)
+        for (const pr of prs) {
+          let comments: PrComment[]
           try {
-            await respondToMention({
-              root,
-              repoName,
-              pr,
-              mention,
-              config,
-              driver,
-              tracker,
-              exec,
-              makeHarnessFn,
-              ...(store === undefined
-                ? {}
-                : {
-                    onClassified: (c) =>
-                      store.append(null, {
-                        type: 'mention.classified',
-                        prNumber: pr.number,
-                        mentionId: mention.id,
-                        ...c,
-                      }),
-                    onGitBypassed: (entries) =>
-                      store.append(null, { type: 'git.bypassed', entries }),
-                  }),
-            })
-            handled.add(mention.id)
-            saveHandledMentions(handledPath, handled)
-            responded++
-            respondedNow++
+            comments = await driver.listComments(root, pr.number)
           } catch (err) {
-            logEvent(`PR #${pr.number}, mention ${mention.id}: ${errMsg(err)}`, 'error')
-            console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
+            const message = `PR #${pr.number}: failed to read comments: ${errMsg(err)}`
+            logEvent(message, 'error')
+            console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
+            continue
+          }
+          scanned++
+          scannedNow++
+          const mentions = comments.filter(
+            (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
+          )
+          if (mentions.length > 0)
+            logEvent(`PR #${pr.number}: found ${mentions.length} new mention(s)`)
+          for (const mention of mentions) {
+            try {
+              await respondToMention({
+                root,
+                repoName,
+                pr,
+                mention,
+                config,
+                driver,
+                tracker,
+                exec,
+                makeHarnessFn,
+                ...(store === undefined
+                  ? {}
+                  : {
+                      onClassified: (c) =>
+                        store.append(null, {
+                          type: 'mention.classified',
+                          prNumber: pr.number,
+                          mentionId: mention.id,
+                          ...c,
+                        }),
+                      onGitBypassed: (entries) =>
+                        store.append(null, { type: 'git.bypassed', entries }),
+                    }),
+              })
+              handled.add(mention.id)
+              saveHandledMentions(handledPath, handled)
+              responded++
+              respondedNow++
+            } catch (err) {
+              logEvent(`PR #${pr.number}, mention ${mention.id}: ${errMsg(err)}`, 'error')
+              console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
+            }
           }
         }
+        next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s)`
+        logEvent(`run ${runs} completed: ${next.detail}`)
+      } catch (err) {
+        failures++
+        next.ok = false
+        next.error = errMsg(err)
+        next.failures = failures
+        next.successes = runs - failures
+        next.detail = 'scan failed'
+        logEvent(`run ${runs} failed: ${next.error}`, 'error')
+        console.warn(`mention watch: ${next.error}`)
       }
-      next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s)`
-      logEvent(`run ${runs} completed: ${next.detail}`)
-    } catch (err) {
-      failures++
-      next.ok = false
-      next.error = errMsg(err)
-      next.failures = failures
-      next.successes = runs - failures
-      next.detail = 'scan failed'
-      logEvent(`run ${runs} failed: ${next.error}`, 'error')
-      console.warn(`mention watch: ${next.error}`)
-    }
-    next.counters = counters()
-    next.log = log
-    activity = next
-  })
+      next.counters = counters()
+      next.log = log
+      activity = next
+    },
+    true,
+  )
 
   return {
     stop() {

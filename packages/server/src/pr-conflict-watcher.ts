@@ -291,7 +291,7 @@ export function startPrConflictWatcher({
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 
-  timer = setTimeout(() => void tick(), intervalMs)
+  void tick()
   return {
     stop() {
       stopped = true

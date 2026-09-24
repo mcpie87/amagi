@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadConfig, writeConfig } from './config.ts'
+import { loadConfig, watcherHarnessConfig, writeConfig } from './config.ts'
 
 let home: string
 let repo: string
@@ -39,6 +39,11 @@ describe('loadConfig', () => {
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
     expect(config.loop.maxParallel).toBe(1)
+    expect(config.watchers).toMatchObject({
+      mention: { enabled: true },
+      prConflict: { enabled: true },
+      stall: { enabled: true },
+    })
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
     expect(config.loop.mentionWatchIntervalSec).toBe(300)
@@ -125,6 +130,36 @@ describe('loadConfig', () => {
   test('accepts a per-harness tool allowlist', () => {
     writeRepo('[harness.implement]\nkind = "claude"\nallowedTools = ["Read", "Bash"]\n')
     expect(loadConfig(repo).config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
+  })
+
+  test('watcher settings default on and inherit implement harness fields', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "claude"\nmodel = "base-model"\neffort = "medium"\nseat = "shared"\n\n' +
+        '[watchers.mention]\nenabled = false\nmodel = "mention-model"\nseat = "mention-seat"\n\n' +
+        '[watchers.prConflict]\neffort = "high"\n\n' +
+        '[watchers.stall]\nenabled = false\n',
+    )
+    const config = loadConfig(repo).config
+    expect(config.watchers.mention.enabled).toBe(false)
+    expect(config.watchers.mention).toMatchObject({
+      enabled: false,
+      model: 'mention-model',
+      seat: 'mention-seat',
+    })
+    expect(config.watchers.prConflict.enabled).toBe(true)
+    expect(config.watchers.stall.enabled).toBe(false)
+    expect(watcherHarnessConfig(config, 'mention')).toMatchObject({
+      kind: 'claude',
+      model: 'mention-model',
+      effort: 'medium',
+      seat: 'mention-seat',
+    })
+    expect(watcherHarnessConfig(config, 'prConflict')).toMatchObject({
+      kind: 'claude',
+      model: 'base-model',
+      effort: 'high',
+      seat: 'shared',
+    })
   })
 
   test('an unknown enum value fails loudly and names the file', () => {

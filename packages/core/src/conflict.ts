@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { Config } from './config.ts'
+import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -168,7 +168,8 @@ export async function resolveConflict(
         conflictFiles: unmerged,
         outPath: verdictPath,
       }
-      const harness = mk(opts.config.harness.implement)
+      const harnessConfig = watcherHarnessConfig(opts.config, 'prConflict')
+      const harness = mk(harnessConfig)
       log('info', `agent: ${harness.kind} (${wt.branch})`)
       const outcome = await withHeadReflogBypassCheck(
         wt.path,
@@ -178,7 +179,7 @@ export async function resolveConflict(
             cwd: wt.path,
             prompt: resolveConflictPrompt(ctx),
             systemPrompt: resolveConflictSystemPrompt(ctx),
-            ...harnessStartOpts(opts.config.harness.implement),
+            ...harnessStartOpts(harnessConfig),
           })
           for await (const event of proc.events()) {
             if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)

@@ -168,6 +168,13 @@ describe('resolveConflict', () => {
 
   test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
     const started: string[] = []
+    const cfg = config()
+    cfg.harness.implement.model = 'base-model'
+    cfg.watchers.prConflict.kind = 'opencode'
+    cfg.watchers.prConflict.model = 'conflict-model'
+    cfg.watchers.prConflict.effort = 'high'
+    cfg.watchers.prConflict.seat = 'conflict-seat'
+    let startedWith: Config['harness']['implement'] | undefined
     let reflogCalls = 0
     const { exec, calls } = fake((c) => {
       if (c.includes('MERGE_HEAD')) return ok('merge-head')
@@ -195,11 +202,12 @@ describe('resolveConflict', () => {
       repoRoot: '/repo',
       repoName: 'amagi',
       pr: pr(),
-      config: config(),
+      config: cfg,
       driver,
       exec,
       makeHarnessFn: (cfg) => {
         started.push(cfg.kind)
+        startedWith = cfg
         return fakeHarness()
       },
       onLog: (level, text) => logs.push({ level, text }),
@@ -207,7 +215,13 @@ describe('resolveConflict', () => {
     })
 
     expect(result.ok).toBe(true)
-    expect(started).toEqual(['claude'])
+    expect(started).toEqual(['opencode'])
+    expect(startedWith).toMatchObject({
+      kind: 'opencode',
+      model: 'conflict-model',
+      effort: 'high',
+      seat: 'conflict-seat',
+    })
     expect(calls).toContainEqual([
       'git',
       'push',

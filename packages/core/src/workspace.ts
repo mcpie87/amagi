@@ -71,6 +71,16 @@ export class Workspaces {
     return workspace
   }
 
+  /** Refresh watcher switches from disk so the server supervisor can apply edits live. */
+  refreshWatcherConfig(key: string): Workspace | null {
+    const workspace = this.get(key)
+    if (workspace === null) return null
+    const entry = this.list().find((candidate) => candidate.key === key)
+    if (entry === undefined) return null
+    workspace.config.watchers = loadConfig(entry.path).config.watchers
+    return workspace
+  }
+
   private build(entry: RegistryEntry): Workspace {
     const { config } = loadConfig(entry.path)
     const store = (this.opts.storeFor ?? defaultStoreFor)(entry.key)

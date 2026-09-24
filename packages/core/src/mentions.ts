@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { Config } from './config.ts'
+import { type Config, watcherHarnessConfig } from './config.ts'
 import { classifyDifficulty } from './difficulty.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
@@ -219,7 +219,7 @@ function startImplementHarness(
 
 /** Provenance footer for a canned reply, from the configured implement harness. */
 function configuredFooter(config: Config): string {
-  const { kind, model, effort } = config.harness.implement
+  const { kind, model, effort } = watcherHarnessConfig(config, 'mention')
   return modelFooter(kind, model ?? null, effort ?? null)
 }
 
@@ -247,7 +247,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
     () => {
       const proc = startImplementHarness(
         mk,
-        opts.config.harness.implement,
+        watcherHarnessConfig(opts.config, 'mention'),
         wt.path,
         respondToMentionPrompt({
           pr: opts.pr,
@@ -318,7 +318,7 @@ async function respondToExplain(
       async () => {
         const proc = startImplementHarness(
           mk,
-          opts.config.harness.implement,
+          watcherHarnessConfig(opts.config, 'mention'),
           wt.path,
           explainMentionPrompt({
             pr: opts.pr,
@@ -339,7 +339,7 @@ async function respondToExplain(
     const explanation = readFileSync(outPath, 'utf8').trim()
     if (explanation === '') throw new Error('agent produced no explanation')
     p.phase('posting comment')
-    const { kind, model, effort } = opts.config.harness.implement
+    const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')
     const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
     await opts.driver.postComment(opts.root, opts.pr.number, `${explanation}${footer}`)
   } finally {
@@ -367,7 +367,7 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   p.phase('classifying')
   const proc = startImplementHarness(
     mk,
-    opts.config.harness.implement,
+    watcherHarnessConfig(opts.config, 'mention'),
     tmpdir(),
     classifyMentionPrompt({ pr: opts.pr, mention: opts.mention }),
     classifyMentionSystemPrompt(),
@@ -450,7 +450,7 @@ async function respondToTakeDown(
       () => {
         const proc = startImplementHarness(
           mk,
-          opts.config.harness.implement,
+          watcherHarnessConfig(opts.config, 'mention'),
           wt.path,
           takeDownPrompt({
             pr: opts.pr,

@@ -6,7 +6,11 @@ export type Poller = {
  * Runs an async tick every intervalMs, re-arming with setTimeout after each
  * tick resolves unless stopped. A tick never overlaps the previous one.
  */
-export function startPoller(intervalMs: number, tick: () => Promise<void>): Poller {
+export function startPoller(
+  intervalMs: number,
+  tick: () => Promise<void>,
+  runImmediately = false,
+): Poller {
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -15,7 +19,8 @@ export function startPoller(intervalMs: number, tick: () => Promise<void>): Poll
     if (!stopped) timer = setTimeout(() => void run(), intervalMs)
   }
 
-  timer = setTimeout(() => void run(), intervalMs)
+  if (runImmediately) void run()
+  else timer = setTimeout(() => void run(), intervalMs)
   return {
     stop() {
       stopped = true
