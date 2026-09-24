@@ -20,9 +20,11 @@ const boardRoute = createRoute({
   path: '/board',
   component: QueueView,
 })
-const issuesRoute = createRoute({
+export const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
+  validateSearch: (search: Record<string, unknown>): { issue?: string } =>
+    typeof search.issue === 'string' ? { issue: search.issue } : {},
   component: IssuesView,
 })
 const inboxRoute = createRoute({
