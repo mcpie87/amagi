@@ -71,10 +71,17 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
-/** A merge into the PR worktree that always conflicts. */
+/** A merge into the PR worktree that conflicts until the agent resolves the file. */
+let unmergedReported = false
 const conflicted = (c: Call): ExecResult | undefined => {
+  if (c.includes('MERGE_HEAD')) return ok('merge-head')
   if (c.includes('rev-parse')) return fail('')
   if (c.includes('merge')) return fail('conflict')
+  if (c.includes('--diff-filter=U')) {
+    if (unmergedReported) return ok('')
+    unmergedReported = true
+    return ok('src/a.txt\n')
+  }
   return undefined
 }
 
@@ -120,6 +127,7 @@ const config = () =>
   })
 
 beforeEach(() => {
+  unmergedReported = false
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
 })
@@ -162,8 +170,14 @@ describe('resolveConflict', () => {
     const started: string[] = []
     let reflogCalls = 0
     const { exec, calls } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
+      if (c.includes('--diff-filter=U')) {
+        if (unmergedReported) return ok('')
+        unmergedReported = true
+        return ok('src/a.txt\n')
+      }
       if (c.includes('reflog')) {
         reflogCalls++
         return ok(
@@ -207,8 +221,14 @@ describe('resolveConflict', () => {
 
   test('blocks an empty merge diff regardless of the agent verdict', async () => {
     const { exec, calls } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
+      if (c.includes('--diff-filter=U')) {
+        if (unmergedReported) return ok('')
+        unmergedReported = true
+        return ok('src/a.txt\n')
+      }
       if (c[1] === 'diff') return ok('')
       return undefined
     })
@@ -265,6 +285,39 @@ describe('resolveConflict', () => {
       'origin',
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
+  })
+
+  test('re-dispatches unresolved paths until the agent resolves them, then the runner commits', async () => {
+    let diffPass = 0
+    let launches = 0
+    const { exec, calls } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return fail('conflict')
+      if (c.includes('--diff-filter=U')) {
+        diffPass++
+        return ok(diffPass <= 2 ? 'src/a.txt\n' : '')
+      }
+      if (c.includes('reflog')) return ok('same head\n')
+      return undefined
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness()
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(launches).toBe(2)
+    expect(result.iteration).toBe(2)
+    expect(calls).toContainEqual(['git', 'commit', '--no-edit'])
   })
 
   test('reports a failed agent without pushing', async () => {

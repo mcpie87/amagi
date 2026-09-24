@@ -213,6 +213,8 @@ export type ConflictPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
+  conflictFiles?: readonly string[]
   outPath?: string
 }
 
@@ -228,7 +230,7 @@ export function resolveConflictSystemPrompt(ctx: ConflictPromptContext): string 
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- Resolve conflicts by preserving the intent of both branches where possible. Inspect whether base already contains the PR work; do not reinstate a duplicate or fight the base version when it does.',
     "- The PR is another agent's completed task; do not rework its non-conflicting changes.",
-    '- Commit the resolved merge to finish the in-progress merge. Do not push; the dispatcher pushes.',
+    '- Resolve the conflicted files and stop; the runner commits the merge.',
   ]
   if (ctx.outPath !== undefined) {
     lines.splice(
@@ -247,6 +249,9 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
     'A merge of the base branch is in progress and currently conflicts. Resolve all conflicted files.',
     '',
     'Check whether base already contains the PR work. If it does, preserve base and do not reintroduce a duplicate or fight base’s version just to make the merge look like the PR.',
+    ...(ctx.conflictFiles === undefined
+      ? []
+      : ['', `Currently unresolved: ${ctx.conflictFiles.join(', ')}`]),
   ]
   if (ctx.outPath !== undefined) {
     parts.push(
@@ -266,11 +271,14 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
   if (ctx.checks.length > 0) {
     parts.push(
       '',
-      'Run the project checks and make sure they pass before committing:',
+      'Run the project checks and make sure they pass before stopping:',
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }
-  parts.push('', 'Then finish the merge with `git add -A` and `git commit`, and stop.')
+  parts.push(
+    '',
+    'The runner stages and commits the resolved merge. Stop when the conflicts are resolved.',
+  )
   return parts.join('\n')
 }
 
@@ -330,7 +338,7 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   if (ctx.checks.length > 0) {
     parts.push(
       '',
-      'Run the project checks and make sure they pass before committing:',
+      'Run the project checks and make sure they pass before stopping:',
       ...ctx.checks.map((c) => `- ${c}`),
     )
   }

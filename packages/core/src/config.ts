@@ -105,6 +105,13 @@ export const Config = z.object({
        */
       prCheckIntervalSec: z.number().int().min(1).default(300),
       /**
+       * Max conflict-resolution agent dispatches per conflicting PR before the
+       * conflict checker parks the linked task at needs_human. A PR that keeps
+       * re-conflicting burns through its iterations and sinks in the dispatch
+       * order instead of being re-dispatched forever.
+       */
+      conflictMaxIterations: z.number().int().min(1).default(3),
+      /**
        * Observation-only merge-tree audit: each tick, compare the local
        * `git merge-tree` verdict against GitHub's `mergeable` for every open
        * PR and append the result to an observation JSONL under the cache dir.

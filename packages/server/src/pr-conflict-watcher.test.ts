@@ -39,11 +39,21 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
 
 /** Serves the git side of a tick: ls-remote, worktree, merge. PRs come from the driver. */
 function fakeExec(): Exec {
+  let unmerged = false
   return async (cmd) => {
+    if (cmd.includes('MERGE_HEAD')) return { exitCode: 0, stdout: 'merge-head', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
-    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    if (cmd.includes('merge')) {
+      unmerged = true
+      return { exitCode: 1, stdout: '', stderr: 'conflict' }
+    }
     if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
       return { exitCode: 1, stdout: '', stderr: '' }
+    }
+    if (cmd.includes('--diff-filter=U')) {
+      const stdout = unmerged ? 'src/a.ts\n' : ''
+      unmerged = false
+      return { exitCode: 0, stdout, stderr: '' }
     }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
@@ -197,10 +207,8 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<
-  string,
-  { headOid: string; verdict?: { verdict: string; reasoning: string; proposal: string } }
-> => JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
+const stateFile = (): Record<string, { headOid: string }> =>
+  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
@@ -227,26 +235,6 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
 })
 
-test('shows conflict resolution warnings in watcher activity', async () => {
-  const driver = new FakePr()
-  driver.prs = [pr()]
-  const exec: Exec = async (cmd) => {
-    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
-    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
-      return { exitCode: 0, stdout: '', stderr: '' }
-    }
-    return { exitCode: 0, stdout: '', stderr: '' }
-  }
-  const w = start(exec, () => fakeHarness(() => {}), { driver, intervalMs: 100 })
-
-  await Bun.sleep(150)
-
-  expect(w.activity().detail).toContain(
-    'warnings: #7: base already contains the PR work; skipped the empty merge push',
-  )
-})
-
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
   let started = 0
   const driver = new FakePr()
@@ -260,36 +248,6 @@ test('does not re-attempt a conflicting PR until its head SHA changes', async ()
   await Bun.sleep(60)
   expect(started).toBe(afterFirst)
   expect(counter(w, 'resolved')).toBeGreaterThanOrEqual(1)
-})
-
-test('stores the agent verdict with the head SHA it classified', async () => {
-  let started = 0
-  const driver = new FakePr()
-  driver.prs = [pr()]
-  start(
-    fakeExec(),
-    () =>
-      fakeHarness((opts) => {
-        started++
-        const path = opts.prompt.match(/Verdict file: (.+)/)?.[1]
-        if (path !== undefined) {
-          writeFileSync(path, 'CLOSE TASK\nREASONING:\nBase has the work.\nPROPOSAL:\nClose am-1.')
-        }
-      }),
-    { driver },
-  )
-
-  await Bun.sleep(60)
-
-  expect(stateFile()['7']).toEqual({
-    headOid: 'deadbeef',
-    verdict: {
-      verdict: 'CLOSE TASK',
-      reasoning: 'Base has the work.',
-      proposal: 'Close am-1.',
-    },
-  })
-  expect(started).toBe(1)
 })
 
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
@@ -362,14 +320,13 @@ test('a conflicting PR that stops conflicting drops out of the state file', asyn
 test('fetches every open PR head each tick when a head moved', async () => {
   let started = 0
   const calls: string[][] = []
-  const exec: Exec = async (cmd) => {
+  const git = fakeExec()
+  const exec: Exec = async (cmd, opts) => {
     calls.push(cmd as string[])
     if (cmd.includes('ls-remote')) {
       return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
     }
-    if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
-    if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
-    return { exitCode: 0, stdout: '', stderr: '' }
+    return git(cmd, opts)
   }
   const driver = new FakePr()
   driver.prs = [pr()]
@@ -495,9 +452,6 @@ const openPrTask = (store: Store): void => {
 /** Serves the pointless pass's `gh pr diff`; PRs come from the driver. */
 function fakeExecForPointless(diff: () => string): Exec {
   return async (cmd) => {
-    if (cmd[1] === 'diff' && cmd.includes('--quiet')) {
-      return { exitCode: 1, stdout: '', stderr: '' }
-    }
     if (cmd.includes('diff')) return { exitCode: 0, stdout: diff(), stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
