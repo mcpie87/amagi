@@ -7,6 +7,7 @@ import type {
   AgentOutcome,
   AgentProcess,
   AgentStartOptions,
+  BeadsBlocker,
   BeadsIssue,
   CreatePrOptions,
   CreateTrackerTask,
@@ -344,6 +345,10 @@ class FakeIssueTracker extends BeadsTracker {
     return this.issues.get(id) ?? null
   }
 
+  override async dependents(id: string): Promise<BeadsBlocker[]> {
+    return [...this.issues.values()].filter((i) => i.dependencies.some((d) => d.id === id))
+  }
+
   override async ready(): Promise<TrackerTask[]> {
     return [...this.issues.values()]
   }
@@ -542,13 +547,15 @@ describe('issue mutations', () => {
 
   test('GET /api/repos/:repo/issues/:id returns the issue detail', async () => {
     const tracker = new FakeIssueTracker()
-    tracker.seed({ id: 'bd-1', labels: ['x'] })
+    const issue = tracker.seed({ id: 'bd-1', labels: ['x'] })
+    tracker.seed({ id: 'bd-2', dependencies: [issue] })
     app = issueApp(tracker)
     const res = await app.request('/api/repos/repo1/issues/bd-1')
     expect(res.status).toBe(200)
-    const body = (await res.json()) as BeadsIssue
+    const body = (await res.json()) as BeadsIssue & { dependents: BeadsBlocker[] }
     expect(body.id).toBe('bd-1')
     expect(body.labels).toEqual(['x'])
+    expect(body.dependents.map((d) => d.id)).toEqual(['bd-2'])
   })
 
   test('GET /api/repos/:repo/issues/:id 404s on an unknown issue', async () => {

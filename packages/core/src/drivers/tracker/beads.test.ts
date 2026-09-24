@@ -99,11 +99,20 @@ const SHOW_WITH_DEPS_JSON = `[
     ],
     "dependencies": [
       {
+        "id": "tst-epic",
+        "title": "Parent epic",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "epic",
+        "dependency_type": "parent-child"
+      },
+      {
         "id": "tst-abc",
         "title": "Blocker",
         "status": "blocked",
         "priority": 1,
-        "issue_type": "task"
+        "issue_type": "task",
+        "dependency_type": "blocks"
       },
       {
         "id": "tst-human",
@@ -111,7 +120,8 @@ const SHOW_WITH_DEPS_JSON = `[
         "status": "open",
         "priority": 3,
         "issue_type": "task",
-        "labels": ["human"]
+        "labels": ["human"],
+        "dependency_type": "blocks"
       }
     ]
   }
@@ -523,7 +533,7 @@ describe('BeadsTracker', () => {
     expect(calls[0]?.slice(0, 4)).toEqual(['bd', 'children', 'tst-epic', '--json'])
   })
 
-  test('getIssue surfaces dependency blockers with their state and labels', async () => {
+  test('getIssue surfaces blocking dependencies with their state and labels, not the parent', async () => {
     const { exec } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
     const issue = await new BeadsTracker({ cwd: '/repo', exec }).getIssue('tst-1')
 
@@ -549,6 +559,28 @@ describe('BeadsTracker', () => {
         url: null,
         labels: ['human'],
       },
+    ])
+  })
+
+  test('dependents lists the issues this one blocks', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('dep')
+        ? ok(`[{"id": "tst-next", "title": "Next", "status": "open", "dependency_type": "blocks"}]`)
+        : undefined,
+    )
+    const dependents = await new BeadsTracker({ cwd: '/repo', exec }).dependents('tst-1')
+
+    expect(dependents.map((d) => d.id)).toEqual(['tst-next'])
+    expect(calls[0]).toEqual([
+      'bd',
+      'dep',
+      'list',
+      'tst-1',
+      '--direction',
+      'up',
+      '--type',
+      'blocks',
+      '--json',
     ])
   })
 

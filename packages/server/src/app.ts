@@ -277,7 +277,7 @@ export function createApp({
       }
       const issue = await beads.getIssue(id)
       if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
-      return c.json(issue)
+      return c.json({ ...issue, dependents: await beads.dependents(id) })
     })
 
     .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {

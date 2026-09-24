@@ -22,6 +22,8 @@ type BdIssue = {
   labels?: string[]
   parent?: string
   dependencies?: BdIssue[]
+  /** Edge kind on a dependency record from `bd show` / `bd dep list`. */
+  dependency_type?: string
   notes?: string
   comments?: Array<{ text: string }>
   dependent_count?: number
@@ -108,6 +110,19 @@ function toTask(issue: BdIssue): TrackerTask {
   return task
 }
 
+/**
+ * bd show lists the parent epic among the dependencies as a `parent-child`
+ * edge; only `blocks` edges gate the issue. bd list reports bare edges without
+ * a dependency_type, which carry no title or status to show.
+ */
+function isBlockingEdge(d: BdIssue): boolean {
+  return d.dependency_type === 'blocks'
+}
+
+function toBlocker(d: BdIssue): BeadsBlocker {
+  return { ...toTask(d), labels: d.labels ?? [] }
+}
+
 function toIssue(issue: BdIssue): BeadsIssue {
   return {
     ...toTask(issue),
@@ -115,10 +130,7 @@ function toIssue(issue: BdIssue): BeadsIssue {
     assignee: issue.assignee ?? null,
     labels: issue.labels ?? [],
     parent: issue.parent ?? null,
-    dependencies: (issue.dependencies ?? []).map((d) => ({
-      ...toTask(d),
-      labels: d.labels ?? [],
-    })),
+    dependencies: (issue.dependencies ?? []).filter(isBlockingEdge).map(toBlocker),
     childCount: issue.dependent_count ?? 0,
   }
 }
@@ -197,6 +209,21 @@ export class BeadsTracker implements Tracker {
   async getIssue(id: string): Promise<BeadsIssue | null> {
     const issues = parseIssues(await this.show(id))
     return issues.length > 0 && issues[0] ? toIssue(issues[0]) : null
+  }
+
+  /** Issues blocked by this one, the ones it unblocks once closed. */
+  async dependents(id: string): Promise<BeadsBlocker[]> {
+    const out = await this.bd([
+      'dep',
+      'list',
+      id,
+      '--direction',
+      'up',
+      '--type',
+      'blocks',
+      '--json',
+    ])
+    return parseIssues(out).map(toBlocker)
   }
 
   async claim(id?: string): Promise<TrackerTask | null> {
