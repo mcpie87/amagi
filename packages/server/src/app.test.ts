@@ -1789,6 +1789,11 @@ describe('runner endpoints', () => {
         harness: 'claude',
         model: 'sonnet',
         effort: null,
+        workerId: null,
+        workerName: null,
+        seat: 'claude',
+        waitingOnSeat: false,
+        adHoc: true,
       })
       expect(body.resources['bd-9']).toBeDefined()
     } finally {
@@ -2114,7 +2119,20 @@ describe('fleet endpoints', () => {
 
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
-    fleet = [{ id, name: 'One', enabled: true, on: true, busy: true, taskId: 'bd-9' }]
+    fleet = [
+      {
+        id,
+        name: 'One',
+        kind: 'claude',
+        model: null,
+        effort: null,
+        seat: 'claude',
+        enabled: true,
+        on: true,
+        busy: true,
+        taskId: 'bd-9',
+      },
+    ]
     const res = await send('PATCH', `/api/workers/${id}`, { name: 'Renamed', model: null })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ id, name: 'Renamed', on: true, taskId: 'bd-9' })
@@ -2141,7 +2159,20 @@ describe('fleet endpoints', () => {
 
   test('deleting a worker mid-run is refused with the running task', async () => {
     const { id } = await create({ name: 'One', kind: 'claude' })
-    fleet = [{ id, name: 'One', enabled: true, on: true, busy: true, taskId: 'bd-9' }]
+    fleet = [
+      {
+        id,
+        name: 'One',
+        kind: 'claude',
+        model: null,
+        effort: null,
+        seat: 'claude',
+        enabled: true,
+        on: true,
+        busy: true,
+        taskId: 'bd-9',
+      },
+    ]
     const refused = await send('DELETE', `/api/workers/${id}`)
     expect(refused.status).toBe(409)
     expect(((await refused.json()) as { error: string }).error).toContain('bd-9')
