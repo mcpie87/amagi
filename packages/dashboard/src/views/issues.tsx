@@ -471,6 +471,7 @@ export function IssuesView() {
 
   useEffect(() => {
     if (selected === null || selectedEpic === null) return
+    void refresh
     let active = true
     setEpicChildren([])
     setEpicChildrenLoading(true)

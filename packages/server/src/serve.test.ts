@@ -118,7 +118,7 @@ test('watcher enable switches reconcile from config on the next supervisor scan'
     }),
     start: async () => ({ ok: false as const, status: 409 as const, error: 'empty' }),
     stop: async () => ({ ok: false as const, status: 404 as const, error: 'not running' }),
-    setMaxParallel: () => {},
+    setWorkerOn: () => {},
     retryNow: async () => ({ ok: false as const, status: 404 as const, error: 'not running' }),
     setAutoQueue: () => {},
   } satisfies Partial<RunServiceApi>

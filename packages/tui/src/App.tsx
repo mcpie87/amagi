@@ -386,6 +386,7 @@ function WatcherDetail({
             ) : (
               (watcher.log ?? []).map((entry, i) => (
                 <Text
+                  // biome-ignore lint/suspicious/noArrayIndexKey: log entries can share a timestamp; the index disambiguates.
                   key={`${entry.ts}-${i}`}
                   {...(entry.level === 'error' ? { color: 'red' } : {})}
                 >
