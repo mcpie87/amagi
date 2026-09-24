@@ -240,6 +240,7 @@ class FakePr implements PrDriver {
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
+  async deleteBranch(): Promise<void> {}
 }
 
 let repo: string

@@ -92,6 +92,7 @@ class FakeDriver implements PrDriver {
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
+  async deleteBranch(): Promise<void> {}
 }
 
 class FakeTracker implements Tracker {

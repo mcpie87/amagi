@@ -107,6 +107,7 @@ describe('githubPr', () => {
       'url.https://x-access-token:ghp_abc@github.com/.insteadOf=git@github.com:',
       'push',
       '-u',
+      '--force-with-lease=refs/heads/amagi/am-1-do-the-thing:',
       'origin',
       'amagi/am-1-do-the-thing',
     ])
@@ -129,6 +130,92 @@ describe('githubPr', () => {
     ])
     expect(calls).toContainEqual(['<stdin>', 'Task: am-1'])
     expect(pr).toEqual({ number: 7, url: 'https://github.com/x/y/pull/7' })
+  })
+
+  test('overwrites a stale remote branch no open pr uses, pinned to its sha', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('ls-remote')) {
+        return ok('83213b1\trefs/heads/amagi/am-1-do-the-thing\n')
+      }
+      if (c.includes('list') && c.includes('pr')) return ok('[]')
+      if (c.includes('create') && c.includes('pr')) return ok('https://github.com/x/y/pull/8\n')
+      return undefined
+    })
+    const pr = await makePrDriver('github', exec).createPr({
+      cwd: '/wt',
+      branch: 'amagi/am-1-do-the-thing',
+      base: 'main',
+      remote: 'origin',
+      title: 't',
+      body: 'b',
+      labels: [],
+    })
+
+    expect(calls).toContainEqual([
+      'gh',
+      'pr',
+      'list',
+      '--head',
+      'amagi/am-1-do-the-thing',
+      '--state',
+      'open',
+      '--json',
+      'number,url',
+    ])
+    expect(calls.find((c) => c.includes('push'))).toEqual([
+      'git',
+      'push',
+      '-u',
+      '--force-with-lease=refs/heads/amagi/am-1-do-the-thing:83213b1',
+      'origin',
+      'amagi/am-1-do-the-thing',
+    ])
+    expect(pr.number).toBe(8)
+  })
+
+  test('refuses to overwrite a remote branch that backs an open pr', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('ls-remote')) return ok('83213b1\trefs/heads/amagi/am-1\n')
+      if (c.includes('list') && c.includes('pr')) {
+        return ok('[{"number":36,"url":"https://github.com/x/y/pull/36"}]')
+      }
+      return undefined
+    })
+    const create = makePrDriver('github', exec).createPr({
+      cwd: '/wt',
+      branch: 'amagi/am-1',
+      base: 'main',
+      remote: 'origin',
+      title: 't',
+      body: 'b',
+      labels: [],
+    })
+
+    await expect(create).rejects.toThrow('open pull request #36')
+    expect(calls.find((c) => c.includes('push'))).toBeUndefined()
+  })
+
+  test('deletes a remote branch, tolerating one already gone', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('--delete')
+        ? {
+            exitCode: 1,
+            stdout: '',
+            stderr: "error: unable to delete 'amagi/am-1': remote ref does not exist",
+          }
+        : undefined,
+    )
+    await makePrDriver('github', exec).deleteBranch('/repo', 'origin', 'amagi/am-1')
+    expect(calls).toContainEqual(['git', 'push', 'origin', '--delete', 'amagi/am-1'])
+  })
+
+  test('surfaces any other branch deletion failure', async () => {
+    const { exec } = fake((c) =>
+      c.includes('--delete') ? { exitCode: 1, stdout: '', stderr: 'permission denied' } : undefined,
+    )
+    await expect(
+      makePrDriver('github', exec).deleteBranch('/repo', 'origin', 'amagi/am-1'),
+    ).rejects.toThrow('permission denied')
   })
 
   test('creates each label on demand before the pr', async () => {

@@ -574,7 +574,7 @@ export function createApp({
       }
       // The reconcile writes events the dashboard already streams, so the
       // caller's live state picks up a merge/close without a page reload.
-      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, task)
+      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
     })
 
@@ -731,6 +731,13 @@ export function createApp({
           await ws.tracker.close(id, reason)
         } catch (err) {
           console.warn(`close ${id}: ${errMsg(err)}`)
+        }
+        if (task.state === 'pr_flagged' && ws.forge !== null && task.branch !== null) {
+          try {
+            await ws.forge.deleteBranch(ws.root, ws.config.forge.remote, task.branch)
+          } catch (err) {
+            console.warn(`branch removal on close ${id}: ${errMsg(err)}`)
+          }
         }
         return c.json({ task: ws.store.task(id) })
       },

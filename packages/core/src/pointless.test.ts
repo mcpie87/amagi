@@ -65,6 +65,7 @@ class FakePr implements PrDriver {
   async removeLabel(_cwd: string, _number: number, label: string): Promise<void> {
     this.removedLabels.push(label)
   }
+  async deleteBranch(): Promise<void> {}
 }
 
 const fakeTracker = (): Tracker & { comments: { id: string; body: string }[] } => {

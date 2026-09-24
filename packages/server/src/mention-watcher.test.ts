@@ -74,6 +74,7 @@ class FakePr implements PrDriver {
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
+  async deleteBranch(): Promise<void> {}
 }
 
 function fakeHarness(summary = 'ambiguous'): Harness {

@@ -172,6 +172,7 @@ class FakeMergePrDriver implements PrDriver {
   async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {}
   async addLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
   async removeLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
+  async deleteBranch(): Promise<void> {}
 }
 
 describe('GET /api/repos/:repo/mergeable-prs', () => {
@@ -1396,6 +1397,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
   class FakeForge implements PrDriver {
     readonly closed: { number: number; reason: string }[] = []
+    readonly deleted: string[] = []
     closeError: Error | null = null
     async createPr(): Promise<PullRequest> {
       throw new Error('unused')
@@ -1422,6 +1424,9 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     }
     async addLabel(): Promise<void> {}
     async removeLabel(): Promise<void> {}
+    async deleteBranch(_cwd: string, _remote: string, branch: string): Promise<void> {
+      this.deleted.push(branch)
+    }
   }
 
   const withForge = (forge: FakeForge) => {
@@ -1432,6 +1437,11 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
   const flagged = (id: string, number: number) => {
     claim(id)
+    store.append(id, {
+      type: 'worktree.created',
+      path: `/nonexistent/${id}`,
+      branch: `amagi/${id}`,
+    })
     store.append(id, { type: 'pr.created', url: `https://github.com/x/y/pull/${number}`, number })
     for (const to of [
       'worktree_ready',
@@ -1461,6 +1471,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     expect(body.task.state).toBe('abandoned')
     expect(body.task.statusReason).toBe('agree, nothing to merge')
     expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'agree, nothing to merge' }])
+    expect(forge.deleted).toEqual(['amagi/bd-1'])
   })
 
   test('closing a pr_open task does not touch the pull request', async () => {

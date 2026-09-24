@@ -8,6 +8,8 @@ export type PrPollerOptions = {
   tracker: Tracker
   /** Repo the open PRs live in, so the forge CLI can resolve them. */
   cwd: string
+  /** Remote the settled PRs' branches are deleted from. */
+  remote: string
   intervalMs?: number | undefined
 }
 
@@ -27,11 +29,12 @@ export function startPrPoller({
   forge,
   tracker,
   cwd,
+  remote,
   intervalMs = DEFAULT_INTERVAL_MS,
 }: PrPollerOptions): PrPoller {
   return startPoller(intervalMs, async () => {
     try {
-      await reconcilePrs(store, forge, tracker, cwd)
+      await reconcilePrs(store, forge, tracker, cwd, remote)
     } catch (err) {
       console.warn(`pr reconcile: ${errMsg(err)}`)
     }
