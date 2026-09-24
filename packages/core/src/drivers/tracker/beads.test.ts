@@ -397,6 +397,14 @@ describe('BeadsTracker', () => {
     expect(calls.some((c) => c.includes('unclaim') || c.includes('update'))).toBe(false)
   })
 
+  test('reclaims expired native claims', async () => {
+    const { exec, calls } = fake(() => undefined)
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.reclaimExpiredClaims()
+
+    expect(calls).toEqual([['bd', 'reclaim']])
+  })
+
   test('a closed gate reads as resolved', async () => {
     const { exec } = fake(() => ok('[{"id":"tst-77h","title":"g","status":"closed"}]'))
     const tracker = new BeadsTracker({ cwd: '/repo', exec })

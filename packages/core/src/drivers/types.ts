@@ -112,6 +112,8 @@ export interface Tracker {
   comment(id: string, body: string): Promise<void>
   setStatus(id: string, status: TrackerStatus): Promise<void>
   release(id: string): Promise<void>
+  /** Reap expired native claims that may not have a corresponding amagi store task. */
+  reclaimExpiredClaims?(): Promise<void>
   close(id: string, reason?: string): Promise<void>
 
   /**
