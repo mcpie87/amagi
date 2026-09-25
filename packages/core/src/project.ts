@@ -62,12 +62,42 @@ export type ProjectedQuestion = {
   resolvedAt: number | null
 }
 
+export type ProjectedWatcherAction = {
+  targetType: 'pr' | 'mention' | 'task'
+  targetId: string
+  prNumber?: number
+  url?: string
+  result: string
+  level: 'info' | 'error'
+  ts: number
+}
+
+export type ProjectedWatcherLogEntry = { ts: number; message: string; level: 'info' | 'error' }
+
+export type ProjectedWatcherRun = {
+  repo: string
+  name: string
+  runId: string
+  startedAt: number
+  endedAt: number | null
+  ok: boolean | null
+  error: string | null
+  actions: ProjectedWatcherAction[]
+  log: ProjectedWatcherLogEntry[]
+  startSeq: number
+  endSeq: number | null
+}
+
+export const watcherRunKey = (repo: string, name: string, runId: string): string =>
+  JSON.stringify([repo, name, runId])
+
 export type Projection = {
   tasks: Record<string, ProjectedTask>
   questions: Record<string, ProjectedQuestion>
+  watcherRuns: Record<string, ProjectedWatcherRun>
 }
 
-export const emptyProjection = (): Projection => ({ tasks: {}, questions: {} })
+export const emptyProjection = (): Projection => ({ tasks: {}, questions: {}, watcherRuns: {} })
 
 /**
  * The single state machine. Folds one event over a projection; the server and
@@ -76,6 +106,75 @@ export const emptyProjection = (): Projection => ({ tasks: {}, questions: {} })
  * interprets it, never mutates it.
  */
 export function project(state: Projection, event: StoredEvent): Projection {
+  if (event.type === 'watcher.run.started') {
+    const key = watcherRunKey(event.repo, event.name, event.runId)
+    const watcherRuns = { ...state.watcherRuns }
+    watcherRuns[key] = {
+      repo: event.repo,
+      name: event.name,
+      runId: event.runId,
+      startedAt: event.ts,
+      endedAt: null,
+      ok: null,
+      error: null,
+      actions: [],
+      log: [{ ts: event.ts, message: 'run started', level: 'info' }],
+      startSeq: event.seq,
+      endSeq: null,
+    }
+    return { ...state, watcherRuns }
+  }
+  if (event.type === 'watcher.action') {
+    const key = watcherRunKey(event.repo, event.name, event.runId)
+    const currentRun = state.watcherRuns[key]
+    if (currentRun === undefined) return state
+    const watcherRuns = { ...state.watcherRuns }
+    const action: ProjectedWatcherAction = {
+      targetType: event.targetType,
+      targetId: event.targetId,
+      ...(event.prNumber === undefined ? {} : { prNumber: event.prNumber }),
+      ...(event.url === undefined ? {} : { url: event.url }),
+      result: event.result,
+      level: event.level,
+      ts: event.ts,
+    }
+    watcherRuns[key] = {
+      ...currentRun,
+      actions: [...currentRun.actions, action],
+      log: [
+        ...currentRun.log,
+        {
+          ts: event.ts,
+          message: `${event.targetType} ${event.targetId}: ${event.result}`,
+          level: event.level,
+        },
+      ],
+    }
+    return { ...state, watcherRuns }
+  }
+  if (event.type === 'watcher.run.finished') {
+    const key = watcherRunKey(event.repo, event.name, event.runId)
+    const currentRun = state.watcherRuns[key]
+    if (currentRun === undefined) return state
+    const watcherRuns = { ...state.watcherRuns }
+    const error = event.error ?? null
+    watcherRuns[key] = {
+      ...currentRun,
+      endedAt: event.ts,
+      ok: event.ok,
+      error,
+      endSeq: event.seq,
+      log: [
+        ...currentRun.log,
+        {
+          ts: event.ts,
+          message: event.ok ? 'run completed' : `run failed${error === null ? '' : `: ${error}`}`,
+          level: event.ok ? 'info' : 'error',
+        },
+      ],
+    }
+    return { ...state, watcherRuns }
+  }
   if (event.taskId === null) return state
   // Copy-on-write: the clients fold tens of thousands of events, most of which
   // touch neither map, so copying both on every event made replay quadratic.
@@ -308,5 +407,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
       break
   }
 
-  return tasks === state.tasks && questions === state.questions ? state : { tasks, questions }
+  return tasks === state.tasks && questions === state.questions
+    ? state
+    : { ...state, tasks, questions }
 }

@@ -141,6 +141,11 @@ export const WorkerUpdateBody = z
 export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>
 
 export const WatcherParam = z.object({ kind: z.enum(['mention', 'prConflict', 'stall']) })
+export const WatcherHistoryParam = z.object({ repo: z.string().min(1), name: z.string().min(1) })
+export const WatcherHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  beforeSeq: z.coerce.number().int().min(1).optional(),
+})
 
 export const WatcherUpdateBody = z
   .object({

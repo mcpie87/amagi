@@ -282,6 +282,32 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
   z.object({
+    type: z.literal('watcher.run.started'),
+    repo: z.string(),
+    name: z.string(),
+    runId: z.string(),
+  }),
+  z.object({
+    type: z.literal('watcher.action'),
+    repo: z.string(),
+    name: z.string(),
+    runId: z.string(),
+    targetType: z.enum(['pr', 'mention', 'task']),
+    targetId: z.string(),
+    prNumber: z.number().int().optional(),
+    url: z.string().optional(),
+    result: z.string(),
+    level: z.enum(['info', 'error']).default('info'),
+  }),
+  z.object({
+    type: z.literal('watcher.run.finished'),
+    repo: z.string(),
+    name: z.string(),
+    runId: z.string(),
+    ok: z.boolean(),
+    error: z.string().nullable().optional(),
+  }),
+  z.object({
     type: z.literal('mention.classified'),
     /** Which response path the classifier chose for the mention. */
     kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
