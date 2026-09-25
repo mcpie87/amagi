@@ -1,3 +1,29 @@
+export const DEFAULT_DATE_FORMAT = 'YYYY-MM-DD hh:mm:ss'
+
+const DATE_TOKENS = /YYYY|MM|DD|hh|mm|ss/g
+
+export function normalizeDateFormat(format: string): string {
+  const candidate = format.trim()
+  if (candidate === '' || /[A-Za-z]/.test(candidate.replace(DATE_TOKENS, ''))) {
+    return DEFAULT_DATE_FORMAT
+  }
+  return candidate
+}
+
+export function fmtDateTime(value: Date | number, format = DEFAULT_DATE_FORMAT): string {
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) return ''
+  const tokens: Record<string, string> = {
+    YYYY: String(date.getFullYear()).padStart(4, '0'),
+    MM: String(date.getMonth() + 1).padStart(2, '0'),
+    DD: String(date.getDate()).padStart(2, '0'),
+    hh: String(date.getHours()).padStart(2, '0'),
+    mm: String(date.getMinutes()).padStart(2, '0'),
+    ss: String(date.getSeconds()).padStart(2, '0'),
+  }
+  return normalizeDateFormat(format).replace(DATE_TOKENS, (token) => tokens[token] ?? token)
+}
+
 export function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
