@@ -39,9 +39,12 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
 })
 
 /** Serves the git side of a tick: ls-remote, worktree, merge. PRs come from the driver. */
-function fakeExec(): Exec {
+function fakeExec(baseOid: () => string = () => 'base1'): Exec {
   let unmerged = false
   return async (cmd) => {
+    if (cmd.includes('ls-remote') && cmd.includes('refs/heads/main')) {
+      return { exitCode: 0, stdout: `${baseOid()}\trefs/heads/main\n`, stderr: '' }
+    }
     if (cmd.includes('MERGE_HEAD')) return { exitCode: 0, stdout: 'merge-head', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) {
@@ -209,7 +212,7 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, { headOid: string }> =>
+const stateFile = (): Record<string, { headOid: string; baseOid?: string }> =>
   JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
@@ -230,7 +233,7 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(counter(w, 'conflicting')).toBe(1)
   expect(counter(w, 'resolved')).toBe(1)
   expect(started).toBe(1)
-  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base1' })
   expect(activity.runs).toBeGreaterThanOrEqual(1)
   expect(activity.successes).toBe(activity.runs)
   expect(activity.failures).toBe(0)
@@ -274,7 +277,27 @@ test('re-attempts a conflicting PR once its head SHA changes', async () => {
   driver.prs = [pr({ headRefOid: head })]
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(2)
-  expect(stateFile()['7']).toEqual({ headOid: 'newsha' })
+  expect(stateFile()['7']).toEqual({ headOid: 'newsha', baseOid: 'base1' })
+})
+
+test('re-attempts a conflicting PR once the base branch moves, even on the same head', async () => {
+  let started = 0
+  let base = 'base1'
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(
+    fakeExec(() => base),
+    () => fakeHarness(() => started++),
+    { driver },
+  )
+
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  base = 'base2'
+  await Bun.sleep(60)
+  expect(started).toBe(2)
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base2' })
 })
 
 test('a failed resolution is recorded so the same head is not retried', async () => {
@@ -299,7 +322,7 @@ test('a failed resolution is recorded so the same head is not retried', async ()
   const afterFirst = started
   await Bun.sleep(60)
   expect(started).toBe(afterFirst)
-  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base1' })
 })
 
 test('a conflicting PR that stops conflicting drops out of the state file', async () => {
