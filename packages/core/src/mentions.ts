@@ -186,10 +186,10 @@ export function taskIdFromPrTitle(title: string): string | null {
 }
 
 /**
- * Resolves the tracker task id for a PR, most to least reliable: the
- * `amagi-task:` body trailer set at creation (works for any tracker, and
- * survives a human editing the title); the branch name matched against the
- * tracker's open ids (for PRs that predate the trailer); the PR title, as a
+ * Resolves the tracker task id for a PR, most to least reliable: the task id
+ * the body was written with at creation (works for any tracker, and survives
+ * a human editing the title); the branch name matched against the tracker's
+ * open ids (for PRs that predate it); the PR title, as a
  * last resort for beads ids that happen to still carry the "am-544: " prefix.
  */
 export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
@@ -240,56 +240,66 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  p.phase('fixing in worktree')
-  const outcome = await withHeadReflogBypassCheck(
-    wt.path,
-    run,
-    () => {
-      const proc = startImplementHarness(
-        mk,
-        watcherHarnessConfig(opts.config, 'mention'),
-        wt.path,
-        respondToMentionPrompt({
+  const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
+  try {
+    p.phase('fixing in worktree')
+    const { outcome, proc } = await withHeadReflogBypassCheck(
+      wt.path,
+      run,
+      async () => {
+        const ctx = {
           pr: opts.pr,
           mention: opts.mention,
           worktree: wt.path,
           branch: wt.branch,
           baseBranch: opts.config.repo.baseBranch,
           checks: opts.config.checks.commands,
+          outPath,
           conflicted: wt.conflicted,
-        }),
-        respondToMentionSystemPrompt({
-          pr: opts.pr,
-          mention: opts.mention,
-          worktree: wt.path,
-          branch: wt.branch,
-          baseBranch: opts.config.repo.baseBranch,
-          checks: opts.config.checks.commands,
-          conflicted: wt.conflicted,
-        }),
-      )
-      return p.agent(proc, 'fixing in worktree')
-    },
-    opts.onGitBypassed,
-  )
-  if (!outcome.ok) {
-    throw new Error(`agent failed: ${agentFailure(outcome)}`)
+        }
+        const proc = startImplementHarness(
+          mk,
+          watcherHarnessConfig(opts.config, 'mention'),
+          wt.path,
+          respondToMentionPrompt(ctx),
+          respondToMentionSystemPrompt(ctx),
+        )
+        return { outcome: await p.agent(proc, 'fixing in worktree'), proc }
+      },
+      opts.onGitBypassed,
+    )
+    if (!outcome.ok) {
+      throw new Error(`agent failed: ${agentFailure(outcome)}`)
+    }
+    const changed = await commitWorktree(run, wt.path, opts.pr)
+    p.phase('pushing fix')
+    await pushConflictFix({
+      cwd: wt.path,
+      branch: wt.branch,
+      headRef: opts.pr.headRefName,
+      remote: opts.config.forge.remote,
+      exec: run,
+    })
+    const summary = readFileSync(outPath, 'utf8').trim()
+    if (summary === '') throw new Error('agent produced no fix summary')
+    const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')
+    const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
+    const result = changed ? summary : `No change was made: ${summary}`
+    p.phase('posting comment')
+    await opts.driver.postComment(
+      opts.root,
+      opts.pr.number,
+      `@${opts.mention.user} ${result}${footer}`,
+    )
+  } finally {
+    rmSync(outPath, { force: true })
   }
-  await commitWorktree(run, wt.path, opts.pr)
-  p.phase('pushing fix')
-  await pushConflictFix({
-    cwd: wt.path,
-    branch: wt.branch,
-    headRef: opts.pr.headRefName,
-    remote: opts.config.forge.remote,
-    exec: run,
-  })
 }
 
 /** Stages and commits the fix, mirroring runner.commit: nothing to commit is fine, a git failure throws. */
-async function commitWorktree(run: Exec, cwd: string, pr: PrInfo): Promise<void> {
+async function commitWorktree(run: Exec, cwd: string, pr: PrInfo): Promise<boolean> {
   const status = await run(['git', 'status', '--porcelain'], { cwd })
-  if (status.stdout.trim() === '') return
+  if (status.stdout.trim() === '') return false
   await run(['git', 'add', '-A'], { cwd })
   const commit = await run(['git', 'commit', '-q', '-F', '-'], {
     cwd,
@@ -298,6 +308,7 @@ async function commitWorktree(run: Exec, cwd: string, pr: PrInfo): Promise<void>
   if (commit.exitCode !== 0) {
     throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
   }
+  return true
 }
 
 async function respondToExplain(

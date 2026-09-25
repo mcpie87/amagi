@@ -4,6 +4,7 @@ import {
   emptyProjection,
   type ProjectedQuestion,
   type ProjectedTask,
+  type ProjectedWatcherRun,
   type Projection,
   project,
 } from '../project.ts'
@@ -327,6 +328,42 @@ export class Store {
       taskId: r.task_id,
       ...(JSON.parse(r.body) as EventBody),
     }))
+  }
+
+  /** Durable watcher history, newest runs first. Pages are cut on run boundaries. */
+  watcherRuns(opts: {
+    repo: string
+    name: string
+    limit: number
+    beforeSeq?: number
+  }): ProjectedWatcherRun[] {
+    const beforeSeq = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER
+    const rows = this.db
+      .query(
+        `select * from events where type in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')
+         and seq < ? order by seq`,
+      )
+      .all(beforeSeq) as { seq: number; ts: number; task_id: string | null; body: string }[]
+    let projection = emptyProjection()
+    for (const row of rows) {
+      const event = {
+        seq: row.seq,
+        ts: row.ts,
+        taskId: row.task_id,
+        ...(JSON.parse(row.body) as EventBody),
+      } as StoredEvent
+      if (
+        event.type === 'watcher.run.started' ||
+        event.type === 'watcher.action' ||
+        event.type === 'watcher.run.finished'
+      ) {
+        projection = project(projection, event)
+      }
+    }
+    return Object.values(projection.watcherRuns)
+      .filter((run) => run.repo === opts.repo && run.name === opts.name)
+      .sort((a, b) => b.startSeq - a.startSeq)
+      .slice(0, opts.limit)
   }
 
   question(id: string): ProjectedQuestion | null {

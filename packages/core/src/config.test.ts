@@ -138,12 +138,12 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
   })
 
-  test('loads workers with stable identity and defaults enabled', () => {
+  test('loads workers with stable identity and defaults them disabled', () => {
     writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
     expect(loadConfig(repo).config.worker[0]).toMatchObject({
       id: 'w-fast',
       name: 'Fast',
-      enabled: true,
+      enabled: false,
     })
   })
 
@@ -180,6 +180,17 @@ describe('loadConfig', () => {
       effort: 'high',
       seat: 'shared',
     })
+  })
+
+  test('a watcher on a different harness kind does not inherit the implement bin or args', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "codex"\nbin = "codex-unconfined"\nmodel = "gpt-x"\npermissions = "bypass"\nextraArgs = ["--foo"]\n\n' +
+        '[watchers.prConflict]\nkind = "claude"\n',
+    )
+    const harness = watcherHarnessConfig(loadConfig(repo).config, 'prConflict')
+    expect(harness).toMatchObject({ kind: 'claude', permissions: 'bypass', extraArgs: [] })
+    expect(harness.bin).toBeUndefined()
+    expect(harness.model).toBeUndefined()
   })
 
   test('an unknown enum value fails loudly and names the file', () => {

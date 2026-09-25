@@ -8,6 +8,7 @@ import {
   loadLiveRuns,
   mergeLiveRuns,
   recordLiveRun,
+  updateLiveRun,
 } from './live-runs.ts'
 import { killTree } from './process.ts'
 import type { RunnerStatus } from './run-service.ts'
@@ -50,6 +51,12 @@ describe('live runs registry', () => {
     expect(loadLiveRuns(path)).toEqual([{ ...live(), pid: 1234, title: 'replacement' }])
   })
 
+  test('a foreground run records when it is waiting for its seat', () => {
+    recordLiveRun(live(), path)
+    updateLiveRun('repo1', 'bd-1', { waitingOnSeat: true }, path)
+    expect(loadLiveRuns(path)).toEqual([{ ...live(), waitingOnSeat: true }])
+  })
+
   test('two tasks in one repo both stay recorded', () => {
     recordLiveRun(live(), path)
     recordLiveRun({ ...live(), taskId: 'bd-2' }, path)
@@ -86,6 +93,11 @@ describe('mergeLiveRuns', () => {
         harness: 'claude',
         model: null,
         effort: null,
+        workerId: null,
+        workerName: null,
+        seat: 'claude',
+        waitingOnSeat: false,
+        adHoc: true,
       })
       expect(merged.resources['bd-1']).toBeDefined()
     } finally {
@@ -104,6 +116,31 @@ describe('mergeLiveRuns', () => {
     )
     expect(merged.running).toEqual(['bd-1'])
     expect(merged.tasks['bd-1']?.title).toBe('server')
+  })
+
+  test('keeps a configured foreground worker identity and seat-wait state', async () => {
+    const proc = Bun.spawn(['sleep', '30'], { stdout: 'ignore' })
+    try {
+      const merged = await mergeLiveRuns(status(), [
+        {
+          ...live(),
+          pid: proc.pid,
+          workerId: 'worker-1',
+          workerName: 'Claude worker',
+          seat: 'claude-pro',
+          waitingOnSeat: true,
+        },
+      ])
+      expect(merged.tasks['bd-1']).toMatchObject({
+        workerId: 'worker-1',
+        workerName: 'Claude worker',
+        seat: 'claude-pro',
+        waitingOnSeat: true,
+      })
+      expect(merged.tasks['bd-1']?.adHoc).toBeUndefined()
+    } finally {
+      await killTree(proc.pid, { graceMs: 50 })
+    }
   })
 
   test('drops a dead-pid record so a crashed CLI does not linger', async () => {

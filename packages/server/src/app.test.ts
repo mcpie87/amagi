@@ -315,6 +315,7 @@ class FakeIssueTracker extends BeadsTracker {
   readonly created: CreateTrackerTask[] = []
   readonly updated: { id: string; input: UpdateTrackerTask }[] = []
   readonly released: string[] = []
+  readonly closed: { id: string; reason: string | undefined }[] = []
   issues = new Map<string, BeadsIssue>()
   private seq = 0
 
@@ -425,7 +426,11 @@ class FakeIssueTracker extends BeadsTracker {
   override async release(id: string): Promise<void> {
     this.released.push(id)
   }
-  override async close(): Promise<void> {}
+  override async close(id: string, reason?: string): Promise<void> {
+    this.closed.push({ id, reason })
+    const issue = this.issues.get(id)
+    if (issue !== undefined) this.issues.set(id, { ...issue, status: 'closed' })
+  }
   override async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'g', advisory: false }
   }
@@ -442,6 +447,38 @@ function issueApp(tracker: Tracker) {
 }
 
 describe('issue mutations', () => {
+  test('POST /api/repos/:repo/issues/:id/close closes only the requested issue with its reason', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', type: 'epic' })
+    tracker.seed({ id: 'bd-2', type: 'epic' })
+    app = issueApp(tracker)
+
+    const res = await app.request('/api/repos/repo1/issues/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'completed' }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ id: 'bd-1', status: 'closed', reason: 'completed' })
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'completed' }])
+    expect((await tracker.getIssue('bd-1'))?.status).toBe('closed')
+    expect((await tracker.getIssue('bd-2'))?.status).toBe('open')
+  })
+
+  test('POST /api/repos/:repo/issues/:id/close rejects a blank reason', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', type: 'epic' })
+    app = issueApp(tracker)
+    const res = await app.request('/api/repos/repo1/issues/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: '   ' }),
+    })
+    expect(res.status).toBe(400)
+    expect(tracker.closed).toHaveLength(0)
+  })
+
   test('POST /api/repos/:repo/issues creates through the tracker and returns the issue', async () => {
     const tracker = new FakeIssueTracker()
     app = issueApp(tracker)
@@ -1001,7 +1038,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async (id) => {
           retried.push(id)
           return { ok: true, taskId: id }
@@ -1269,7 +1306,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           store.append(id, { type: 'task.state', from: 'implementing', to: 'cancelled' })
           return { ok: true, taskId: id }
         },
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -1324,7 +1361,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           store.append(id, { type: 'task.state', from: 'retrying', to: 'cancelled' })
           return { ok: true, taskId: id }
         },
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -1656,7 +1693,7 @@ describe('runner endpoints', () => {
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
-    setWorkerOn: () => {},
+    fleetChanged: () => {},
     retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
     setAutoQueue: () => {},
     ...over,
@@ -1789,6 +1826,11 @@ describe('runner endpoints', () => {
         harness: 'claude',
         model: 'sonnet',
         effort: null,
+        workerId: null,
+        workerName: null,
+        seat: 'claude',
+        waitingOnSeat: false,
+        adHoc: true,
       })
       expect(body.resources['bd-9']).toBeDefined()
     } finally {
@@ -1983,7 +2025,7 @@ describe('repo settings endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         setAutoQueue: (enabled) => applied.push(enabled),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
@@ -2029,7 +2071,7 @@ describe('repo settings endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -2047,7 +2089,7 @@ describe('fleet endpoints', () => {
   const savedXdg = process.env.XDG_CONFIG_HOME
   let home: string
   let fleet: FleetWorkerStatus[]
-  const toggled: { id: string; on: boolean }[] = []
+  let fleetChanges = 0
   const queued: boolean[] = []
 
   const send = (method: string, path: string, body?: unknown) =>
@@ -2065,7 +2107,7 @@ describe('fleet endpoints', () => {
     ws = testWorkspaces(['repo1', 'repo2'])
     store = ws.store('repo1')
     fleet = []
-    toggled.length = 0
+    fleetChanges = 0
     queued.length = 0
     app = createApp({
       workspaces: ws.workspaces,
@@ -2083,7 +2125,9 @@ describe('fleet endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: (id, on) => toggled.push({ id, on }),
+        fleetChanged: () => {
+          fleetChanges++
+        },
         setAutoQueue: (enabled) => queued.push(enabled),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
@@ -2097,51 +2141,70 @@ describe('fleet endpoints', () => {
     else process.env.XDG_CONFIG_HOME = savedXdg
   })
 
-  test('a created worker persists globally, reaches the runner, and starts off', async () => {
+  test('a created worker persists globally, reaches the runner, and starts disabled', async () => {
     const res = await send('POST', '/api/workers', { name: 'Codex 1', kind: 'codex' })
     expect(res.status).toBe(201)
     const worker = (await res.json()) as { id: string }
-    expect(worker).toMatchObject({ name: 'Codex 1', kind: 'codex', enabled: true, on: false })
+    expect(worker).toMatchObject({ name: 'Codex 1', kind: 'codex', enabled: false })
     expect(loadGlobalConfig().worker.map((w) => w.id)).toEqual([worker.id])
     expect(ws.workspaces.get('repo1')?.config.worker.map((w) => w.id)).toEqual([worker.id])
+    expect(fleetChanges).toBe(1)
     const list = (await (await app.request('/api/workers')).json()) as {
-      workers: { id: string; on: boolean; taskId: string | null }[]
+      workers: { id: string; enabled: boolean; taskId: string | null }[]
     }
     expect(list.workers).toEqual([
-      expect.objectContaining({ id: worker.id, on: false, taskId: null }),
+      expect.objectContaining({ id: worker.id, enabled: false, taskId: null }),
     ])
   })
 
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
-    fleet = [{ id, name: 'One', enabled: true, on: true, busy: true, taskId: 'bd-9' }]
+    fleet = [
+      {
+        id,
+        name: 'One',
+        kind: 'claude',
+        model: null,
+        effort: null,
+        seat: 'claude',
+        enabled: true,
+        busy: true,
+        taskId: 'bd-9',
+      },
+    ]
     const res = await send('PATCH', `/api/workers/${id}`, { name: 'Renamed', model: null })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ id, name: 'Renamed', on: true, taskId: 'bd-9' })
+    expect(await res.json()).toMatchObject({ id, name: 'Renamed', taskId: 'bd-9' })
     const saved = loadGlobalConfig().worker[0]
     expect(saved).toMatchObject({ id, name: 'Renamed', seat: 'mine' })
     expect(saved?.model).toBeUndefined()
-    expect(toggled).toEqual([])
   })
 
-  test('on is a runtime toggle, refused for a disabled worker and dropped on disable', async () => {
+  test('enabled persists, reaches the runner and is the only on/off switch', async () => {
     const { id } = await create({ name: 'One', kind: 'claude' })
-    expect((await send('PATCH', `/api/workers/${id}`, { on: true })).status).toBe(200)
-    expect(toggled).toEqual([{ id, on: true }])
-    expect('on' in (loadGlobalConfig().worker[0] ?? {})).toBe(false)
-    expect((await send('PATCH', `/api/workers/${id}`, { enabled: false })).status).toBe(200)
-    expect(toggled).toEqual([
-      { id, on: true },
-      { id, on: false },
-    ])
-    const refused = await send('PATCH', `/api/workers/${id}`, { on: true })
-    expect(refused.status).toBe(409)
-    expect(((await refused.json()) as { error: string }).error).toContain('disabled')
+    expect((await send('PATCH', `/api/workers/${id}`, { enabled: true })).status).toBe(200)
+    expect(loadGlobalConfig().worker[0]?.enabled).toBe(true)
+    expect(ws.workspaces.get('repo1')?.config.worker[0]?.enabled).toBe(true)
+    expect(fleetChanges).toBe(2)
+    expect((await send('PATCH', `/api/workers/${id}`, { on: false })).status).toBe(400)
+    expect(loadGlobalConfig().worker[0]?.enabled).toBe(true)
   })
 
   test('deleting a worker mid-run is refused with the running task', async () => {
     const { id } = await create({ name: 'One', kind: 'claude' })
-    fleet = [{ id, name: 'One', enabled: true, on: true, busy: true, taskId: 'bd-9' }]
+    fleet = [
+      {
+        id,
+        name: 'One',
+        kind: 'claude',
+        model: null,
+        effort: null,
+        seat: 'claude',
+        enabled: true,
+        busy: true,
+        taskId: 'bd-9',
+      },
+    ]
     const refused = await send('DELETE', `/api/workers/${id}`)
     expect(refused.status).toBe(409)
     expect(((await refused.json()) as { error: string }).error).toContain('bd-9')
@@ -2252,6 +2315,50 @@ describe('GET /api/repos/:repo/events', () => {
     const res = await app.request('/api/repos/repo1/events?taskId=bd-2')
     const body = (await res.json()) as { taskId: string | null }[]
     expect(body.every((e) => e.taskId === 'bd-2')).toBe(true)
+  })
+})
+
+describe('GET /api/repos/:repo/watchers/:name/runs', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('returns a window of complete runs, newest first', async () => {
+    for (const runId of ['old', 'new']) {
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+      })
+      store.append(null, {
+        type: 'watcher.action',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+        targetType: 'task',
+        targetId: `am-${runId}`,
+        result: 'recovered',
+        level: 'info',
+      })
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+        ok: true,
+      })
+    }
+    const res = await app.request('/api/repos/repo1/watchers/stall-watcher/runs?limit=1')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      runs: { runId: string; actions: { targetId: string }[] }[]
+    }
+    expect(body.runs).toHaveLength(1)
+    expect(body.runs[0]?.runId).toBe('new')
+    expect(body.runs[0]?.actions[0]?.targetId).toBe('am-new')
   })
 })
 
@@ -2624,7 +2731,7 @@ describe('POST /api/repos/:repo/run', () => {
         },
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         setAutoQueue: () => {},
       },
     })

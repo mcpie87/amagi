@@ -9,7 +9,7 @@ import { applyPersona, branchExists } from './worktree.ts'
 export type PrInfo = {
   number: number
   title: string
-  /** Full PR description, so the amagi-task trailer can be read back off it. */
+  /** Full PR description, so the task id can be read back off it. */
   body: string
   url: string
   headRefName: string

@@ -256,6 +256,7 @@ describe('pickWorkerSelection', () => {
           kind: 'opencode',
           model: 'local/default',
           seat: 'shared-seat',
+          enabled: true,
         },
         { id: 'off', name: 'Off', kind: 'claude', enabled: false },
       ],

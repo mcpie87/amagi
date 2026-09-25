@@ -216,10 +216,11 @@ const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): n
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
 test('lists open PRs, resolves only conflicting ones, and records counters', async () => {
+  const store = new Store(openDatabase(':memory:'))
   let started = 0
   const driver = new FakePr()
   driver.prs = [pr(), pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
-  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver })
+  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver, store })
 
   await Bun.sleep(60)
 
@@ -235,6 +236,13 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(activity.failures).toBe(0)
   expect(activity.status).toBe('active')
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
+  const runs = store.watcherRuns({ repo: 'amagi', name: 'pr-conflict-watcher', limit: 20 })
+  const run = runs.find((entry) =>
+    entry.actions.some(
+      (action) => action.prNumber === 7 && action.result === 'conflict resolution dispatched',
+    ),
+  )
+  expect(run?.ok).toBe(true)
 })
 
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {

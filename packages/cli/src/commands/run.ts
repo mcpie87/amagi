@@ -10,6 +10,7 @@ import {
   recordLiveRun,
   repoName,
   repoRoot,
+  updateLiveRun,
   type WorkerConfig,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
@@ -38,12 +39,14 @@ export async function workOneTask(opts: {
   const { config } = loadConfig(root)
   const { key, name, store } = currentRepo()
   let implement: Config['harness']['implement']
+  let worker: WorkerConfig | undefined
   let selectedWorker: WorkerConfig | undefined
   let selectionInteractive: boolean
   if (opts.useFleet) {
     const selection = await pickWorkerSelection(config, opts.flags, interactive() ? picker : null)
     implement = selection.harness
     selectedWorker = selection.worker
+    worker = selection.worker
     selectionInteractive = selection.interactive
   } else {
     const selection = await pickRunSelection(
@@ -54,6 +57,18 @@ export async function workOneTask(opts: {
       usageCounts(store.events()),
     )
     implement = selection.harness
+    const picked = implement
+    const matchingWorkers = config.worker.filter((candidate) => {
+      const fallback =
+        candidate.kind === config.harness.implement.kind ? config.harness.implement : null
+      return (
+        candidate.kind === picked.kind &&
+        (candidate.model ?? fallback?.model ?? null) === (picked.model ?? null) &&
+        (candidate.effort ?? fallback?.effort ?? null) === (picked.effort ?? null) &&
+        (candidate.seat ?? candidate.kind) === (picked.seat ?? picked.kind)
+      )
+    })
+    worker = matchingWorkers.length === 1 ? matchingWorkers[0] : undefined
     selectionInteractive = selection.interactive
   }
   if (selectionInteractive) {
@@ -92,6 +107,10 @@ export async function workOneTask(opts: {
       harness: implement.kind,
       model: implement.model ?? null,
       effort: implement.effort ?? null,
+      workerId: worker?.id ?? null,
+      workerName: worker?.name ?? null,
+      seat: worker?.seat ?? implement.seat ?? implement.kind,
+      waitingOnSeat: false,
       startedAt: Date.now(),
     })
   }
@@ -125,9 +144,15 @@ export async function workOneTask(opts: {
         console.log(dim(`  worktree: ${event.path} (${event.branch})`))
         break
       case 'agent.started':
+        if (liveTaskId !== null) updateLiveRun(key, liveTaskId, { waitingOnSeat: false })
         console.log(dim(`  agent: ${event.harness}${event.model ? ` (${event.model})` : ''}`))
         break
       case 'agent.stream':
+        if (event.event.kind === 'status' && liveTaskId !== null) {
+          updateLiveRun(key, liveTaskId, {
+            waitingOnSeat: event.event.message.startsWith('waiting for seat '),
+          })
+        }
         if (event.event.kind === 'tool_use') console.log(dim(`  ${event.event.name}`))
         if (event.event.kind === 'text' && event.event.text.trim()) {
           printBlock(event.event.text)

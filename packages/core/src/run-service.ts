@@ -19,6 +19,13 @@ export type RunnerResource = {
  *  channel like rss/cpu instead of relying on the SSE projection. */
 export type RunnerTask = {
   title: string
+  workerId?: string | null
+  workerName?: string | null
+  seat?: string
+  /** True until a harness emits agent.started after blocking on its seat. */
+  waitingOnSeat?: boolean
+  /** True for a foreground run that does not match a configured worker. */
+  adHoc?: boolean
   /** The configured implement harness for the run. */
   harness: string
   model: string | null
@@ -47,8 +54,11 @@ export type RunnerStatus = {
 export type FleetWorkerStatus = {
   id: string
   name: string
+  kind: WorkerConfig['kind']
+  model: string | null
+  effort: string | null
+  seat: string
   enabled: boolean
-  on: boolean
   busy: boolean
   /** The task this worker itself is running, as opposed to another worker on its seat. */
   taskId: string | null
@@ -111,7 +121,8 @@ export interface RunServiceApi {
   status(): Promise<RunnerStatus>
   start(taskId?: string, opts?: RunOptions): Promise<StartResult>
   stop(taskId: string): Promise<StopResult>
-  setWorkerOn(workerId: string, on: boolean): void
+  /** The fleet config changed; with auto queue on, poll now instead of after the idle backoff. */
+  fleetChanged(): void
   /**
    * Skip the backoff of a task currently deferring an automatic retry and
    * start the next attempt immediately. 404 when the task runs elsewhere.
@@ -171,21 +182,16 @@ export class RunService implements RunServiceApi {
   private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
   private autoQueuePolling = false
   private stopped = false
-  private readonly workerOn = new Map<string, boolean>()
 
   constructor(private readonly opts: RunServiceOptions) {
-    for (const worker of opts.config.worker) this.workerOn.set(worker.id, false)
     this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
     this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
     this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
     if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
-  setWorkerOn(workerId: string, on: boolean): void {
-    if (this.opts.config.worker.some((worker) => worker.id === workerId && worker.enabled)) {
-      this.workerOn.set(workerId, on)
-      if (on && this.autoQueue) this.scheduleAutoQueuePoll(0)
-    }
+  fleetChanged(): void {
+    if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
   /**
@@ -229,7 +235,7 @@ export class RunService implements RunServiceApi {
     this.autoQueuePolling = true
     try {
       if (!this.autoQueue || this.stopped) return
-      const result = await this.start(undefined, undefined, true)
+      const result = await this.start()
       const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
       if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
     } finally {
@@ -251,8 +257,28 @@ export class RunService implements RunServiceApi {
         }
         const task = this.opts.store.task(id)
         const agent = this.opts.store.currentAgent(id)
+        const worker = this.opts.config.worker.find((candidate) => candidate.id === entry?.workerId)
+        const latestEvents = this.opts.store.recentEvents(id, 100)
+        const waitingSeatEvent = [...latestEvents]
+          .reverse()
+          .find(
+            (event) =>
+              event.type === 'agent.stream' &&
+              event.event.kind === 'status' &&
+              event.event.message.startsWith('waiting for seat '),
+          )
+        const latestAgentStart = [...latestEvents]
+          .reverse()
+          .find((event) => event.type === 'agent.started')
+        const waitingOnSeat =
+          waitingSeatEvent !== undefined &&
+          (latestAgentStart === undefined || waitingSeatEvent.seq > latestAgentStart.seq)
         tasks[id] = {
           title: task?.title ?? id,
+          workerId: worker?.id ?? null,
+          workerName: worker?.name ?? null,
+          seat: entry?.seat ?? worker?.seat ?? worker?.kind ?? this.opts.harness.kind,
+          waitingOnSeat,
           // The configured harness is known at launch; only the model/effort
           // wait for the agent run to report them.
           harness:
@@ -266,8 +292,8 @@ export class RunService implements RunServiceApi {
     for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
-      available: this.availableCapacity(true) > 0,
-      capacity: this.availableCapacity(true),
+      available: this.availableCapacity() > 0,
+      capacity: this.availableCapacity(),
       running,
       startedAt,
       resources,
@@ -276,16 +302,19 @@ export class RunService implements RunServiceApi {
       fleet: this.opts.config.worker.map((worker) => ({
         id: worker.id,
         name: worker.name,
+        kind: worker.kind,
+        model: worker.model ?? null,
+        effort: worker.effort ?? null,
+        seat: this.workerSeat(worker),
         enabled: worker.enabled,
-        on: this.workerOn.get(worker.id) === true,
         busy: this.runsBySeat().has(this.workerSeat(worker)),
         taskId: [...this.runs].find(([, run]) => run.workerId === worker.id)?.[0] ?? null,
       })),
     }
   }
 
-  start(taskId?: string, opts?: RunOptions, automatic = false): Promise<StartResult> {
-    const result = this.launchQueue.then(() => this.tryStart(taskId, opts, automatic))
+  start(taskId?: string, opts?: RunOptions): Promise<StartResult> {
+    const result = this.launchQueue.then(() => this.tryStart(taskId, opts))
     this.launchQueue = result.then(
       () => undefined,
       () => undefined,
@@ -309,38 +338,28 @@ export class RunService implements RunServiceApi {
     return new Map([...this.runs].map(([id, run]) => [run.seat, id]))
   }
 
-  private availableWorkers(automatic: boolean): WorkerConfig[] {
+  private availableWorkers(): WorkerConfig[] {
     const busy = this.runsBySeat()
     return this.opts.config.worker.filter(
-      (worker) =>
-        worker.enabled &&
-        (!automatic || this.workerOn.get(worker.id) === true) &&
-        !busy.has(this.workerSeat(worker)),
+      (worker) => worker.enabled && !busy.has(this.workerSeat(worker)),
     )
   }
 
-  private availableCapacity(automatic: boolean): number {
-    return new Set(this.availableWorkers(automatic).map((worker) => this.workerSeat(worker))).size
+  private availableCapacity(): number {
+    return new Set(this.availableWorkers().map((worker) => this.workerSeat(worker))).size
   }
 
-  private async tryStart(
-    taskId?: string,
-    opts?: RunOptions,
-    automatic = false,
-  ): Promise<StartResult> {
+  private async tryStart(taskId?: string, opts?: RunOptions): Promise<StartResult> {
     if (taskId !== undefined && this.runs.has(taskId)) {
       return { ok: false, status: 409, error: `task ${taskId} is already running` }
     }
     const selected =
       opts?.workerId === undefined
-        ? this.availableWorkers(automatic)[0]
+        ? this.availableWorkers()[0]
         : this.opts.config.worker.find((worker) => worker.id === opts.workerId)
     if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
-    if (automatic && this.workerOn.get(selected.id) !== true) {
-      return { ok: false, status: 409, error: `worker ${selected.id} is off` }
-    }
     if (this.runsBySeat().has(this.workerSeat(selected))) {
       return { ok: false, status: 409, error: `worker ${selected.id} seat is busy` }
     }
