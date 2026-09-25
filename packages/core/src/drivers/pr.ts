@@ -1,7 +1,7 @@
 import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
-import type { PrInfo, PrMergeStatus } from '../pr-check.ts'
+import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
 import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
@@ -262,16 +262,10 @@ function githubPr(exec: Exec): PrDriver {
       })
     },
     async addLabel(cwd, number, label) {
-      await execOk(exec, ['gh', 'pr', 'edit', String(number), '--add-label', label], {
-        cwd,
-        env: ghEnv(),
-      })
+      await addPrLabels(exec, cwd, number, [label])
     },
     async removeLabel(cwd, number, label) {
-      await execOk(exec, ['gh', 'pr', 'edit', String(number), '--remove-label', label], {
-        cwd,
-        env: ghEnv(),
-      })
+      await removePrLabel(exec, cwd, number, label)
     },
     async deleteBranch(cwd, remote, branch) {
       await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github'))

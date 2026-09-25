@@ -372,8 +372,22 @@ describe('githubPr', () => {
     await driver.addLabel('/repo', 7, 'amagi/needs-closing')
     await driver.removeLabel('/repo', 7, 'amagi/needs-closing')
 
-    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/needs-closing'])
-    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--remove-label', 'amagi/needs-closing'])
+    expect(calls).toContainEqual([
+      'gh',
+      'api',
+      '--method',
+      'POST',
+      'repos/{owner}/{repo}/issues/7/labels',
+      '--input',
+      '-',
+    ])
+    expect(calls).toContainEqual([
+      'gh',
+      'api',
+      '--method',
+      'DELETE',
+      'repos/{owner}/{repo}/issues/7/labels/amagi%2Fneeds-closing',
+    ])
   })
 })
 

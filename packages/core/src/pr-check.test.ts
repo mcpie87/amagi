@@ -15,6 +15,7 @@ import {
   type PrInfo,
   prepareConflictWorktree,
   pushConflictFix,
+  removePrLabel,
   resolvePrPriorities,
   stampIterationLabel,
   syncPrPriorityLabel,
@@ -24,16 +25,43 @@ import {
 
 type Call = readonly string[]
 
-function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
+function fake(routes: (cmd: Call) => ExecResult | undefined): {
+  exec: Exec
+  calls: Call[]
+  inputs: unknown[]
+} {
   const calls: Call[] = []
-  const exec: Exec = async (cmd) => {
+  const inputs: unknown[] = []
+  const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
+    if (cmd.includes('api') && opts?.stdin !== undefined)
+      inputs.push(JSON.parse(String(opts.stdin)))
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { exec, calls }
+  return { exec, calls, inputs }
 }
+
+const addLabelsCall = (n: number): Call => [
+  'gh',
+  'api',
+  '--method',
+  'POST',
+  `repos/{owner}/{repo}/issues/${n}/labels`,
+  '--input',
+  '-',
+]
+
+const removeLabelCall = (n: number, label: string): Call => [
+  'gh',
+  'api',
+  '--method',
+  'DELETE',
+  `repos/{owner}/{repo}/issues/${n}/labels/${encodeURIComponent(label)}`,
+]
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
 const fail = (stderr: string): ExecResult => ({ exitCode: 1, stdout: '', stderr })
@@ -191,7 +219,7 @@ describe('iterations', () => {
   })
 
   test('stamps the first iteration on an amagi PR with no prior label', async () => {
-    const { exec, calls } = fake(() => undefined)
+    const { exec, calls, inputs } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
       pr: pr({ labels: ['amagi'] }),
@@ -199,12 +227,12 @@ describe('iterations', () => {
     })
 
     expect(stamped).toEqual({ taskId: 'am-1', iteration: 1 })
-    expect(calls).toContainEqual(['gh', 'label', 'create', 'amagi/iterations:1', '--force'])
-    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'amagi/iterations:1'])
+    expect(calls).toContainEqual(addLabelsCall(7))
+    expect(inputs).toEqual([{ labels: ['amagi/iterations:1'] }])
   })
 
   test('stamps the next iteration and drops the stale label', async () => {
-    const { exec, calls } = fake(() => undefined)
+    const { exec, calls, inputs } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
       pr: pr({ labels: ['amagi/iterations:2'] }),
@@ -212,17 +240,8 @@ describe('iterations', () => {
     })
 
     expect(stamped).toEqual({ taskId: 'am-1', iteration: 3 })
-    expect(calls).toContainEqual(['gh', 'label', 'create', 'amagi/iterations:3', '--force'])
-    expect(calls).toContainEqual([
-      'gh',
-      'pr',
-      'edit',
-      '7',
-      '--add-label',
-      'amagi/iterations:3',
-      '--remove-label',
-      'amagi/iterations:2',
-    ])
+    expect(inputs).toEqual([{ labels: ['amagi/iterations:3'] }])
+    expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
   })
 
   test('leaves non-amagi PRs untouched', async () => {
@@ -353,7 +372,7 @@ describe('resolvePrPriorities', () => {
 
 describe('syncPrPriorityLabel', () => {
   test('removes stale P* labels and adds the current one', async () => {
-    const { exec, calls } = fake(() => undefined)
+    const { exec, calls, inputs } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
       number: 7,
@@ -362,18 +381,9 @@ describe('syncPrPriorityLabel', () => {
       exec,
     })
 
-    expect(calls).toContainEqual([
-      'gh',
-      'pr',
-      'edit',
-      '7',
-      '--remove-label',
-      'P1',
-      '--remove-label',
-      'P3',
-    ])
-    expect(calls).toContainEqual(['gh', 'label', 'create', 'P2', '--force'])
-    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--add-label', 'P2'])
+    expect(calls).toContainEqual(removeLabelCall(7, 'P1'))
+    expect(calls).toContainEqual(removeLabelCall(7, 'P3'))
+    expect(inputs).toEqual([{ labels: ['P2'] }])
   })
 
   test('leaves a matching label alone', async () => {
@@ -386,9 +396,7 @@ describe('syncPrPriorityLabel', () => {
       exec,
     })
 
-    expect(calls.some((c) => c.includes('edit'))).toBe(false)
-    expect(calls.some((c) => c.includes('--add-label'))).toBe(false)
-    expect(calls.some((c) => c.includes('label') && c.includes('create'))).toBe(false)
+    expect(calls).toEqual([])
   })
 
   test('removes any P* label when the bead is unlinked', async () => {
@@ -401,8 +409,16 @@ describe('syncPrPriorityLabel', () => {
       exec,
     })
 
-    expect(calls).toContainEqual(['gh', 'pr', 'edit', '7', '--remove-label', 'P2'])
-    expect(calls.some((c) => c.includes('--add-label'))).toBe(false)
+    expect(calls).toEqual([removeLabelCall(7, 'P2')])
+  })
+})
+
+describe('removePrLabel', () => {
+  test('a label already gone from the PR is not an error, any other failure is', async () => {
+    const gone = fake(() => fail('gh: Label does not exist (HTTP 404)'))
+    await removePrLabel(gone.exec, '/repo', 7, 'P2')
+    const denied = fake(() => fail('gh: Resource not accessible (HTTP 403)'))
+    await expect(removePrLabel(denied.exec, '/repo', 7, 'P2')).rejects.toThrow(/HTTP 403/)
   })
 })
 
@@ -435,11 +451,18 @@ describe('prepareConflictWorktree', () => {
       '/wt/amagi-pr-7',
       'origin/amagi/am-1-do-the-thing',
     ])
-    expect(calls).toContainEqual(['git', 'merge', 'origin/main'])
+    expect(calls).toContainEqual([
+      'git',
+      'merge',
+      '-m',
+      "Merge remote-tracking branch 'origin/main'",
+      'base-oid',
+    ])
     expect(wt).toEqual({
       path: '/wt/amagi-pr-7',
       branch: 'amagi/pr-7-conflict',
       conflicted: true,
+      baseOid: 'base-oid',
     })
   })
 
@@ -488,6 +511,7 @@ describe('prepareConflictWorktree', () => {
         path,
         branch: 'amagi/pr-7-conflict',
         conflicted: true,
+        baseOid: 'base-oid',
       })
     } finally {
       rmSync(root, { recursive: true, force: true })

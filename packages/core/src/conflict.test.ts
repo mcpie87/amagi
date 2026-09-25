@@ -13,6 +13,8 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
   const calls: Call[] = []
   const exec: Exec = async (cmd) => {
     calls.push(cmd)
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
     if (cmd[1] === 'diff') return { exitCode: 1, stdout: '', stderr: '' }
@@ -268,9 +270,12 @@ describe('resolveConflict', () => {
     })
 
     expect(result.ok).toBe(false)
+    expect(result.contained).toBe(true)
     expect(result.message).toContain('skipped the empty merge push')
     expect(result.verdict?.verdict).toBe('CLOSE TASK')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+    // Against the commit that was merged: origin/main may have moved during the agent run.
+    expect(calls).toContainEqual(['git', 'diff', '--quiet', 'base-oid', 'HEAD'])
   })
 
   test('pushes a real merge even when the agent verdict is not resolved', async () => {

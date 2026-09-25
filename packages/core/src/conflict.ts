@@ -48,16 +48,19 @@ export type ResolveConflictResult = {
   iteration: number
   /** The agent's task verdict, saved by the watcher for this PR head. */
   verdict?: PointlessVerdict
+  /** Base already contains the PR's work: nothing was pushed and the PR needs closing, not resolving. */
+  contained?: true
+}
+
+/** True when the merge result adds nothing on top of the merged base commit. */
+async function conflictDiffEmpty(cwd: string, baseOid: string, run: Exec): Promise<boolean> {
+  const diff = await run(['git', 'diff', '--quiet', baseOid, 'HEAD'], { cwd })
+  if (diff.exitCode === 0) return true
+  if (diff.exitCode === 1) return false
+  throw new Error(diff.stderr.trim() || `git diff ${baseOid} HEAD failed`)
 }
 
 /** Paths still unmerged (in conflict); empty once every conflict is resolved. */
-async function conflictDiffEmpty(cwd: string, baseBranch: string, run: Exec): Promise<boolean> {
-  const diff = await run(['git', 'diff', '--quiet', `origin/${baseBranch}..HEAD`], { cwd })
-  if (diff.exitCode === 0) return true
-  if (diff.exitCode === 1) return false
-  throw new Error(diff.stderr.trim() || `git diff origin/${baseBranch}..HEAD failed`)
-}
-
 async function unmergedPaths(run: Exec, cwd: string): Promise<string[]> {
   const out = await execOk(run, ['git', 'diff', '--name-only', '--diff-filter=U'], { cwd })
   return out
@@ -126,10 +129,10 @@ export async function resolveConflict(
     const verdictPath = join(tmpdir(), `amagi-conflict-${opts.pr.number}-${randomUUID()}.md`)
 
     if (!wt.conflicted) {
-      if (await conflictDiffEmpty(wt.path, opts.config.repo.baseBranch, run)) {
+      if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
         const message = 'base already contains the PR work; skipped the empty merge push'
         log('warn', message)
-        return { ok: false, message, iteration }
+        return { ok: false, message, iteration, contained: true }
       }
       await pushConflictFix({
         cwd: wt.path,
@@ -209,11 +212,17 @@ export async function resolveConflict(
     }
 
     await finishMerge(run, wt.path)
-    if (await conflictDiffEmpty(wt.path, opts.config.repo.baseBranch, run)) {
+    if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
       const classification = verdict?.verdict ? ` (${verdict.verdict})` : ''
       const message = `base already contains the PR work; skipped the empty merge push${classification}`
       log('warn', message)
-      return { ok: false, message, iteration, ...(verdict === undefined ? {} : { verdict }) }
+      return {
+        ok: false,
+        message,
+        iteration,
+        contained: true,
+        ...(verdict === undefined ? {} : { verdict }),
+      }
     }
     await pushConflictFix({
       cwd: wt.path,
@@ -242,10 +251,14 @@ export async function resolveConflict(
   }
 }
 
-/** Last-attempted PR head and base head per conflicting PR, so the watcher can skip unchanged pairs. */
+/**
+ * Last-attempted PR head and base head per conflicting PR, so the watcher can
+ * skip unchanged pairs. `contained` marks a head whose work base already has;
+ * base moves cannot undo that, so only a new PR head re-arms it.
+ */
 export type ConflictWatchState = Record<
   string,
-  { headOid: string; baseOid?: string; verdict?: PointlessVerdict }
+  { headOid: string; baseOid?: string; verdict?: PointlessVerdict; contained?: boolean }
 >
 
 export function conflictWatchPath(repoName: string): string {

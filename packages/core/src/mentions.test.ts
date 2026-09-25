@@ -39,6 +39,8 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
   const calls: Call[] = []
   const exec: Exec = async (cmd) => {
     calls.push(cmd)
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
     return { exitCode: 0, stdout: '', stderr: '' }
@@ -364,7 +366,13 @@ describe('respondToMention', () => {
     })
 
     expect(kind).toBe('fix-pr')
-    expect(calls).toContainEqual(['git', 'merge', 'origin/main'])
+    expect(calls).toContainEqual([
+      'git',
+      'merge',
+      '-m',
+      "Merge remote-tracking branch 'origin/main'",
+      'base-oid',
+    ])
     expect(calls).toContainEqual([
       'git',
       'push',
