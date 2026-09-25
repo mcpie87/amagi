@@ -296,11 +296,13 @@ export function watcherHarnessConfig(
   watcher: AgentWatcherKind,
 ): Config['harness']['implement'] {
   const { enabled: _enabled, ...overrides } = config.watchers[watcher]
-  return {
-    ...config.harness.implement,
-    ...overrides,
-    kind: overrides.kind ?? config.harness.implement.kind,
-  }
+  const implement = config.harness.implement
+  // bin, model, extraArgs etc. belong to the implement harness; handing them to a different kind runs e.g. claude argv through a codex binary.
+  const base =
+    overrides.kind === undefined || overrides.kind === implement.kind
+      ? implement
+      : HarnessConfig.parse({ kind: overrides.kind, permissions: implement.permissions })
+  return { ...base, ...overrides, kind: overrides.kind ?? implement.kind }
 }
 
 export const workerSeat = (worker: Pick<WorkerConfig, 'kind' | 'seat'>): string =>

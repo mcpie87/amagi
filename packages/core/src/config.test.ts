@@ -182,6 +182,17 @@ describe('loadConfig', () => {
     })
   })
 
+  test('a watcher on a different harness kind does not inherit the implement bin or args', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "codex"\nbin = "codex-unconfined"\nmodel = "gpt-x"\npermissions = "bypass"\nextraArgs = ["--foo"]\n\n' +
+        '[watchers.prConflict]\nkind = "claude"\n',
+    )
+    const harness = watcherHarnessConfig(loadConfig(repo).config, 'prConflict')
+    expect(harness).toMatchObject({ kind: 'claude', permissions: 'bypass', extraArgs: [] })
+    expect(harness.bin).toBeUndefined()
+    expect(harness.model).toBeUndefined()
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
