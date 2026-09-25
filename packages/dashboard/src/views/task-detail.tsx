@@ -17,6 +17,7 @@ import {
   type StatusEntry,
   stateAtAttempt,
   statusLog,
+  taskEvents,
 } from '@amagi/core/view'
 import { Link, useParams } from '@tanstack/react-router'
 import {
@@ -533,7 +534,7 @@ export function TaskDetailView() {
     return () => clearInterval(timer)
   }, [])
   const health = runHealth(state, id, past && task !== undefined ? task.updatedAt : now)
-  const usageEvents = currentAttemptEvents(state.events, id)
+  const usageEvents = currentAttemptEvents(taskEvents(state, id), id)
     .filter((e): e is AgentStreamEvent => e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
@@ -574,7 +575,7 @@ export function TaskDetailView() {
       task.statusReason !== null &&
       task.sessionId !== null &&
       task.worktree !== null) ||
-      state.events.some((e) => e.taskId === task.id && e.type === 'chat.message'))
+      taskEvents(state, task.id).some((e) => e.type === 'chat.message'))
 
   return (
     <section>
