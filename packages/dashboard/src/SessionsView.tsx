@@ -2,6 +2,7 @@ import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { type SessionView, sessionsFromEvents } from '@amagi/core/sessions'
 import { useMemo } from 'react'
 import { useDashboard } from './store.tsx'
+import { Time } from './ui.tsx'
 
 type Group = {
   harness: string
@@ -134,6 +135,9 @@ export function SessionsView() {
                 <span className="block truncate text-sm font-medium">
                   {s.model ?? 'unknown'} · {s.harness} · {s.role}
                 </span>
+              </span>
+              <span className="shrink-0 text-xs tabular-nums text-fg-muted">
+                <Time ts={s.startedAt} />
               </span>
               <span className="shrink-0 text-xs tabular-nums text-fg-muted">
                 {fmtDuration(s.durationMs)}
