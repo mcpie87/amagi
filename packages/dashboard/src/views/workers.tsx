@@ -1,12 +1,18 @@
 import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { fmtTokens } from '@amagi/core/format'
-import type { RunnerResource, RunnerTask, WorkerActivity } from '@amagi/core/run-service'
+import type {
+  FleetWorkerStatus,
+  RunnerResource,
+  RunnerTask,
+  WorkerActivity,
+} from '@amagi/core/run-service'
 import {
   currentAgentFor,
   currentUsageFor,
   type DashboardState,
   runHealth,
   runHealthNearLimit,
+  watcherRunsFor,
 } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -28,6 +34,7 @@ function LastLogLine({ repo, taskId, attempt }: { repo: string; taskId: string; 
 }
 
 function WorkerSlot({
+  worker,
   taskId,
   startedAt,
   now,
@@ -36,6 +43,7 @@ function WorkerSlot({
   state,
   selected,
 }: {
+  worker: FleetWorkerStatus | null
   taskId: string | null
   startedAt: number | undefined
   /** Wall-clock snapshot, advanced by one shared 1s interval in WorkersPanel. */
@@ -45,25 +53,34 @@ function WorkerSlot({
   state: DashboardState
   selected: string | null
 }) {
+  const task = taskId === null ? undefined : state.tasks[taskId]
   if (taskId === null) {
     return (
-      <div className="rounded-lg border border-dashed border-line bg-surface/40 px-4 py-2 text-sm text-fg-dim">
-        free slot
+      <div className="rounded-lg border border-line bg-surface/60 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-fg">{worker?.name ?? 'Worker'}</span>
+          <span className={`${PILL} bg-raised text-fg-muted ring-line`}>
+            {worker === null ? 'idle' : worker.enabled ? 'idle' : 'disabled'}
+          </span>
+        </div>
+        {worker !== null && (
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
+            <span>harness: {worker.kind}</span>
+            <span>model: {worker.model ?? 'default'}</span>
+            <span>effort: {worker.effort ?? 'default'}</span>
+            <span>seat: {worker.seat}</span>
+            {worker.busy && <span>seat in use</span>}
+          </div>
+        )}
       </div>
     )
   }
-  const task = state.tasks[taskId]
   const agent = currentAgentFor(state, taskId)
   const title = taskInfo?.title ?? task?.title ?? taskId
   // The runner's per-task identity is authoritative for what is actually
   // running (rss/cpu arrive the same way); the SSE projection only fills in
   // when the polled status has not caught up.
-  const agentLabel =
-    taskInfo?.harness !== undefined
-      ? `implement: ${taskInfo.harness}`
-      : agent === null
-        ? 'starting…'
-        : `${agent.role}: ${agent.harness}`
+  const agentLabel = taskInfo?.harness ?? agent?.harness ?? worker?.kind ?? 'unknown'
   const modelLabel = taskInfo?.model ?? agent?.model ?? 'unknown'
   const usage = currentUsageFor(state, taskId)
   const health = runHealth(state, taskId, now)
@@ -76,7 +93,16 @@ function WorkerSlot({
             {fmtElapsed(now - startedAt)}
           </span>
         )}
-        <span className={`${PILL} bg-blue-soft text-blue-ink ring-blue-edge`}>busy</span>
+        <span
+          className={`${PILL} ${taskInfo?.waitingOnSeat ? 'bg-amber-soft text-amber-ink ring-amber-edge' : 'bg-blue-soft text-blue-ink ring-blue-edge'}`}
+        >
+          {taskInfo?.waitingOnSeat
+            ? `waiting on seat ${taskInfo.seat ?? worker?.seat ?? agentLabel}`
+            : 'running'}
+        </span>
+        <span className="font-medium text-fg">
+          {worker?.name ?? taskInfo?.workerName ?? 'Ad hoc run'}
+        </span>
         {nearLimit && (
           <span
             className="shrink-0 rounded bg-amber-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-ink ring-1 ring-inset ring-amber-edge"
@@ -96,8 +122,10 @@ function WorkerSlot({
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-        <span>agent: {agentLabel}</span>
+        <span>harness: {agentLabel}</span>
         <span>model: {modelLabel}</span>
+        <span>effort: {taskInfo?.effort ?? agent?.effort ?? worker?.effort ?? 'unknown'}</span>
+        <span>seat: {taskInfo?.seat ?? worker?.seat ?? agent?.seat ?? agentLabel}</span>
         <span>
           ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
         </span>
@@ -130,6 +158,7 @@ function WatcherDetailDialog({
   workers: WorkerActivity[]
   onClose: () => void
 }) {
+  const { state } = useDashboard()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const open = selected !== null
   useEffect(() => {
@@ -140,6 +169,11 @@ function WatcherDetailDialog({
   }, [open])
   if (selected === null) return null
   const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
+  const history = watcher === null ? [] : watcherRunsFor(state, watcher.repo, watcher.name)
+  const liveLog = history
+    .flatMap((run) => run.log)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 100)
   const statusPill =
     watcher === null
       ? PILL
@@ -231,6 +265,94 @@ function WatcherDetailDialog({
               </div>
             </div>
           )}
+          <div className="mt-5 border-t border-line pt-4">
+            <h3 className="text-sm font-medium text-fg">Run history</h3>
+            {history.length === 0 ? (
+              <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {history.map((run) => (
+                  <details
+                    key={run.runId}
+                    className="rounded border border-line bg-surface/60 px-3 py-2"
+                  >
+                    <summary className="cursor-pointer text-xs text-fg">
+                      <span className="tabular-nums">
+                        {new Date(run.startedAt).toLocaleString()}
+                      </span>
+                      <span
+                        className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+                      >
+                        {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
+                      </span>
+                      <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
+                    </summary>
+                    {run.error !== null && (
+                      <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
+                    )}
+                    {run.actions.length === 0 ? (
+                      <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
+                    ) : (
+                      <ul className="mt-2 space-y-1 text-xs">
+                        {run.actions.map((action, index) => (
+                          <li
+                            key={`${run.runId}-${index}`}
+                            className={action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
+                          >
+                            {action.targetType === 'task' ? (
+                              <Link
+                                to="/tasks/$id"
+                                params={{ id: action.targetId }}
+                                className="text-blue-ink hover:underline"
+                              >
+                                task {action.targetId}
+                              </Link>
+                            ) : action.url !== undefined ? (
+                              <a
+                                href={action.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-ink hover:underline"
+                              >
+                                {action.targetType === 'mention'
+                                  ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                  : `PR #${action.prNumber ?? action.targetId}`}
+                              </a>
+                            ) : (
+                              <span>
+                                {action.targetType === 'mention'
+                                  ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                  : `${action.targetType} ${action.targetId}`}
+                              </span>
+                            )}
+                            {': '}
+                            {action.result}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </details>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="mt-4 border-t border-line pt-4">
+            <h3 className="text-sm font-medium text-fg">Live log</h3>
+            {liveLog.length === 0 ? (
+              <p className="mt-2 text-xs text-fg-faint">no activity recorded yet</p>
+            ) : (
+              <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px]">
+                {liveLog.map((entry, index) => (
+                  <li
+                    key={`${entry.ts}-${index}`}
+                    className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
+                  >
+                    {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <div className="mt-4 flex justify-end">
             <button
               type="button"
@@ -247,11 +369,9 @@ function WatcherDetailDialog({
 }
 
 /**
- * One row per runner slot from the selected repo's runner status, so busy agents and free capacity
- * are both visible at a glance. Busy slots draw their identity and activity
- * from the SSE projection plus the live agent log ring buffer. The summary
- * strip sums RSS/CPU/process count over the live agent trees so the operator
- * can see which runner is eating the machine.
+ * One row per configured worker plus any ad-hoc foreground run. Worker profile
+ * and runtime data both come from the selected repo's runner status; the
+ * summary strip aggregates resource use over live agent trees.
  */
 function AutoQueueToggle() {
   const { status } = useRunner()
@@ -350,20 +470,51 @@ export function WorkersPanel() {
         <span>procs: {total.processes}</span>
       </div>
       <div className="space-y-2">
-        {/* running can exceed capacity when foreground `just run` workers are merged in. */}
-        {Array.from({ length: Math.max(status.capacity, running.length) }, (_, i) => (
-          <WorkerSlot
-            // biome-ignore lint/suspicious/noArrayIndexKey: slots are positional, a slot's task changes under it.
-            key={i}
-            taskId={running[i] ?? null}
-            startedAt={running[i] === undefined ? undefined : status.startedAt[running[i]]}
-            now={now}
-            resource={running[i] === undefined ? undefined : status.resources[running[i]]}
-            taskInfo={running[i] === undefined ? undefined : status.tasks?.[running[i]]}
-            state={state}
-            selected={selected}
-          />
-        ))}
+        {status.fleet?.map((worker) => {
+          const taskId =
+            worker.taskId ??
+            running.find((id) => status.tasks?.[id]?.workerId === worker.id) ??
+            null
+          return (
+            <WorkerSlot
+              key={worker.id}
+              worker={worker}
+              taskId={taskId}
+              startedAt={taskId === null ? undefined : status.startedAt[taskId]}
+              now={now}
+              resource={taskId === null ? undefined : status.resources[taskId]}
+              taskInfo={taskId === null ? undefined : status.tasks?.[taskId]}
+              state={state}
+              selected={selected}
+            />
+          )
+        })}
+        {running
+          .filter((id) => {
+            const taskInfo = status.tasks?.[id]
+            return (
+              taskInfo?.workerId == null ||
+              !status.fleet?.some((worker) => worker.id === taskInfo.workerId)
+            )
+          })
+          .map((taskId) => (
+            <WorkerSlot
+              key={`adhoc:${taskId}`}
+              worker={null}
+              taskId={taskId}
+              startedAt={status.startedAt[taskId]}
+              now={now}
+              resource={status.resources[taskId]}
+              taskInfo={status.tasks?.[taskId]}
+              state={state}
+              selected={selected}
+            />
+          ))}
+        {(status.fleet?.length ?? 0) === 0 && running.length === 0 && (
+          <div className="rounded-lg border border-line bg-surface/60 px-4 py-3 text-sm text-fg-dim">
+            No workers configured
+          </div>
+        )}
       </div>
       {status.workers !== undefined && status.workers.length > 0 && (
         <div className="mt-2 space-y-2">

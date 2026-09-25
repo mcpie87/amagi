@@ -50,6 +50,7 @@ function fakeDriver(
     async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {},
     async addLabel(_cwd: string, _number: number, _label: string): Promise<void> {},
     async removeLabel(_cwd: string, _number: number, _label: string): Promise<void> {},
+    async deleteBranch(): Promise<void> {},
   }
 }
 

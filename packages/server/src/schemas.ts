@@ -1,4 +1,4 @@
-import { MAX_PARALLEL, TaskState } from '@amagi/core'
+import { HarnessKind, TaskState } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -55,14 +55,11 @@ export const AskBody = z.object({
 export type AskBody = z.infer<typeof AskBody>
 
 /**
- * Empty body (or `{}`) launches the next ready task with the configured
- * defaults. `harness` is a harness.definitions name or a kind
- * (claude/codex/opencode); `model` and `effort` override the chosen harness.
- * An omitted field falls back to config.harness.implement.
+ * Empty body launches the next ready task; an optional workerId selects its worker.
  */
 export const RunBody = z.object({
   taskId: z.string().min(1).optional(),
-  harness: z.string().min(1).optional(),
+  workerId: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: z.string().min(1).optional(),
 })
@@ -111,13 +108,60 @@ export type ChatBody = z.infer<typeof ChatBody>
 
 export const SettingsBody = z
   .object({
-    maxParallel: z.number().int().min(1).max(MAX_PARALLEL).optional(),
     autoQueue: z.boolean().optional(),
   })
-  .refine((body) => body.maxParallel !== undefined || body.autoQueue !== undefined, {
-    message: 'provide at least one of maxParallel or autoQueue',
+  .refine((body) => body.autoQueue !== undefined, {
+    message: 'provide autoQueue',
   })
 export type SettingsBody = z.infer<typeof SettingsBody>
+
+const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
+
+export const WorkerCreateBody = z.object({
+  name: z.string().trim().min(1),
+  kind: HarnessKind,
+  model: z.string().trim().min(1).optional(),
+  effort: z.string().trim().min(1).optional(),
+  seat: z.string().trim().min(1).optional(),
+  enabled: z.boolean().default(false),
+})
+export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
+
+/** A null clears an optional field back to the harness default. */
+export const WorkerUpdateBody = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    kind: HarnessKind.optional(),
+    model: z.string().trim().min(1).nullable().optional(),
+    effort: z.string().trim().min(1).nullable().optional(),
+    seat: z.string().trim().min(1).nullable().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(nonEmpty, { message: 'provide at least one field' })
+export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>
+
+export const WatcherParam = z.object({ kind: z.enum(['mention', 'prConflict', 'stall']) })
+export const WatcherHistoryParam = z.object({ repo: z.string().min(1), name: z.string().min(1) })
+export const WatcherHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  beforeSeq: z.coerce.number().int().min(1).optional(),
+})
+
+export const WatcherUpdateBody = z
+  .object({
+    enabled: z.boolean().optional(),
+    kind: HarnessKind.nullable().optional(),
+    model: z.string().trim().min(1).nullable().optional(),
+    effort: z.string().trim().min(1).nullable().optional(),
+    seat: z.string().trim().min(1).nullable().optional(),
+  })
+  .refine(nonEmpty, { message: 'provide at least one field' })
+export type WatcherUpdateBody = z.infer<typeof WatcherUpdateBody>
+
+export const ParticipationBody = z
+  .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })
+  .refine(nonEmpty, { message: 'provide workers or watchers' })
+export type ParticipationBody = z.infer<typeof ParticipationBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

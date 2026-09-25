@@ -58,10 +58,63 @@ export type PrDriver = {
   addLabel(cwd: string, number: number, label: string): Promise<void>
   /** Remove a label from an existing pull request. */
   removeLabel(cwd: string, number: number, label: string): Promise<void>
+  /** Delete a branch on the remote; a branch already gone is not an error. */
+  deleteBranch(cwd: string, remote: string, branch: string): Promise<void>
 }
 
 const GH_FIELDS =
   'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,createdAt,updatedAt,labels'
+
+/**
+ * Pushes the task branch. Branch names derive from the task, so a requeued
+ * task (say, its PR merged and then reverted) collides with the branch its
+ * earlier attempt left on the remote; that copy is overwritten, pinned to the
+ * sha just observed. A branch still backing an open PR is never overwritten.
+ */
+async function pushTaskBranch(
+  exec: Exec,
+  opts: Pick<CreatePrOptions, 'cwd' | 'remote' | 'branch'>,
+  token: string | null,
+  openPrOn: (branch: string) => Promise<{ number: number; url: string } | null>,
+): Promise<void> {
+  const { cwd, remote, branch } = opts
+  const auth = await gitTokenConfig(exec, cwd, remote, token)
+  const ref = `refs/heads/${branch}`
+  const heads = await execOk(exec, ['git', ...auth, 'ls-remote', '--heads', remote, ref], { cwd })
+  const remoteSha =
+    heads
+      .split('\n')
+      .map((line) => line.split('\t'))
+      .find(([, name]) => name === ref)?.[0] ?? ''
+  if (remoteSha !== '') {
+    const open = await openPrOn(branch)
+    if (open !== null) {
+      throw new Error(
+        `${branch} already backs open pull request #${open.number} (${open.url}); refusing to overwrite it`,
+      )
+    }
+  }
+  // An empty expected sha makes the lease demand that the branch is still absent.
+  await execOk(
+    exec,
+    ['git', ...auth, 'push', '-u', `--force-with-lease=${ref}:${remoteSha}`, remote, branch],
+    { cwd },
+  )
+}
+
+async function deleteRemoteBranch(
+  exec: Exec,
+  cwd: string,
+  remote: string,
+  branch: string,
+  token: string | null,
+): Promise<void> {
+  const auth = await gitTokenConfig(exec, cwd, remote, token)
+  const r = await exec(['git', ...auth, 'push', remote, '--delete', branch], { cwd })
+  if (r.exitCode !== 0 && !/remote ref does not exist/i.test(r.stderr)) {
+    throw new Error(`deleting remote branch ${branch}: ${r.stderr.trim()}`)
+  }
+}
 
 /**
  * Github PRs through `gh`, with Chise's token and an Amagi-owned GH_CONFIG_DIR
@@ -86,12 +139,14 @@ function githubPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote, title, body, labels }) {
-      const token = forgeToken('github')
-      await execOk(
-        exec,
-        ['git', ...(await gitTokenConfig(exec, cwd, remote, token)), 'push', '-u', remote, branch],
-        { cwd },
-      )
+      await pushTaskBranch(exec, { cwd, remote, branch }, forgeToken('github'), async (head) => {
+        const out = await execOk(
+          exec,
+          ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
+          { cwd, env: ghEnv() },
+        )
+        return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
+      })
       for (const label of labels) {
         // --force makes create idempotent; failure (e.g. no write perms) is best effort
         await exec(['gh', 'label', 'create', label, '--force'], { cwd, env: ghEnv() })
@@ -218,6 +273,9 @@ function githubPr(exec: Exec): PrDriver {
         env: ghEnv(),
       })
     },
+    async deleteBranch(cwd, remote, branch) {
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github'))
+    },
   }
 }
 
@@ -314,6 +372,27 @@ function forgejoPr(exec: Exec): PrDriver {
     return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
   }
 
+  async function listOpenPrs(cwd: string): Promise<PrInfo[]> {
+    const r = await forge(cwd)
+    const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/pulls?state=open`)
+    const items = Array.isArray(raw) ? raw : []
+    return (items as Array<Record<string, unknown>>).map((item) => ({
+      number: Number(item.number ?? 0),
+      title: typeof item.title === 'string' ? item.title : '',
+      body: typeof item.body === 'string' ? item.body : '',
+      url: typeof item.html_url === 'string' ? item.html_url : '',
+      headRefName: refName(item.head),
+      baseRefName: refName(item.base),
+      headRefOid: headOid(item.head),
+      ...mergeFields(item),
+      createdAt: typeof item.created_at === 'string' ? item.created_at : '',
+      updatedAt: typeof item.updated_at === 'string' ? item.updated_at : '',
+      labels: ((item.labels as Array<{ name?: string }> | undefined) ?? []).map(
+        (l) => l.name ?? '',
+      ),
+    }))
+  }
+
   // The Forgejo issue-labels API keys on numeric label ids, so a name must be
   // resolved before a label can be added or removed.
   async function labelId(cwd: string, r: ForgejoRemote, name: string): Promise<number | null> {
@@ -328,18 +407,11 @@ function forgejoPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote: remoteName, title, body, labels }) {
-      const token = forgeToken('forgejo')
-      await execOk(
+      await pushTaskBranch(
         exec,
-        [
-          'git',
-          ...(await gitTokenConfig(exec, cwd, remoteName, token)),
-          'push',
-          '-u',
-          remoteName,
-          branch,
-        ],
-        { cwd },
+        { cwd, remote: remoteName, branch },
+        forgeToken('forgejo'),
+        async (head) => (await listOpenPrs(cwd)).find((pr) => pr.headRefName === head) ?? null,
       )
       for (const label of labels) {
         // best effort: a label that exists or a run without write perms is not fatal
@@ -370,26 +442,7 @@ function forgejoPr(exec: Exec): PrDriver {
       if (pr.state === 'closed') return 'closed'
       return 'open'
     },
-    async listOpenPrs(cwd) {
-      const r = await forge(cwd)
-      const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/pulls?state=open`)
-      const items = Array.isArray(raw) ? raw : []
-      return (items as Array<Record<string, unknown>>).map((item) => ({
-        number: Number(item.number ?? 0),
-        title: typeof item.title === 'string' ? item.title : '',
-        body: typeof item.body === 'string' ? item.body : '',
-        url: typeof item.html_url === 'string' ? item.html_url : '',
-        headRefName: refName(item.head),
-        baseRefName: refName(item.base),
-        headRefOid: headOid(item.head),
-        ...mergeFields(item),
-        createdAt: typeof item.created_at === 'string' ? item.created_at : '',
-        updatedAt: typeof item.updated_at === 'string' ? item.updated_at : '',
-        labels: ((item.labels as Array<{ name?: string }> | undefined) ?? []).map(
-          (l) => l.name ?? '',
-        ),
-      }))
-    },
+    listOpenPrs,
     async getMergeStatus(cwd, number) {
       const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
       if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
@@ -449,6 +502,9 @@ function forgejoPr(exec: Exec): PrDriver {
       const id = await labelId(cwd, r, label)
       if (id === null) return
       await api(cwd, 'DELETE', `repos/${r.ownerRepo}/issues/${number}/labels/${id}`)
+    },
+    async deleteBranch(cwd, remote, branch) {
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('forgejo'))
     },
   }
 }

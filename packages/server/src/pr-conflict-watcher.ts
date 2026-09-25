@@ -55,7 +55,8 @@ const DEFAULT_INTERVAL_MS = 300_000
 /**
  * The shared PR watcher: one listOpenPrs per tick feeds the conflict and
  * pointlessness passes over the same list, so no fourth poll loop hammers the
- * endpoint. Conflicts are resolved one per head SHA; amagi PRs whose diff
+ * endpoint. Conflicts are resolved once per (PR head, base head) pair, so a
+ * failed attempt is retried when either side moves; amagi PRs whose diff
  * against base is empty get flagged (label + comments, task parked in
  * pr_flagged), and a flag is cleared once real commits arrive. Ticks are
  * sequential: a long resolution delays the next scan rather than stacking on
@@ -126,7 +127,7 @@ export function startPrConflictWatcher({
    * tick are forced through the driver so the mergeability job resolves
    * round-robin and coverage accrues without a tenfold call increase.
    */
-  async function observeMergeTree(prs: PrInfo[], run: Exec): Promise<void> {
+  async function observeMergeTree(prs: PrInfo[], run: Exec, runId: string): Promise<void> {
     const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
     const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
     for (const base of baseRefs) {
@@ -163,6 +164,18 @@ export function startPrConflictWatcher({
         })
       } catch (err) {
         logEvent(`PR #${p.number}: merge-tree check failed: ${errMsg(err)}`, 'error')
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(p.number),
+          prNumber: p.number,
+          url: p.url,
+          result: `merge-tree check failed: ${errMsg(err)}`,
+          level: 'error',
+        })
         console.warn(`merge-tree #${p.number}: ${errMsg(err)}`)
         continue
       }
@@ -178,8 +191,23 @@ export function startPrConflictWatcher({
     }
   }
 
+  /** The base branch's remote head, so a base move re-arms PRs already attempted. */
+  async function baseHeadOid(run: Exec): Promise<string> {
+    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
+    const ref = `refs/heads/${config.repo.baseBranch}`
+    const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', ref], { cwd: root })
+    return (
+      out
+        .split('\n')
+        .map((line) => line.split('\t'))
+        .find(([, name]) => name === ref)?.[0] ?? ''
+    )
+  }
+
   async function tick(): Promise<void> {
     runs++
+    const runId = `${Date.now()}-${runs}`
+    store.append(null, { type: 'watcher.run.started', repo, name: 'pr-conflict-watcher', runId })
     logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
@@ -206,7 +234,7 @@ export function startPrConflictWatcher({
       if (config.loop.mergeTreeCheck) {
         // Observation never blocks dispatch: a failed audit is logged and skipped.
         try {
-          await observeMergeTree(prs, run)
+          await observeMergeTree(prs, run, runId)
         } catch (err) {
           logEvent(`merge-tree observation failed: ${errMsg(err)}`, 'error')
           console.warn(`merge-tree observation: ${errMsg(err)}`)
@@ -218,13 +246,14 @@ export function startPrConflictWatcher({
       const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
       conflicting = conflicts.length
       if (conflicts.length > 0) logEvent(`found ${conflicts.length} conflicting PR(s)`)
+      const baseOid = conflicts.length > 0 ? await baseHeadOid(run) : ''
       let resolvedNow = 0
       const warnings: string[] = []
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
-        if (seen !== undefined && seen.headOid === headOid) {
+        if (seen !== undefined && seen.headOid === headOid && seen.baseOid === baseOid) {
           nextState[key] = seen
           continue
         }
@@ -240,6 +269,7 @@ export function startPrConflictWatcher({
         })
         nextState[key] = {
           headOid,
+          baseOid,
           ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
@@ -250,8 +280,32 @@ export function startPrConflictWatcher({
           resolved++
           resolvedNow++
           logEvent(`PR #${pr.number}: conflict resolution dispatched`)
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'pr-conflict-watcher',
+            runId,
+            targetType: 'pr',
+            targetId: String(pr.number),
+            prNumber: pr.number,
+            url: pr.url,
+            result: 'conflict resolution dispatched',
+            level: 'info',
+          })
         } else {
           logEvent(`PR #${pr.number}: ${result.message}`, 'error')
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'pr-conflict-watcher',
+            runId,
+            targetType: 'pr',
+            targetId: String(pr.number),
+            prNumber: pr.number,
+            url: pr.url,
+            result: result.message,
+            level: 'error',
+          })
           console.warn(`pr conflict #${pr.number}: ${result.message}`)
           warnings.push(`#${pr.number}: ${result.message}`)
         }
@@ -268,6 +322,19 @@ export function startPrConflictWatcher({
         config,
         ...(exec === undefined ? {} : { exec }),
         ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+        onAction: (pr, result, level) =>
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'pr-conflict-watcher',
+            runId,
+            targetType: 'pr',
+            targetId: String(pr.number),
+            prNumber: pr.number,
+            url: pr.url,
+            result,
+            level,
+          }),
       })
       flagged += pointless.flagged
       cleared += pointless.cleared
@@ -288,6 +355,18 @@ export function startPrConflictWatcher({
     next.counters = counters()
     next.log = log
     activity = next
+    try {
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo,
+        name: 'pr-conflict-watcher',
+        runId,
+        ok: next.ok,
+        error: next.error,
+      })
+    } catch (err) {
+      console.warn(`pr conflict watcher history: ${errMsg(err)}`)
+    }
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 

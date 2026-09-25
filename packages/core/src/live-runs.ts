@@ -22,6 +22,10 @@ export type LiveRun = {
   harness: string
   model: string | null
   effort: string | null
+  workerId?: string | null
+  workerName?: string | null
+  seat?: string
+  waitingOnSeat?: boolean
   /** Epoch ms at claim, for the same live elapsed-time display server runs get. */
   startedAt: number
 }
@@ -83,6 +87,25 @@ export function recordLiveRun(run: LiveRun, path = liveRunsPath()): void {
   }
 }
 
+/** Updates runtime details such as a foreground process waiting for its seat. */
+export function updateLiveRun(
+  repoKey: string,
+  taskId: string,
+  update: Partial<Pick<LiveRun, 'waitingOnSeat'>>,
+  path = liveRunsPath(),
+): void {
+  try {
+    writeLiveRuns(
+      path,
+      readLiveRuns(path).map((run) =>
+        run.repoKey === repoKey && run.taskId === taskId ? { ...run, ...update } : run,
+      ),
+    )
+  } catch (err) {
+    warn(err)
+  }
+}
+
 /** Forgets a live run: its worker is done. */
 export function dropLiveRun(repoKey: string, taskId: string, path = liveRunsPath()): void {
   try {
@@ -133,7 +156,17 @@ export async function mergeLiveRuns(
   await Promise.all(
     live.map(async (r) => {
       startedAt[r.taskId] = r.startedAt
-      tasks[r.taskId] = { title: r.title, harness: r.harness, model: r.model, effort: r.effort }
+      tasks[r.taskId] = {
+        title: r.title,
+        harness: r.harness,
+        model: r.model,
+        effort: r.effort,
+        workerId: r.workerId ?? null,
+        workerName: r.workerName ?? null,
+        seat: r.seat ?? r.harness,
+        waitingOnSeat: r.waitingOnSeat ?? false,
+        ...(r.workerId == null ? { adHoc: true } : {}),
+      }
       resources[r.taskId] = await processTreeStats(r.pid)
     }),
   )

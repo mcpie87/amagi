@@ -1,4 +1,12 @@
-import { type Config, HARDCODED_EFFORTS, HarnessConfig, type StoredEvent } from '@amagi/core'
+import {
+  type Config,
+  HARDCODED_EFFORTS,
+  resolveHarnessKind,
+  resolveWorkerHarness,
+  type StoredEvent,
+  type WorkerConfig,
+  workerSeat,
+} from '@amagi/core'
 
 const KINDS = ['claude', 'codex', 'opencode'] as const
 
@@ -38,14 +46,78 @@ export type RunSelection = {
  * to the harness's stock binary, which may be a read-only sandbox.
  */
 function bareKind(kind: (typeof KINDS)[number], config: Config): Config['harness']['implement'] {
-  const implement = config.harness.implement
-  return implement.kind === kind ? implement : HarnessConfig.parse({ kind })
+  return resolveHarnessKind(config, kind)
 }
 
-/**
- * Harness choices for the picker: named definitions, or the three known kinds.
- * Most-used first, by the kind recorded in each run.
- */
+export type WorkerRunSelection = {
+  worker: WorkerConfig
+  harness: Config['harness']['implement']
+  interactive: boolean
+}
+
+export function workerChoices(config: Config): SelectOption<WorkerConfig>[] {
+  return config.worker
+    .filter((worker) => worker.enabled)
+    .map((worker) => ({
+      label: [
+        `${worker.name} [${worker.id}]`,
+        worker.kind,
+        `model ${worker.model ?? 'default'}`,
+        `effort ${worker.effort ?? 'default'}`,
+        `seat ${workerSeat(worker)}`,
+      ].join(' · '),
+      value: worker,
+    }))
+}
+
+/** Selects a fleet worker and resolves per-run overrides without persisting them. */
+export async function pickWorkerSelection(
+  config: Config,
+  flags: { worker?: string; harness?: string; model?: string; effort?: string },
+  picker: Picker | null,
+): Promise<WorkerRunSelection> {
+  const enabled = config.worker.filter((worker) => worker.enabled)
+  const worker =
+    flags.worker === undefined
+      ? picker === null
+        ? undefined
+        : await picker.select('Which worker?', workerChoices(config))
+      : config.worker.find((candidate) => candidate.id === flags.worker)
+
+  if (flags.worker !== undefined && worker === undefined) {
+    const exists = config.worker.some((candidate) => candidate.id === flags.worker)
+    throw new Error(
+      exists ? `worker "${flags.worker}" is disabled` : `unknown worker "${flags.worker}"`,
+    )
+  }
+  if (worker !== undefined && worker !== null && !worker.enabled) {
+    throw new Error(`worker "${worker.id}" is disabled`)
+  }
+  if (worker === null) throw new Error('worker selection cancelled')
+  if (worker === undefined) {
+    if (enabled.length === 0) throw new Error('no enabled workers are configured')
+    throw new Error('amagi run needs a terminal or --worker <id>')
+  }
+
+  let kind: WorkerConfig['kind'] | undefined
+  if (flags.harness !== undefined) {
+    kind = KINDS.find((candidate) => candidate === flags.harness)
+    if (kind === undefined) {
+      throw new Error(`unknown harness "${flags.harness}"`)
+    }
+  }
+  return {
+    worker,
+    harness: resolveWorkerHarness(config, worker, {
+      ...(kind === undefined ? {} : { kind }),
+      ...(flags.model === undefined ? {} : { model: flags.model }),
+      ...(flags.effort === undefined ? {} : { effort: flags.effort }),
+    }),
+    interactive: flags.worker === undefined,
+  }
+}
+
+/** Harness choices for the picker, most-used kind first. */
 export function harnessChoices(
   config: Config,
   counts: UsageCounts = emptyCounts(),
@@ -54,10 +126,6 @@ export function harnessChoices(
     a: SelectOption<Config['harness']['implement']>,
     b: SelectOption<Config['harness']['implement']>,
   ) => (counts.harness[b.value.kind] ?? 0) - (counts.harness[a.value.kind] ?? 0)
-  const defs = Object.entries(config.harness.definitions)
-  if (defs.length > 0) {
-    return defs.map(([name, cfg]) => ({ label: name, value: cfg })).sort(byUsage)
-  }
   return KINDS.map((kind) => ({ label: kind, value: bareKind(kind, config) })).sort(byUsage)
 }
 
@@ -86,9 +154,8 @@ export async function pickRunSelection(
   counts: UsageCounts = emptyCounts(),
 ): Promise<RunSelection> {
   if (flags.harness !== undefined) {
-    const named = config.harness.definitions[flags.harness]
     const known = KINDS.find((kind) => kind === flags.harness)
-    const harness = named ?? (known === undefined ? undefined : bareKind(known, config))
+    const harness = known === undefined ? undefined : bareKind(known, config)
     if (harness === undefined) throw new Error(`unknown harness "${flags.harness}"`)
     return {
       harness: withEffort(withModel(harness, flags.model), flags.effort),

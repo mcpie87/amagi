@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  hasStaleMaxParallel,
   loadConfig,
   loadGlobalConfig,
   migrateFleet,
@@ -47,7 +48,7 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
-    expect(config.loop.maxParallel).toBe(1)
+    expect(config.worker).toEqual([])
     expect(config.watchers).toMatchObject({
       mention: { enabled: true },
       prConflict: { enabled: true },
@@ -77,12 +78,13 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.loop.questionTimeoutSec).toBeLessThan(600)
   })
 
-  test('repo config overrides global, key by key', () => {
+  test('stale maxParallel is ignored while other config resolves', () => {
     writeGlobal('[forge]\nkind = "github"\n\n[loop]\nmaxParallel = 4\n')
     writeRepo('[forge]\nkind = "forgejo"\n')
     const { config, sources } = loadConfig(repo)
     expect(config.forge.kind).toBe('forgejo')
-    expect(config.loop.maxParallel).toBe(4)
+    expect(config.loop.autoQueue).toBe(false)
+    expect(hasStaleMaxParallel(repo)).toBe(true)
     expect(sources).toHaveLength(2)
   })
 
@@ -136,6 +138,15 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
   })
 
+  test('loads workers with stable identity and defaults them disabled', () => {
+    writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
+    expect(loadConfig(repo).config.worker[0]).toMatchObject({
+      id: 'w-fast',
+      name: 'Fast',
+      enabled: false,
+    })
+  })
+
   test('accepts a per-harness tool allowlist', () => {
     writeRepo('[harness.implement]\nkind = "claude"\nallowedTools = ["Read", "Bash"]\n')
     expect(loadConfig(repo).config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
@@ -171,6 +182,17 @@ describe('loadConfig', () => {
     })
   })
 
+  test('a watcher on a different harness kind does not inherit the implement bin or args', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "codex"\nbin = "codex-unconfined"\nmodel = "gpt-x"\npermissions = "bypass"\nextraArgs = ["--foo"]\n\n' +
+        '[watchers.prConflict]\nkind = "claude"\n',
+    )
+    const harness = watcherHarnessConfig(loadConfig(repo).config, 'prConflict')
+    expect(harness).toMatchObject({ kind: 'claude', permissions: 'bypass', extraArgs: [] })
+    expect(harness.bin).toBeUndefined()
+    expect(harness.model).toBeUndefined()
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
@@ -181,9 +203,10 @@ describe('loadConfig', () => {
     expect(() => loadConfig(repo)).toThrow()
   })
 
-  test('rejects maxParallel above the ceiling', () => {
+  test('ignores stale maxParallel above the former ceiling', () => {
     writeRepo('[loop]\nmaxParallel = 100\n')
-    expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+    expect(loadConfig(repo).config.loop.autoQueue).toBe(false)
+    expect(hasStaleMaxParallel(repo)).toBe(true)
   })
 
   test('stall watcher keys are overridable', () => {
@@ -233,15 +256,15 @@ describe('loadConfig', () => {
 describe('writeConfig', () => {
   test('merges a patch into the repo config and preserves other keys', () => {
     writeRepo('[forge]\nkind = "forgejo"\n\n[loop]\nmaxParallel = 1\n')
-    writeConfig(repo, { loop: { maxParallel: 6 } })
+    writeConfig(repo, { loop: { autoQueue: true } })
     const { config } = loadConfig(repo)
-    expect(config.loop.maxParallel).toBe(6)
+    expect(config.loop.autoQueue).toBe(true)
     expect(config.forge.kind).toBe('forgejo')
   })
 
   test('creates the repo config file when absent', () => {
-    writeConfig(repo, { loop: { maxParallel: 3 } })
-    expect(loadConfig(repo).config.loop.maxParallel).toBe(3)
+    writeConfig(repo, { loop: { autoQueue: true } })
+    expect(loadConfig(repo).config.loop.autoQueue).toBe(true)
   })
 })
 
@@ -301,17 +324,15 @@ describe('worker fleet', () => {
     for (const id of taken) expect(id).toMatch(/^w-[a-z0-9-]+$/)
   })
 
-  test('migrates maxParallel into a fleet once', () => {
+  test('migrates to one worker regardless of stale maxParallel, once', () => {
     writeGlobal(
       '[harness.implement]\nkind = "claude"\nmodel = "claude-sonnet-5"\n\n[loop]\nmaxParallel = 3\n',
     )
     const created = migrateFleet()
     expect(created.map((w) => [w.name, w.kind, w.seat, w.model])).toEqual([
       ['Claude 1', 'claude', 'claude', 'claude-sonnet-5'],
-      ['Claude 2', 'claude', 'claude', 'claude-sonnet-5'],
-      ['Claude 3', 'claude', 'claude', 'claude-sonnet-5'],
     ])
-    expect(new Set(created.map((w) => w.id)).size).toBe(3)
+    expect(new Set(created.map((w) => w.id)).size).toBe(1)
     expect(loadGlobalConfig().worker).toEqual(created)
     const written = readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')
     expect(migrateFleet()).toEqual([])

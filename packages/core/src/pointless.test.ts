@@ -65,6 +65,7 @@ class FakePr implements PrDriver {
   async removeLabel(_cwd: string, _number: number, label: string): Promise<void> {
     this.removedLabels.push(label)
   }
+  async deleteBranch(): Promise<void> {}
 }
 
 const fakeTracker = (): Tracker & { comments: { id: string; body: string }[] } => {
@@ -270,9 +271,14 @@ describe('parsePointlessVerdict', () => {
 describe('flagPointlessPrs', () => {
   test('no verdict file: falls back to the static reason on the PR and the tracker', async () => {
     const over = opts()
-    const result = await flagPointlessPrs(over)
+    const actions: string[] = []
+    const result = await flagPointlessPrs({
+      ...over,
+      onAction: (pr, action) => actions.push(`#${pr.number}: ${action}`),
+    })
 
     expect(result).toEqual({ flagged: 1, cleared: 0 })
+    expect(actions).toEqual(['#7: empty-diff PR flagged for review'])
     expect(over.store.task('bd-1')?.state).toBe('pr_flagged')
     expect(over.driver.addedLabels).toEqual(['amagi/needs-closing'])
     expect(over.driver.postedComments).toHaveLength(1)

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { lintCommitMessage } from './commit-lint.ts'
 import type { Config } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -17,10 +18,18 @@ import {
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts } from './factory.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
-import { changesSinceBase, diffBase, formatPrBody, withAgentSections } from './pr-body.ts'
+import {
+  changesSinceBase,
+  diffBase,
+  formatPrBody,
+  type PrBodyMeta,
+  withAgentSections,
+} from './pr-body.ts'
 import {
   answerPrompt,
+  CHECKPOINT_COMMIT_SUMMARY,
   commitMessage,
+  commitSummary,
   fixChecksPrompt,
   implementAfterVerifyPrompt,
   implementPrompt,
@@ -640,7 +649,11 @@ export class Runner {
       current = mergeAgentRuns(current, resumed)
     }
 
-    const committed = await this.commit(task, cwd, config.repo.baseBranch)
+    const committed = await this.commit(task, cwd, config.repo.baseBranch, {
+      summary: commitSummary(current.summary),
+      model: current.model,
+      effort: current.effort,
+    })
     if (!committed) {
       let reason = current.summary?.trim() !== '' ? current.summary : null
       // The verdict is what the operator acts on for a task with no PR, so a
@@ -748,10 +761,7 @@ export class Runner {
     return null
   }
 
-  /**
-   * Pushes the worktree branch and opens a pull request. A failed PR leaves the
-   * commit in place; a read-only diagnosis tells the operator how to proceed.
-   */
+  /** Pushes the worktree branch and opens a pull request, with one recovery attempt on failure. */
   private async openPullRequest(
     task: TrackerTask,
     cwd: string,
@@ -845,7 +855,7 @@ export class Runner {
       })
       let reason: string | null = null
       try {
-        const diagnosis = await this.runAgent(
+        const recovery = await this.runAgent(
           task.id,
           sessionId,
           {
@@ -854,16 +864,32 @@ export class Runner {
             systemPrompt: prFailureSystemPrompt(),
             ...harnessStartOpts(config.harness.implement),
           },
-          'PR failure diagnosis',
+          'PR failure recovery',
           budget,
-          'verify',
         )
         this.throwIfCancelled(task.id)
-        if (diagnosis.ok) reason = diagnosis.summary?.trim() || null
+        reason = recovery.summary?.trim() || null
       } catch {
         this.throwIfCancelled(task.id)
       }
-      this.transition(task.id, 'needs_human', reason ?? `${message}${hint}`)
+
+      try {
+        const pr = await forge.createPr(opts)
+        store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
+        this.transition(task.id, 'pr_open')
+      } catch (retryErr) {
+        this.throwIfCancelled(task.id)
+        const retryMessage = errMsg(retryErr)
+        const retryHint = /auth|login|token|not logged/i.test(retryMessage)
+          ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+          : ''
+        store.append(task.id, {
+          type: 'error',
+          message: `pull request retry: ${retryMessage}${retryHint}`,
+          fatal: false,
+        })
+        this.transition(task.id, 'needs_human', reason ?? `${retryMessage}${retryHint}`)
+      }
     }
   }
 
@@ -1409,8 +1435,13 @@ export class Runner {
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
-  private async commit(task: TrackerTask, cwd: string, base: string): Promise<boolean> {
-    await this.stageAndCommit(task, cwd)
+  private async commit(
+    task: TrackerTask,
+    cwd: string,
+    base: string,
+    run: { summary: string; model: string | null; effort: string | null },
+  ): Promise<boolean> {
+    await this.stageAndCommit(task, cwd, run.summary, this.commitMeta(run.model, run.effort))
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
@@ -1427,20 +1458,33 @@ export class Runner {
     return true
   }
 
+  /** Commit footer provenance, falling back to the configured implement model like the PR body. */
+  private commitMeta(model: string | null, effort: string | null): PrBodyMeta {
+    const implement = this.deps.config.harness.implement
+    return {
+      harness: this.deps.harness.kind,
+      model: model ?? implement.model ?? null,
+      effort: effort ?? implement.effort ?? null,
+    }
+  }
+
   /**
-   * Stages and commits the worktree with the same message format as the
-   * end-of-phase commit. `committed: false` means the worktree was already
-   * clean; a git failure throws, since the caller decides how to surface it.
+   * Stages and commits the worktree with a message commit-lint.ts accepts.
+   * `committed: false` means the worktree was already clean; a git failure or
+   * a malformed message throws, since the caller decides how to surface it.
    */
   private async stageAndCommit(
     task: Pick<TrackerTask, 'id' | 'title'>,
     cwd: string,
+    summary: string,
+    meta: PrBodyMeta,
   ): Promise<{ committed: false } | { committed: true; sha: string }> {
     const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
     if (status.stdout.trim() === '') return { committed: false }
+    const message = commitMessage(task, summary, meta)
+    const lint = lintCommitMessage(message)
+    if (lint.length > 0) throw new Error(`malformed commit message: ${lint.join('; ')}`)
     await this.exec(['git', 'add', '-A'], { cwd })
-    const changes = await changesSinceBase(this.exec, cwd, this.deps.config.repo.baseBranch, true)
-    const message = commitMessage(task, changes)
     const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
     if (commit.exitCode !== 0) {
       throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
@@ -1463,7 +1507,12 @@ export class Runner {
     const task = this.deps.store.task(taskId)
     if (task === null) return { ok: false, error: `unknown task ${taskId}` }
     try {
-      const staged = await this.stageAndCommit(task, cwd)
+      const staged = await this.stageAndCommit(
+        task,
+        cwd,
+        CHECKPOINT_COMMIT_SUMMARY,
+        this.commitMeta(null, null),
+      )
       if (!staged.committed) return { ok: false, error: 'nothing to commit; the worktree is clean' }
       this.deps.store.append(taskId, {
         type: 'commit.created',

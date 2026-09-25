@@ -25,7 +25,7 @@ export const newCommand = defineCommand({
   args: {
     harness: {
       type: 'string',
-      description: 'Harness to use: a harness.definitions name or a kind (claude/codex/opencode)',
+      description: 'Harness kind to use (claude/codex/opencode)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
   },

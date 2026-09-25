@@ -59,7 +59,7 @@ export const statusCommand = defineCommand({
       dim(
         `\ntracker=${config.tracker.kind} forge=${config.forge.kind} ` +
           `implement=${config.harness.implement.kind} ` +
-          `parallel=${config.loop.maxParallel}`,
+          `workers=${config.worker.length}`,
       ),
     )
     store.close()

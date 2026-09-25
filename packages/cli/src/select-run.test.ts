@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { Config } from '@amagi/core'
-import { harnessChoices, type Picker, pickRunSelection, usageCounts } from './select-run.ts'
+import {
+  harnessChoices,
+  type Picker,
+  pickRunSelection,
+  pickWorkerSelection,
+  usageCounts,
+  workerChoices,
+} from './select-run.ts'
 
 const started = (seq: number, harness: string, model: string | null = null) => ({
   seq,
@@ -15,20 +22,7 @@ const started = (seq: number, harness: string, model: string | null = null) => (
   resumed: false,
 })
 
-const config = (over: Record<string, unknown> = {}) =>
-  Config.parse({
-    harness: {
-      definitions: {
-        fast: {
-          kind: 'opencode',
-          model: 'local/deepseek-ai/DeepSeek-V4-Flash-0731',
-          permissions: 'bypass',
-        },
-        careful: { kind: 'claude' },
-      },
-      ...over,
-    },
-  })
+const config = (over: Record<string, unknown> = {}) => Config.parse({ harness: { ...over } })
 
 const scripted = (selects: (string | null)[], inputs: (string | null)[] = []): Picker => {
   let s = 0
@@ -43,20 +37,14 @@ const scripted = (selects: (string | null)[], inputs: (string | null)[] = []): P
 }
 
 describe('harnessChoices', () => {
-  test('offers the named definitions when present', () => {
+  test('offers the three known harness kinds', () => {
     const labels = harnessChoices(config()).map((o) => o.label)
-    expect(labels).toEqual(['fast', 'careful'])
-  })
-
-  test('falls back to the three known kinds', () => {
-    const labels = harnessChoices(config({ definitions: {} })).map((o) => o.label)
     expect(labels).toEqual(['claude', 'codex', 'opencode'])
   })
 
   test('fallback kind matching the implement harness keeps its bin', () => {
     const choices = harnessChoices(
       config({
-        definitions: {},
         implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
       }),
     )
@@ -68,19 +56,19 @@ describe('harnessChoices', () => {
     })
   })
 
-  test('sorts definitions by how often their kind was used', () => {
+  test('sorts harness kinds by how often they were used', () => {
     const counts = usageCounts([
       started(1, 'claude', 'sonnet'),
       started(2, 'claude', 'sonnet'),
       started(3, 'opencode', 'local/x'),
     ])
     const labels = harnessChoices(config(), counts).map((o) => o.label)
-    expect(labels).toEqual(['careful', 'fast'])
+    expect(labels).toEqual(['claude', 'opencode', 'codex'])
   })
 
   test('sorts the fallback kinds by usage, ties keep insertion order', () => {
     const counts = usageCounts([started(1, 'codex'), started(2, 'codex'), started(3, 'claude')])
-    const labels = harnessChoices(config({ definitions: {} }), counts).map((o) => o.label)
+    const labels = harnessChoices(config(), counts).map((o) => o.label)
     expect(labels).toEqual(['codex', 'claude', 'opencode'])
   })
 })
@@ -103,10 +91,10 @@ describe('usageCounts', () => {
 describe('pickRunSelection', () => {
   const listModels = async () => ['opencode/big-pickle', 'opencode/ling-3.0-flash-fin-free']
 
-  test('a --harness definition name resolves without prompting', async () => {
+  test('a --harness kind resolves without prompting', async () => {
     const { harness, interactive } = await pickRunSelection(
-      config(),
-      { harness: 'fast', model: 'opencode/other' },
+      config({ implement: { kind: 'opencode', permissions: 'bypass' } }),
+      { harness: 'opencode', model: 'opencode/other' },
       null,
       listModels,
     )
@@ -153,21 +141,28 @@ describe('pickRunSelection', () => {
   })
 
   test('interactive: picks harness, then a model from the listed options', async () => {
-    const picker = scripted(['fast', 'opencode/big-pickle'])
+    const picker = scripted(['opencode', 'opencode/big-pickle'])
     const { harness } = await pickRunSelection(config(), {}, picker, listModels)
     expect(harness.kind).toBe('opencode')
     expect(harness.model).toBe('opencode/big-pickle')
   })
 
   test('interactive: a custom model is read from the prompt', async () => {
-    const picker = scripted(['fast', '(custom model)'], ['local/some-model'])
+    const picker = scripted(['opencode', '(custom model)'], ['local/some-model'])
     const { harness } = await pickRunSelection(config(), {}, picker, listModels)
     expect(harness.model).toBe('local/some-model')
   })
 
   test('interactive: the picked default stays when the model pick is cancelled', async () => {
-    const picker = scripted(['fast', null])
-    const { harness } = await pickRunSelection(config(), {}, picker, listModels)
+    const picker = scripted(['opencode', null])
+    const { harness } = await pickRunSelection(
+      config({
+        implement: { kind: 'opencode', model: 'local/deepseek-ai/DeepSeek-V4-Flash-0731' },
+      }),
+      {},
+      picker,
+      listModels,
+    )
     expect(harness.model).toBe('local/deepseek-ai/DeepSeek-V4-Flash-0731')
   })
 
@@ -176,7 +171,7 @@ describe('pickRunSelection', () => {
     const picker: Picker = {
       select: async (title, options) => {
         if (title === 'Which harness?') {
-          return options.find((o) => o.label === 'careful')?.value ?? null
+          return options.find((o) => o.label === 'claude')?.value ?? null
         }
         if (title === 'Which model?') {
           modelLabels = options.map((o) => o.label)
@@ -203,7 +198,7 @@ describe('pickRunSelection', () => {
   })
 
   test('interactive: --model skips the model prompt after an interactive harness pick', async () => {
-    const picker = scripted(['fast'])
+    const picker = scripted(['opencode'])
     const { harness } = await pickRunSelection(
       config(),
       { model: 'opencode/forced' },
@@ -214,7 +209,7 @@ describe('pickRunSelection', () => {
   })
 
   test('interactive: picks harness, model, then effort from the hardcoded levels', async () => {
-    const picker = scripted(['careful', 'sonnet', 'high'])
+    const picker = scripted(['claude', 'sonnet', 'high'])
     const claudeModels = async () => ['sonnet', 'opus', 'haiku']
     const { harness } = await pickRunSelection(config(), {}, picker, claudeModels)
     expect(harness.kind).toBe('claude')
@@ -223,24 +218,22 @@ describe('pickRunSelection', () => {
   })
 
   test('interactive: cancelling the effort pick keeps the configured default', async () => {
-    const withEffort = config({
-      definitions: { careful: { kind: 'claude', effort: 'medium' } },
-    })
-    const picker = scripted(['careful', 'sonnet', null])
+    const withEffort = config({ implement: { kind: 'claude', effort: 'medium' } })
+    const picker = scripted(['claude', 'sonnet', null])
     const claudeModels = async () => ['sonnet', 'opus', 'haiku']
     const { harness } = await pickRunSelection(withEffort, {}, picker, claudeModels)
     expect(harness.effort).toBe('medium')
   })
 
   test('interactive: opencode gets no effort prompt', async () => {
-    const picker = scripted(['fast', 'opencode/big-pickle'])
+    const picker = scripted(['opencode', 'opencode/big-pickle'])
     const { harness } = await pickRunSelection(config(), {}, picker, listModels)
     expect(harness.kind).toBe('opencode')
     expect(harness.effort).toBeUndefined()
   })
 
   test('--effort is applied without prompting', async () => {
-    const picker = scripted(['careful'])
+    const picker = scripted(['claude'])
     const { harness } = await pickRunSelection(config(), { effort: 'high' }, picker, listModels)
     expect(harness.kind).toBe('claude')
     expect(harness.effort).toBe('high')
@@ -250,5 +243,81 @@ describe('pickRunSelection', () => {
     const { harness } = await pickRunSelection(config(), { effort: 'xhigh' }, null, listModels)
     expect(harness.kind).toBe('claude')
     expect(harness.effort).toBe('xhigh')
+  })
+})
+
+describe('pickWorkerSelection', () => {
+  const fleetConfig = () =>
+    Config.parse({
+      worker: [
+        {
+          id: 'primary',
+          name: 'Primary',
+          kind: 'opencode',
+          model: 'local/default',
+          seat: 'shared-seat',
+          enabled: true,
+        },
+        { id: 'off', name: 'Off', kind: 'claude', enabled: false },
+      ],
+      harness: {
+        implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
+      },
+    })
+
+  test('lists enabled workers with profile and seat, including off workers', () => {
+    const choices = workerChoices(fleetConfig())
+    expect(choices).toHaveLength(1)
+    expect(choices[0]?.label).toContain('Primary [primary]')
+    expect(choices[0]?.label).toContain('opencode')
+    expect(choices[0]?.label).toContain('model local/default')
+    expect(choices[0]?.label).toContain('seat shared-seat')
+  })
+
+  test('interactive selection uses the worker profile and preserves its configured harness bin', async () => {
+    const config = fleetConfig()
+    const label = workerChoices(config)[0]?.label ?? ''
+    const selection = await pickWorkerSelection(config, {}, scripted([label]))
+    expect(selection.worker.id).toBe('primary')
+    expect(selection.harness).toMatchObject({
+      kind: 'opencode',
+      model: 'local/default',
+      seat: 'shared-seat',
+      bin: 'opencode-unconfined',
+      permissions: 'bypass',
+    })
+    expect(selection.interactive).toBe(true)
+  })
+
+  test('--worker selects non-interactively and overrides only the run', async () => {
+    const config = fleetConfig()
+    const selection = await pickWorkerSelection(
+      config,
+      { worker: 'primary', harness: 'claude', model: 'opus', effort: 'high' },
+      null,
+    )
+    expect(selection.harness).toMatchObject({
+      kind: 'claude',
+      model: 'opus',
+      effort: 'high',
+      seat: 'shared-seat',
+    })
+    expect(config.worker[0]).toMatchObject({ kind: 'opencode', model: 'local/default' })
+    expect(selection.interactive).toBe(false)
+  })
+
+  test('unknown and disabled worker ids fail clearly', async () => {
+    await expect(pickWorkerSelection(fleetConfig(), { worker: 'missing' }, null)).rejects.toThrow(
+      'unknown worker "missing"',
+    )
+    await expect(pickWorkerSelection(fleetConfig(), { worker: 'off' }, null)).rejects.toThrow(
+      'worker "off" is disabled',
+    )
+  })
+
+  test('requires a worker id when there is no terminal', async () => {
+    await expect(pickWorkerSelection(fleetConfig(), {}, null)).rejects.toThrow(
+      'amagi run needs a terminal or --worker <id>',
+    )
   })
 })

@@ -1,7 +1,8 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { CheckResult } from './events.ts'
-import type { PrChange } from './pr-body.ts'
-import { NOT_VIABLE_VERDICTS, VERDICTS, verdictPromptLines } from './verdict.ts'
+import { commitFooter } from './footer.ts'
+import type { PrBodyMeta } from './pr-body.ts'
+import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from './verdict.ts'
 
 export type PromptContext = {
   task: TrackerTask
@@ -57,8 +58,13 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '  still write your findings, evidence, and conclusion in your final message.',
     '',
     'Your final message feeds the pull request description. Write it as:',
-    '1. A short summary of what was done. When the task has no description it is the',
-    '   PR summary, and it is the reason shown when no pull request is opened.',
+    '1. A short summary of what was done. It is the body of the commit the orchestrator',
+    '   makes, the PR summary when the task has no description, and the reason shown',
+    '   when no pull request is opened. Write it against the actual change',
+    `   (\`git diff ${base}\`), not against what you intended: open with the problem as a`,
+    '   reader who has not seen the code would understand it, then what the change does',
+    '   about it and why that matters rather than which mechanism it uses, then how you',
+    '   verified it. Do not list the changed files: the diff already shows them.',
     '2. Only if your changes add a user-facing feature (new CLI command or flag, new',
     '   config option, new API endpoint): a `### How to use` section saying how to',
     '   trigger it and what it does.',
@@ -67,6 +73,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '   task: what the changes do file by file and anything the reviewer needs to know',
     '   (deviations from the task, what was left out, why a file that looks unrelated',
     '   was touched).',
+    'Whenever the summary or Conclusion refers to more than one file, use a markdown',
+    'bullet list with one file per line. Put each path in `backticks`; you may add a',
+    'short note after it. Never join multiple file paths with commas in a sentence.',
     '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
     '   opens no pull request, so the verdict is what tells the operator what to do next.',
     ...verdictPromptLines().map((l) => `   ${l}`),
@@ -182,21 +191,37 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
   )
 }
 
+/** Body of a commit made before the agent has reported what it did. */
+export const CHECKPOINT_COMMIT_SUMMARY =
+  'Checkpoint of work in progress, requested by the agent mid-run. The final commit on\n' +
+  'this branch summarizes the change.'
+
+/**
+ * The commit body out of the implementing run's final message: the summary it
+ * opens with, cut before its `### How to use` / `### Conclusion` sections and
+ * without the verdict line, which is for the operator.
+ */
+export function commitSummary(finalMessage: string | null | undefined): string {
+  const lines: string[] = []
+  for (const line of (finalMessage ?? '').split('\n')) {
+    if (/^#{1,6}\s/.test(line)) break
+    if (parseVerdict(line) === null) lines.push(line)
+  }
+  const summary = lines.join('\n').trim()
+  return summary === '' ? 'The agent reported no summary of the change.' : summary
+}
+
+/**
+ * `[task-id] title`, the summary, and the PR body's amagi footer in plain
+ * text. commit-lint.ts checks this shape on every amagi commit.
+ */
 export function commitMessage(
   task: Pick<TrackerTask, 'id' | 'title'>,
-  changes: readonly PrChange[] = [],
+  summary: string,
+  meta: PrBodyMeta,
 ): string {
-  const lines = [task.title, '', `Task: ${task.id}`]
-  if (changes.length > 0) {
-    lines.push('', 'Changes:')
-    for (const change of changes) {
-      const stat = Number.isFinite(change.additions)
-        ? `+${change.additions} -${change.deletions}`
-        : 'binary'
-      lines.push(`- \`${change.path}\` ${stat}`)
-    }
-  }
-  return `${lines.join('\n')}\n`
+  const footer = commitFooter(meta.harness, meta.model, meta.effort)
+  return `[${task.id}] ${task.title}\n\n${summary.trim()}\n\n${footer}\n`
 }
 
 /**
@@ -293,6 +318,7 @@ export type MentionPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  outPath: string
   /** True when the base branch does not merge cleanly into the PR head. */
   conflicted: boolean
 }
@@ -317,6 +343,7 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
     '- Commit your changes. Do not push; the dispatcher pushes.',
+    `- Write a short summary of what changed, or why no change was needed, to ${ctx.outPath}.`,
   ]
   if (ctx.conflicted) {
     lines.push(
@@ -349,6 +376,7 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   parts.push(
     '',
     'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+    `Write a short summary of what changed to file: ${ctx.outPath}. If no change is needed, write why. Keep it concise and suitable for a PR comment.`,
   )
   return parts.join('\n')
 }
@@ -561,7 +589,7 @@ export function whyNoChangesPrompt(task: TrackerTask): string {
   return parts.join('\n')
 }
 
-/** Explain a failed PR creation so the operator can finish it manually. */
+/** Recover from a failed PR creation or explain the manual next step. */
 export function prFailurePrompt(task: TrackerTask, branch: string, error: string): string {
   const parts = [
     `Task ${task.id}: ${task.title}`,
@@ -569,12 +597,15 @@ export function prFailurePrompt(task: TrackerTask, branch: string, error: string
     `The commit is on branch ${branch}, but the forge failed to create its pull request:`,
     error,
     '',
-    'Investigate the worktree and repository state using read-only commands. Explain',
-    'what happened and exactly what the operator must do to open the pull request by',
-    'hand. Be concrete and include relevant commands when useful.',
+    'Investigate why pull request creation failed. Resolve the problem if you can do',
+    'so safely with the available repository state and credentials. The runner will',
+    'retry pull request creation once after you finish, so do not open a pull request',
+    'yourself. If you cannot resolve it, explain what happened and the exact manual',
+    'next step. Be concrete and include relevant commands when useful.',
     '',
-    'Do not modify files, git state, branches, remotes, or forge state. Do not commit,',
-    'push, or retry pull request creation. Reply with the explanation only.',
+    'Do not change project files, git history, branches, or remotes. Do not commit,',
+    'push, or retry pull request creation. Reply with a concise summary of what you',
+    'investigated, any safe recovery action you took, and the outcome.',
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
   parts.push(...trackerContext(task))
@@ -583,16 +614,17 @@ export function prFailurePrompt(task: TrackerTask, branch: string, error: string
 
 export function prFailureSystemPrompt(): string {
   return [
-    'You are diagnosing why an autonomous coding agent could not open a pull request.',
-    'Your investigation is strictly read-only.',
+    'You are recovering from a failed pull request creation by an autonomous coding agent.',
+    'Investigate the failure, make a safe recovery action when possible, and summarize',
+    'the result for the operator if recovery does not work.',
     '',
     'Rules:',
-    '- Do not modify, create, or delete files.',
-    '- Do not run writing git commands, including add, commit, push, checkout, or reset.',
-    '- Do not modify remotes or use forge commands that change remote state.',
-    '- Inspect the worktree and report the evidence, what failed, and the exact action',
+    '- Do not change project files, git history, branches, or remotes.',
+    '- Do not commit or push, and do not create a pull request yourself; the runner will retry once.',
+    '- You may use available tools to inspect the failure and safely correct its cause.',
+    '- If you cannot resolve it, report the evidence, what failed, and the exact action',
     '  the operator must take to open the pull request manually.',
-    '- Reply with the explanation only, in plain language.',
+    '- Reply with a concise explanation in plain language.',
   ].join('\n')
 }
 

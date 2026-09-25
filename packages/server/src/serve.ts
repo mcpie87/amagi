@@ -186,6 +186,7 @@ function startRepoPollers(
                   forge,
                   tracker: ws.tracker,
                   cwd: ws.root,
+                  remote: ws.config.forge.remote,
                   intervalMs: prIntervalMs,
                 }),
           mention: mentionEnabled ? startMention() : null,

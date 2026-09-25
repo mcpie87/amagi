@@ -96,6 +96,31 @@ const EVENTS: StoredEvent[] = [
     options: ['npm', 'nexus'],
     gateRef: null,
   }),
+  ev(5, null, {
+    type: 'watcher.run.started',
+    repo: 'repo1',
+    name: 'mention-watcher',
+    runId: 'run-2',
+  }),
+  ev(6, null, {
+    type: 'watcher.action',
+    repo: 'repo1',
+    name: 'mention-watcher',
+    runId: 'run-2',
+    targetType: 'pr',
+    targetId: '12',
+    prNumber: 12,
+    result: 'failed to read comments',
+    level: 'error',
+  }),
+  ev(7, null, {
+    type: 'watcher.run.finished',
+    repo: 'repo1',
+    name: 'mention-watcher',
+    runId: 'run-2',
+    ok: false,
+    error: 'comment service unavailable',
+  }),
 ]
 
 function streamMock(events: StoredEvent[], extra?: (url: string, init?: RequestInit) => Response) {
@@ -150,8 +175,8 @@ describe('App', () => {
       await waitFor(() => (instance.lastFrame() ?? '').includes('activity log'))
       const frame = instance.lastFrame() ?? ''
       expect(frame).toContain('2 runs')
-      expect(frame).toContain('run 2 started')
-      expect(frame).toContain('PR #12: failed to read comments')
+      expect(frame).toContain('run started')
+      expect(frame).toContain('pr 12: failed to read comments')
 
       instance.stdin.write('\u001b')
       await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))

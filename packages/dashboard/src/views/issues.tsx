@@ -397,15 +397,136 @@ function CloseEpicButton({
   )
 }
 
+function MarkEpicDoneButton({
+  repo,
+  epic,
+  onClosed,
+}: {
+  repo: string
+  epic: Pick<EligibleEpic, 'id' | 'title'>
+  onClosed: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState<string>(EPIC_CLOSE_REASONS[0] ?? 'completed')
+  const [custom, setCustom] = useState('')
+
+  const close = async () => {
+    const finalReason = reason === '__other' ? custom.trim() : reason
+    if (finalReason === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/issues/${epic.id}/close`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: finalReason }),
+      })
+      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      else {
+        onClosed()
+        setOpen(false)
+      }
+    } catch {
+      setError('could not reach the amagi server')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const input =
+    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
+  const label = 'mb-1 block text-sm text-fg-muted'
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setOpen(true)}
+        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+      >
+        Mark done
+      </button>
+      {error !== null && <p className="text-sm text-red-ink">{error}</p>}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void close()
+            }}
+            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
+          >
+            <h2 className="mb-3 text-lg font-semibold">Mark {epic.id} done</h2>
+            <div className="space-y-3">
+              <p className="text-sm text-fg-muted">{epic.title}</p>
+              <div>
+                <label className={label} htmlFor={`epic-done-reason-${epic.id}`}>
+                  Reason for closing
+                </label>
+                <select
+                  id={`epic-done-reason-${epic.id}`}
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className={input}
+                >
+                  {EPIC_CLOSE_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r === '__other' ? 'Other...' : r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {reason === '__other' && (
+                <div>
+                  <label className={label} htmlFor={`epic-done-custom-${epic.id}`}>
+                    Custom reason
+                  </label>
+                  <input
+                    id={`epic-done-custom-${epic.id}`}
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                    className={input}
+                  />
+                </div>
+              )}
+              {error !== null && <p className="text-sm text-red-ink">{error}</p>}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded border border-line-strong px-3 py-1 text-sm hover:bg-raised"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy || (reason === '__other' && custom.trim() === '')}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {busy ? 'Closing…' : 'Mark done'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </>
+  )
+}
+
 export function IssuesView() {
   const { selected } = useDashboard()
   const [issues, setIssues] = useState<Issue[]>([])
   const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
-  const { issue: selectedId } = useSearch({ from: issuesRoute.id })
+  const { issue: selectedId, epic: selectedEpicId } = useSearch({ from: issuesRoute.id })
   const navigate = useNavigate()
   const [issueDetail, setIssueDetail] = useState<Issue | null>(null)
   const [issueError, setIssueError] = useState<string | null>(null)
-  const [selectedEpic, setSelectedEpic] = useState<EligibleEpic | null>(null)
+  const [epicIssueDetail, setEpicIssueDetail] = useState<Issue | null>(null)
+  const [epicIssueError, setEpicIssueError] = useState<string | null>(null)
   const [epicChildren, setEpicChildren] = useState<Issue[]>([])
   const [epicChildrenLoading, setEpicChildrenLoading] = useState(false)
   const [epicChildrenError, setEpicChildrenError] = useState<string | null>(null)
@@ -439,8 +560,7 @@ export function IssuesView() {
     if (repoRef.current !== selected) {
       repoRef.current = selected
       setIssues([])
-      setSelectedEpic(null)
-      void navigate({ to: '/issues', search: {} })
+      void navigate({ to: '/issues', search: {}, replace: true })
     }
     setError(null)
     fetch(`${apiBase}/api/repos/${selected}/issues`)
@@ -470,12 +590,30 @@ export function IssuesView() {
   }, [selected, selectedId, refresh])
 
   useEffect(() => {
-    if (selected === null || selectedEpic === null) return
+    setEpicIssueDetail(null)
+    setEpicIssueError(null)
+    if (selected === null || selectedEpicId === undefined) return
+    let active = true
+    fetchIssue(selected, selectedEpicId)
+      .then((issue) => {
+        if (active) setEpicIssueDetail(issue)
+      })
+      .catch((err: unknown) => {
+        if (active) setEpicIssueError(errMsg(err))
+      })
+    return () => {
+      active = false
+    }
+  }, [selected, selectedEpicId, refresh])
+
+  useEffect(() => {
+    if (selected === null || selectedEpicId === undefined) return
+    void refresh
     let active = true
     setEpicChildren([])
     setEpicChildrenLoading(true)
     setEpicChildrenError(null)
-    fetch(`${apiBase}/api/repos/${selected}/issues/${selectedEpic.id}/children`)
+    fetch(`${apiBase}/api/repos/${selected}/issues/${selectedEpicId}/children`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
         return res.json() as Promise<Issue[]>
@@ -492,7 +630,7 @@ export function IssuesView() {
     return () => {
       active = false
     }
-  }, [selected, selectedEpic, refresh])
+  }, [selected, selectedEpicId, refresh])
 
   useEffect(() => {
     if (selected === null) return
@@ -514,7 +652,27 @@ export function IssuesView() {
   }
 
   const openIssue = (id: string | null) =>
-    void navigate({ to: '/issues', search: id === null ? {} : { issue: id } })
+    void navigate({
+      to: '/issues',
+      replace: false,
+      search: {
+        ...(id === null ? {} : { issue: id }),
+        ...(selectedEpicId === undefined ? {} : { epic: selectedEpicId }),
+      },
+    })
+  const selectedEpic =
+    selectedEpicId === undefined
+      ? null
+      : (eligibleEpics.find((epic) => epic.id === selectedEpicId) ??
+        (epicIssueDetail !== null && epicIssueDetail.id === selectedEpicId
+          ? {
+              id: epicIssueDetail.id,
+              title: epicIssueDetail.title,
+              status: epicIssueDetail.status,
+              totalChildren: epicChildren.length,
+              closedChildren: epicChildren.filter((child) => child.status === 'closed').length,
+            }
+          : null))
   // The previous detail stays up while a refresh refetches it, but never
   // stands in for a different issue.
   const selectedIssue = issueDetail?.id === selectedId ? issueDetail : null
@@ -534,7 +692,7 @@ export function IssuesView() {
       onClick={() => openIssue(null)}
       className="text-sm text-sky-ink hover:underline"
     >
-      &larr; {selectedEpic === null ? 'tasks' : 'epic'}
+      &larr; {selectedEpicId === undefined ? 'tasks' : 'epic'}
     </button>
   )
 
@@ -567,6 +725,11 @@ export function IssuesView() {
               Edit
             </button>
           )}
+          {selected !== null &&
+            selectedIssue.type === 'epic' &&
+            eligibleEpics.some((epic) => epic.id === selectedIssue.id) && (
+              <MarkEpicDoneButton repo={selected} epic={selectedIssue} onClosed={saved} />
+            )}
         </div>
         <p className="mt-1 text-sm text-fg-faint">
           {selectedIssue.id}
@@ -609,21 +772,37 @@ export function IssuesView() {
       </section>
     )
   }
-  if (selectedEpic !== null) {
+  if (selectedEpicId !== undefined && selectedId === undefined) {
     return (
       <section>
         <button
           type="button"
-          onClick={() => setSelectedEpic(null)}
+          onClick={() => void navigate({ to: '/issues', search: {}, replace: true })}
           className="text-sm text-sky-ink hover:underline"
         >
           &larr; tasks
         </button>
-        <h1 className="mt-3 text-xl font-semibold">{selectedEpic.title}</h1>
+        <div className="mt-3 flex items-center gap-3">
+          <h1 className="text-xl font-semibold">
+            {selectedEpic?.title ?? (epicIssueError === null ? 'Loading epic...' : selectedEpicId)}
+          </h1>
+          {selectedEpic?.status === 'closed' ? (
+            <span className="rounded bg-raised px-2 py-0.5 text-xs text-fg-muted">Closed</span>
+          ) : (
+            selected !== null &&
+            selectedEpic !== null &&
+            eligibleEpics.some((epic) => epic.id === selectedEpic.id) && (
+              <MarkEpicDoneButton repo={selected} epic={selectedEpic} onClosed={saved} />
+            )
+          )}
+        </div>
         <p className="mt-1 text-sm text-fg-faint">
-          {selectedEpic.id} · {selectedEpic.closedChildren}/{selectedEpic.totalChildren} children
-          done
+          {selectedEpicId}
+          {selectedEpic === null
+            ? ''
+            : ` · ${selectedEpic.closedChildren}/${selectedEpic.totalChildren} children done`}
         </p>
+        {epicIssueError !== null && <p className="mt-2 text-sm text-red-ink">{epicIssueError}</p>}
         <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
           Child tasks ({epicChildren.length})
         </h2>
@@ -731,7 +910,13 @@ export function IssuesView() {
               <li key={epic.id} className="flex items-center gap-3 px-4 py-3">
                 <button
                   type="button"
-                  onClick={() => setSelectedEpic(epic)}
+                  onClick={() =>
+                    void navigate({
+                      to: '/issues',
+                      search: { epic: epic.id },
+                      replace: false,
+                    })
+                  }
                   className="min-w-0 flex-1 text-left hover:text-sky-ink"
                 >
                   <span className="block truncate font-medium">{epic.title}</span>

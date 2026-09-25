@@ -3,4 +3,4 @@
  * Kept in its own module, free of Node builtins, so client bundles (e.g. the
  * Vite dev server) can import it without dragging in server-only code.
  */
-export const MAX_PARALLEL = 16
+export const MAX_WORKERS = 16

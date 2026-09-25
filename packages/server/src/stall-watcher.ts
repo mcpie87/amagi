@@ -62,7 +62,7 @@ export const DOOM_STATES: readonly TaskState[] = ['implementing', 'checks', 'ret
 
 /** Event tail the doom guard analyzes per task each tick; covers the tool window. */
 const RECENT_EVENTS_LIMIT = 2000
-/** Cap on the per-tick doom scan; runs are bounded by loop.maxParallel in practice. */
+/** Cap on the per-tick doom scan; active runs are bounded by the fleet in practice. */
 const DOOM_SCAN_LIMIT = 50
 const GIT_TIMEOUT_MS = 10_000
 
@@ -136,6 +136,25 @@ export function startStallWatcher({
     intervalMs,
     status: 'idle',
   }
+  let currentRunId: string | null = null
+  let currentRunFinalized = false
+
+  const finishRun = (ok: boolean, error: string | null): void => {
+    if (currentRunId === null || currentRunFinalized) return
+    currentRunFinalized = true
+    try {
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo,
+        name: 'stall-watcher',
+        runId: currentRunId,
+        ok,
+        error,
+      })
+    } catch (err) {
+      console.warn(`stall watcher history: ${errMsg(err)}`)
+    }
+  }
 
   const detail = (): string => {
     const bits: string[] = []
@@ -159,6 +178,18 @@ export function startStallWatcher({
       detail: signal.detail,
     })
     logEvent(`task ${task.id}: stopped doom loop (${signal.detail})`, 'error')
+    if (currentRunId !== null) {
+      store.append(null, {
+        type: 'watcher.action',
+        repo,
+        name: 'stall-watcher',
+        runId: currentRunId,
+        targetType: 'task',
+        targetId: task.id,
+        result: `stopped doom loop (${signal.detail})`,
+        level: 'error',
+      })
+    }
     store.append(task.id, {
       type: 'task.state',
       from: task.state,
@@ -209,6 +240,18 @@ export function startStallWatcher({
   function parkClosedIssue(task: Pick<ProjectedTask, 'id' | 'state'>): void {
     const reason = 'tracker issue was closed remotely; human review needed'
     logEvent(`task ${task.id}: parked because tracker issue is closed`)
+    if (currentRunId !== null) {
+      store.append(null, {
+        type: 'watcher.action',
+        repo,
+        name: 'stall-watcher',
+        runId: currentRunId,
+        targetType: 'task',
+        targetId: task.id,
+        result: 'parked for human review because tracker issue is closed',
+        level: 'error',
+      })
+    }
     store.append(task.id, {
       type: 'task.state',
       from: task.state,
@@ -231,6 +274,18 @@ export function startStallWatcher({
         count++
       } catch (err) {
         console.warn(`doom watch ${task.id}: ${errMsg(err)}`)
+        if (currentRunId !== null) {
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'stall-watcher',
+            runId: currentRunId,
+            targetType: 'task',
+            targetId: task.id,
+            result: `doom check failed: ${errMsg(err)}`,
+            level: 'error',
+          })
+        }
       }
     }
     for (const id of [...diffSince.keys()]) {
@@ -241,6 +296,14 @@ export function startStallWatcher({
 
   async function tick(): Promise<void> {
     runs++
+    currentRunId = `${Date.now()}-${runs}`
+    currentRunFinalized = false
+    store.append(null, {
+      type: 'watcher.run.started',
+      repo,
+      name: 'stall-watcher',
+      runId: currentRunId,
+    })
     logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
@@ -269,6 +332,16 @@ export function startStallWatcher({
           issue = await tracker.get(task.id)
         } catch (err) {
           logEvent(`task ${task.id}: failed to read tracker issue: ${errMsg(err)}`, 'error')
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'stall-watcher',
+            runId: currentRunId,
+            targetType: 'task',
+            targetId: task.id,
+            result: `failed to read tracker issue: ${errMsg(err)}`,
+            level: 'error',
+          })
           console.warn(`stall recover ${task.id}: ${errMsg(err)}`)
         }
         if (issue?.status === 'closed') {
@@ -281,6 +354,16 @@ export function startStallWatcher({
         } catch (err) {
           parkedCount++
           logEvent(`task ${task.id}: failed to release tracker claim: ${errMsg(err)}`, 'error')
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'stall-watcher',
+            runId: currentRunId,
+            targetType: 'task',
+            targetId: task.id,
+            result: `failed to release tracker claim: ${errMsg(err)}`,
+            level: 'error',
+          })
           console.warn(`stall recover ${task.id}: ${errMsg(err)}`)
           store.append(task.id, {
             type: 'task.state',
@@ -292,6 +375,16 @@ export function startStallWatcher({
         }
         reclaimed++
         logEvent(`task ${task.id}: recovered after ${humanMs(timeoutMs)} without worker activity`)
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'stall-watcher',
+          runId: currentRunId,
+          targetType: 'task',
+          targetId: task.id,
+          result: `recovered after ${humanMs(timeoutMs)} without worker activity`,
+          level: 'info',
+        })
         store.append(task.id, {
           type: 'task.reclaimed',
           reason: `recovered by stall watcher: no worker activity for ${humanMs(timeoutMs)}`,
@@ -302,7 +395,7 @@ export function startStallWatcher({
 
       if (tracker.reclaimExpiredClaims !== undefined) {
         try {
-          await tracker.reclaimExpiredClaims()
+          await tracker.reclaimExpiredClaims((id) => store.task(id) !== null)
         } catch (err) {
           const message = `tracker lease reclaim failed: ${errMsg(err)}`
           failures++
@@ -340,6 +433,8 @@ export function startStallWatcher({
     }
     next.log = log
     activity = next
+    finishRun(next.ok, next.error)
+    currentRunId = null
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 
@@ -349,6 +444,7 @@ export function startStallWatcher({
       stopped = true
       if (timer !== null) clearTimeout(timer)
       timer = null
+      finishRun(false, 'watcher stopped')
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,

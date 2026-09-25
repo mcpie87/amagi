@@ -36,7 +36,7 @@ The dashboard is the shared control room for the connected server. A persistent 
 - **Inbox** collects everything that needs a human: every open question (with one-tap options and a free-text answer) and the tasks needing attention.
 - **Activity** is a feed of everything that happened across runs - claims, state changes, checks, commits, PRs, questions, retries, and errors - newest first, linked to the task.
 - **Sessions** accounts for agent usage: total sessions, average duration, tokens used and cached, a breakdown by model and harness, and the recent sessions.
-- **Settings** edits the server's max concurrent workers (`loop.maxParallel`).
+- **Settings** reports that capacity comes from the configured worker fleet and warns when a stale `loop.maxParallel` key is present.
 - **Task detail** (linked from Overview, Tasks, Inbox, and Activity) shows the task's state and summary, its live agent log, token usage, worktree, branch, and PR, and any open questions, answerable in place, with Log/Checks tabs. Its actions cover reclaim, retry, stop, and instant close.
 
 Starting and stopping runs, editing tracker tasks, and registering repositories are all live from the dashboard; the event stream is scoped to the selected repo.
@@ -121,9 +121,10 @@ ready task or the next ready one (`POST /api/repos/:repo/runs`, with an optional
 the owned agent process is killed, the tracker lease is released, and the task
 is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
-server runs up to `loop.maxParallel` tasks at once and refuses launch requests
-that would exceed that or claim a task that is already running. The dashboard
-surfaces all of this from the task board and task detail pages.
+server dispatches through the enabled workers in the global `worker` fleet,
+manually or, while the global `loop.autoQueue` is on, automatically whenever an
+enabled worker has a free seat. Workers sharing a seat serialize their runs. The dashboard surfaces runner status from the task board
+and task detail pages.
 
 The repo-scoped runner endpoint also carries per-task resource usage, summed
 over each running task's whole agent process tree from `/proc` on Linux: resident
@@ -206,10 +207,70 @@ turn it off.
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
 
-Every key is optional; the table below is the complete schema with its default.
+The worker fleet is machine-wide, so define `[[worker]]` entries in the global
+config. Workers can share a seat, for example:
+
+```toml
+[[worker]]
+id = "claude-fast"
+name = "Claude fast"
+kind = "claude"
+model = "claude-sonnet"
+seat = "claude-subscription"
+enabled = true
+
+[[worker]]
+id = "claude-careful"
+name = "Claude careful"
+kind = "claude"
+model = "claude-opus"
+seat = "claude-subscription"
+enabled = true
+```
+
+A worker is either enabled or not: `enabled` defaults to `false`, persists
+across server restarts, and can also be flipped from the dashboard. Only
+enabled workers take runs, manual or automatic. Whether runs are dispatched
+automatically is the global **Auto queue** setting (`loop.autoQueue`), not a
+per-worker one.
+
+A seat names the credential an agent uses. Amagi guarantees that at most one
+agent is live on a seat at a time, even when different workers, watchers, or a
+chat reply request it. A worker without an explicit seat uses its harness kind
+as the seat name. Capacity is derived from the distinct free seats of enabled
+workers, rather than from the number of worker entries: workers
+sharing a credential must take turns, while workers on separate credentials
+can run concurrently.
+
+Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
+override them in a repo's `.amagi/config.toml` when needed. The `mention`,
+`prConflict`, and `stall` kinds default to enabled; the first two can override
+their harness kind, model, effort, and seat. The registered-repository registry
+separately controls whether the server starts watchers for each repo.
+
+Every key is optional; the table below gives the schema and defaults.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
+| `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
+| `worker[].id` | string | required | Stable worker identity, unique across the fleet. |
+| `worker[].name` | string | required | Display name. |
+| `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` | required | Harness used by this worker. |
+| `worker[].model` | string | *(harness default)* | Model passed to the harness. |
+| `worker[].effort` | string | *(harness default)* | Reasoning effort passed to the harness. |
+| `worker[].seat` | string | `worker[].kind` | Credential seat used by the worker; workers with the same seat serialize. |
+| `worker[].enabled` | boolean | `false` | Whether the worker takes runs, manual or automatic. Persisted, and editable from the dashboard. |
+| `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
+| `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
+| `watchers.mention.model` | string | `harness.implement.model` | Model for mention responses. |
+| `watchers.mention.effort` | string | `harness.implement.effort` | Reasoning effort for mention responses. |
+| `watchers.mention.seat` | string | `harness.implement.seat`, then kind | Seat used for mention responses. |
+| `watchers.prConflict.enabled` | boolean | `true` | Enable the per-repository PR conflict watcher. |
+| `watchers.prConflict.kind` | harness kind | `harness.implement.kind` | Harness for conflict resolution. |
+| `watchers.prConflict.model` | string | `harness.implement.model` | Model for conflict resolution. |
+| `watchers.prConflict.effort` | string | `harness.implement.effort` | Reasoning effort for conflict resolution. |
+| `watchers.prConflict.seat` | string | `harness.implement.seat`, then kind | Seat used for conflict resolution. |
+| `watchers.stall.enabled` | boolean | `true` | Enable the per-repository stall watcher. It does not spawn an agent and has no harness fields. |
 | `repo.baseBranch` | string | `"main"` | Branch new worktrees and PRs are based on. |
 | `repo.worktreeRoot` | string | `~/.cache/amagi/worktrees` (`$XDG_CACHE_HOME/amagi/worktrees`) | Where per-task worktrees are created. `~` is expanded. |
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
@@ -218,23 +279,16 @@ Every key is optional; the table below is the complete schema with its default.
 | `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. `github` goes through `gh`, `forgejo` through a direct token-authenticated Forgejo API client; both are token-only and never require an interactive login. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
-| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that writes the code when no harness is picked at dispatch time. |
+| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Fallback harness configuration for runs not routed through a worker. |
 | `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"claude-opus-5"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
-| `harness.review.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"codex"` | Harness that reviews the PR. Reserved for the review loop (see [state machine](#the-task-state-machine)); not invoked by the runner yet. |
-| `harness.review.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
-| `harness.review.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
-| `harness.review.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
-| `harness.review.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
 | `harness.triage.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that decides what to do with unclaimed tasks the runner skips. It reads task context and reports a structured decision; it never touches the repository. |
 | `harness.triage.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
 | `harness.triage.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
 | `harness.triage.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
 | `harness.triage.extraArgs` | string[] | `[]` | Same shape as `harness.implement.extraArgs`. |
-| `harness.definitions.<name>.<key>` | same as `harness.implement.*` | *(none)* | Named harness definitions offered by the `amagi run` interactive picker, e.g. `[harness.definitions.fast]` with `kind = "opencode"`. Each is a full harness config (`kind`, `bin`, `model`, `effort`, `permissions`, `extraArgs`). `--harness <name>` also accepts a definition name. When empty, the picker offers the three known kinds. |
-| `loop.maxParallel` | integer >= 1 | `1` | Number of tasks worked concurrently. |
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
 | `loop.prCheckIntervalSec` | integer >= 1 | `300` | How often the PR conflict watcher scans open PRs and dispatches a resolution agent per one conflicting with `repo.baseBranch`. Each PR is only attempted once per head SHA, so the default 5 minutes stays inside GitHub REST rate limits. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
@@ -259,6 +313,19 @@ Every key is optional; the table below is the complete schema with its default.
 | `notify.ntfyServer` | string | `"https://ntfy.sh"` | ntfy server base URL, for self-hosted instances. |
 | `server.host` | string | `"127.0.0.1"` | Bind address for `amagi serve` and the address the CLI (`amagi ask`) talks to. |
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
+
+The server's registered-repository list is stored in
+`$XDG_STATE_HOME/amagi/registry.json` (or `~/.local/state/amagi/registry.json`).
+Each entry has `workers` and `watchers` participation flags, both defaulting to
+`true`. `workers` controls whether that repository's tasks can be dispatched by
+the automatic queue; `watchers` controls whether its background pollers and
+watchers run. Change these flags in the dashboard's repository controls.
+
+`loop.maxParallel` no longer sets capacity or creates that many workers. On
+the first `amagi serve` run when the global config has no worker table, Amagi
+uses the old `harness.implement` kind, model, effort, and seat to create one
+enabled worker. Add or remove worker entries to change the fleet;
+`amagi config` reports when the ignored old setting is still present.
 
 `server.host`/`server.port` are read from the global config only: `serve` hosts every
 registered repo, so there is no single repo config to draw them from.
@@ -308,25 +375,12 @@ permissions = "bypass"
 
 ### Harness and model selection
 
-`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness (the named `harness.definitions`, or `claude`/`codex`/`opencode` when none are defined), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
+`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness kind (`claude`, `codex`, or `opencode`), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
 
 ```bash
 amagi run                      # interactive picker
 amagi run --harness opencode   # pin the harness, pick the model and effort
 amagi run --harness codex --model gpt-5.6-sol --effort high
-```
-
-Define the choices the picker offers per repo:
-
-```toml
-[harness.definitions.fast]
-kind = "opencode"
-bin = "opencode-unconfined"
-permissions = "bypass"
-
-[harness.definitions.careful]
-kind = "claude"
-model = "claude-opus-5"
 ```
 
 ### Interrupting and restarting a task

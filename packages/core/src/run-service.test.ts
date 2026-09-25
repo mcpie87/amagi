@@ -240,37 +240,51 @@ class FakePr implements PrDriver {
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
+  async deleteBranch(): Promise<void> {}
 }
 
 let repo: string
 let wtRoot: string
 let store: Store
 
-const config = (over: Record<string, unknown> = {}) =>
-  Config.parse({
+const config = (over: Record<string, unknown> = {}) => {
+  const { worker = [{ id: 'worker-1', name: 'Worker 1', kind: 'claude' }], ...rest } = over
+  return Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
+    worker: (worker as Record<string, unknown>[]).map((w) => ({ enabled: true, ...w })),
     checks: { commands: [], format: null, lint: null },
-    ...over,
+    ...rest,
   })
+}
 
 const makeService = (
   tracker: Tracker,
   harness: Harness,
-  maxParallel = 1,
+  workerCount = 1,
   cfg = config(),
   over: Partial<RunServiceOptions> = {},
-) =>
-  new RunService({
+) => {
+  const template = cfg.worker[0]
+  const workers =
+    template !== undefined && cfg.worker.length === 1 && workerCount > 1
+      ? Array.from({ length: workerCount }, (_, i) => ({
+          ...template,
+          id: `worker-${i + 1}`,
+          name: `Worker ${i + 1}`,
+          seat: `seat-${i + 1}`,
+        }))
+      : cfg.worker
+  return new RunService({
     store,
     tracker,
     harness,
-    config: cfg,
+    config: { ...cfg, worker: workers },
     repoRoot: repo,
     repoName: 'demo',
     forge: new FakePr(),
-    maxParallel,
     ...over,
   })
+}
 
 const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
   const started = Date.now()
@@ -312,6 +326,30 @@ describe('RunService', () => {
       resources: {},
       tasks: {},
       autoQueue: false,
+      fleet: [
+        {
+          id: 'worker-1',
+          name: 'Worker 1',
+          kind: 'claude',
+          model: null,
+          effort: null,
+          seat: 'seat-1',
+          enabled: true,
+          busy: false,
+          taskId: null,
+        },
+        {
+          id: 'worker-2',
+          name: 'Worker 2',
+          kind: 'claude',
+          model: null,
+          effort: null,
+          seat: 'seat-2',
+          enabled: true,
+          busy: false,
+          taskId: null,
+        },
+      ],
     })
     service.dispose()
   })
@@ -368,11 +406,36 @@ describe('RunService', () => {
     const status = await service.status()
     expect(status.tasks[TASK.id]).toEqual({
       title: 'Add a greeting file',
-      harness: 'fake',
+      workerId: 'worker-1',
+      workerName: 'Worker 1',
+      seat: 'claude',
+      waitingOnSeat: false,
+      harness: 'claude',
       model: null,
       effort: null,
     })
 
+    await service.stop(TASK.id)
+  })
+
+  test('status reports the selected worker harness', async () => {
+    const service = makeService(
+      new FakeTracker([TASK]),
+      new BlockingHarness(),
+      1,
+      config({ worker: [{ id: 'worker-codex', name: 'Codex', kind: 'codex' }] }),
+      { makeHarness: () => new BlockingHarness() },
+    )
+    const started = await service.start(undefined, { workerId: 'worker-codex' })
+    expect(started.ok).toBe(true)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+
+    expect((await service.status()).tasks[TASK.id]).toMatchObject({
+      harness: 'codex',
+      workerId: 'worker-codex',
+      workerName: 'Codex',
+      seat: 'codex',
+    })
     await service.stop(TASK.id)
   })
 
@@ -385,7 +448,11 @@ describe('RunService', () => {
     const status = await service.status()
     expect(status.tasks[TASK.id]).toEqual({
       title: 'Add a greeting file',
-      harness: 'fake',
+      workerId: 'worker-1',
+      workerName: 'Worker 1',
+      seat: 'claude',
+      waitingOnSeat: false,
+      harness: 'claude',
       model: 'fake-model',
       effort: 'high',
     })
@@ -393,36 +460,124 @@ describe('RunService', () => {
     await service.stop(TASK.id)
   })
 
-  test('setMaxParallel changes capacity live without touching running runs', async () => {
-    const service = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1)
-    const started = await service.start()
-    expect(started.ok).toBe(true)
-    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
-    service.setMaxParallel(4)
-    const status = await service.status()
-    expect(status.available).toBe(true)
-    expect(status.capacity).toBe(4)
-    expect(status.running).toEqual([TASK.id])
-    // a buggy caller cannot zero the runner out
-    service.setMaxParallel(0)
+  test('a disabled worker adds no capacity and the auto queue skips it', async () => {
+    const workers = [
+      { id: 'one', name: 'One', kind: 'claude' as const, seat: 'seat-a' },
+      { id: 'two', name: 'Two', kind: 'codex' as const, seat: 'seat-b', enabled: false },
+    ]
+    const service = makeService(
+      new FakeTracker([TASK, TASK2]),
+      new BlockingHarness(),
+      1,
+      config({ worker: workers }),
+      { autoQueue: true, autoQueueActiveMs: 10 },
+    )
     expect((await service.status()).capacity).toBe(1)
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(store.task(TASK2.id)).toBeNull()
+    expect((await service.status()).capacity).toBe(0)
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
+  test('enabling a worker dispatches without waiting out the idle backoff', async () => {
+    const cfg = config({
+      worker: [{ id: 'one', name: 'One', kind: 'claude', seat: 'seat-a', enabled: false }],
+    })
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new BlockingHarness(),
+      config: cfg,
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      autoQueue: true,
+      autoQueueIdleMs: 60_000,
+    })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(store.task(TASK.id)).toBeNull()
+    cfg.worker = cfg.worker.map((worker) => ({ ...worker, enabled: true }))
+    service.fleetChanged()
+    await waitFor(() => store.task(TASK.id)?.state === 'implementing')
+    await service.stop(TASK.id)
+    service.dispose()
+  })
+
+  test('manual dispatch rejects disabled workers', async () => {
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new BlockingHarness(),
+      config: config({
+        worker: [
+          { id: 'one', name: 'One', kind: 'claude', seat: 'seat-one' },
+          { id: 'disabled', name: 'Disabled', kind: 'codex', enabled: false },
+        ],
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+    })
+
+    expect(await service.start(undefined, { workerId: 'disabled' })).toEqual({
+      ok: false,
+      status: 409,
+      error: 'worker disabled is disabled',
+    })
+    expect(await service.start(undefined, { workerId: 'one' })).toEqual({
+      ok: true,
+      taskId: TASK.id,
+    })
+    expect((await service.status()).fleet).toEqual([
+      {
+        id: 'one',
+        name: 'One',
+        kind: 'claude',
+        model: null,
+        effort: null,
+        seat: 'seat-one',
+        enabled: true,
+        busy: true,
+        taskId: TASK.id,
+      },
+      {
+        id: 'disabled',
+        name: 'Disabled',
+        kind: 'codex',
+        model: null,
+        effort: null,
+        seat: 'codex',
+        enabled: false,
+        busy: false,
+        taskId: null,
+      },
+    ])
     await service.stop(TASK.id)
   })
 
-  test('setMaxParallel raises the ceiling for new launches', async () => {
-    const harness = new BlockingHarness()
-    const service = makeService(new FakeTracker([TASK, TASK2]), harness, 1)
-    expect((await service.start(TASK.id)).ok).toBe(true)
-    await waitFor(() => harness.starts === 1)
-    try {
-      expect((await service.start(TASK2.id)).ok).toBe(false)
-      service.setMaxParallel(2)
-      expect(await service.start(TASK2.id)).toEqual({ ok: true, taskId: TASK2.id })
-      await waitFor(() => harness.starts === 2)
-    } finally {
-      await Promise.all([service.stop(TASK.id), service.stop(TASK2.id)])
-      service.dispose()
-    }
+  test('workers sharing a seat serialize runs', async () => {
+    const service = makeService(
+      new FakeTracker([TASK, TASK2]),
+      new BlockingHarness(),
+      1,
+      config({
+        worker: [
+          { id: 'one', name: 'One', kind: 'claude', seat: 'shared' },
+          { id: 'two', name: 'Two', kind: 'codex', seat: 'shared' },
+        ],
+      }),
+    )
+    expect((await service.status()).capacity).toBe(1)
+    expect((await service.start(undefined, { workerId: 'one' })).ok).toBe(true)
+    expect(await service.start(undefined, { workerId: 'two' })).toEqual({
+      ok: false,
+      status: 409,
+      error: 'worker two seat is busy',
+    })
+    expect((await service.status()).capacity).toBe(0)
+    await service.stop(TASK.id)
   })
 
   test('start launches the next ready task and it completes', async () => {
@@ -471,19 +626,20 @@ describe('RunService', () => {
     })
   })
 
-  test('start rejects an unknown harness name', async () => {
+  test('start rejects an unknown worker id', async () => {
     const service = makeService(new FakeTracker([TASK]), new FakeHarness())
-    const res = await service.start(undefined, { harness: 'nope' })
+    const res = await service.start(undefined, { workerId: 'nope' })
     expect(res).toEqual({
       ok: false,
       status: 409,
-      error: 'unknown harness "nope"; use a harness.definitions name or claude/codex/opencode',
+      error: 'no available worker',
     })
   })
 
-  test('start resolves a bare kind to the implement harness so its bin carries over', async () => {
+  test('start resolves the worker kind to the implement harness so its bin carries over', async () => {
     let captured: Config['harness']['implement'] | null = null
     const cfg = config({
+      worker: [{ id: 'worker-opencode', name: 'OpenCode', kind: 'opencode' }],
       harness: {
         implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
       },
@@ -501,7 +657,7 @@ describe('RunService', () => {
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
       },
     })
-    const res = await service.start(undefined, { harness: 'opencode' })
+    const res = await service.start(undefined, { workerId: 'worker-opencode' })
     expect(res).toEqual({ ok: true, taskId: TASK.id })
     await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
     expect(captured).toMatchObject({
@@ -511,43 +667,22 @@ describe('RunService', () => {
     })
   })
 
-  test('start applies harness/model/effort overrides to the launched run', async () => {
-    let captured: Config['harness']['implement'] | null = null
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK]),
-      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
-      config: config(),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      makeHarness: (cfg) => {
-        captured = cfg
-        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
-      },
-    })
-    const res = await service.start(undefined, {
-      harness: 'codex',
-      model: 'gpt-5.6-luna',
-      effort: 'high',
-    })
-    expect(res).toEqual({ ok: true, taskId: TASK.id })
-    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    expect(captured).toEqual(
-      expect.objectContaining({ kind: 'codex', model: 'gpt-5.6-luna', effort: 'high' }),
-    )
-  })
-
-  test('start resolves a named harness definition for the harness override', async () => {
+  test('start applies worker model/effort to the launched run', async () => {
     let captured: Config['harness']['implement'] | null = null
     const service = new RunService({
       store,
       tracker: new FakeTracker([TASK]),
       harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
       config: config({
-        harness: {
-          definitions: { fast: { kind: 'claude', model: 'claude-haiku-4-5', effort: 'low' } },
-        },
+        worker: [
+          {
+            id: 'worker-codex',
+            name: 'Codex',
+            kind: 'codex',
+            model: 'gpt-5.6-luna',
+            effort: 'high',
+          },
+        ],
       }),
       repoRoot: repo,
       repoName: 'demo',
@@ -557,7 +692,40 @@ describe('RunService', () => {
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
       },
     })
-    const res = await service.start(undefined, { harness: 'fast' })
+    const res = await service.start(undefined, { workerId: 'worker-codex' })
+    expect(res).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual(
+      expect.objectContaining({ kind: 'codex', model: 'gpt-5.6-luna', effort: 'high' }),
+    )
+  })
+
+  test('start uses the selected worker model and effort', async () => {
+    let captured: Config['harness']['implement'] | null = null
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config({
+        worker: [
+          {
+            id: 'worker-fast',
+            name: 'Fast',
+            kind: 'claude',
+            model: 'claude-haiku-4-5',
+            effort: 'low',
+          },
+        ],
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured = cfg
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const res = await service.start(undefined, { workerId: 'worker-fast' })
     expect(res).toEqual({ ok: true, taskId: TASK.id })
     await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
     expect(captured).toEqual(
@@ -612,7 +780,7 @@ describe('RunService', () => {
     const first = await service.start()
     expect(first.ok).toBe(true)
     const second = await service.start()
-    expect(second).toEqual({ ok: false, status: 409, error: 'runner at capacity (1/1)' })
+    expect(second).toEqual({ ok: false, status: 409, error: 'no available worker' })
     await service.stop(TASK.id)
   })
 

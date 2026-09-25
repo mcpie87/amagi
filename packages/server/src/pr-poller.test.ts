@@ -22,6 +22,7 @@ class FakePr implements PrDriver {
   state: PrState = 'open'
   mergeStatus = 'conflicted' as const
   readonly calls: number[] = []
+  readonly deleted: { remote: string; branch: string }[] = []
 
   async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
     return { url: 'https://example.com/demo/pull/7', number: 7 }
@@ -46,6 +47,9 @@ class FakePr implements PrDriver {
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
+  async deleteBranch(_cwd: string, remote: string, branch: string): Promise<void> {
+    this.deleted.push({ remote, branch })
+  }
 }
 
 class FakeTracker implements Tracker {
@@ -96,6 +100,7 @@ class FakeTracker implements Tracker {
 /** Claims a task and drives it to pr_open with a recorded pr number. */
 const openPr = (store: Store, prNumber = 7): void => {
   store.append('bd-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  store.append('bd-1', { type: 'worktree.created', path: '/wt/bd-1', branch: 'amagi/bd-1-pr-work' })
   store.append('bd-1', {
     type: 'pr.created',
     url: 'https://example.com/demo/pull/7',
@@ -119,7 +124,9 @@ test('a merged pr settles the task as done and closes the tracker issue', async 
   forge.state = 'merged'
   const tracker = new FakeTracker()
 
-  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
   await Bun.sleep(40)
 
   expect(forge.calls).toContain(7)
@@ -139,7 +146,9 @@ test('a merged pr closes the error tasks filed against it', async () => {
   const tracker = new FakeTracker()
   tracker.open.add('bd-err')
 
-  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
   await Bun.sleep(40)
 
   expect(tracker.closed).toEqual([
@@ -155,7 +164,9 @@ test('a closed pr settles the task as abandoned and closes the tracker issue', a
   forge.state = 'closed'
   const tracker = new FakeTracker()
 
-  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
   await Bun.sleep(40)
 
   expect(store.task('bd-1')?.state).toBe('abandoned')
@@ -167,7 +178,16 @@ test('an open pr keeps the task in pr_open', async () => {
   openPr(store)
   const tracker = new FakeTracker()
 
-  pollers.push(startPrPoller({ store, forge: new FakePr(), tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({
+      store,
+      forge: new FakePr(),
+      tracker,
+      cwd: '/repo',
+      remote: 'origin',
+      intervalMs: 10,
+    }),
+  )
   await Bun.sleep(40)
 
   expect(store.task('bd-1')?.state).toBe('pr_open')
@@ -182,7 +202,9 @@ test('an open pr records its merge status for the pr_open task', async () => {
   const forge = new FakePr()
   forge.mergeStatus = 'conflicted'
 
-  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
   await Bun.sleep(40)
 
   expect(store.task('bd-1')?.prMergeStatus).toBe('conflicted')
@@ -196,7 +218,9 @@ test('a merged pr settles a flagged task as done', async () => {
   forge.state = 'merged'
   const tracker = new FakeTracker()
 
-  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
   await Bun.sleep(40)
 
   expect(store.task('bd-1')?.state).toBe('done')
@@ -212,9 +236,92 @@ test('an unresolvable merge status keeps the task in pr_open without settling it
     throw new Error('forge down')
   }
 
-  pollers.push(startPrPoller({ store, forge, tracker, cwd: '/repo', intervalMs: 10 }))
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
   await Bun.sleep(40)
 
   expect(store.task('bd-1')?.state).toBe('pr_open')
   expect(store.task('bd-1')?.prMergeStatus).toBeNull()
+})
+
+test('a merged pr deletes its branch from the remote', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const forge = new FakePr()
+  forge.state = 'merged'
+
+  pollers.push(
+    startPrPoller({
+      store,
+      forge,
+      tracker: new FakeTracker(),
+      cwd: '/repo',
+      remote: 'origin',
+      intervalMs: 10,
+    }),
+  )
+  await Bun.sleep(40)
+
+  expect(forge.deleted).toEqual([{ remote: 'origin', branch: 'amagi/bd-1-pr-work' }])
+})
+
+test('a closed pr deletes its branch once the tracker issue is closed', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const forge = new FakePr()
+  forge.state = 'closed'
+
+  pollers.push(
+    startPrPoller({
+      store,
+      forge,
+      tracker: new FakeTracker(),
+      cwd: '/repo',
+      remote: 'origin',
+      intervalMs: 10,
+    }),
+  )
+  await Bun.sleep(40)
+
+  expect(forge.deleted).toEqual([{ remote: 'origin', branch: 'amagi/bd-1-pr-work' }])
+})
+
+test('a closed pr keeps its branch when the tracker issue could not be closed', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const forge = new FakePr()
+  forge.state = 'closed'
+  const tracker = new FakeTracker()
+  tracker.setStatus = async () => {
+    throw new Error('tracker down')
+  }
+
+  pollers.push(
+    startPrPoller({ store, forge, tracker, cwd: '/repo', remote: 'origin', intervalMs: 10 }),
+  )
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.state).toBe('abandoned')
+  expect(forge.deleted).toEqual([])
+})
+
+test('an open pr keeps its branch', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const forge = new FakePr()
+
+  pollers.push(
+    startPrPoller({
+      store,
+      forge,
+      tracker: new FakeTracker(),
+      cwd: '/repo',
+      remote: 'origin',
+      intervalMs: 10,
+    }),
+  )
+  await Bun.sleep(40)
+
+  expect(forge.deleted).toEqual([])
 })
