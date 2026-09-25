@@ -122,12 +122,10 @@ export type PrBodyMeta = {
 }
 
 /**
- * Key of the machine-readable trailer that links a PR back to its tracker
- * task, in the same spirit as a `Co-Authored-By:` git trailer: a plain
- * `key: value` line a regex can find regardless of how the surrounding
- * markdown evolves. branchName (worktree.ts) encodes the same id in the
- * branch name, but splitting it back out of a slug is ambiguous; the trailer
- * is unambiguous because the id is on its own line.
+ * Key of the machine-readable task marker that links a PR back to its tracker
+ * task. New bodies use an HTML comment so the marker stays hidden; the parser
+ * also accepts the legacy visible trailer. The branch name encodes the same
+ * id, but splitting it back out of a slug is ambiguous.
  */
 export const TASK_TRAILER_KEY = 'amagi-task'
 
