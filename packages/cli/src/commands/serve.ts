@@ -66,6 +66,7 @@ export const serveCommand = defineCommand({
     const dashboardDir = join(import.meta.dir, '..', '..', '..', 'dashboard')
     await buildDashboard(dashboardDir)
     const workspaces = new Workspaces()
+    const seats = new Map<string, string>()
     const server = serve({
       workspaces,
       host: config.server.host,
@@ -82,6 +83,7 @@ export const serveCommand = defineCommand({
           autoQueue:
             ws.config.loop.autoQueue &&
             (workspaces.list().find((entry) => entry.key === ws.key)?.workers ?? false),
+          seats,
           ...(ws.forge === null ? {} : { forge: ws.forge }),
         }),
     })

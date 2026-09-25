@@ -123,7 +123,9 @@ is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
 server dispatches through the enabled workers in the global `worker` fleet,
 manually or, while the global `loop.autoQueue` is on, automatically whenever an
-enabled worker has a free seat. Workers sharing a seat serialize their runs. The dashboard surfaces runner status from the task board
+enabled worker has a free seat. Workers sharing a seat serialize their runs, and
+the fleet's seats are shared by every registered repository, so loading more
+repositories does not start more agents. The dashboard surfaces runner status from the task board
 and task detail pages.
 
 The repo-scoped runner endpoint also carries per-task resource usage, summed

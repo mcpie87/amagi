@@ -154,6 +154,12 @@ export type RunServiceOptions = {
   autoQueueIdleMs?: number
   /** How often to poll while a launch just succeeded (filling free slots). */
   autoQueueActiveMs?: number
+  /**
+   * Seat occupancy shared by every repo's RunService in one server, so the
+   * fleet's seats cap concurrency across repositories rather than per repo.
+   * Maps seat to the `repo/task` holding it.
+   */
+  seats?: Map<string, string>
 }
 
 /**
@@ -182,8 +188,10 @@ export class RunService implements RunServiceApi {
   private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
   private autoQueuePolling = false
   private stopped = false
+  private readonly seats: Map<string, string>
 
   constructor(private readonly opts: RunServiceOptions) {
+    this.seats = opts.seats ?? new Map()
     this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
     this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
     this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
@@ -335,7 +343,7 @@ export class RunService implements RunServiceApi {
   }
 
   private runsBySeat(): Map<string, string> {
-    return new Map([...this.runs].map(([id, run]) => [run.seat, id]))
+    return this.seats
   }
 
   private availableWorkers(): WorkerConfig[] {
@@ -360,9 +368,25 @@ export class RunService implements RunServiceApi {
     if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
-    if (this.runsBySeat().has(this.workerSeat(selected))) {
+    const seat = this.workerSeat(selected)
+    if (this.seats.has(seat)) {
       return { ok: false, status: 409, error: `worker ${selected.id} seat is busy` }
     }
+    // Held across the tracker awaits so another repo's runner cannot take the seat meanwhile.
+    const hold = `${this.opts.repoName}/pending`
+    this.seats.set(seat, hold)
+    try {
+      return await this.claimAndLaunch(selected, taskId, opts)
+    } finally {
+      if (this.seats.get(seat) === hold) this.seats.delete(seat)
+    }
+  }
+
+  private async claimAndLaunch(
+    selected: WorkerConfig,
+    taskId: string | undefined,
+    opts: RunOptions | undefined,
+  ): Promise<StartResult> {
     const implement = this.resolveHarness(selected, opts)
     // Difficulty gating reads the model the worker would actually run, so the
     // override config (not the stored default) is what gates the claim.
@@ -440,7 +464,12 @@ export class RunService implements RunServiceApi {
       forge,
     })
     const seat = this.workerSeat(worker)
-    const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
+    const holder = `${repoName}/${task.id}`
+    this.seats.set(seat, holder)
+    const done = runner.runClaimed(task).finally(() => {
+      this.runs.delete(task.id)
+      if (this.seats.get(seat) === holder) this.seats.delete(seat)
+    })
     this.runs.set(task.id, { runner, startedAt: Date.now(), done, workerId: worker.id, seat })
   }
 }
