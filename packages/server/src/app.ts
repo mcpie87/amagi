@@ -65,6 +65,8 @@ import {
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
+  WatcherHistoryParam,
+  WatcherHistoryQuery,
   WatcherParam,
   WatcherUpdateBody,
   WorkerCreateBody,
@@ -224,12 +226,13 @@ export function createApp({
   const saveFleet = (fleet: WorkerConfig[]): void => {
     writeGlobalConfig({ worker: fleet })
     if (runnerRepo !== undefined) resolveWorkspace(workspaces, runnerRepo).config.worker = fleet
+    runner?.fleetChanged()
   }
   const fleetView = async () => {
     const live = runner === undefined ? [] : ((await runner.status()).fleet ?? [])
     return loadGlobalConfig().worker.map((worker) => {
       const state = live.find((w) => w.id === worker.id)
-      return { ...worker, on: state?.on ?? false, taskId: state?.taskId ?? null }
+      return { ...worker, taskId: state?.taskId ?? null }
     })
   }
   return new Hono()
@@ -321,6 +324,22 @@ export function createApp({
       }
       return c.json(await beads.children(id))
     })
+
+    .post(
+      '/api/repos/:repo/issues/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (beadsTracker(ws) === null) {
+          return c.json({ error: `issue closure is unavailable for ${repo}` }, 501)
+        }
+        await ws.tracker.close(id, reason)
+        return c.json({ id, status: 'closed', reason })
+      },
+    )
 
     .post(
       '/api/repos/:repo/issues',
@@ -798,6 +817,24 @@ export function createApp({
       return c.json({ ...status, workers: workers() })
     })
 
+    .get(
+      '/api/repos/:repo/watchers/:name/runs',
+      valid('param', WatcherHistoryParam),
+      valid('query', WatcherHistoryQuery),
+      (c) => {
+        const { repo, name } = c.req.valid('param')
+        const { limit, beforeSeq } = c.req.valid('query')
+        const ws = resolveWorkspace(workspaces, repo)
+        const runs = ws.store.watcherRuns({
+          repo,
+          name,
+          limit,
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        })
+        return c.json({ runs, nextBeforeSeq: runs.at(-1)?.startSeq ?? null })
+      },
+    )
+
     .get('/api/runner/options', (c) => {
       if (runner === undefined || runnerRepo === undefined) {
         return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
@@ -882,7 +919,7 @@ export function createApp({
       const next = Config.shape.worker.safeParse([...fleet, worker])
       if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
       saveFleet(next.data)
-      return c.json({ ...worker, on: false, taskId: null }, 201)
+      return c.json({ ...worker, taskId: null }, 201)
     })
 
     .patch(
@@ -891,13 +928,10 @@ export function createApp({
       valid('json', WorkerUpdateBody),
       async (c) => {
         const { id } = c.req.valid('param')
-        const { on, ...fields } = c.req.valid('json')
+        const fields = c.req.valid('json')
         const fleet = loadGlobalConfig().worker
         const current = fleet.find((w) => w.id === id)
         if (current === undefined) return c.json({ error: `unknown worker ${id}` }, 404)
-        if (on !== undefined && runner === undefined) {
-          return c.json({ error: 'runner service is unavailable' }, 501)
-        }
         const merged: Record<string, unknown> = { ...current }
         for (const [key, value] of Object.entries(fields)) {
           if (value === null) delete merged[key]
@@ -906,13 +940,7 @@ export function createApp({
         const parsed = WorkerConfig.safeParse(merged)
         if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
         const worker = parsed.data
-        if (on === true && !worker.enabled) {
-          return c.json({ error: `worker ${id} is disabled; enable it before turning it on` }, 409)
-        }
-        // setWorkerOn ignores a disabled worker, so it has to go off before the save disables it.
-        if (!worker.enabled) runner?.setWorkerOn(id, false)
-        if (Object.keys(fields).length > 0) saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
-        if (on !== undefined) runner?.setWorkerOn(id, on)
+        saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
         return c.json((await fleetView()).find((w) => w.id === id))
       },
     )

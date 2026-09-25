@@ -300,4 +300,47 @@ describe('Store', () => {
     ])
     expect(store.recentEvents('bd-1', 0)).toEqual([])
   })
+
+  test('watcherRuns folds durable run and action events and pages complete runs newest first', () => {
+    for (const runId of ['one', 'two']) {
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId,
+      })
+      store.append(null, {
+        type: 'watcher.action',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId,
+        targetType: 'mention',
+        targetId: runId,
+        prNumber: 45,
+        result: 'classified as explain',
+        level: 'info',
+      })
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId,
+        ok: true,
+      })
+    }
+    const page = store.watcherRuns({ repo: 'repo', name: 'mention-watcher', limit: 1 })
+    expect(page).toHaveLength(1)
+    expect(page[0]?.runId).toBe('two')
+    expect(page[0]?.actions[0]?.prNumber).toBe(45)
+    expect(page[0]?.ok).toBe(true)
+    const beforeSeq = page[0]?.startSeq
+    expect(
+      store.watcherRuns({
+        repo: 'repo',
+        name: 'mention-watcher',
+        limit: 1,
+        ...(beforeSeq === undefined ? {} : { beforeSeq }),
+      })[0]?.runId,
+    ).toBe('one')
+  })
 })

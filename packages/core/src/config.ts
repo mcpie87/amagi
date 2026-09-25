@@ -67,9 +67,35 @@ export const WorkerConfig = z.object({
   model: z.string().optional(),
   effort: z.string().optional(),
   seat: z.string().min(1).optional(),
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
 })
 export type WorkerConfig = z.infer<typeof WorkerConfig>
+
+/** Resolves a harness kind while preserving repo-specific settings for the configured implement kind. */
+export function resolveHarnessKind(
+  config: Config,
+  kind: WorkerConfig['kind'],
+): Config['harness']['implement'] {
+  return kind === config.harness.implement.kind
+    ? config.harness.implement
+    : HarnessConfig.parse({ kind })
+}
+
+/** Resolves a worker profile for one run without changing the stored fleet. */
+export function resolveWorkerHarness(
+  config: Config,
+  worker: WorkerConfig,
+  overrides: { kind?: WorkerConfig['kind']; model?: string; effort?: string } = {},
+): Config['harness']['implement'] {
+  const kind = overrides.kind ?? worker.kind
+  const base = resolveHarnessKind(config, kind)
+  return {
+    ...base,
+    model: overrides.model ?? worker.model ?? base.model,
+    effort: overrides.effort ?? worker.effort ?? base.effort,
+    seat: worker.seat ?? worker.kind,
+  }
+}
 
 const AgentWatcherConfig = z.object({
   enabled: z.boolean().default(true),
@@ -296,11 +322,13 @@ export function watcherHarnessConfig(
   watcher: AgentWatcherKind,
 ): Config['harness']['implement'] {
   const { enabled: _enabled, ...overrides } = config.watchers[watcher]
-  return {
-    ...config.harness.implement,
-    ...overrides,
-    kind: overrides.kind ?? config.harness.implement.kind,
-  }
+  const implement = config.harness.implement
+  // bin, model, extraArgs etc. belong to the implement harness; handing them to a different kind runs e.g. claude argv through a codex binary.
+  const base =
+    overrides.kind === undefined || overrides.kind === implement.kind
+      ? implement
+      : HarnessConfig.parse({ kind: overrides.kind, permissions: implement.permissions })
+  return { ...base, ...overrides, kind: overrides.kind ?? implement.kind }
 }
 
 export const workerSeat = (worker: Pick<WorkerConfig, 'kind' | 'seat'>): string =>

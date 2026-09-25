@@ -17,6 +17,7 @@ import {
   type StatusEntry,
   stateAtAttempt,
   statusLog,
+  taskEvents,
 } from '@amagi/core/view'
 import { Link, useParams } from '@tanstack/react-router'
 import {
@@ -470,34 +471,65 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
         const cause = STATUS_CAUSE_LABEL[entry.cause]
         const date = new Date(entry.ts)
         return (
-          <li key={entry.seq} className="flex flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
-            <time
-              dateTime={date.toISOString()}
-              className="w-44 shrink-0 font-mono text-xs tabular-nums text-fg-muted"
-            >
-              {date.toLocaleString([], {
-                year: 'numeric',
-                month: 'short',
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-              })}
-            </time>
-            <Badge state={entry.to} />
-            {cause !== null && <span className="text-xs text-fg-faint">{cause}</span>}
-            {entry.from !== null && (
-              <span className="text-xs text-fg-faint">from {entry.from}</span>
-            )}
-            {entry.reason !== null && (
-              <span className="min-w-0 flex-1 truncate text-fg-muted" title={entry.reason}>
-                {entry.reason}
-              </span>
-            )}
-            {entry.durationMs !== null && (
-              <span className="ml-auto shrink-0 text-xs tabular-nums text-fg-faint">
-                {fmtDuration(entry.durationMs)}
-              </span>
+          <li key={entry.seq}>
+            <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
+              <time
+                dateTime={date.toISOString()}
+                className="w-44 shrink-0 font-mono text-xs tabular-nums text-fg-muted"
+              >
+                {date.toLocaleString([], {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })}
+              </time>
+              <Badge state={entry.to} />
+              {cause !== null && <span className="text-xs text-fg-faint">{cause}</span>}
+              {entry.from !== null && (
+                <span className="text-xs text-fg-faint">from {entry.from}</span>
+              )}
+              {entry.reason !== null && (
+                <span className="min-w-0 flex-1 truncate text-fg-muted" title={entry.reason}>
+                  {entry.reason}
+                </span>
+              )}
+              {entry.durationMs !== null && (
+                <span className="ml-auto shrink-0 text-xs tabular-nums text-fg-faint">
+                  {fmtDuration(entry.durationMs)}
+                </span>
+              )}
+            </div>
+            {entry.runs.length > 0 && (
+              <ol className="space-y-1 pb-2 pl-12 pr-4">
+                {entry.runs.map((run, index) => {
+                  const model = run.model === null ? run.harness : `${run.harness}/${run.model}`
+                  const details = [
+                    run.durationMs === null ? null : fmtDuration(run.durationMs),
+                    run.exitCode === null ? null : `exit ${run.exitCode}`,
+                    `${fmtTokens(run.inputTokens)} in · ${fmtTokens(run.outputTokens)} out`,
+                    run.costUsd === null ? null : `$${run.costUsd.toFixed(2)}`,
+                  ].filter((part): part is string => part !== null)
+                  return (
+                    <li
+                      key={`${run.startedAt}-${index}`}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted"
+                    >
+                      <span className="text-fg-faint">
+                        {index === entry.runs.length - 1 ? '└' : '├'}
+                      </span>
+                      <span className="font-medium text-fg">{run.label}</span>
+                      <span>
+                        {model}
+                        {run.effort === null ? '' : ` · ${run.effort}`}
+                      </span>
+                      <span className="tabular-nums">{details.join(' · ')}</span>
+                    </li>
+                  )
+                })}
+              </ol>
             )}
           </li>
         )
@@ -533,7 +565,7 @@ export function TaskDetailView() {
     return () => clearInterval(timer)
   }, [])
   const health = runHealth(state, id, past && task !== undefined ? task.updatedAt : now)
-  const usageEvents = currentAttemptEvents(state.events, id)
+  const usageEvents = currentAttemptEvents(taskEvents(state, id), id)
     .filter((e): e is AgentStreamEvent => e.type === 'agent.stream')
     .map((e) => e.event)
     .filter((ev): ev is Extract<AgentEvent, { kind: 'usage' }> => ev.kind === 'usage')
@@ -574,7 +606,7 @@ export function TaskDetailView() {
       task.statusReason !== null &&
       task.sessionId !== null &&
       task.worktree !== null) ||
-      state.events.some((e) => e.taskId === task.id && e.type === 'chat.message'))
+      taskEvents(state, task.id).some((e) => e.type === 'chat.message'))
 
   return (
     <section>

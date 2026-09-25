@@ -23,8 +23,10 @@ const boardRoute = createRoute({
 export const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
-  validateSearch: (search: Record<string, unknown>): { issue?: string } =>
-    typeof search.issue === 'string' ? { issue: search.issue } : {},
+  validateSearch: (search: Record<string, unknown>): { issue?: string; epic?: string } => ({
+    ...(typeof search.issue === 'string' ? { issue: search.issue } : {}),
+    ...(typeof search.epic === 'string' ? { epic: search.epic } : {}),
+  }),
   component: IssuesView,
 })
 const inboxRoute = createRoute({

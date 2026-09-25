@@ -2,7 +2,7 @@ import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { StoredEvent } from '@amagi/core/events'
 import type { RunnerStatus } from '@amagi/core/run-service'
-import { type DashboardState, initialDashboardState, reduceState } from '@amagi/core/view'
+import { type DashboardState, initialDashboardState, reduceBatch } from '@amagi/core/view'
 import {
   createContext,
   type ReactNode,
@@ -143,11 +143,13 @@ function RepoStream({
   resync: number
   children: ReactNode
 }) {
-  const [state, dispatch] = useReducer(reduceState, undefined, initialDashboardState)
+  const [state, dispatch] = useReducer(reduceBatch, undefined, initialDashboardState)
   const [readyQueue, setReadyQueue] = useState<TrackerTask[]>([])
   const [connection, setConnection] = useState<ConnectionStatus>('connecting')
+  // Advanced on receipt, not on render: a resync must resume after events
+  // still queued for the next flush, and after agent.stream lines that never
+  // reach the reducer, or the replay would duplicate them.
   const latestSeqRef = useRef(0)
-  latestSeqRef.current = state.latestSeq
   // Survives reconnects, which only replay missed events, so a resumed stream
   // keeps counting resets from where the first connection left off.
   const attemptsRef = useRef(new Map<string, number>())
@@ -180,11 +182,28 @@ function RepoStream({
     const source = new EventSource(
       `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}`,
     )
+    // A replay delivers tens of thousands of events back to back; one dispatch
+    // each meant one full render each. Queue them and fold once per frame.
+    let pending: StoredEvent[] = []
+    let frame: number | null = null
+    const flush = () => {
+      frame = null
+      if (pending.length === 0) return
+      const batch = pending
+      pending = []
+      dispatch(batch)
+    }
+    const enqueue = (event: StoredEvent) => {
+      pending.push(event)
+      frame ??= requestAnimationFrame(flush)
+    }
     source.addEventListener('open', () => setConnection('connected'))
     source.addEventListener('error', () => setConnection('reconnecting'))
     source.addEventListener('message', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data) as StoredEvent
+        if (parsed.seq <= latestSeqRef.current) return
+        latestSeqRef.current = parsed.seq
         // agent.stream is the hot path: hundreds of lines/sec of assistant
         // text and tool output. It bypasses the reducer entirely so it never
         // costs a setState per line; the ring buffer in agentLog.ts owns it
@@ -206,15 +225,19 @@ function RepoStream({
           // Chat runs are also routed to the reducer so the chat panel can
           // fold their text into a conversation; the reducer itself ignores
           // agent.stream, only the event log accumulates it.
-          if (parsed.event.kind === 'usage' || parsed.role === 'chat') dispatch(parsed)
+          if (parsed.event.kind === 'usage' || parsed.role === 'chat') enqueue(parsed)
         } else {
-          dispatch(parsed)
+          enqueue(parsed)
         }
       } catch {
         // a malformed event must not drop the stream
       }
     })
-    return () => source.close()
+    return () => {
+      source.close()
+      if (frame !== null) cancelAnimationFrame(frame)
+      flush()
+    }
   }, [repo, resync])
 
   return (

@@ -24,8 +24,8 @@ export type MentionWatcherOptions = {
   config: Config
   driver: PrDriver
   tracker: Tracker
-  /** Event store to record classification outcomes, so a misparse is diagnosable later. */
-  store?: Store
+  /** Event store for durable run, action and classification history. */
+  store: Store
   intervalMs?: number
   /** Test seams, forwarded to the mention responder. */
   exec?: Exec | undefined
@@ -103,6 +103,8 @@ export function startMentionWatcher({
     intervalMs,
     async () => {
       runs++
+      const runId = `${Date.now()}-${runs}`
+      store.append(null, { type: 'watcher.run.started', repo, name: 'mention-watcher', runId })
       logEvent(`run ${runs} started`)
       const next: WorkerActivity = {
         ...activity,
@@ -129,6 +131,17 @@ export function startMentionWatcher({
           } catch (err) {
             const message = `PR #${pr.number}: failed to read comments: ${errMsg(err)}`
             logEvent(message, 'error')
+            store.append(null, {
+              type: 'watcher.action',
+              repo,
+              name: 'mention-watcher',
+              runId,
+              targetType: 'pr',
+              targetId: String(pr.number),
+              prNumber: pr.number,
+              result: `failed to read comments: ${errMsg(err)}`,
+              level: 'error',
+            })
             console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
             continue
           }
@@ -140,6 +153,7 @@ export function startMentionWatcher({
           if (mentions.length > 0)
             logEvent(`PR #${pr.number}: found ${mentions.length} new mention(s)`)
           for (const mention of mentions) {
+            let classifiedKind: string | null = null
             try {
               await respondToMention({
                 root,
@@ -151,26 +165,71 @@ export function startMentionWatcher({
                 tracker,
                 exec,
                 makeHarnessFn,
-                ...(store === undefined
-                  ? {}
-                  : {
-                      onClassified: (c) =>
-                        store.append(null, {
-                          type: 'mention.classified',
-                          prNumber: pr.number,
-                          mentionId: mention.id,
-                          ...c,
-                        }),
-                      onGitBypassed: (entries) =>
-                        store.append(null, { type: 'git.bypassed', entries }),
-                    }),
+                onClassified: (c) => {
+                  classifiedKind = c.kind
+                  store.append(null, {
+                    type: 'mention.classified',
+                    prNumber: pr.number,
+                    mentionId: mention.id,
+                    ...c,
+                  })
+                  store.append(null, {
+                    type: 'watcher.action',
+                    repo,
+                    name: 'mention-watcher',
+                    runId,
+                    targetType: 'mention',
+                    targetId: mention.id,
+                    prNumber: pr.number,
+                    url: pr.url,
+                    result: `classified as ${c.kind}`,
+                    level: 'info',
+                  })
+                },
+                onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
               })
               handled.add(mention.id)
               saveHandledMentions(handledPath, handled)
               responded++
               respondedNow++
+              const result =
+                classifiedKind === 'fix-pr'
+                  ? 'fix pushed'
+                  : classifiedKind === 'explain'
+                    ? 'explanation posted'
+                    : classifiedKind === 'add-a-task'
+                      ? 'task logged and comment posted'
+                      : classifiedKind === 'take-down'
+                        ? 'take-down response posted'
+                        : classifiedKind === 'ambiguous'
+                          ? 'clarification posted'
+                          : 'response completed'
+              store.append(null, {
+                type: 'watcher.action',
+                repo,
+                name: 'mention-watcher',
+                runId,
+                targetType: 'mention',
+                targetId: mention.id,
+                prNumber: pr.number,
+                url: pr.url,
+                result,
+                level: 'info',
+              })
             } catch (err) {
               logEvent(`PR #${pr.number}, mention ${mention.id}: ${errMsg(err)}`, 'error')
+              store.append(null, {
+                type: 'watcher.action',
+                repo,
+                name: 'mention-watcher',
+                runId,
+                targetType: 'mention',
+                targetId: mention.id,
+                prNumber: pr.number,
+                url: pr.url,
+                result: `${classifiedKind === null ? 'classification or response failed' : `${classifiedKind} failed`}: ${errMsg(err)}`,
+                level: 'error',
+              })
               console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
             }
           }
@@ -190,6 +249,18 @@ export function startMentionWatcher({
       next.counters = counters()
       next.log = log
       activity = next
+      try {
+        store.append(null, {
+          type: 'watcher.run.finished',
+          repo,
+          name: 'mention-watcher',
+          runId,
+          ok: next.ok,
+          error: next.error,
+        })
+      } catch (err) {
+        console.warn(`mention watcher history: ${errMsg(err)}`)
+      }
     },
     true,
   )

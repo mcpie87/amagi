@@ -19,7 +19,6 @@ type Worker = {
   effort?: string
   seat?: string
   enabled: boolean
-  on: boolean
   taskId: string | null
 }
 
@@ -475,16 +474,9 @@ function WorkerCard({
           <Toggle
             on={worker.enabled}
             label="Enabled"
-            title="Persisted. A disabled worker refuses every dispatch, manual included."
+            title="Persisted across restarts. A disabled worker refuses every dispatch, manual included."
             disabled={busy}
             onClick={() => void act('PATCH', { enabled: !worker.enabled })}
-          />
-          <Toggle
-            on={worker.on}
-            label="Auto queue"
-            title="Not persisted, off after every server restart. Off means the auto-queue skips this worker; Run next still works."
-            disabled={busy || !worker.enabled}
-            onClick={() => void act('PATCH', { on: !worker.on })}
           />
           <button type="button" onClick={onEdit} disabled={busy} className={secondary}>
             Edit
@@ -652,7 +644,7 @@ export function FleetSettings() {
         </div>
         <p className="mb-3 text-sm text-fg-faint">
           Workers live in the global config and serve every repository. Capacity is one run per free
-          seat among the workers that are enabled and on.
+          seat among the enabled workers.
         </p>
         {loadError !== null && <p className="text-sm text-red-ink">{loadError}</p>}
         {workers?.length === 0 && <p className="text-sm text-fg-faint">no workers configured</p>}

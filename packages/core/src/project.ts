@@ -62,12 +62,42 @@ export type ProjectedQuestion = {
   resolvedAt: number | null
 }
 
+export type ProjectedWatcherAction = {
+  targetType: 'pr' | 'mention' | 'task'
+  targetId: string
+  prNumber?: number
+  url?: string
+  result: string
+  level: 'info' | 'error'
+  ts: number
+}
+
+export type ProjectedWatcherLogEntry = { ts: number; message: string; level: 'info' | 'error' }
+
+export type ProjectedWatcherRun = {
+  repo: string
+  name: string
+  runId: string
+  startedAt: number
+  endedAt: number | null
+  ok: boolean | null
+  error: string | null
+  actions: ProjectedWatcherAction[]
+  log: ProjectedWatcherLogEntry[]
+  startSeq: number
+  endSeq: number | null
+}
+
+export const watcherRunKey = (repo: string, name: string, runId: string): string =>
+  JSON.stringify([repo, name, runId])
+
 export type Projection = {
   tasks: Record<string, ProjectedTask>
   questions: Record<string, ProjectedQuestion>
+  watcherRuns: Record<string, ProjectedWatcherRun>
 }
 
-export const emptyProjection = (): Projection => ({ tasks: {}, questions: {} })
+export const emptyProjection = (): Projection => ({ tasks: {}, questions: {}, watcherRuns: {} })
 
 /**
  * The single state machine. Folds one event over a projection; the server and
@@ -76,14 +106,93 @@ export const emptyProjection = (): Projection => ({ tasks: {}, questions: {} })
  * interprets it, never mutates it.
  */
 export function project(state: Projection, event: StoredEvent): Projection {
+  if (event.type === 'watcher.run.started') {
+    const key = watcherRunKey(event.repo, event.name, event.runId)
+    const watcherRuns = { ...state.watcherRuns }
+    watcherRuns[key] = {
+      repo: event.repo,
+      name: event.name,
+      runId: event.runId,
+      startedAt: event.ts,
+      endedAt: null,
+      ok: null,
+      error: null,
+      actions: [],
+      log: [{ ts: event.ts, message: 'run started', level: 'info' }],
+      startSeq: event.seq,
+      endSeq: null,
+    }
+    return { ...state, watcherRuns }
+  }
+  if (event.type === 'watcher.action') {
+    const key = watcherRunKey(event.repo, event.name, event.runId)
+    const currentRun = state.watcherRuns[key]
+    if (currentRun === undefined) return state
+    const watcherRuns = { ...state.watcherRuns }
+    const action: ProjectedWatcherAction = {
+      targetType: event.targetType,
+      targetId: event.targetId,
+      ...(event.prNumber === undefined ? {} : { prNumber: event.prNumber }),
+      ...(event.url === undefined ? {} : { url: event.url }),
+      result: event.result,
+      level: event.level,
+      ts: event.ts,
+    }
+    watcherRuns[key] = {
+      ...currentRun,
+      actions: [...currentRun.actions, action],
+      log: [
+        ...currentRun.log,
+        {
+          ts: event.ts,
+          message: `${event.targetType} ${event.targetId}: ${event.result}`,
+          level: event.level,
+        },
+      ],
+    }
+    return { ...state, watcherRuns }
+  }
+  if (event.type === 'watcher.run.finished') {
+    const key = watcherRunKey(event.repo, event.name, event.runId)
+    const currentRun = state.watcherRuns[key]
+    if (currentRun === undefined) return state
+    const watcherRuns = { ...state.watcherRuns }
+    const error = event.error ?? null
+    watcherRuns[key] = {
+      ...currentRun,
+      endedAt: event.ts,
+      ok: event.ok,
+      error,
+      endSeq: event.seq,
+      log: [
+        ...currentRun.log,
+        {
+          ts: event.ts,
+          message: event.ok ? 'run completed' : `run failed${error === null ? '' : `: ${error}`}`,
+          level: event.ok ? 'info' : 'error',
+        },
+      ],
+    }
+    return { ...state, watcherRuns }
+  }
   if (event.taskId === null) return state
-  const tasks = { ...state.tasks }
-  const questions = { ...state.questions }
+  // Copy-on-write: the clients fold tens of thousands of events, most of which
+  // touch neither map, so copying both on every event made replay quadratic.
+  let tasks = state.tasks
+  let questions = state.questions
+  const writeTasks = () => {
+    if (tasks === state.tasks) tasks = { ...state.tasks }
+    return tasks
+  }
+  const writeQuestions = () => {
+    if (questions === state.questions) questions = { ...state.questions }
+    return questions
+  }
   const current = tasks[event.taskId]
 
   switch (event.type) {
     case 'task.claimed':
-      tasks[event.taskId] = current
+      writeTasks()[event.taskId] = current
         ? {
             ...current,
             title: event.title,
@@ -119,7 +228,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'task.reset':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           state: 'claimed',
           branch: null,
@@ -141,7 +250,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         }
         for (const q of Object.values(questions)) {
           if (q.taskId === event.taskId && q.resolvedAt === null) {
-            questions[q.id] = { ...q, resolvedAt: event.ts }
+            writeQuestions()[q.id] = { ...q, resolvedAt: event.ts }
           }
         }
       }
@@ -152,7 +261,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         if (!canTransition(current.state, event.to)) {
           throw new InvalidTransitionError(event.taskId, current.state, event.to)
         }
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           state: event.to,
           statusReason: event.reason ?? null,
@@ -163,7 +272,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'task.reclaimed':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           state: 'queued',
           statusReason: event.reason ?? null,
@@ -174,7 +283,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'worktree.created':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           worktree: event.path,
           branch: event.branch,
@@ -185,19 +294,24 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'worktree.removed':
       if (current) {
-        tasks[event.taskId] = { ...current, worktree: null, branch: null, updatedAt: event.ts }
+        writeTasks()[event.taskId] = {
+          ...current,
+          worktree: null,
+          branch: null,
+          updatedAt: event.ts,
+        }
       }
       break
 
     case 'agent.exited':
       if (current && event.sessionId !== null) {
-        tasks[event.taskId] = { ...current, sessionId: event.sessionId, updatedAt: event.ts }
+        writeTasks()[event.taskId] = { ...current, sessionId: event.sessionId, updatedAt: event.ts }
       }
       break
 
     case 'commit.created':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           lastCommit: { sha: event.sha, subject: event.subject },
           updatedAt: event.ts,
@@ -207,7 +321,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'pr.created':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           prUrl: event.url,
           prNumber: event.number,
@@ -218,13 +332,17 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'pr.status':
       if (current) {
-        tasks[event.taskId] = { ...current, prMergeStatus: event.mergeStatus, updatedAt: event.ts }
+        writeTasks()[event.taskId] = {
+          ...current,
+          prMergeStatus: event.mergeStatus,
+          updatedAt: event.ts,
+        }
       }
       break
 
     case 'checks.finished':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           checks: event.results,
           checksOk: event.ok,
@@ -235,7 +353,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'retry.scheduled':
       if (current) {
-        tasks[event.taskId] = {
+        writeTasks()[event.taskId] = {
           ...current,
           retryCount: current.retryCount + 1,
           retryAt: event.ts + event.delayMs,
@@ -246,12 +364,12 @@ export function project(state: Projection, event: StoredEvent): Projection {
 
     case 'error':
       if (current) {
-        tasks[event.taskId] = { ...current, lastError: event.message, updatedAt: event.ts }
+        writeTasks()[event.taskId] = { ...current, lastError: event.message, updatedAt: event.ts }
       }
       break
 
     case 'question.asked':
-      questions[event.questionId] = {
+      writeQuestions()[event.questionId] = {
         id: event.questionId,
         taskId: event.taskId,
         question: event.question,
@@ -268,7 +386,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
       {
         const q = questions[event.questionId]
         if (q) {
-          questions[event.questionId] = {
+          writeQuestions()[event.questionId] = {
             ...q,
             answer: event.answer,
             answeredVia: event.via,
@@ -281,7 +399,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
     case 'question.timedout':
       {
         const q = questions[event.questionId]
-        if (q) questions[event.questionId] = { ...q, resolvedAt: event.ts }
+        if (q) writeQuestions()[event.questionId] = { ...q, resolvedAt: event.ts }
       }
       break
 
@@ -289,5 +407,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
       break
   }
 
-  return { tasks, questions }
+  return tasks === state.tasks && questions === state.questions
+    ? state
+    : { ...state, tasks, questions }
 }
