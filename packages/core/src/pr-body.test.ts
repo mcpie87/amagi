@@ -101,6 +101,23 @@ describe('formatPrBody', () => {
     expect(body).toContain('- `image.png` binary')
   })
 
+  test('omits the Pre-flight section while keeping the surrounding description', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          '## Goal\n\nKeep the task summary.\n\n## Pre-flight (runner: do this before writing code)\n\n- Check bd show\n- Search for the goal\n\n## Acceptance\n\nKeep this criterion.',
+      },
+      [],
+    )
+
+    expect(body).toContain('## Goal\n\nKeep the task summary.')
+    expect(body).toContain('## Acceptance\n\nKeep this criterion.')
+    expect(body).not.toContain('Pre-flight')
+    expect(body).not.toContain('Check bd show')
+    expect(body).not.toContain('Search for the goal')
+  })
+
   test('renders the task creation date as a relative-time stamp when known', () => {
     const body = formatPrBody({ ...TASK, createdAt: Date.parse('2026-09-20T14:02:53Z') }, [])
 
