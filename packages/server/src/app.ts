@@ -324,6 +324,22 @@ export function createApp({
     })
 
     .post(
+      '/api/repos/:repo/issues/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (beadsTracker(ws) === null) {
+          return c.json({ error: `issue closure is unavailable for ${repo}` }, 501)
+        }
+        await ws.tracker.close(id, reason)
+        return c.json({ id, status: 'closed', reason })
+      },
+    )
+
+    .post(
       '/api/repos/:repo/issues',
       valid('param', RepoParam),
       valid('json', IssueCreateBody),
