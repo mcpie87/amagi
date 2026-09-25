@@ -224,12 +224,13 @@ export function createApp({
   const saveFleet = (fleet: WorkerConfig[]): void => {
     writeGlobalConfig({ worker: fleet })
     if (runnerRepo !== undefined) resolveWorkspace(workspaces, runnerRepo).config.worker = fleet
+    runner?.fleetChanged()
   }
   const fleetView = async () => {
     const live = runner === undefined ? [] : ((await runner.status()).fleet ?? [])
     return loadGlobalConfig().worker.map((worker) => {
       const state = live.find((w) => w.id === worker.id)
-      return { ...worker, on: state?.on ?? false, taskId: state?.taskId ?? null }
+      return { ...worker, taskId: state?.taskId ?? null }
     })
   }
   return new Hono()
@@ -882,7 +883,7 @@ export function createApp({
       const next = Config.shape.worker.safeParse([...fleet, worker])
       if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
       saveFleet(next.data)
-      return c.json({ ...worker, on: false, taskId: null }, 201)
+      return c.json({ ...worker, taskId: null }, 201)
     })
 
     .patch(
@@ -891,13 +892,10 @@ export function createApp({
       valid('json', WorkerUpdateBody),
       async (c) => {
         const { id } = c.req.valid('param')
-        const { on, ...fields } = c.req.valid('json')
+        const fields = c.req.valid('json')
         const fleet = loadGlobalConfig().worker
         const current = fleet.find((w) => w.id === id)
         if (current === undefined) return c.json({ error: `unknown worker ${id}` }, 404)
-        if (on !== undefined && runner === undefined) {
-          return c.json({ error: 'runner service is unavailable' }, 501)
-        }
         const merged: Record<string, unknown> = { ...current }
         for (const [key, value] of Object.entries(fields)) {
           if (value === null) delete merged[key]
@@ -906,13 +904,7 @@ export function createApp({
         const parsed = WorkerConfig.safeParse(merged)
         if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
         const worker = parsed.data
-        if (on === true && !worker.enabled) {
-          return c.json({ error: `worker ${id} is disabled; enable it before turning it on` }, 409)
-        }
-        // setWorkerOn ignores a disabled worker, so it has to go off before the save disables it.
-        if (!worker.enabled) runner?.setWorkerOn(id, false)
-        if (Object.keys(fields).length > 0) saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
-        if (on !== undefined) runner?.setWorkerOn(id, on)
+        saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
         return c.json((await fleetView()).find((w) => w.id === id))
       },
     )

@@ -138,12 +138,12 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
   })
 
-  test('loads workers with stable identity and defaults enabled', () => {
+  test('loads workers with stable identity and defaults them disabled', () => {
     writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
     expect(loadConfig(repo).config.worker[0]).toMatchObject({
       id: 'w-fast',
       name: 'Fast',
-      enabled: true,
+      enabled: false,
     })
   })
 

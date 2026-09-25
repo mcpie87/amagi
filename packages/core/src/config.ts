@@ -67,7 +67,7 @@ export const WorkerConfig = z.object({
   model: z.string().optional(),
   effort: z.string().optional(),
   seat: z.string().min(1).optional(),
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
 })
 export type WorkerConfig = z.infer<typeof WorkerConfig>
 

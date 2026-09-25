@@ -1001,7 +1001,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async (id) => {
           retried.push(id)
           return { ok: true, taskId: id }
@@ -1269,7 +1269,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           store.append(id, { type: 'task.state', from: 'implementing', to: 'cancelled' })
           return { ok: true, taskId: id }
         },
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -1324,7 +1324,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
           store.append(id, { type: 'task.state', from: 'retrying', to: 'cancelled' })
           return { ok: true, taskId: id }
         },
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -1656,7 +1656,7 @@ describe('runner endpoints', () => {
     }),
     start: async () => ({ ok: true, taskId: 'bd-1' }),
     stop: async () => ({ ok: true, taskId: 'bd-1' }),
-    setWorkerOn: () => {},
+    fleetChanged: () => {},
     retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
     setAutoQueue: () => {},
     ...over,
@@ -1988,7 +1988,7 @@ describe('repo settings endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         setAutoQueue: (enabled) => applied.push(enabled),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
@@ -2034,7 +2034,7 @@ describe('repo settings endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
         setAutoQueue: () => {},
       },
@@ -2052,7 +2052,7 @@ describe('fleet endpoints', () => {
   const savedXdg = process.env.XDG_CONFIG_HOME
   let home: string
   let fleet: FleetWorkerStatus[]
-  const toggled: { id: string; on: boolean }[] = []
+  let fleetChanges = 0
   const queued: boolean[] = []
 
   const send = (method: string, path: string, body?: unknown) =>
@@ -2070,7 +2070,7 @@ describe('fleet endpoints', () => {
     ws = testWorkspaces(['repo1', 'repo2'])
     store = ws.store('repo1')
     fleet = []
-    toggled.length = 0
+    fleetChanges = 0
     queued.length = 0
     app = createApp({
       workspaces: ws.workspaces,
@@ -2088,7 +2088,9 @@ describe('fleet endpoints', () => {
         }),
         start: async () => ({ ok: true, taskId: 'bd-1' }),
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: (id, on) => toggled.push({ id, on }),
+        fleetChanged: () => {
+          fleetChanges++
+        },
         setAutoQueue: (enabled) => queued.push(enabled),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
       },
@@ -2102,18 +2104,19 @@ describe('fleet endpoints', () => {
     else process.env.XDG_CONFIG_HOME = savedXdg
   })
 
-  test('a created worker persists globally, reaches the runner, and starts off', async () => {
+  test('a created worker persists globally, reaches the runner, and starts disabled', async () => {
     const res = await send('POST', '/api/workers', { name: 'Codex 1', kind: 'codex' })
     expect(res.status).toBe(201)
     const worker = (await res.json()) as { id: string }
-    expect(worker).toMatchObject({ name: 'Codex 1', kind: 'codex', enabled: true, on: false })
+    expect(worker).toMatchObject({ name: 'Codex 1', kind: 'codex', enabled: false })
     expect(loadGlobalConfig().worker.map((w) => w.id)).toEqual([worker.id])
     expect(ws.workspaces.get('repo1')?.config.worker.map((w) => w.id)).toEqual([worker.id])
+    expect(fleetChanges).toBe(1)
     const list = (await (await app.request('/api/workers')).json()) as {
-      workers: { id: string; on: boolean; taskId: string | null }[]
+      workers: { id: string; enabled: boolean; taskId: string | null }[]
     }
     expect(list.workers).toEqual([
-      expect.objectContaining({ id: worker.id, on: false, taskId: null }),
+      expect.objectContaining({ id: worker.id, enabled: false, taskId: null }),
     ])
   })
 
@@ -2128,33 +2131,26 @@ describe('fleet endpoints', () => {
         effort: null,
         seat: 'claude',
         enabled: true,
-        on: true,
         busy: true,
         taskId: 'bd-9',
       },
     ]
     const res = await send('PATCH', `/api/workers/${id}`, { name: 'Renamed', model: null })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ id, name: 'Renamed', on: true, taskId: 'bd-9' })
+    expect(await res.json()).toMatchObject({ id, name: 'Renamed', taskId: 'bd-9' })
     const saved = loadGlobalConfig().worker[0]
     expect(saved).toMatchObject({ id, name: 'Renamed', seat: 'mine' })
     expect(saved?.model).toBeUndefined()
-    expect(toggled).toEqual([])
   })
 
-  test('on is a runtime toggle, refused for a disabled worker and dropped on disable', async () => {
+  test('enabled persists, reaches the runner and is the only on/off switch', async () => {
     const { id } = await create({ name: 'One', kind: 'claude' })
-    expect((await send('PATCH', `/api/workers/${id}`, { on: true })).status).toBe(200)
-    expect(toggled).toEqual([{ id, on: true }])
-    expect('on' in (loadGlobalConfig().worker[0] ?? {})).toBe(false)
-    expect((await send('PATCH', `/api/workers/${id}`, { enabled: false })).status).toBe(200)
-    expect(toggled).toEqual([
-      { id, on: true },
-      { id, on: false },
-    ])
-    const refused = await send('PATCH', `/api/workers/${id}`, { on: true })
-    expect(refused.status).toBe(409)
-    expect(((await refused.json()) as { error: string }).error).toContain('disabled')
+    expect((await send('PATCH', `/api/workers/${id}`, { enabled: true })).status).toBe(200)
+    expect(loadGlobalConfig().worker[0]?.enabled).toBe(true)
+    expect(ws.workspaces.get('repo1')?.config.worker[0]?.enabled).toBe(true)
+    expect(fleetChanges).toBe(2)
+    expect((await send('PATCH', `/api/workers/${id}`, { on: false })).status).toBe(400)
+    expect(loadGlobalConfig().worker[0]?.enabled).toBe(true)
   })
 
   test('deleting a worker mid-run is refused with the running task', async () => {
@@ -2168,7 +2164,6 @@ describe('fleet endpoints', () => {
         effort: null,
         seat: 'claude',
         enabled: true,
-        on: true,
         busy: true,
         taskId: 'bd-9',
       },
@@ -2655,7 +2650,7 @@ describe('POST /api/repos/:repo/run', () => {
         },
         stop: async () => ({ ok: true, taskId: 'bd-1' }),
         retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
-        setWorkerOn: () => {},
+        fleetChanged: () => {},
         setAutoQueue: () => {},
       },
     })
