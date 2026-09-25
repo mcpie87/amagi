@@ -122,21 +122,21 @@ export type PrBodyMeta = {
 }
 
 /**
- * Key of the machine-readable trailer that links a PR back to its tracker
- * task, in the same spirit as a `Co-Authored-By:` git trailer: a plain
- * `key: value` line a regex can find regardless of how the surrounding
- * markdown evolves. branchName (worktree.ts) encodes the same id in the
- * branch name, but splitting it back out of a slug is ambiguous; the trailer
- * is unambiguous because the id is on its own line.
+ * Key of the visible trailer older amagi PR bodies ended with, still read so
+ * those PRs keep resolving to their task.
  */
 export const TASK_TRAILER_KEY = 'amagi-task'
 
-/** Reads the task id comment or legacy visible trailer off a PR body. */
+/**
+ * Reads the task id off a PR body: the `**Task:**` line formatPrBody opens
+ * with, or the legacy `amagi-task:` trailer. branchName (worktree.ts) encodes
+ * the same id in the branch name, but splitting it back out of a slug is
+ * ambiguous; the id here sits alone in a code span, so it is not.
+ */
 export function taskIdFromPrBody(body: string): string | null {
-  const id = '(\\S+)'
-  const comment = new RegExp(`<!--\\s*${TASK_TRAILER_KEY}:\\s*${id}\\s*-->`)
-  const trailer = new RegExp(`^${TASK_TRAILER_KEY}:\\s*${id}\\s*$`, 'm')
-  return body.match(comment)?.[1] ?? body.match(trailer)?.[1] ?? null
+  const taskLine = /^\*\*Task:\*\*\s*`([^`\s]+)`/m
+  const trailer = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
+  return body.match(taskLine)?.[1] ?? body.match(trailer)?.[1] ?? null
 }
 
 /**
@@ -181,5 +181,5 @@ export function formatPrBody(
     lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
-  return `${lines.join('\n')}\n\n<!-- ${TASK_TRAILER_KEY}: ${task.id} -->${footer}`
+  return `${lines.join('\n')}${footer}`
 }

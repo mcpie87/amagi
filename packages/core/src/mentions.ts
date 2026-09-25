@@ -186,10 +186,10 @@ export function taskIdFromPrTitle(title: string): string | null {
 }
 
 /**
- * Resolves the tracker task id for a PR, most to least reliable: the
- * `amagi-task:` body trailer set at creation (works for any tracker, and
- * survives a human editing the title); the branch name matched against the
- * tracker's open ids (for PRs that predate the trailer); the PR title, as a
+ * Resolves the tracker task id for a PR, most to least reliable: the task id
+ * the body was written with at creation (works for any tracker, and survives
+ * a human editing the title); the branch name matched against the tracker's
+ * open ids (for PRs that predate it); the PR title, as a
  * last resort for beads ids that happen to still carry the "am-544: " prefix.
  */
 export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
