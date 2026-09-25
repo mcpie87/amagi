@@ -207,6 +207,7 @@ describe('iterations', () => {
     expect(iterationsFromLabels(['amagi', 'amagi/iterations:3'])).toBe(3)
     expect(iterationsFromLabels(['amagi/iterations:0'])).toBe(0)
     expect(iterationsFromLabels(['amagi/iterations:oops'])).toBe(0)
+    expect(iterationsFromLabels(['amagi/iterations:2', 'amagi/iterations:3'])).toBe(3)
   })
 
   test('formats the iteration label', () => {
@@ -242,6 +243,14 @@ describe('iterations', () => {
     expect(stamped).toEqual({ taskId: 'am-1', iteration: 3 })
     expect(inputs).toEqual([{ labels: ['amagi/iterations:3'] }])
     expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
+  })
+
+  test('drops the previous count even when the PR snapshot predates it', async () => {
+    const { exec, calls } = fake(() => undefined)
+    await stampIterationLabel({ cwd: '/repo', pr: pr({ labels: ['amagi'] }), iteration: 3, exec })
+
+    expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
+    expect(calls).not.toContainEqual(removeLabelCall(7, 'amagi/iterations:3'))
   })
 
   test('leaves non-amagi PRs untouched', async () => {

@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
+import { canTransition } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
@@ -79,19 +80,24 @@ async function finishMerge(run: Exec, cwd: string): Promise<void> {
   }
 }
 
-/** Parks the linked task at needs_human, so a PR that keeps re-conflicting stops being re-dispatched. */
-function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly string[]): void {
-  if (opts.store === undefined) return
+/**
+ * Parks the linked task at needs_human, so a PR that keeps re-conflicting
+ * stops being re-dispatched. Returns whether it parked: a task already done,
+ * or already parked by an earlier dispatch, is left where it is.
+ */
+function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly string[]): boolean {
+  if (opts.store === undefined) return false
   const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
-  if (taskId === null) return
+  if (taskId === null) return false
   const task = opts.store.task(taskId)
-  if (task === null) return
+  if (task === null || !canTransition(task.state, 'needs_human')) return false
   opts.store.append(taskId, {
     type: 'task.state',
     from: task.state,
     to: 'needs_human',
     reason: `PR #${opts.pr.number} still has unmerged paths after ${opts.config.loop.conflictMaxIterations} conflict-resolution dispatches: ${unmerged.join(', ')}`,
   })
+  return true
 }
 
 /**
@@ -150,8 +156,8 @@ export async function resolveConflict(
       const unmerged = await unmergedPaths(run, wt.path)
       if (unmerged.length === 0) break
       if (iteration >= opts.config.loop.conflictMaxIterations) {
-        parkAtNeedsHuman(opts, unmerged)
-        const message = `unmerged paths remain after ${iteration} dispatches; parked the task at needs_human: ${unmerged.join(', ')}`
+        const parked = parkAtNeedsHuman(opts, unmerged)
+        const message = `unmerged paths remain after ${iteration} dispatches${parked ? '; parked the task at needs_human' : ''}: ${unmerged.join(', ')}`
         log('error', message)
         return { ok: false, message, iteration }
       }

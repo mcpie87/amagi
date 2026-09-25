@@ -178,13 +178,15 @@ export function iterationLabel(n: number): string {
   return `${ITERATION_LABEL_PREFIX}${n}`
 }
 
-/** The amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
+/** The highest amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
 export function iterationsFromLabels(labels: readonly string[] | undefined): number {
-  if (labels === undefined) return 0
-  const hit = labels.find((l) => l.startsWith(ITERATION_LABEL_PREFIX))
-  if (hit === undefined) return 0
-  const n = Number(hit.slice(ITERATION_LABEL_PREFIX.length))
-  return Number.isInteger(n) && n > 0 ? n : 0
+  let max = 0
+  for (const l of labels ?? []) {
+    if (!l.startsWith(ITERATION_LABEL_PREFIX)) continue
+    const n = Number(l.slice(ITERATION_LABEL_PREFIX.length))
+    if (Number.isInteger(n) && n > max) max = n
+  }
+  return max
 }
 
 /** The task id an amagi PR's head branch encodes (`amagi/<id>-...`), null for non-amagi PRs. */
@@ -216,9 +218,12 @@ export async function stampIterationLabel(opts: {
   const current = iterationsFromLabels(opts.pr.labels)
   const iteration = opts.iteration ?? current + 1
   await addPrLabels(run, opts.cwd, opts.pr.number, [iterationLabel(iteration)])
-  if (current > 0 && current !== iteration) {
-    await removePrLabel(run, opts.cwd, opts.pr.number, iterationLabel(current))
-  }
+  // The snapshot's labels go stale across dispatches in one call, so the
+  // previous count is dropped even when the snapshot does not show it.
+  const stale = new Set(opts.pr.labels.filter((l) => l.startsWith(ITERATION_LABEL_PREFIX)))
+  if (iteration > 1) stale.add(iterationLabel(iteration - 1))
+  stale.delete(iterationLabel(iteration))
+  for (const label of stale) await removePrLabel(run, opts.cwd, opts.pr.number, label)
   return { taskId, iteration }
 }
 

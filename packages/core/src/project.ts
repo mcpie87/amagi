@@ -109,6 +109,20 @@ export function project(state: Projection, event: StoredEvent): Projection {
   if (event.type === 'watcher.run.started') {
     const key = watcherRunKey(event.repo, event.name, event.runId)
     const watcherRuns = { ...state.watcherRuns }
+    // A watcher's ticks are sequential, so a run still open when the next one
+    // starts died with its process (a serve restart) and never finishes.
+    for (const [k, run] of Object.entries(watcherRuns)) {
+      if (run.repo !== event.repo || run.name !== event.name || run.endedAt !== null) continue
+      const error = 'interrupted: the watcher restarted before this run finished'
+      watcherRuns[k] = {
+        ...run,
+        endedAt: event.ts,
+        ok: false,
+        error,
+        endSeq: event.seq,
+        log: [...run.log, { ts: event.ts, message: `run ${error}`, level: 'error' }],
+      }
+    }
     watcherRuns[key] = {
       repo: event.repo,
       name: event.name,
