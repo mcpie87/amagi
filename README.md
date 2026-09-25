@@ -250,7 +250,7 @@ Every key is optional; the table below gives the schema and defaults.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
+| `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`; at most 16 workers. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
 | `worker[].id` | string | required | Stable worker identity, unique across the fleet. |
 | `worker[].name` | string | required | Display name. |
 | `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` | required | Harness used by this worker. |
