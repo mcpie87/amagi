@@ -230,7 +230,8 @@ Each worker's `enabled` setting is its persistent configuration toggle and
 defaults to `true`. The dashboard's **On** toggle is separate, applies at
 runtime, and resets to off when the server restarts. Automatic dispatch needs
 both toggles on and a free seat. Manual dispatch can use an enabled worker even
-when its runtime toggle is off.
+when its runtime toggle is off; a worker with `enabled = false` cannot be
+dispatched.
 
 A seat names the credential an agent uses. Amagi guarantees that at most one
 agent is live on a seat at a time, even when different workers, watchers, or a
@@ -238,7 +239,9 @@ chat reply request it. A worker without an explicit seat uses its harness kind
 as the seat name. Capacity is derived from the distinct free seats of enabled,
 switched-on workers, rather than from the number of worker entries: workers
 sharing a credential must take turns, while workers on separate credentials
-can run concurrently.
+can run concurrently. A separate capacity setting could overbook a shared
+credential or leave independent credentials unused, so the available seats
+determine capacity directly.
 
 Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
 override them in a repo's `.amagi/config.toml` when needed. The `mention`,
