@@ -776,4 +776,164 @@ describe('status log', () => {
     const past = stateAtAttempt(state, 'am-1', 1)
     expect(statusLog(past, 'am-1', null).map((e) => e.to)).toEqual(['claimed', 'no_pr'])
   })
+
+  test('nests verify and implement runs under the same implementing state', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1050, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1100, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1200, {
+        type: 'agent.started',
+        role: 'verify',
+        harness: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        cwd: '/tmp',
+        resumed: false,
+      }),
+      ev(5, 'am-1', 1280, { type: 'agent.exited', role: 'verify', exitCode: 0, sessionId: null }),
+      ev(6, 'am-1', 1300, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'claude',
+        model: 'sonnet',
+        effort: null,
+        cwd: '/tmp',
+        resumed: false,
+      }),
+      ev(7, 'am-1', 1500, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 0,
+        sessionId: null,
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    const implementing = statusLog(state, 'am-1', 1600).find((entry) => entry.to === 'implementing')
+    expect(
+      implementing?.runs.map((run) => [
+        run.label,
+        run.harness,
+        run.model,
+        run.durationMs,
+        run.exitCode,
+      ]),
+    ).toEqual([
+      ['verify', 'claude', 'sonnet', 80, 0],
+      ['implement', 'claude', 'sonnet', 200, 0],
+    ])
+  })
+
+  test('labels an implement run after checks as a fix and marks restarts', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1050, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1100, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1200, { type: 'task.state', from: 'implementing', to: 'checks' }),
+      ev(5, 'am-1', 1300, { type: 'task.state', from: 'checks', to: 'implementing' }),
+      ev(6, 'am-1', 1310, {
+        type: 'run.restarted',
+        phase: 'implement',
+        restart: 2,
+        contextTokens: 100,
+        summary: 'continue',
+      }),
+      ev(7, 'am-1', 1320, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'codex',
+        model: 'gpt',
+        effort: null,
+        cwd: '/tmp',
+        resumed: false,
+      }),
+      ev(8, 'am-1', 1400, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 1,
+        sessionId: null,
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    const run = statusLog(state, 'am-1', null).find(
+      (entry) => entry.to === 'implementing' && entry.runs.length > 0,
+    )?.runs[0]
+    expect(run?.label).toBe('implement (fix) (restart 2)')
+  })
+
+  test("uses only a run's usage events and keeps an in-flight run open", () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1050, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1100, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1200, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'opencode',
+        model: null,
+        effort: null,
+        cwd: '/tmp',
+        resumed: false,
+      }),
+      ev(5, 'am-1', 1210, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 10, outputTokens: 2, costUsd: 0.1 },
+      }),
+      ev(6, 'am-1', 1220, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 0,
+        sessionId: null,
+      }),
+      ev(7, 'am-1', 1300, {
+        type: 'agent.started',
+        role: 'implement',
+        harness: 'opencode',
+        model: null,
+        effort: null,
+        cwd: '/tmp',
+        resumed: true,
+      }),
+      ev(8, 'am-1', 1310, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'usage', inputTokens: 30, outputTokens: 4 },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    const runs = statusLog(state, 'am-1', 1500).find((entry) => entry.to === 'implementing')?.runs
+    expect(runs?.map((run) => [run.inputTokens, run.outputTokens, run.costUsd])).toEqual([
+      [10, 2, 0.1],
+      [30, 4, null],
+    ])
+    expect(runs?.[1]).toMatchObject({
+      label: 'implement (resumed)',
+      durationMs: 200,
+      exitCode: null,
+    })
+  })
+
+  test('settles an open run when viewing a past attempt', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1050, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1100, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1200, {
+        type: 'agent.started',
+        role: 'verify',
+        harness: 'claude',
+        model: null,
+        effort: null,
+        cwd: '/tmp',
+        resumed: false,
+      }),
+      ev(5, 'am-1', 1300, { type: 'task.reset' }),
+      ev(6, 'am-1', 1400, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+    ].reduce(reduceState, initialDashboardState())
+    const past = stateAtAttempt(state, 'am-1', 1)
+    expect(
+      statusLog(past, 'am-1', null).find((entry) => entry.to === 'implementing')?.runs[0],
+    ).toMatchObject({
+      durationMs: null,
+      exitCode: null,
+    })
+  })
 })
