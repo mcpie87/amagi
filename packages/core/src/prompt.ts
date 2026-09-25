@@ -186,7 +186,7 @@ export function commitMessage(
   task: Pick<TrackerTask, 'id' | 'title'>,
   changes: readonly PrChange[] = [],
 ): string {
-  const lines = [task.title, '', `Task: ${task.id}`]
+  const lines = [`[${task.id}] ${task.title}`, '', `Task: ${task.id}`]
   if (changes.length > 0) {
     lines.push('', 'Changes:')
     for (const change of changes) {

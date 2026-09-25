@@ -28,13 +28,13 @@ describe('commitMessage', () => {
     ])
 
     expect(message).toBe(
-      'Add a greeting file\n\nTask: am-1\n\nChanges:\n- `hello.txt` +1 -0\n- `image.png` binary\n',
+      '[am-1] Add a greeting file\n\nTask: am-1\n\nChanges:\n- `hello.txt` +1 -0\n- `image.png` binary\n',
     )
   })
 
   test('omits the changes section when nothing changed', () => {
     const message = commitMessage(TASK)
-    expect(message).toBe('Add a greeting file\n\nTask: am-1\n')
+    expect(message).toBe('[am-1] Add a greeting file\n\nTask: am-1\n')
   })
 })
 

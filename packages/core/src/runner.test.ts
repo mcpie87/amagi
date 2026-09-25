@@ -1930,6 +1930,12 @@ describe('Runner.requestCommit', () => {
       )
     expect(created?.sha).toBe(result.sha)
     expect(created?.subject).toBe(`[${TASK.id}] ${TASK.title}`)
+    const subject = (
+      await execOk(exec, ['git', 'show', '-s', '--format=%s', 'HEAD'], {
+        cwd: wtPath,
+      })
+    ).trim()
+    expect(subject).toBe(created?.subject ?? '')
     const head = (await execOk(exec, ['git', 'rev-parse', 'HEAD'], { cwd: wtPath })).trim()
     expect(head).toBe(result.sha)
   })
