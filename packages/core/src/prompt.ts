@@ -315,6 +315,7 @@ export type MentionPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  outPath: string
   /** True when the base branch does not merge cleanly into the PR head. */
   conflicted: boolean
 }
@@ -339,6 +340,7 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
     '- Commit your changes. Do not push; the dispatcher pushes.',
+    `- Write a short summary of what changed, or why no change was needed, to ${ctx.outPath}.`,
   ]
   if (ctx.conflicted) {
     lines.push(
@@ -371,6 +373,7 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   parts.push(
     '',
     'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+    `Write a short summary of what changed to file: ${ctx.outPath}. If no change is needed, write why. Keep it concise and suitable for a PR comment.`,
   )
   return parts.join('\n')
 }
