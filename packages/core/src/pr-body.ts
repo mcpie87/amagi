@@ -124,17 +124,19 @@ export type PrBodyMeta = {
 /**
  * Key of the machine-readable task marker that links a PR back to its tracker
  * task. New bodies use an HTML comment so the marker stays hidden; the parser
- * also accepts the legacy visible trailer. The branch name encodes the same
- * id, but splitting it back out of a slug is ambiguous.
+ * also accepts the task line and visible trailer used by older PRs. The
+ * branch name encodes the same id, but splitting it back out of a slug is
+ * ambiguous.
  */
 export const TASK_TRAILER_KEY = 'amagi-task'
 
-/** Reads the task id comment or legacy visible trailer off a PR body. */
+/** Reads the task id comment, task line, or visible trailer off a PR body. */
 export function taskIdFromPrBody(body: string): string | null {
   const id = '(\\S+)'
   const comment = new RegExp(`<!--\\s*${TASK_TRAILER_KEY}:\\s*${id}\\s*-->`)
   const trailer = new RegExp(`^${TASK_TRAILER_KEY}:\\s*${id}\\s*$`, 'm')
-  return body.match(comment)?.[1] ?? body.match(trailer)?.[1] ?? null
+  const taskLine = /^\*\*Task:\*\*\s*`([^`\s]+)`/m
+  return body.match(comment)?.[1] ?? body.match(trailer)?.[1] ?? body.match(taskLine)?.[1] ?? null
 }
 
 /**

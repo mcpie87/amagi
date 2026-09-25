@@ -277,7 +277,11 @@ describe('taskIdFromPrBody', () => {
     )
   })
 
-  test('is null for a body without the trailer, e.g. a PR that predates it', () => {
-    expect(taskIdFromPrBody('## Some PR\n\n**Task:** `am-1`\n')).toBeNull()
+  test('reads the task line from older PR bodies', () => {
+    expect(taskIdFromPrBody('## Some PR\n\n**Task:** `am-1`\n')).toBe('am-1')
+  })
+
+  test('is null for a body without a task marker', () => {
+    expect(taskIdFromPrBody('## Some PR\n\nMentions am-1 in passing.\n')).toBeNull()
   })
 })
