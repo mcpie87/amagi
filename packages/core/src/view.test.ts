@@ -8,11 +8,13 @@ import {
   currentUsageFor,
   initialDashboardState,
   openQuestionsFor,
+  reduceBatch,
   reduceState,
   runHealth,
   runHealthNearLimit,
   stateAtAttempt,
   statusLog,
+  taskEvents,
   tasksNeedingAttention,
 } from './view.ts'
 
@@ -70,6 +72,24 @@ describe('dashboard state reducer', () => {
     const b = recorded.reduce(reduceState, initialDashboardState())
     expect(b).toEqual(a)
     expect(b.latestSeq).toBe(14)
+  })
+
+  test('a batched fold matches folding one event at a time', () => {
+    const single = recorded.reduce(reduceState, initialDashboardState())
+    const batched = reduceBatch(
+      reduceBatch(initialDashboardState(), recorded.slice(0, 5)),
+      recorded.slice(5),
+    )
+    expect(batched).toEqual(single)
+    expect(taskEvents(batched, 'am-2').map((e) => e.seq)).toEqual([12, 13, 14])
+    expect(taskEvents(batched, 'am-9')).toEqual([])
+  })
+
+  test('a batch leaves the previous state untouched', () => {
+    const before = reduceBatch(initialDashboardState(), recorded.slice(0, 3))
+    const snapshot = structuredClone(before)
+    reduceBatch(before, recorded.slice(3))
+    expect(before).toEqual(snapshot)
   })
 
   test('folding projects tasks, worktree, branch, PR and checks', () => {
