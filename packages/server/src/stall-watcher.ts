@@ -302,7 +302,7 @@ export function startStallWatcher({
 
       if (tracker.reclaimExpiredClaims !== undefined) {
         try {
-          await tracker.reclaimExpiredClaims()
+          await tracker.reclaimExpiredClaims((id) => store.task(id) !== null)
         } catch (err) {
           const message = `tracker lease reclaim failed: ${errMsg(err)}`
           failures++

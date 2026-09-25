@@ -342,10 +342,17 @@ export class BeadsTracker implements Tracker {
     await this.bd(['unclaim', id])
   }
 
-  async reclaimExpiredClaims(): Promise<void> {
-    // bd's native lease reaper also finds claims made outside amagi or lost
-    // before the runner recorded its first event.
-    await this.bd(['reclaim'])
+  async reclaimExpiredClaims(tracked: (id: string) => boolean): Promise<void> {
+    // bd's native lease reaper finds claims made outside amagi or lost before
+    // the runner recorded its first event. Unscoped it also reaps the parked
+    // tasks' lapsed leases, which reopens them and reruns work already in a PR.
+    const claimed = parseIssues(
+      await this.bd(['list', '--status', 'in_progress', '--brief', '--json', '--limit', '0']),
+    )
+    const ids = claimed.map((i) => i.id).filter((id) => !tracked(id))
+    // A bare `bd reclaim` reaps everything, so no candidates must mean no call.
+    if (ids.length === 0) return
+    await this.bd(['reclaim', ...ids.flatMap((id) => ['--id', id])])
   }
 
   async close(id: string, reason?: string): Promise<void> {
