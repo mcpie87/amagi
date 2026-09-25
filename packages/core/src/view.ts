@@ -1,8 +1,15 @@
-import { currentAttemptEvents, isTerminal, type StoredEvent, type TaskState } from './events.ts'
+import {
+  type AgentRole,
+  currentAttemptEvents,
+  isTerminal,
+  type StoredEvent,
+  type TaskState,
+} from './events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
   type ProjectedTask,
+  type ProjectedWatcherRun,
   type Projection,
   project,
 } from './project.ts'
@@ -52,6 +59,7 @@ export function reduceBatch(state: DashboardState, batch: readonly StoredEvent[]
   return {
     tasks: projection.tasks,
     questions: projection.questions,
+    watcherRuns: projection.watcherRuns,
     events: state.events.concat(batch),
     byTask,
     latestSeq: last.seq,
@@ -104,6 +112,19 @@ export function openQuestionsFor(state: DashboardState, taskId: string): Project
   return Object.values(state.questions)
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)
     .sort((a, b) => a.askedAt - b.askedAt)
+}
+
+/** Completed and in-flight watcher runs, newest first. */
+export function watcherRunsFor(
+  state: DashboardState,
+  repo: string,
+  name: string,
+  limit = Number.MAX_SAFE_INTEGER,
+): ProjectedWatcherRun[] {
+  return Object.values(state.watcherRuns)
+    .filter((run) => run.repo === repo && run.name === name)
+    .sort((a, b) => b.startSeq - a.startSeq)
+    .slice(0, limit)
 }
 
 export function currentAgentFor(
@@ -227,6 +248,23 @@ export type StatusEntry = {
   reason: string | null
   /** Time spent in `to`: until the next entry, else until `now` while in flight, else null. */
   durationMs: number | null
+  runs: StatusRun[]
+}
+
+export type StatusRun = {
+  role: AgentRole
+  harness: string
+  model: string | null
+  effort: string | null
+  resumed: boolean
+  startedAt: number
+  durationMs: number | null
+  exitCode: number | null
+  inputTokens: number
+  outputTokens: number
+  costUsd: number | null
+  restart: number | null
+  label: string
 }
 
 /**
@@ -255,10 +293,15 @@ export function statusLog(
       to,
       reason: reason ?? null,
       durationMs: null,
+      runs: [],
     })
     current = to
   }
-  for (const event of currentAttemptEvents(taskEvents(state, taskId), taskId)) {
+  const events = currentAttemptEvents(taskEvents(state, taskId), taskId)
+  let activeRun: StatusRun | null = null
+  let pendingRestart: number | null = null
+  let checksSinceImplement = false
+  for (const event of events) {
     switch (event.type) {
       case 'task.claimed':
         push(event, 'claimed', 'claimed')
@@ -272,14 +315,64 @@ export function statusLog(
       case 'task.reclaimed':
         push(event, 'reclaimed', 'queued', event.reason)
         break
+      case 'run.restarted':
+        pendingRestart = event.restart
+        break
+      case 'agent.started': {
+        const label = [
+          event.role,
+          ...(event.role === 'implement' && checksSinceImplement ? ['(fix)'] : []),
+          ...(event.role === 'implement' && event.resumed ? ['(resumed)'] : []),
+          ...(pendingRestart === null ? [] : [`(restart ${pendingRestart})`]),
+        ].join(' ')
+        activeRun = {
+          role: event.role,
+          harness: event.harness,
+          model: event.model,
+          effort: event.effort,
+          resumed: event.resumed,
+          startedAt: event.ts,
+          durationMs: null,
+          exitCode: null,
+          inputTokens: 0,
+          outputTokens: 0,
+          costUsd: null,
+          restart: pendingRestart,
+          label,
+        }
+        entries.at(-1)?.runs.push(activeRun)
+        if (event.role === 'implement') checksSinceImplement = false
+        pendingRestart = null
+        break
+      }
+      case 'agent.stream':
+        if (activeRun !== null && activeRun.role === event.role && event.event.kind === 'usage') {
+          activeRun.inputTokens += event.event.inputTokens
+          activeRun.outputTokens += event.event.outputTokens
+          if (event.event.costUsd !== undefined) {
+            activeRun.costUsd = (activeRun.costUsd ?? 0) + event.event.costUsd
+          }
+        }
+        break
+      case 'agent.exited':
+        if (activeRun !== null && activeRun.role === event.role) {
+          activeRun.durationMs = event.ts - activeRun.startedAt
+          activeRun.exitCode = event.exitCode
+          activeRun = null
+        }
+        break
       default:
         break
     }
+    if (event.type === 'task.state' && event.to === 'checks') checksSinceImplement = true
   }
   for (const [i, entry] of entries.entries()) {
     const next = entries[i + 1]
     if (next !== undefined) entry.durationMs = next.ts - entry.ts
     else if (now !== null && !isTerminal(entry.to)) entry.durationMs = now - entry.ts
+  }
+  if (activeRun !== null) {
+    activeRun.durationMs = now === null ? null : now - activeRun.startedAt
   }
   return entries
 }

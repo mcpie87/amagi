@@ -12,6 +12,7 @@ import {
   type DashboardState,
   runHealth,
   runHealthNearLimit,
+  watcherRunsFor,
 } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -157,6 +158,7 @@ function WatcherDetailDialog({
   workers: WorkerActivity[]
   onClose: () => void
 }) {
+  const { state } = useDashboard()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const open = selected !== null
   useEffect(() => {
@@ -167,6 +169,11 @@ function WatcherDetailDialog({
   }, [open])
   if (selected === null) return null
   const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
+  const history = watcher === null ? [] : watcherRunsFor(state, watcher.repo, watcher.name)
+  const liveLog = history
+    .flatMap((run) => run.log)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 100)
   const statusPill =
     watcher === null
       ? PILL
@@ -258,6 +265,94 @@ function WatcherDetailDialog({
               </div>
             </div>
           )}
+          <div className="mt-5 border-t border-line pt-4">
+            <h3 className="text-sm font-medium text-fg">Run history</h3>
+            {history.length === 0 ? (
+              <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {history.map((run) => (
+                  <details
+                    key={run.runId}
+                    className="rounded border border-line bg-surface/60 px-3 py-2"
+                  >
+                    <summary className="cursor-pointer text-xs text-fg">
+                      <span className="tabular-nums">
+                        {new Date(run.startedAt).toLocaleString()}
+                      </span>
+                      <span
+                        className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+                      >
+                        {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
+                      </span>
+                      <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
+                    </summary>
+                    {run.error !== null && (
+                      <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
+                    )}
+                    {run.actions.length === 0 ? (
+                      <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
+                    ) : (
+                      <ul className="mt-2 space-y-1 text-xs">
+                        {run.actions.map((action, index) => (
+                          <li
+                            key={`${run.runId}-${index}`}
+                            className={action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
+                          >
+                            {action.targetType === 'task' ? (
+                              <Link
+                                to="/tasks/$id"
+                                params={{ id: action.targetId }}
+                                className="text-blue-ink hover:underline"
+                              >
+                                task {action.targetId}
+                              </Link>
+                            ) : action.url !== undefined ? (
+                              <a
+                                href={action.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-ink hover:underline"
+                              >
+                                {action.targetType === 'mention'
+                                  ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                  : `PR #${action.prNumber ?? action.targetId}`}
+                              </a>
+                            ) : (
+                              <span>
+                                {action.targetType === 'mention'
+                                  ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                  : `${action.targetType} ${action.targetId}`}
+                              </span>
+                            )}
+                            {': '}
+                            {action.result}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </details>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="mt-4 border-t border-line pt-4">
+            <h3 className="text-sm font-medium text-fg">Live log</h3>
+            {liveLog.length === 0 ? (
+              <p className="mt-2 text-xs text-fg-faint">no activity recorded yet</p>
+            ) : (
+              <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px]">
+                {liveLog.map((entry, index) => (
+                  <li
+                    key={`${entry.ts}-${index}`}
+                    className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
+                  >
+                    {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <div className="mt-4 flex justify-end">
             <button
               type="button"

@@ -26,6 +26,8 @@ export type FlagPointlessOptions = {
   exec?: Exec
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness
+  /** Per-PR results for watcher run history. Recording failures never changes the pass. */
+  onAction?: (pr: PrInfo, result: string, level: 'info' | 'error') => void
 }
 
 export type FlagPointlessResult = { flagged: number; cleared: number }
@@ -229,6 +231,13 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
   const nextState: PointlessWatchState = {}
   let flagged = 0
   let cleared = 0
+  const report = (pr: PrInfo, result: string, level: 'info' | 'error'): void => {
+    try {
+      opts.onAction?.(pr, result, level)
+    } catch (err) {
+      console.warn(`pr pointless history #${pr.number}: ${errMsg(err)}`)
+    }
+  }
 
   for (const pr of opts.prs) {
     if (!pr.labels.includes(AMAGI_LABEL)) continue
@@ -244,6 +253,7 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
       empty = await prDiffEmpty(opts.cwd, pr.number, run)
     } catch (err) {
       console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
+      report(pr, `pointlessness check failed: ${errMsg(err)}`, 'error')
       continue
     }
     const task = tasks.get(pr.number)
@@ -273,8 +283,10 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
             reason: reasoning,
           })
           flagged++
+          report(pr, 'empty-diff PR flagged for review', 'info')
         } catch (err) {
           console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
+          report(pr, `failed to flag empty-diff PR: ${errMsg(err)}`, 'error')
           continue
         }
       }
@@ -290,8 +302,10 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
             reason: 'PR is no longer pointless; its diff against base is not empty',
           })
           cleared++
+          report(pr, 'empty-diff flag cleared after PR changes', 'info')
         } catch (err) {
           console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
+          report(pr, `failed to clear empty-diff flag: ${errMsg(err)}`, 'error')
           continue
         }
       }

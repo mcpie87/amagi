@@ -315,6 +315,7 @@ class FakeIssueTracker extends BeadsTracker {
   readonly created: CreateTrackerTask[] = []
   readonly updated: { id: string; input: UpdateTrackerTask }[] = []
   readonly released: string[] = []
+  readonly closed: { id: string; reason: string | undefined }[] = []
   issues = new Map<string, BeadsIssue>()
   private seq = 0
 
@@ -425,7 +426,11 @@ class FakeIssueTracker extends BeadsTracker {
   override async release(id: string): Promise<void> {
     this.released.push(id)
   }
-  override async close(): Promise<void> {}
+  override async close(id: string, reason?: string): Promise<void> {
+    this.closed.push({ id, reason })
+    const issue = this.issues.get(id)
+    if (issue !== undefined) this.issues.set(id, { ...issue, status: 'closed' })
+  }
   override async openGate(_id: string, _q: Question): Promise<GateRef> {
     return { id: 'g', advisory: false }
   }
@@ -442,6 +447,38 @@ function issueApp(tracker: Tracker) {
 }
 
 describe('issue mutations', () => {
+  test('POST /api/repos/:repo/issues/:id/close closes only the requested issue with its reason', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', type: 'epic' })
+    tracker.seed({ id: 'bd-2', type: 'epic' })
+    app = issueApp(tracker)
+
+    const res = await app.request('/api/repos/repo1/issues/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'completed' }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ id: 'bd-1', status: 'closed', reason: 'completed' })
+    expect(tracker.closed).toEqual([{ id: 'bd-1', reason: 'completed' }])
+    expect((await tracker.getIssue('bd-1'))?.status).toBe('closed')
+    expect((await tracker.getIssue('bd-2'))?.status).toBe('open')
+  })
+
+  test('POST /api/repos/:repo/issues/:id/close rejects a blank reason', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-1', type: 'epic' })
+    app = issueApp(tracker)
+    const res = await app.request('/api/repos/repo1/issues/bd-1/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: '   ' }),
+    })
+    expect(res.status).toBe(400)
+    expect(tracker.closed).toHaveLength(0)
+  })
+
   test('POST /api/repos/:repo/issues creates through the tracker and returns the issue', async () => {
     const tracker = new FakeIssueTracker()
     app = issueApp(tracker)
@@ -2278,6 +2315,50 @@ describe('GET /api/repos/:repo/events', () => {
     const res = await app.request('/api/repos/repo1/events?taskId=bd-2')
     const body = (await res.json()) as { taskId: string | null }[]
     expect(body.every((e) => e.taskId === 'bd-2')).toBe(true)
+  })
+})
+
+describe('GET /api/repos/:repo/watchers/:name/runs', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('returns a window of complete runs, newest first', async () => {
+    for (const runId of ['old', 'new']) {
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+      })
+      store.append(null, {
+        type: 'watcher.action',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+        targetType: 'task',
+        targetId: `am-${runId}`,
+        result: 'recovered',
+        level: 'info',
+      })
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+        ok: true,
+      })
+    }
+    const res = await app.request('/api/repos/repo1/watchers/stall-watcher/runs?limit=1')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      runs: { runId: string; actions: { targetId: string }[] }[]
+    }
+    expect(body.runs).toHaveLength(1)
+    expect(body.runs[0]?.runId).toBe('new')
+    expect(body.runs[0]?.actions[0]?.targetId).toBe('am-new')
   })
 })
 

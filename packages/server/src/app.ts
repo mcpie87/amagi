@@ -65,6 +65,8 @@ import {
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
+  WatcherHistoryParam,
+  WatcherHistoryQuery,
   WatcherParam,
   WatcherUpdateBody,
   WorkerCreateBody,
@@ -322,6 +324,22 @@ export function createApp({
       }
       return c.json(await beads.children(id))
     })
+
+    .post(
+      '/api/repos/:repo/issues/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (beadsTracker(ws) === null) {
+          return c.json({ error: `issue closure is unavailable for ${repo}` }, 501)
+        }
+        await ws.tracker.close(id, reason)
+        return c.json({ id, status: 'closed', reason })
+      },
+    )
 
     .post(
       '/api/repos/:repo/issues',
@@ -798,6 +816,24 @@ export function createApp({
       if (workers === undefined) return c.json(status)
       return c.json({ ...status, workers: workers() })
     })
+
+    .get(
+      '/api/repos/:repo/watchers/:name/runs',
+      valid('param', WatcherHistoryParam),
+      valid('query', WatcherHistoryQuery),
+      (c) => {
+        const { repo, name } = c.req.valid('param')
+        const { limit, beforeSeq } = c.req.valid('query')
+        const ws = resolveWorkspace(workspaces, repo)
+        const runs = ws.store.watcherRuns({
+          repo,
+          name,
+          limit,
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        })
+        return c.json({ runs, nextBeforeSeq: runs.at(-1)?.startSeq ?? null })
+      },
+    )
 
     .get('/api/runner/options', (c) => {
       if (runner === undefined || runnerRepo === undefined) {
