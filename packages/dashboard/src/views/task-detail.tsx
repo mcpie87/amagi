@@ -32,7 +32,8 @@ import {
 import { AgentLogView } from '../AgentLogView.tsx'
 import { apiBase } from '../api.ts'
 import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
-import { fmtRetryIn } from '../format.ts'
+import { useDateFormatPref } from '../date-format.ts'
+import { fmtDateTime, fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import { taskRoute } from '../routes.tsx'
 import { useDashboard, useRunner } from '../store.tsx'
@@ -462,6 +463,7 @@ const STATUS_CAUSE_LABEL: Record<StatusEntry['cause'], string | null> = {
 }
 
 function StatusLogView({ entries }: { entries: StatusEntry[] }) {
+  const dateFormat = useDateFormatPref()
   if (entries.length === 0) {
     return <p className="text-sm text-fg-faint">No state changes recorded yet.</p>
   }
@@ -477,14 +479,7 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                 dateTime={date.toISOString()}
                 className="w-44 shrink-0 font-mono text-xs tabular-nums text-fg-muted"
               >
-                {date.toLocaleString([], {
-                  year: 'numeric',
-                  month: 'short',
-                  day: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                })}
+                {fmtDateTime(date, dateFormat)}
               </time>
               <Badge state={entry.to} />
               {cause !== null && <span className="text-xs text-fg-faint">{cause}</span>}
