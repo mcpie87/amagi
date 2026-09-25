@@ -155,6 +155,15 @@ test('recovers a stalled implementing task, keeping its worktree, and reports it
   expect(watcher.activity().failures).toBe(0)
   expect(watcher.activity().status).toBe('active')
   expect(watcher.activity().nextRunAt).toBeGreaterThan(watcher.activity().lastRunAt)
+  const run = store
+    .watcherRuns({ repo: 'repo1', name: 'stall-watcher', limit: 20 })
+    .find((entry) => entry.actions.some((action) => action.targetId === 'bd-1'))
+  expect(run?.ok).toBe(true)
+  expect(
+    run?.actions.some(
+      (action) => action.targetId === 'bd-1' && action.result.includes('recovered after'),
+    ),
+  ).toBe(true)
 })
 
 test('a task with a fresh worker heartbeat is left alone', async () => {

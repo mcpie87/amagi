@@ -3,6 +3,7 @@ import {
   emptyProjection,
   type ProjectedQuestion,
   type ProjectedTask,
+  type ProjectedWatcherRun,
   type Projection,
   project,
 } from './project.ts'
@@ -52,6 +53,7 @@ export function reduceBatch(state: DashboardState, batch: readonly StoredEvent[]
   return {
     tasks: projection.tasks,
     questions: projection.questions,
+    watcherRuns: projection.watcherRuns,
     events: state.events.concat(batch),
     byTask,
     latestSeq: last.seq,
@@ -104,6 +106,19 @@ export function openQuestionsFor(state: DashboardState, taskId: string): Project
   return Object.values(state.questions)
     .filter((q) => q.taskId === taskId && q.resolvedAt === null)
     .sort((a, b) => a.askedAt - b.askedAt)
+}
+
+/** Completed and in-flight watcher runs, newest first. */
+export function watcherRunsFor(
+  state: DashboardState,
+  repo: string,
+  name: string,
+  limit = Number.MAX_SAFE_INTEGER,
+): ProjectedWatcherRun[] {
+  return Object.values(state.watcherRuns)
+    .filter((run) => run.repo === repo && run.name === name)
+    .sort((a, b) => b.startSeq - a.startSeq)
+    .slice(0, limit)
 }
 
 export function currentAgentFor(

@@ -2281,6 +2281,50 @@ describe('GET /api/repos/:repo/events', () => {
   })
 })
 
+describe('GET /api/repos/:repo/watchers/:name/runs', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('returns a window of complete runs, newest first', async () => {
+    for (const runId of ['old', 'new']) {
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+      })
+      store.append(null, {
+        type: 'watcher.action',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+        targetType: 'task',
+        targetId: `am-${runId}`,
+        result: 'recovered',
+        level: 'info',
+      })
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo: 'repo1',
+        name: 'stall-watcher',
+        runId,
+        ok: true,
+      })
+    }
+    const res = await app.request('/api/repos/repo1/watchers/stall-watcher/runs?limit=1')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      runs: { runId: string; actions: { targetId: string }[] }[]
+    }
+    expect(body.runs).toHaveLength(1)
+    expect(body.runs[0]?.runId).toBe('new')
+    expect(body.runs[0]?.actions[0]?.targetId).toBe('am-new')
+  })
+})
+
 describe('GET /api/repos/:repo/questions', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])

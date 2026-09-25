@@ -126,7 +126,7 @@ export function startPrConflictWatcher({
    * tick are forced through the driver so the mergeability job resolves
    * round-robin and coverage accrues without a tenfold call increase.
    */
-  async function observeMergeTree(prs: PrInfo[], run: Exec): Promise<void> {
+  async function observeMergeTree(prs: PrInfo[], run: Exec, runId: string): Promise<void> {
     const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
     const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
     for (const base of baseRefs) {
@@ -163,6 +163,18 @@ export function startPrConflictWatcher({
         })
       } catch (err) {
         logEvent(`PR #${p.number}: merge-tree check failed: ${errMsg(err)}`, 'error')
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(p.number),
+          prNumber: p.number,
+          url: p.url,
+          result: `merge-tree check failed: ${errMsg(err)}`,
+          level: 'error',
+        })
         console.warn(`merge-tree #${p.number}: ${errMsg(err)}`)
         continue
       }
@@ -180,6 +192,8 @@ export function startPrConflictWatcher({
 
   async function tick(): Promise<void> {
     runs++
+    const runId = `${Date.now()}-${runs}`
+    store.append(null, { type: 'watcher.run.started', repo, name: 'pr-conflict-watcher', runId })
     logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
@@ -206,7 +220,7 @@ export function startPrConflictWatcher({
       if (config.loop.mergeTreeCheck) {
         // Observation never blocks dispatch: a failed audit is logged and skipped.
         try {
-          await observeMergeTree(prs, run)
+          await observeMergeTree(prs, run, runId)
         } catch (err) {
           logEvent(`merge-tree observation failed: ${errMsg(err)}`, 'error')
           console.warn(`merge-tree observation: ${errMsg(err)}`)
@@ -250,8 +264,32 @@ export function startPrConflictWatcher({
           resolved++
           resolvedNow++
           logEvent(`PR #${pr.number}: conflict resolution dispatched`)
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'pr-conflict-watcher',
+            runId,
+            targetType: 'pr',
+            targetId: String(pr.number),
+            prNumber: pr.number,
+            url: pr.url,
+            result: 'conflict resolution dispatched',
+            level: 'info',
+          })
         } else {
           logEvent(`PR #${pr.number}: ${result.message}`, 'error')
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'pr-conflict-watcher',
+            runId,
+            targetType: 'pr',
+            targetId: String(pr.number),
+            prNumber: pr.number,
+            url: pr.url,
+            result: result.message,
+            level: 'error',
+          })
           console.warn(`pr conflict #${pr.number}: ${result.message}`)
           warnings.push(`#${pr.number}: ${result.message}`)
         }
@@ -268,6 +306,19 @@ export function startPrConflictWatcher({
         config,
         ...(exec === undefined ? {} : { exec }),
         ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+        onAction: (pr, result, level) =>
+          store.append(null, {
+            type: 'watcher.action',
+            repo,
+            name: 'pr-conflict-watcher',
+            runId,
+            targetType: 'pr',
+            targetId: String(pr.number),
+            prNumber: pr.number,
+            url: pr.url,
+            result,
+            level,
+          }),
       })
       flagged += pointless.flagged
       cleared += pointless.cleared
@@ -288,6 +339,18 @@ export function startPrConflictWatcher({
     next.counters = counters()
     next.log = log
     activity = next
+    try {
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo,
+        name: 'pr-conflict-watcher',
+        runId,
+        ok: next.ok,
+        error: next.error,
+      })
+    } catch (err) {
+      console.warn(`pr conflict watcher history: ${errMsg(err)}`)
+    }
     if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 

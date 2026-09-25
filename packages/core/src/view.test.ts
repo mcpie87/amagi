@@ -16,6 +16,7 @@ import {
   statusLog,
   taskEvents,
   tasksNeedingAttention,
+  watcherRunsFor,
 } from './view.ts'
 
 function ev(seq: number, taskId: string | null, ts: number, body: object): StoredEvent {
@@ -83,6 +84,44 @@ describe('dashboard state reducer', () => {
     expect(batched).toEqual(single)
     expect(taskEvents(batched, 'am-2').map((e) => e.seq)).toEqual([12, 13, 14])
     expect(taskEvents(batched, 'am-9')).toEqual([])
+  })
+
+  test('folds watcher starts, actions and outcomes into live durable history', () => {
+    const state = [
+      ev(1, null, 1000, {
+        type: 'watcher.run.started',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId: 'r1',
+      }),
+      ev(2, null, 1100, {
+        type: 'watcher.action',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId: 'r1',
+        targetType: 'mention',
+        targetId: '123',
+        prNumber: 45,
+        url: 'https://example/pr/45',
+        result: 'classified as explain',
+        level: 'info',
+      }),
+      ev(3, null, 1200, {
+        type: 'watcher.run.finished',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId: 'r1',
+        ok: false,
+        error: 'post failed',
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    const [run] = watcherRunsFor(state, 'repo', 'mention-watcher')
+    expect(run?.startedAt).toBe(1000)
+    expect(run?.actions[0]?.targetId).toBe('123')
+    expect(run?.actions[0]?.prNumber).toBe(45)
+    expect(run?.ok).toBe(false)
+    expect(run?.error).toBe('post failed')
+    expect(run?.log).toHaveLength(3)
   })
 
   test('a batch leaves the previous state untouched', () => {
