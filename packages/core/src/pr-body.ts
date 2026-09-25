@@ -131,10 +131,12 @@ export type PrBodyMeta = {
  */
 export const TASK_TRAILER_KEY = 'amagi-task'
 
-/** Reads the `amagi-task:` trailer back off a PR body, or null if absent. */
+/** Reads the task id comment or legacy visible trailer off a PR body. */
 export function taskIdFromPrBody(body: string): string | null {
-  const re = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
-  return body.match(re)?.[1] ?? null
+  const id = '(\\S+)'
+  const comment = new RegExp(`<!--\\s*${TASK_TRAILER_KEY}:\\s*${id}\\s*-->`)
+  const trailer = new RegExp(`^${TASK_TRAILER_KEY}:\\s*${id}\\s*$`, 'm')
+  return body.match(comment)?.[1] ?? body.match(trailer)?.[1] ?? null
 }
 
 /**
@@ -179,5 +181,5 @@ export function formatPrBody(
     lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
-  return `${lines.join('\n')}${footer}\n\n${TASK_TRAILER_KEY}: ${task.id}`
+  return `${lines.join('\n')}\n\n<!-- ${TASK_TRAILER_KEY}: ${task.id} -->${footer}`
 }
