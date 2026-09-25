@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
+import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
+import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
 import { FleetSettings } from './fleet.tsx'
@@ -13,6 +15,7 @@ const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
 function Appearance() {
   const pref = useThemePref()
   const theme = useTheme()
+  const dateFormat = useDateFormatPref()
 
   return (
     <div className="mt-6 rounded-lg border border-line bg-surface p-4">
@@ -37,6 +40,22 @@ function Appearance() {
             {option.label}
           </button>
         ))}
+      </div>
+      <div className="mt-5">
+        <label htmlFor="date-format" className="mb-1 block text-sm text-fg-muted">
+          Date format
+        </label>
+        <input
+          id="date-format"
+          type="text"
+          value={dateFormat}
+          onChange={(event) => setDateFormatPref(event.currentTarget.value)}
+          placeholder={DEFAULT_DATE_FORMAT}
+          className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+        />
+        <p className="mt-1 text-xs text-fg-faint">
+          Tokens: YYYY, MM, DD, hh, mm, ss. Example: {fmtDateTime(Date.now(), dateFormat)}.
+        </p>
       </div>
     </div>
   )

@@ -242,8 +242,11 @@ export async function resolveConflict(
   }
 }
 
-/** Last-attempted head per conflicting PR, so the watcher can skip unchanged heads. */
-export type ConflictWatchState = Record<string, { headOid: string; verdict?: PointlessVerdict }>
+/** Last-attempted PR head and base head per conflicting PR, so the watcher can skip unchanged pairs. */
+export type ConflictWatchState = Record<
+  string,
+  { headOid: string; baseOid?: string; verdict?: PointlessVerdict }
+>
 
 export function conflictWatchPath(repoName: string): string {
   return join(cacheHome(), 'amagi', 'conflicts', `${repoName}.json`)

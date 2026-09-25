@@ -18,7 +18,16 @@ import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge, PILL } from '../badges.tsx'
-import { fmtBytes, fmtCpu, fmtElapsed, fmtInterval, fmtLastRun, fmtUntil } from '../format.ts'
+import { useDateFormatPref } from '../date-format.ts'
+import {
+  fmtBytes,
+  fmtCpu,
+  fmtDateTime,
+  fmtElapsed,
+  fmtInterval,
+  fmtLastRun,
+  fmtUntil,
+} from '../format.ts'
 import { useDashboard, useRunner } from '../store.tsx'
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
@@ -159,6 +168,7 @@ function WatcherDetailDialog({
   onClose: () => void
 }) {
   const { state } = useDashboard()
+  const dateFormat = useDateFormatPref()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const open = selected !== null
   useEffect(() => {
@@ -170,6 +180,19 @@ function WatcherDetailDialog({
   if (selected === null) return null
   const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
   const history = watcher === null ? [] : watcherRunsFor(state, watcher.repo, watcher.name)
+  const historyGroups: (typeof history)[] = []
+  for (const run of history) {
+    const previous = historyGroups.at(-1)
+    if (run.actions.length === 0 && run.error === null) {
+      if (previous?.every((item) => item.actions.length === 0 && item.error === null)) {
+        previous.push(run)
+      } else {
+        historyGroups.push([run])
+      }
+    } else {
+      historyGroups.push([run])
+    }
+  }
   const liveLog = history
     .flatMap((run) => run.log)
     .sort((a, b) => b.ts - a.ts)
@@ -198,7 +221,7 @@ function WatcherDetailDialog({
       {watcher === null ? (
         <p className="px-4 py-6 text-sm text-fg-faint">watcher no longer running</p>
       ) : (
-        <div className="p-4">
+        <div className="watcher-dialog-content p-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>
               {watcher.name}
@@ -227,7 +250,7 @@ function WatcherDetailDialog({
               </dd>
               {watcher.lastRunAt > 0 && (
                 <dd className="text-xs tabular-nums text-fg-faint">
-                  {new Date(watcher.lastRunAt).toLocaleString()}
+                  {fmtDateTime(watcher.lastRunAt, dateFormat)}
                 </dd>
               )}
             </div>
@@ -270,69 +293,92 @@ function WatcherDetailDialog({
             {history.length === 0 ? (
               <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
             ) : (
-              <div className="mt-2 space-y-2">
-                {history.map((run) => (
-                  <details
-                    key={run.runId}
-                    className="rounded border border-line bg-surface/60 px-3 py-2"
-                  >
-                    <summary className="cursor-pointer text-xs text-fg">
-                      <span className="tabular-nums">
-                        {new Date(run.startedAt).toLocaleString()}
-                      </span>
-                      <span
-                        className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+              <div className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-1">
+                {historyGroups.map((group) => {
+                  if (group.length > 1) {
+                    const newest = group[0]
+                    const oldest = group[group.length - 1]
+                    if (newest === undefined || oldest === undefined) return null
+                    return (
+                      <div
+                        key={`noop-${newest.runId}-${oldest.runId}`}
+                        className="rounded border border-line bg-surface/60 px-3 py-2 text-xs text-fg"
                       >
-                        {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
-                      </span>
-                      <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
-                    </summary>
-                    {run.error !== null && (
-                      <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
-                    )}
-                    {run.actions.length === 0 ? (
-                      <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
-                    ) : (
-                      <ul className="mt-2 space-y-1 text-xs">
-                        {run.actions.map((action, index) => (
-                          <li
-                            key={`${run.runId}-${index}`}
-                            className={action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
-                          >
-                            {action.targetType === 'task' ? (
-                              <Link
-                                to="/tasks/$id"
-                                params={{ id: action.targetId }}
-                                className="text-blue-ink hover:underline"
-                              >
-                                task {action.targetId}
-                              </Link>
-                            ) : action.url !== undefined ? (
-                              <a
-                                href={action.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-blue-ink hover:underline"
-                              >
-                                {action.targetType === 'mention'
-                                  ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
-                                  : `PR #${action.prNumber ?? action.targetId}`}
-                              </a>
-                            ) : (
-                              <span>
-                                {action.targetType === 'mention'
-                                  ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
-                                  : `${action.targetType} ${action.targetId}`}
-                              </span>
-                            )}
-                            {': '}
-                            {action.result}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </details>
-                ))}
+                        <span className="tabular-nums">
+                          {fmtDateTime(newest.startedAt, dateFormat)} -{' '}
+                          {fmtDateTime(oldest.startedAt, dateFormat)}
+                        </span>
+                        <span className="ml-2 text-fg-faint">{group.length} runs, 0 actions</span>
+                      </div>
+                    )
+                  }
+                  const run = group[0]
+                  if (run === undefined) return null
+                  return (
+                    <details
+                      key={run.runId}
+                      className="rounded border border-line bg-surface/60 px-3 py-2"
+                    >
+                      <summary className="cursor-pointer text-xs text-fg">
+                        <span className="tabular-nums">
+                          {fmtDateTime(run.startedAt, dateFormat)}
+                        </span>
+                        <span
+                          className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+                        >
+                          {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
+                        </span>
+                        <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
+                      </summary>
+                      {run.error !== null && (
+                        <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
+                      )}
+                      {run.actions.length === 0 ? (
+                        <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
+                      ) : (
+                        <ul className="mt-2 space-y-1 text-xs">
+                          {run.actions.map((action, index) => (
+                            <li
+                              key={`${run.runId}-${index}`}
+                              className={
+                                action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'
+                              }
+                            >
+                              {action.targetType === 'task' ? (
+                                <Link
+                                  to="/tasks/$id"
+                                  params={{ id: action.targetId }}
+                                  className="text-blue-ink hover:underline"
+                                >
+                                  task {action.targetId}
+                                </Link>
+                              ) : action.url !== undefined ? (
+                                <a
+                                  href={action.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-blue-ink hover:underline"
+                                >
+                                  {action.targetType === 'mention'
+                                    ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                    : `PR #${action.prNumber ?? action.targetId}`}
+                                </a>
+                              ) : (
+                                <span>
+                                  {action.targetType === 'mention'
+                                    ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                    : `${action.targetType} ${action.targetId}`}
+                                </span>
+                              )}
+                              {': '}
+                              {action.result}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </details>
+                  )
+                })}
               </div>
             )}
           </div>

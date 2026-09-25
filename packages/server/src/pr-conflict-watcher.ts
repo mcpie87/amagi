@@ -55,7 +55,8 @@ const DEFAULT_INTERVAL_MS = 300_000
 /**
  * The shared PR watcher: one listOpenPrs per tick feeds the conflict and
  * pointlessness passes over the same list, so no fourth poll loop hammers the
- * endpoint. Conflicts are resolved one per head SHA; amagi PRs whose diff
+ * endpoint. Conflicts are resolved once per (PR head, base head) pair, so a
+ * failed attempt is retried when either side moves; amagi PRs whose diff
  * against base is empty get flagged (label + comments, task parked in
  * pr_flagged), and a flag is cleared once real commits arrive. Ticks are
  * sequential: a long resolution delays the next scan rather than stacking on
@@ -190,6 +191,19 @@ export function startPrConflictWatcher({
     }
   }
 
+  /** The base branch's remote head, so a base move re-arms PRs already attempted. */
+  async function baseHeadOid(run: Exec): Promise<string> {
+    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
+    const ref = `refs/heads/${config.repo.baseBranch}`
+    const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', ref], { cwd: root })
+    return (
+      out
+        .split('\n')
+        .map((line) => line.split('\t'))
+        .find(([, name]) => name === ref)?.[0] ?? ''
+    )
+  }
+
   async function tick(): Promise<void> {
     runs++
     const runId = `${Date.now()}-${runs}`
@@ -232,13 +246,14 @@ export function startPrConflictWatcher({
       const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
       conflicting = conflicts.length
       if (conflicts.length > 0) logEvent(`found ${conflicts.length} conflicting PR(s)`)
+      const baseOid = conflicts.length > 0 ? await baseHeadOid(run) : ''
       let resolvedNow = 0
       const warnings: string[] = []
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
-        if (seen !== undefined && seen.headOid === headOid) {
+        if (seen !== undefined && seen.headOid === headOid && seen.baseOid === baseOid) {
           nextState[key] = seen
           continue
         }
@@ -254,6 +269,7 @@ export function startPrConflictWatcher({
         })
         nextState[key] = {
           headOid,
+          baseOid,
           ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
