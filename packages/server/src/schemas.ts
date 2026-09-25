@@ -123,7 +123,7 @@ export const WorkerCreateBody = z.object({
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
   seat: z.string().trim().min(1).optional(),
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
 })
 export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
 
@@ -136,8 +136,6 @@ export const WorkerUpdateBody = z
     effort: z.string().trim().min(1).nullable().optional(),
     seat: z.string().trim().min(1).nullable().optional(),
     enabled: z.boolean().optional(),
-    /** Runtime only: whether the auto-queue may dispatch to this worker. Never persisted. */
-    on: z.boolean().optional(),
   })
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>
