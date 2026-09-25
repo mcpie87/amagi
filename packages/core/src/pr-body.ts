@@ -39,6 +39,26 @@ export async function changesSinceBase(run: Exec, cwd: string, base: string): Pr
 /** Headings an agent appends to the task description to document the PR. */
 const SECTION_HEADING = /^###\s+(How to use|Conclusion)\s*$/gm
 
+function stripPreflightSection(text: string): string {
+  const headings = [...text.matchAll(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)].map((m) => ({
+    index: m.index ?? 0,
+    level: m[1]?.length ?? 1,
+    title: m[2]?.trim() ?? '',
+  }))
+  let result = ''
+  let cursor = 0
+
+  for (const [i, heading] of headings.entries()) {
+    if (heading.index < cursor) continue
+    if (!/^Pre-flight(?:\s+\([^\r\n]*\))?$/i.test(heading.title)) continue
+    result += text.slice(cursor, heading.index)
+    const next = headings.slice(i + 1).find((candidate) => candidate.level <= heading.level)
+    cursor = next?.index ?? text.length
+  }
+
+  return result + text.slice(cursor)
+}
+
 /**
  * Splits a task description into its summary and any agent-authored sections:
  * `### How to use` (optional, when the PR adds a user-facing feature) and
@@ -157,7 +177,8 @@ export function formatPrBody(
     '',
     `**Task:** \`${task.id}\`${created === null ? '' : ` · ${created}`}`,
   ]
-  const { summary, howToUse, conclusion } = splitDescription(task.description)
+  const { summary: descriptionSummary, howToUse, conclusion } = splitDescription(task.description)
+  const summary = stripPreflightSection(descriptionSummary).trim()
   const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
   lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
