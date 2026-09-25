@@ -120,10 +120,9 @@ body), and stops a run it owns (`POST /api/runs/:id/stop`). Stop is graceful:
 the owned agent process is killed, the tracker lease is released, and the task
 is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
-server dispatches through workers in the global `worker` fleet. Automatic
-dispatch uses enabled workers that are switched on and have a free seat; manual
-dispatch can target an enabled worker while it is off. Workers sharing a seat
-serialize their runs. The dashboard surfaces runner status from the task board
+server dispatches through the enabled workers in the global `worker` fleet,
+manually or, while the global `loop.autoQueue` is on, automatically whenever an
+enabled worker has a free seat. Workers sharing a seat serialize their runs. The dashboard surfaces runner status from the task board
 and task detail pages.
 
 `GET /api/runner` also carries per-task resource usage for the runner, summed
@@ -217,6 +216,7 @@ name = "Claude fast"
 kind = "claude"
 model = "claude-sonnet"
 seat = "claude-subscription"
+enabled = true
 
 [[worker]]
 id = "claude-careful"
@@ -224,19 +224,20 @@ name = "Claude careful"
 kind = "claude"
 model = "claude-opus"
 seat = "claude-subscription"
+enabled = true
 ```
 
-Each worker's `enabled` setting is its persistent configuration toggle and
-defaults to `true`. The dashboard's **On** toggle is separate, applies at
-runtime, and resets to off when the server restarts. Automatic dispatch needs
-both toggles on and a free seat. Manual dispatch can use an enabled worker even
-when its runtime toggle is off.
+A worker is either enabled or not: `enabled` defaults to `false`, persists
+across server restarts, and can also be flipped from the dashboard. Only
+enabled workers take runs, manual or automatic. Whether runs are dispatched
+automatically is the global **Auto queue** setting (`loop.autoQueue`), not a
+per-worker one.
 
 A seat names the credential an agent uses. Amagi guarantees that at most one
 agent is live on a seat at a time, even when different workers, watchers, or a
 chat reply request it. A worker without an explicit seat uses its harness kind
-as the seat name. Capacity is derived from the distinct free seats of enabled,
-switched-on workers, rather than from the number of worker entries: workers
+as the seat name. Capacity is derived from the distinct free seats of enabled
+workers, rather than from the number of worker entries: workers
 sharing a credential must take turns, while workers on separate credentials
 can run concurrently.
 
@@ -257,7 +258,7 @@ Every key is optional; the table below gives the schema and defaults.
 | `worker[].model` | string | *(harness default)* | Model passed to the harness. |
 | `worker[].effort` | string | *(harness default)* | Reasoning effort passed to the harness. |
 | `worker[].seat` | string | `worker[].kind` | Credential seat used by the worker; workers with the same seat serialize. |
-| `worker[].enabled` | boolean | `true` | Persistent availability toggle. The dashboard's runtime **On** toggle is separate and resets off after a server restart. |
+| `worker[].enabled` | boolean | `false` | Whether the worker takes runs, manual or automatic. Persisted, and editable from the dashboard. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
 | `watchers.mention.model` | string | `harness.implement.model` | Model for mention responses. |
