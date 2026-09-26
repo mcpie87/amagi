@@ -33,8 +33,8 @@ type SeatTicket = {
 type SeatHolder = SeatTicket
 
 export type SeatLockOptions = {
-  /** Maximum time to wait for this seat before rejecting. Defaults to five minutes. */
-  maxWaitMs?: number
+  /** Maximum time to wait for this seat before rejecting. Defaults to five minutes, null waits indefinitely. */
+  maxWaitMs?: number | null
   /** Called once when another holder or waiter is ahead. */
   onWaiting?: (message: string) => void
   /** Directory override for tests and isolated callers. */
@@ -180,8 +180,8 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
   const queueDir = join(dir, 'queue')
   mkdirSync(queueDir, { recursive: true })
 
-  const maxWaitMs = options.maxWaitMs ?? DEFAULT_WAIT_MS
-  const deadline = Date.now() + maxWaitMs
+  const maxWaitMs = options.maxWaitMs === undefined ? DEFAULT_WAIT_MS : options.maxWaitMs
+  const deadline = maxWaitMs === null ? Number.POSITIVE_INFINITY : Date.now() + maxWaitMs
   const id = await withAllocator(dir, deadline, () => {
     const sequencePath = join(dir, 'sequence')
     let sequence = 0
@@ -231,6 +231,7 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
   }
 
   rmSync(ticketPath(dir, id), { force: true })
+  if (maxWaitMs === null) throw new Error(`seat ${seat} wait ended unexpectedly`)
   throw new SeatWaitTimeoutError(seat, maxWaitMs)
 }
 

@@ -174,6 +174,61 @@ class FakeHarness implements Harness {
   }
 }
 
+class ReviewHarness implements Harness {
+  readonly kind = 'codex'
+  readonly calls: { resumeFrom: string | null; opts: AgentStartOptions }[] = []
+
+  constructor(private readonly outputs: string[]) {}
+
+  start(opts: AgentStartOptions): AgentProcess {
+    return this.run(null, opts)
+  }
+
+  resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
+    return this.run(sessionId, opts)
+  }
+
+  async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+
+  private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
+    this.calls.push({ resumeFrom, opts })
+    if (!opts.prompt.includes('runner stores your final response')) {
+      throw new Error('review prompt did not explain where findings are stored')
+    }
+    const summary = this.outputs.shift() ?? '[]'
+    const queue = new AsyncQueue<AgentEvent>()
+    queue.push({
+      kind: 'usage',
+      inputTokens: 12,
+      outputTokens: 3,
+      cachedTokens: 0,
+      costUsd: 0.01,
+    })
+    queue.close()
+    const sessionId = `review-session-${this.calls.length}`
+    return {
+      pid: -1,
+      events: () => queue,
+      done: Promise.resolve({
+        exitCode: 0,
+        ok: true,
+        sessionId,
+        summary,
+        usage: null,
+        stderr: '',
+      }),
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+  }
+}
+
 /** An agent process that stays running until killed, so a cancel can interrupt it. */
 class BlockingHarness implements Harness {
   readonly kind = 'fake'
@@ -283,6 +338,7 @@ const makeRunner = (
   forge = new FakePr(),
   runExec: Exec = exec,
   leaseHeartbeatMs?: number,
+  reviewerHarness?: Harness,
 ) =>
   new Runner({
     store,
@@ -292,6 +348,7 @@ const makeRunner = (
     repoRoot: repo,
     repoName: 'demo',
     forge,
+    reviewerHarness,
     exec: runExec,
     ...(leaseHeartbeatMs === undefined ? {} : { leaseHeartbeatMs }),
   })
@@ -426,6 +483,107 @@ const cancelMidRun = async (): Promise<void> => {
   })
   expect((await pending)?.state).toBe('cancelled')
 }
+
+describe('Runner.review', () => {
+  const finding = {
+    id: 'F-1',
+    severity: 'major',
+    scope: 'in-scope',
+    path: 'README.md',
+    line: 1,
+    title: 'Missing behavior',
+    evidence: 'The new behavior is absent.',
+    failureScenario: 'A user cannot complete the task.',
+  } as const
+  const reviewConfig = () =>
+    config({
+      harness: { implement: { kind: 'claude', seat: 'implement-seat' } },
+      review: { harness: { kind: 'codex', seat: 'review-seat' } },
+    })
+  const registerTask = () =>
+    store.append(TASK.id, {
+      type: 'task.claimed',
+      title: TASK.title,
+      tracker: 'fake',
+      description: TASK.description,
+    })
+
+  test('valid findings resume across rounds and final pass starts a fresh session', async () => {
+    registerTask()
+    writeFileSync(join(repo, 'README.md'), '# first change\n')
+    const reviewer = new ReviewHarness([JSON.stringify([finding]), '[]', '[]'])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const first = await runner.review({ task: TASK, cwd: repo, round: 1 })
+    expect(first.ok).toBe(true)
+    expect(first.findings).toEqual([finding])
+    expect(reviewer.calls[0]?.resumeFrom).toBeNull()
+    expect(reviewer.calls[0]?.opts.permissions).toBe('read-only')
+    expect(reviewer.calls[0]?.opts.seat).toBe('review-seat')
+    expect(reviewer.calls[0]?.opts.seatMaxWaitMs).toBeNull()
+    expect(reviewer.calls[0]?.opts.outputSchema).toBeDefined()
+    expect(
+      store
+        .events({ taskId: TASK.id, limit: 999 })
+        .some(
+          (event) =>
+            event.type === 'agent.stream' &&
+            event.role === 'review' &&
+            event.event.kind === 'usage',
+        ),
+    ).toBe(true)
+
+    writeFileSync(join(repo, 'README.md'), '# second change\n')
+    const second = await runner.review({
+      task: TASK,
+      cwd: repo,
+      round: 2,
+      previousSnapshot: first.snapshot,
+      previousFindings: first.findings,
+      replies: [{ id: 'F-1', outcome: 'fixed', reason: 'Addressed.' }],
+    })
+    expect(second.ok).toBe(true)
+    expect(reviewer.calls[1]?.resumeFrom).toBe(first.reviewerSession)
+    expect(reviewer.calls[1]?.opts.prompt).toContain('-# first change\n+# second change')
+    expect(reviewer.calls[1]?.opts.prompt).not.toContain('# demo')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('Prior findings:')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
+
+    await runner.review({ task: TASK, cwd: repo, round: 3, finalPass: true })
+    expect(reviewer.calls[2]?.resumeFrom).toBeNull()
+  })
+
+  test('invalid findings are re-asked once in the same session and reported as failed', async () => {
+    registerTask()
+    const reviewer = new ReviewHarness(['not json', '{"not":"an array"}'])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const result = await runner.review({ task: TASK, cwd: repo, round: 1 })
+
+    expect(result.ok).toBe(false)
+    expect(reviewer.calls).toHaveLength(2)
+    expect(reviewer.calls[0]?.resumeFrom).toBeNull()
+    expect(reviewer.calls[1]?.resumeFrom).toBe('review-session-1')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('previous output was invalid')
+    expect(types(TASK.id)).toContain('review.failed')
+  })
+})
 
 describe('Runner.runOnce', () => {
   test('an empty queue is not an error', async () => {

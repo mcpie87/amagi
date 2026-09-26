@@ -77,6 +77,7 @@ export function spawnAgent(
     let lease: Awaited<ReturnType<typeof acquireSeat>> | undefined
     try {
       lease = await acquireSeat(seat, {
+        ...(opts.seatMaxWaitMs === undefined ? {} : { maxWaitMs: opts.seatMaxWaitMs }),
         signal: abort.signal,
         onWaiting: (message) => queue.push({ kind: 'status', message }),
       })

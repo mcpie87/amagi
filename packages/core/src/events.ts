@@ -295,6 +295,13 @@ export const EventBody = z.discriminatedUnion('type', [
     round: z.number().int().positive(),
     findings: z.array(Finding),
     blockingIds: z.array(z.string().min(1)),
+    snapshot: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('review.failed'),
+    round: z.number().int().positive(),
+    reason: z.string().min(1),
+    snapshot: z.string().min(1),
   }),
   z.object({
     type: z.literal('review.fixed'),

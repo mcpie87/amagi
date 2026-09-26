@@ -253,6 +253,36 @@ describe('OpencodeHarness process', () => {
     }
   })
 
+  test('read-only mode denies shell and file mutation tools', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'opencode-env-'))
+    try {
+      const bin = join(dir, 'echo-env')
+      writeFileSync(bin, '#!/bin/sh\nprintf %s "$OPENCODE_CONFIG_CONTENT" >&2\n')
+      chmodSync(bin, 0o755)
+      const outcome = await new OpencodeHarness({ bin }).start({
+        cwd: dir,
+        prompt: 'x',
+        permissions: 'read-only',
+      }).done
+      expect(JSON.parse(outcome.stderr)).toEqual({
+        permission: {
+          read: 'allow',
+          glob: 'allow',
+          grep: 'allow',
+          list: 'allow',
+          lsp: 'allow',
+          edit: 'deny',
+          write: 'deny',
+          patch: 'deny',
+          bash: 'deny',
+          skill: 'deny',
+        },
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('opts.env still overrides the skill deny', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'opencode-env-'))
     try {

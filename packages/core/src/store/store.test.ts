@@ -80,6 +80,7 @@ describe('Store', () => {
       round: 2,
       findings,
       blockingIds: ['finding-1'],
+      snapshot: 'tree-snapshot',
     })
     store.append('bd-1', {
       type: 'review.stopped',

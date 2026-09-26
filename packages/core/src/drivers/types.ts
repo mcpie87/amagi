@@ -6,6 +6,7 @@ export type TrackerTask = {
   id: string
   title: string
   description: string
+  acceptanceCriteria?: string | null
   status: TrackerStatus
   priority: number | null
   type: string | null
@@ -133,7 +134,7 @@ export interface Tracker {
   resolveGate(ref: GateRef): Promise<void>
 }
 
-export type Permissions = 'workspace-write' | 'bypass'
+export type Permissions = 'read-only' | 'workspace-write' | 'bypass'
 
 export type AgentStartOptions = {
   cwd: string
@@ -148,6 +149,10 @@ export type AgentStartOptions = {
   allowedTools?: readonly string[]
   env?: Record<string, string>
   extraArgs?: readonly string[]
+  /** Path to a JSON schema passed to harnesses that support constrained output. */
+  outputSchema?: string
+  /** Seat wait limit in ms, or null to wait without a timeout. */
+  seatMaxWaitMs?: number | null
   /** Identifies watcher agents while they hold a shared credential seat. */
   seatActivity?: { repo: string; watcher: string }
 }

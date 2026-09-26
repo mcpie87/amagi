@@ -1,6 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import * as z from 'zod'
 import { lintCommitMessage } from './commit-lint.ts'
-import type { Config } from './config.ts'
+import { type Config, reviewerHarnessConfig } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
@@ -11,12 +14,15 @@ import {
   type AgentRole,
   type CheckResult,
   currentAttemptEvents,
+  Finding,
+  type FindingReply,
   isTerminal,
+  type Finding as ReviewFinding,
   type StoredEvent,
   type TaskState,
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
-import { harnessStartOpts } from './factory.ts'
+import { harnessStartOpts, makeHarness } from './factory.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -44,6 +50,7 @@ import {
   withRestartHandoff,
 } from './prompt.ts'
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
+import { reviewPrompt } from './review-pack.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
 import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
 import { applyRepoIdentity, createWorktree, type WorktreeSpec } from './worktree.ts'
@@ -58,6 +65,8 @@ export type RunnerDeps = {
   exec?: Exec | undefined
   /** Overridable so tests do not need gh installed. Defaults to the configured forge driver. */
   forge?: PrDriver | undefined
+  /** Override the configured reviewer harness in tests. */
+  reviewerHarness?: Harness | undefined
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
   /**
@@ -188,8 +197,10 @@ function parseViabilityDecision(
  * harness without a dollar figure (codex) skips it rather than counting zero.
  */
 class TaskBudget {
+  private pausedAt: number | null = null
+
   constructor(
-    private readonly startedAt: number,
+    private startedAt: number,
     private readonly maxRunMs: number,
     private readonly maxCostUsd: number,
     private costUsd = 0,
@@ -197,7 +208,17 @@ class TaskBudget {
   ) {}
 
   elapsedMs(): number {
-    return Date.now() - this.startedAt
+    return (this.pausedAt ?? Date.now()) - this.startedAt
+  }
+
+  pause(): void {
+    this.pausedAt ??= Date.now()
+  }
+
+  resume(): void {
+    if (this.pausedAt === null) return
+    this.startedAt += Date.now() - this.pausedAt
+    this.pausedAt = null
   }
 
   addCost(costUsd: number): void {
@@ -216,6 +237,25 @@ class TaskBudget {
     }
     return null
   }
+}
+
+export type ReviewRoundOptions = {
+  task: TrackerTask
+  cwd: string
+  round: number
+  finalPass?: boolean
+  previousSnapshot?: string
+  previousFindings?: readonly ReviewFinding[]
+  replies?: readonly FindingReply[]
+  reviewerSession?: string | null
+}
+
+export type ReviewRoundResult = {
+  ok: boolean
+  findings: ReviewFinding[]
+  reviewerSession: string | null
+  snapshot: string
+  reason: string | null
 }
 
 /**
@@ -274,6 +314,177 @@ export class Runner {
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
+  }
+
+  /** Run one schema-checked review round. The review session is kept separate from the implementer session. */
+  async review(
+    options: ReviewRoundOptions,
+    budget: TaskBudget | null = null,
+  ): Promise<ReviewRoundResult> {
+    const { store, config } = this.deps
+    const { task, cwd, round } = options
+    if (!Number.isInteger(round) || round < 1) throw new Error('review round must be positive')
+    const finalPass = options.finalPass ?? false
+    const runState = runStateDir(task.id)
+    mkdirSync(runState, { recursive: true })
+    const beforeTree = await this.snapshotTree(cwd)
+    let fromTree: string
+    if (options.previousSnapshot) {
+      fromTree = options.previousSnapshot
+    } else {
+      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      fromTree = (await execOk(this.exec, ['git', 'merge-base', base, 'HEAD'], { cwd })).trim()
+    }
+    const diff = await execOk(this.exec, ['git', 'diff', '--binary', fromTree, beforeTree], { cwd })
+    const changedFiles = (
+      await execOk(this.exec, ['git', 'diff', '--name-only', fromTree, beforeTree], {
+        cwd,
+      })
+    )
+      .split('\n')
+      .filter(Boolean)
+    const openIssues = await this.deps.tracker.ready(200)
+    const outputPath = join(runState, `review-${round}-${Date.now()}.json`)
+    const schemaPath = join(runState, `review-${round}-${Date.now()}.schema.json`)
+    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(z.array(Finding)), null, 2))
+    const instructions = [
+      `Task: ${task.id} ${task.title}`,
+      `Description:\n${task.description}`,
+      `Acceptance criteria:\n${task.acceptanceCriteria ?? '(none provided)'}`,
+      finalPass
+        ? 'This is the final review pass. Start a fresh reviewer session.'
+        : `Review round ${round}.`,
+      options.previousSnapshot
+        ? `Review only this delta since snapshot ${options.previousSnapshot}. Prior findings and implementer replies follow.`
+        : 'Review the complete change against the base branch.',
+      options.previousFindings?.length
+        ? `Prior findings:\n${JSON.stringify(options.previousFindings, null, 2)}`
+        : '',
+      options.replies?.length
+        ? `Implementer replies:\n${JSON.stringify(options.replies, null, 2)}`
+        : '',
+      `Open issue ids and titles for covers:\n${openIssues.map((issue) => `${issue.id}: ${issue.title}`).join('\n') || '(none)'}`,
+      `Change under review:\n${diff || '(no diff)'}`,
+      `Return only the findings JSON array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+    const prompt = reviewPrompt({
+      repoRoot: this.deps.repoRoot,
+      changedFiles,
+      roundInstructions: instructions,
+    })
+    const reviewerConfig = reviewerHarnessConfig(config)
+    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
+    const previousReviewerSession = finalPass
+      ? null
+      : (options.reviewerSession ?? this.latestReviewerSession(task.id))
+    store.append(task.id, {
+      type: 'review.started',
+      round,
+      finalPass,
+      reviewerSession: previousReviewerSession,
+    })
+
+    let reviewerSession = previousReviewerSession
+    let reason: string | null = null
+    let findings: ReviewFinding[] | null = null
+    const runOpts = {
+      cwd,
+      prompt,
+      permissions: 'read-only' as const,
+      seatMaxWaitMs: null,
+      extraArgs: reviewerConfig.extraArgs,
+      ...(reviewerConfig.seat === undefined ? {} : { seat: reviewerConfig.seat }),
+      ...(reviewerConfig.model === undefined ? {} : { model: reviewerConfig.model }),
+      ...(reviewerConfig.effort === undefined ? {} : { effort: reviewerConfig.effort }),
+      ...(harness.kind === 'codex' ? { outputSchema: schemaPath } : {}),
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) {
+        try {
+          rmSync(outputPath, { force: true })
+        } catch {
+          /* no previous output */
+        }
+      }
+      const run = await this.runAgentWithRetry(
+        task.id,
+        reviewerSession,
+        {
+          ...runOpts,
+          prompt:
+            attempt === 0
+              ? prompt
+              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON array.`,
+        },
+        'review',
+        null,
+        budget,
+        'review',
+        harness,
+      )
+      reviewerSession = run.sessionId
+      if (run.stopped) {
+        reason = run.summary ?? 'reviewer agent failed'
+        break
+      }
+      try {
+        writeFileSync(outputPath, run.summary ?? '')
+        const parsed: unknown = JSON.parse(readFileSync(outputPath, 'utf8'))
+        findings = z.array(Finding).parse(parsed)
+        reason = null
+        break
+      } catch (error) {
+        reason = `reviewer output was not valid findings JSON: ${errMsg(error)}`
+      }
+    }
+
+    const snapshot = await this.snapshotTree(cwd)
+    rmSync(outputPath, { force: true })
+    rmSync(schemaPath, { force: true })
+    if (findings === null) {
+      const failure = reason ?? 'reviewer did not produce findings JSON'
+      store.append(task.id, { type: 'review.failed', round, reason: failure, snapshot })
+      store.append(task.id, {
+        type: 'error',
+        message: `review round ${round} failed: ${failure}`,
+        fatal: false,
+      })
+      return { ok: false, findings: [], reviewerSession, snapshot, reason: failure }
+    }
+    store.append(task.id, {
+      type: 'review.finished',
+      round,
+      findings,
+      blockingIds: [],
+      snapshot,
+    })
+    return { ok: true, findings, reviewerSession, snapshot, reason: null }
+  }
+
+  private latestReviewerSession(taskId: string): string | null {
+    return (
+      this.deps.store
+        .events({ taskId, limit: 5000 })
+        .filter(
+          (event): event is Extract<StoredEvent, { type: 'agent.exited' }> =>
+            event.type === 'agent.exited' && event.role === 'review' && event.sessionId !== null,
+        )
+        .at(-1)?.sessionId ?? null
+    )
+  }
+
+  private async snapshotTree(cwd: string): Promise<string> {
+    const index = join(tmpdir(), `amagi-review-index-${crypto.randomUUID()}`)
+    const env = { GIT_INDEX_FILE: index }
+    try {
+      await execOk(this.exec, ['git', 'read-tree', 'HEAD'], { cwd, env })
+      await execOk(this.exec, ['git', 'add', '--all'], { cwd, env })
+      return (await execOk(this.exec, ['git', 'write-tree'], { cwd, env })).trim()
+    } finally {
+      rmSync(index, { force: true })
+    }
   }
 
   /**
@@ -1011,8 +1222,9 @@ export class Runner {
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
     phase: string,
-    budget: TaskBudget,
+    budget: TaskBudget | null,
     role: AgentRole = 'implement',
+    harness: Harness = this.deps.harness,
   ): Promise<{
     sessionId: string | null
     ok: boolean
@@ -1022,14 +1234,14 @@ export class Runner {
     effort: string | null
     contextExceeded: boolean
   }> {
-    const { store, harness } = this.deps
+    const { store } = this.deps
     const runState = runStateDir(taskId)
     mkdirSync(runState, { recursive: true })
     const spawn = {
       ...opts,
       ...(opts.seat !== undefined
         ? {}
-        : this.deps.config.harness.implement.seat === undefined
+        : role === 'review' || this.deps.config.harness.implement.seat === undefined
           ? {}
           : { seat: this.deps.config.harness.implement.seat }),
       env: {
@@ -1047,11 +1259,16 @@ export class Runner {
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
+    let budgetPausedForSeat = false
 
     // The store is the shared interrupt channel: `amagi stop` or the API parks
     // the task in `cancelled`, and this poll kills the agent process so a hung
     // harness is stopped without reaching into the runner process.
     const cancelWatch = setInterval(() => {
+      if (budgetPausedForSeat && proc.pid > 0) {
+        budget?.resume()
+        budgetPausedForSeat = false
+      }
       if (store.task(taskId)?.state !== 'cancelled') return
       this.cancelled = true
       clearInterval(cancelWatch)
@@ -1074,6 +1291,14 @@ export class Runner {
       let started = false
       let contextExceeded = false
       for await (const event of proc.events()) {
+        if (event.kind === 'status' && event.message.startsWith('waiting for seat ')) {
+          budget?.pause()
+          budgetPausedForSeat = budget !== null
+        }
+        if (budgetPausedForSeat && proc.pid > 0) {
+          budget?.resume()
+          budgetPausedForSeat = false
+        }
         if (!started && event.kind !== 'status') {
           started = true
           model = proc.model ?? opts.model ?? null
@@ -1088,7 +1313,7 @@ export class Runner {
             resumed: resumeFrom !== null,
           })
         }
-        if (event.kind === 'usage' && event.costUsd !== undefined) budget.addCost(event.costUsd)
+        if (event.kind === 'usage' && event.costUsd !== undefined) budget?.addCost(event.costUsd)
         switch (event.kind) {
           case 'text':
             lastText = event.text
@@ -1116,7 +1341,7 @@ export class Runner {
           await proc.kill()
           break
         }
-        const spent = budget.spentReason()
+        const spent = budget?.spentReason() ?? null
         if (spent !== null) {
           budgetSpent = spent
           try {
@@ -1129,6 +1354,7 @@ export class Runner {
       }
 
       clearInterval(cancelWatch)
+      if (budgetPausedForSeat) budget?.resume()
 
       const outcome = await proc.done
       store.append(taskId, {
@@ -1160,6 +1386,7 @@ export class Runner {
         contextExceeded,
       }
     } finally {
+      if (budgetPausedForSeat) budget?.resume()
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
       await this.recordGitBypass(taskId, opts.cwd, reflogBefore, seqBefore)
@@ -1282,8 +1509,10 @@ export class Runner {
     resumeFrom: string | null,
     opts: Parameters<Harness['start']>[0],
     phase: string,
-    lease: Lease,
-    budget: TaskBudget,
+    lease: Lease | null,
+    budget: TaskBudget | null,
+    role: AgentRole = 'implement',
+    harness: Harness = this.deps.harness,
   ): Promise<AgentRun & { stopped: boolean }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
@@ -1293,7 +1522,7 @@ export class Runner {
     let runOpts = opts
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget)
+      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
       this.throwIfCancelled(taskId)
       sessionId = run.sessionId
       summary = run.summary
@@ -1326,11 +1555,11 @@ export class Runner {
         this.peakContext = 0
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
-        this.transition(taskId, 'implementing')
+        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
         continue
       }
       if (run.ok) return { sessionId, stopped: false, summary, model, effort }
-      if (lease.isLost) throw new LeaseLostError(taskId)
+      if (lease?.isLost) throw new LeaseLostError(taskId)
 
       if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
         this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
@@ -1347,7 +1576,7 @@ export class Runner {
       // A session that hit its own limit (turn/context window) is spent and
       // cannot be resumed; the retry starts a fresh session in the same worktree.
       if (isSessionLimit(run.detail ?? '')) sessionId = null
-      this.transition(taskId, 'retrying')
+      if (role !== 'review') this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out,
       // and a retry-now request skips the wait for an immediate retry.
       this.retryNowRequested = false
@@ -1357,8 +1586,8 @@ export class Runner {
         if (this.retryNowRequested) break
         await Bun.sleep(Math.min(100, deadline - Date.now()))
       }
-      if (lease.isLost) throw new LeaseLostError(taskId)
-      this.transition(taskId, 'implementing')
+      if (lease?.isLost) throw new LeaseLostError(taskId)
+      if (role !== 'review') this.transition(taskId, 'implementing')
     }
   }
 
