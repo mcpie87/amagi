@@ -33,7 +33,14 @@ import type {
   TrackerTask,
   UpdateTrackerTask,
 } from '@amagi/core'
-import { AsyncQueue, BeadsTracker, killTree, loadConfig, loadGlobalConfig } from '@amagi/core'
+import {
+  AsyncQueue,
+  BeadsTracker,
+  killTree,
+  loadConfig,
+  loadGlobalConfig,
+  writeGlobalConfig,
+} from '@amagi/core'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -2285,6 +2292,53 @@ describe('fleet endpoints', () => {
     expect((await send('PATCH', '/api/watchers/stall', { enabled: false })).status).toBe(200)
     expect(loadGlobalConfig().watchers.stall.enabled).toBe(false)
     expect((await send('PATCH', '/api/watchers/review', { enabled: false })).status).toBe(400)
+  })
+
+  test('seat names include legacy references and rename or remove references atomically', async () => {
+    const { id } = await create({ name: 'One', kind: 'claude', seat: 'old-seat' })
+    await send('PATCH', '/api/watchers/mention', { seat: 'old-seat' })
+    writeGlobalConfig({
+      harness: {
+        implement: { kind: 'claude', seat: 'old-seat' },
+        definitions: { named: { kind: 'codex', seat: 'old-seat' } },
+      },
+    })
+
+    expect(await (await app.request('/api/seat-names')).json()).toEqual({ seats: ['old-seat'] })
+    const renamed = await send('PUT', '/api/seat-names', {
+      seats: ['new-seat'],
+      renames: [{ from: 'old-seat', to: 'new-seat' }],
+    })
+    expect(renamed.status).toBe(200)
+    expect(loadGlobalConfig()).toMatchObject({
+      seats: ['new-seat'],
+      worker: [{ id, seat: 'new-seat' }],
+      watchers: { mention: { seat: 'new-seat' } },
+      harness: {
+        implement: { seat: 'new-seat' },
+        definitions: { named: { seat: 'new-seat' } },
+      },
+    })
+    const occupancy = (await (await app.request('/api/seats')).json()) as {
+      seats: { seat: string }[]
+    }
+    expect(occupancy.seats.map(({ seat }) => seat)).toContain('new-seat')
+
+    const removed = await send('PUT', '/api/seat-names', { seats: [] })
+    expect(removed.status).toBe(200)
+    const config = loadGlobalConfig()
+    expect(config.seats).toEqual([])
+    expect(config.worker[0]?.seat).toBeUndefined()
+    expect(config.watchers.mention.seat).toBeUndefined()
+    expect(config.harness.implement.seat).toBeUndefined()
+    expect(config.harness.definitions.named?.seat).toBeUndefined()
+
+    await send('PUT', '/api/seat-names', { seats: ['unused-seat'] })
+    expect(await (await app.request('/api/seat-names')).json()).toEqual({ seats: ['unused-seat'] })
+    const withUnused = (await (await app.request('/api/seats')).json()) as {
+      seats: { seat: string }[]
+    }
+    expect(withUnused.seats.map(({ seat }) => seat)).toContain('unused-seat')
   })
 
   test('participation flags persist, show on the repo list, and gate the served auto-queue', async () => {

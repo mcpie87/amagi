@@ -65,6 +65,7 @@ import {
   RepoRegisterBody,
   RepoTaskIdParam,
   RunBody,
+  SeatNamesUpdateBody,
   SettingsBody,
   StreamQuery,
   TaskIdParam,
@@ -276,11 +277,97 @@ export function createApp({
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
     })
 
+    .get('/api/seat-names', (c) => {
+      const global = loadGlobalConfig()
+      const seats = new Set(global.seats)
+      for (const worker of global.worker) if (worker.seat !== undefined) seats.add(worker.seat)
+      for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
+        if (watcher.seat !== undefined) seats.add(watcher.seat)
+      }
+      for (const harness of [
+        global.harness.implement,
+        global.harness.review,
+        global.harness.triage,
+        ...Object.values(global.harness.definitions),
+      ]) {
+        if (harness.seat !== undefined) seats.add(harness.seat)
+      }
+      return c.json({ seats: [...seats].sort() })
+    })
+
+    .put('/api/seat-names', valid('json', SeatNamesUpdateBody), (c) => {
+      const { seats, renames } = c.req.valid('json')
+      const global = loadGlobalConfig()
+      const current = new Set(global.seats)
+      for (const worker of global.worker) if (worker.seat !== undefined) current.add(worker.seat)
+      for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
+        if (watcher.seat !== undefined) current.add(watcher.seat)
+      }
+      for (const harness of [
+        global.harness.implement,
+        global.harness.review,
+        global.harness.triage,
+        ...Object.values(global.harness.definitions),
+      ]) {
+        if (harness.seat !== undefined) current.add(harness.seat)
+      }
+
+      const renameMap = new Map<string, string>()
+      for (const { from, to } of renames) {
+        if (!current.has(from)) return c.json({ error: `unknown seat ${from}` }, 400)
+        if (!seats.includes(to)) return c.json({ error: `renamed seat ${to} is not defined` }, 400)
+        if (from === to || renameMap.has(from)) {
+          return c.json({ error: `invalid rename for seat ${from}` }, 400)
+        }
+        renameMap.set(from, to)
+      }
+
+      const rewrite = (seat: string | undefined): string | undefined => {
+        if (seat === undefined) return undefined
+        const next = renameMap.get(seat) ?? seat
+        return seats.includes(next) ? next : undefined
+      }
+      const worker = global.worker.map((entry) => {
+        const seat = rewrite(entry.seat)
+        if (seat === entry.seat) return entry
+        const rest = { ...entry }
+        delete rest.seat
+        return seat === undefined ? rest : { ...rest, seat }
+      })
+      const watchers: Record<string, unknown> = {}
+      for (const kind of ['mention', 'prConflict'] as const) {
+        const original = global.watchers[kind]
+        const seat = rewrite(original.seat)
+        if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
+      }
+      const harness: Record<string, unknown> = {}
+      for (const name of ['implement', 'review', 'triage'] as const) {
+        const original = global.harness[name]
+        const seat = rewrite(original.seat)
+        if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }
+      }
+      const definitions: Record<string, { seat: string | null }> = {}
+      for (const [name, original] of Object.entries(global.harness.definitions)) {
+        const seat = rewrite(original.seat)
+        if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
+      }
+      if (Object.keys(definitions).length > 0) harness.definitions = definitions
+
+      writeGlobalConfig({
+        seats,
+        worker,
+        ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
+        ...(Object.keys(harness).length === 0 ? {} : { harness }),
+      })
+      return c.json({ seats: [...seats].sort() })
+    })
+
     .get('/api/seats', async (c) => {
       type Holder = { repo: string; taskId?: string; watcher?: string }
       type Waiter = { repo: string; taskId: string }
       const configured = new Set<string>()
       const global = loadGlobalConfig()
+      for (const seat of global.seats) configured.add(seat)
       for (const worker of global.worker) configured.add(workerSeat(worker))
       for (const entry of workspaces.list()) {
         const ws = workspaces.get(entry.key)

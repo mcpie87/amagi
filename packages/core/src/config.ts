@@ -103,6 +103,8 @@ const AgentWatcherConfig = z.object({
 })
 
 export const Config = z.object({
+  /** Named credential seats offered by the dashboard fleet editor. */
+  seats: z.array(z.string().trim().min(1)).default([]),
   /** The fleet: `[[worker]]` tables, global config only. */
   worker: z
     .array(WorkerConfig)
