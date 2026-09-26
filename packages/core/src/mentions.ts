@@ -10,7 +10,7 @@ import { agentFailure } from './errors.ts'
 import type { AgentEvent } from './events.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
-import { modelFooter } from './footer.ts'
+import { commitFooter, modelFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { type PrBodyMeta, taskIdFromPrBody } from './pr-body.ts'
@@ -276,14 +276,11 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
     model: configuredHarness.model ?? null,
     effort: configuredHarness.effort ?? null,
   }
+  const mergeSummary = `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`
   const mergeMessage =
     task === null
-      ? undefined
-      : mentionCommitMessage(
-          task,
-          `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
-          commitMeta,
-        )
+      ? `[pr-${opts.pr.number}] Merge PR base\n\n${mergeSummary}\n\n${commitFooter(commitMeta.harness, commitMeta.model, commitMeta.effort)}\n`
+      : mentionCommitMessage(task, mergeSummary, commitMeta)
   const wt = await prWorktree(opts, run, mergeMessage)
   const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
   try {
@@ -322,6 +319,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
         }
       },
       opts.onGitBypassed,
+      true,
     )
     if (!outcome.ok) {
       throw new Error(`agent failed: ${agentFailure(outcome)}`)
@@ -376,7 +374,7 @@ async function commitWorktree(
   await run(['git', 'add', '-A'], { cwd })
   const message =
     task === null
-      ? `Respond to review feedback on PR #${pr.number}\n\nPR: ${pr.url}`
+      ? `[pr-${pr.number}] Respond to review feedback\n\n${summary.trim()}\n\n${commitFooter(meta.harness, meta.model, meta.effort)}\n`
       : mentionCommitMessage(task, summary, meta)
   const commit = await run(['git', 'commit', '-q', '-F', '-'], {
     cwd,

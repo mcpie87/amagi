@@ -9,6 +9,7 @@ import { agentFailure, errMsg } from './errors.ts'
 import { canTransition } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { commitFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { type PointlessVerdict, parsePointlessVerdict } from './pointless.ts'
@@ -88,11 +89,14 @@ async function finishMerge(run: Exec, cwd: string, message?: string): Promise<vo
 
 function watcherCommitMessage(
   task: { id: string; title: string } | null,
+  prNumber: number,
   summary: string,
   meta: PrBodyMeta,
-): string | undefined {
-  if (task === null) return undefined
-  const message = commitMessage(task, summary, meta)
+): string {
+  const message =
+    task === null
+      ? `[pr-${prNumber}] Resolve conflicts\n\n${summary}\n\n${commitFooter(meta.harness, meta.model, meta.effort)}\n`
+      : commitMessage(task, summary, meta)
   const errors = lintCommitMessage(message)
   if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
   return message
@@ -150,6 +154,7 @@ export async function resolveConflict(
     }
     const cleanMergeMessage = watcherCommitMessage(
       task,
+      opts.pr.number,
       `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
       commitMeta,
     )
@@ -160,7 +165,7 @@ export async function resolveConflict(
       baseBranch: opts.config.repo.baseBranch,
       pr: opts.pr,
       persona: opts.config.repo.persona,
-      ...(cleanMergeMessage === undefined ? {} : { mergeMessage: cleanMergeMessage }),
+      mergeMessage: cleanMergeMessage,
       exec: run,
     })
     log('info', `worktree: ${wt.path}`)
@@ -250,6 +255,7 @@ export async function resolveConflict(
           )
         },
         opts.onGitBypassed,
+        true,
       )
       if (!outcome.ok) {
         const message = `agent failed: ${agentFailure(outcome)}`
@@ -269,7 +275,11 @@ export async function resolveConflict(
     }
 
     const conflictSummary = `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}. Conflict #${iteration}`
-    await finishMerge(run, wt.path, watcherCommitMessage(task, conflictSummary, commitMeta))
+    await finishMerge(
+      run,
+      wt.path,
+      watcherCommitMessage(task, opts.pr.number, conflictSummary, commitMeta),
+    )
     if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
       const classification = verdict?.verdict ? ` (${verdict.verdict})` : ''
       const message = `base already contains the PR work; skipped the empty merge push${classification}`
