@@ -24,6 +24,7 @@ import {
   type FormEvent,
   type ReactNode,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -374,6 +375,7 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
 }
 
 function ChatReply({ text, tasks }: { text: string; tasks: Record<string, ProjectedTask> }) {
+  const { selected } = useDashboard()
   let content: unknown = text
   let structured = false
   try {
@@ -394,29 +396,10 @@ function ChatReply({ text, tasks }: { text: string; tasks: Record<string, Projec
     return parts.map((part, index) => {
       const task = tasks[part]
       if (task !== undefined) {
-        return (
-          <Link
-            key={`${part}-${index}`}
-            to={taskRoute.to}
-            params={{ id: part }}
-            title={task.title}
-            className="text-sky-ink underline"
-          >
-            {part}
-          </Link>
-        )
+        return <TaskReference key={`${part}-${index}`} task={task} />
       }
       if (/^[a-f0-9]{7,40}$/i.test(part)) {
-        return (
-          <Link
-            key={`${part}-${index}`}
-            to={gitCommitRoute.to}
-            params={{ hash: part }}
-            className="text-sky-ink underline"
-          >
-            {part}
-          </Link>
-        )
+        return <CommitReference key={`${part}-${index}`} hash={part} repo={selected} />
       }
       return part
     })
@@ -448,6 +431,128 @@ function ChatReply({ text, tasks }: { text: string; tasks: Record<string, Projec
     <div className="space-y-1">{renderValue(content)}</div>
   ) : (
     <span>{linkedText(text)}</span>
+  )
+}
+
+function ReferencePopover({
+  label,
+  children,
+  onOpen,
+}: {
+  label: string
+  children: ReactNode
+  onOpen?: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const popupId = useId()
+  return (
+    <span className="relative inline-flex items-center gap-1">
+      <button
+        type="button"
+        aria-label={`Preview ${label}`}
+        aria-expanded={open}
+        aria-controls={popupId}
+        onClick={() => {
+          if (!open) onOpen?.()
+          setOpen(!open)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') setOpen(false)
+        }}
+        className="rounded px-0.5 text-xs text-fg-faint hover:bg-surface-muted hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink"
+      >
+        ⓘ
+      </button>
+      {open && (
+        <span
+          id={popupId}
+          className="absolute left-0 top-full z-20 mt-1 w-72 rounded-lg border border-line bg-surface p-3 text-left text-sm shadow-lg"
+        >
+          {children}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function TaskReference({ task }: { task: ProjectedTask }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Link to={taskRoute.to} params={{ id: task.id }} className="text-sky-ink underline">
+        {task.id}
+      </Link>
+      <ReferencePopover label={`task ${task.id}`}>
+        <span className="block font-medium text-fg">{task.title || '(no task title)'}</span>
+        <span className="mt-1 block text-xs text-fg-muted">State: {task.state}</span>
+        <Link
+          to={taskRoute.to}
+          params={{ id: task.id }}
+          className="mt-2 inline-block text-sm text-sky-ink hover:underline"
+        >
+          Open task
+        </Link>
+      </ReferencePopover>
+    </span>
+  )
+}
+
+function CommitReference({ hash, repo }: { hash: string; repo: string | null }) {
+  const [subject, setSubject] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = () => {
+    if (repo === null || loading || subject !== null) return
+    setLoading(true)
+    setError(null)
+    fetch(
+      `${apiBase}/api/repos/${encodeURIComponent(repo)}/git/commits/${encodeURIComponent(hash)}`,
+    )
+      .then(async (response) => {
+        const body: unknown = await response.json()
+        if (!response.ok) {
+          const message =
+            body !== null && typeof body === 'object' && 'error' in body
+              ? String(body.error)
+              : `HTTP ${response.status}`
+          throw new Error(message)
+        }
+        if (body === null || typeof body !== 'object' || !('title' in body)) {
+          throw new Error('Invalid commit response')
+        }
+        setSubject(String(body.title) || '(no commit title)')
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : 'could not reach the amagi server')
+      })
+      .finally(() => setLoading(false))
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Link to={gitCommitRoute.to} params={{ hash }} className="text-sky-ink underline">
+        {hash}
+      </Link>
+      <ReferencePopover label={`commit ${hash}`} onOpen={load}>
+        <code className="block break-all text-xs text-fg-muted">{hash}</code>
+        {loading ? (
+          <span className="mt-1 block text-fg-muted">Loading commit…</span>
+        ) : error !== null ? (
+          <span className="mt-1 block text-red-ink">{error}</span>
+        ) : (
+          <span className="mt-1 block font-medium text-fg">
+            {subject ?? '(commit subject unavailable)'}
+          </span>
+        )}
+        <Link
+          to={gitCommitRoute.to}
+          params={{ hash }}
+          className="mt-2 inline-block text-sm text-sky-ink hover:underline"
+        >
+          Open commit
+        </Link>
+      </ReferencePopover>
+    </span>
   )
 }
 
@@ -740,7 +845,9 @@ export function TaskDetailView() {
         )}
         {!past && <StopButton taskId={task.id} />}
       </div>
-      <p className="mt-1 text-sm text-fg-faint">{task.id}</p>
+      <p className="mt-1 text-sm text-fg-faint">
+        <TaskReference task={task} />
+      </p>
 
       {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
 
