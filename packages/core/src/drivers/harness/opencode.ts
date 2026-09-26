@@ -144,6 +144,8 @@ export type OpencodeHarnessOptions = {
 
 export class OpencodeHarness implements Harness {
   readonly kind = 'opencode'
+  // The system prompt rides in the message, so the first one stays in the history.
+  readonly replacesSystemPromptOnResume = false
   private readonly bin: string
   private readonly seat: string | undefined
 

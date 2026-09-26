@@ -185,6 +185,13 @@ export interface Harness {
   start(opts: AgentStartOptions): AgentProcess
   /** Continues an existing session so a fix round keeps the original context. */
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess
+  /**
+   * True when `resume` delivers `systemPrompt` in place of the one the session
+   * started with. When unset or false the session keeps obeying its original
+   * system prompt, so it must not be resumed into a different role (a
+   * read-only check resumed as implement just answers the check again).
+   */
+  readonly replacesSystemPromptOnResume?: boolean
   /** Models the harness can run, listed the way the harness lists them. */
   listModels(): Promise<string[]>
   /** Reasoning-effort levels the harness can run (for `model`, when the harness scopes them), or [] when it cannot say. */

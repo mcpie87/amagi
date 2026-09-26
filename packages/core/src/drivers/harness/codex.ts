@@ -324,6 +324,9 @@ type CodexModelCache = { models?: CodexModelCacheEntry[] }
 
 export class CodexHarness implements Harness {
   readonly kind = 'codex'
+  // `exec resume` drops `-c developer_instructions`: the thread keeps the
+  // developer message recorded when it started.
+  readonly replacesSystemPromptOnResume = false
   private readonly bin: string
   private readonly seat: string | undefined
 

@@ -544,12 +544,16 @@ export class Runner {
     // repository, so a task already satisfied on the base branch is stopped
     // before the implement agent writes anything or a no-op PR is opened. A
     // resumed run skips the check: its worktree already holds in-progress work.
-    // Implement resumes the check's session so its exploration is not redone.
+    // Implement resumes the check's session so its exploration is not redone,
+    // but only on a harness that swaps the system prompt on resume: elsewhere
+    // the resumed session stays a read-only checker and never implements.
     let verifySession: string | null = null
     if (!resume) {
       const verified = await this.verifyViability(task, cwd, branch, budget)
       if (verified === null) return
-      verifySession = verified.sessionId
+      if (this.deps.harness.replacesSystemPromptOnResume === true) {
+        verifySession = verified.sessionId
+      }
     }
     const first = await this.runAgentWithRetry(
       task.id,

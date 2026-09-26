@@ -105,6 +105,7 @@ class FakeHarness implements Harness {
   /** Viability-check runs are recorded here, separate from implementation calls. */
   readonly verifyCalls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
   private readonly verifyResponse: Turn
+  replacesSystemPromptOnResume = false
   kills = 0
 
   constructor(
@@ -517,11 +518,24 @@ describe('Runner.runOnce', () => {
       events: [],
       outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
     })
+    harness.replacesSystemPromptOnResume = true
     await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(harness.calls[0]?.resumeFrom).toBe('verify-sess')
     expect(harness.calls[0]?.prompt).toContain('viability check is over')
     expect(harness.calls[0]?.prompt).toContain('Implement this task')
+  })
+
+  test('implement starts fresh when the harness keeps the check system prompt on resume', async () => {
+    const harness = new FakeHarness([writesAFile], {
+      events: [],
+      outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
+    })
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls[0]?.resumeFrom).toBeNull()
+    expect(harness.calls[0]?.prompt).not.toContain('viability check is over')
   })
 
   test('a failed viability check defaults to continuing the task', async () => {

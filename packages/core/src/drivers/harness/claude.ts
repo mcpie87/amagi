@@ -165,6 +165,8 @@ export type ClaudeHarnessOptions = {
 
 export class ClaudeHarness implements Harness {
   readonly kind = 'claude'
+  // --append-system-prompt applies per invocation; the session file does not store it.
+  readonly replacesSystemPromptOnResume = true
   private readonly bin: string
   private readonly seat: string | undefined
   private readonly defaultEffort: string | null
