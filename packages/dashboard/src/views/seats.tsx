@@ -1,9 +1,18 @@
 import { Link } from '@tanstack/react-router'
-import { useSeats } from '../store.tsx'
+import { useState } from 'react'
+import { AgentLogView } from '../AgentLogView.tsx'
+import { useDashboard, useSeats } from '../store.tsx'
 import { EmptyState } from '../ui.tsx'
 
 export function SeatsView() {
   const seats = useSeats()
+  const { selected: selectedRepo, state } = useDashboard()
+  const [selectedSeat, setSelectedSeat] = useState<string | null>(null)
+  const activeSeat = seats?.find((seat) => seat.seat === selectedSeat) ?? seats?.[0]
+  const holders = seats?.filter((seat) => seat.holder?.taskId !== undefined) ?? []
+
+  const attemptFor = (repo: string, taskId: string) =>
+    repo === selectedRepo ? (state.tasks[taskId]?.attempt ?? 1) : 1
 
   return (
     <div className="page">
@@ -34,8 +43,20 @@ export function SeatsView() {
             </thead>
             <tbody className="divide-y divide-line">
               {seats.map((seat) => (
-                <tr key={seat.seat}>
-                  <td className="px-4 py-3 font-medium text-fg">{seat.seat}</td>
+                <tr
+                  key={seat.seat}
+                  className={activeSeat?.seat === seat.seat ? 'bg-raised/50' : undefined}
+                >
+                  <td className="px-4 py-3 font-medium text-fg">
+                    <button
+                      type="button"
+                      aria-pressed={activeSeat?.seat === seat.seat}
+                      onClick={() => setSelectedSeat(seat.seat)}
+                      className="text-left hover:underline"
+                    >
+                      {seat.seat}
+                    </button>
+                  </td>
                   <td className="px-4 py-3">
                     <span className={seat.state === 'held' ? 'text-amber-ink' : 'text-emerald-ink'}>
                       {seat.state}
@@ -68,6 +89,66 @@ export function SeatsView() {
             </tbody>
           </table>
         </div>
+      )}
+      {activeSeat !== undefined && (
+        <section className="mt-6 space-y-3">
+          <h2 className="text-lg font-semibold">{activeSeat.seat}</h2>
+          <div className="rounded-lg border border-line bg-surface p-4">
+            <h3 className="text-sm font-medium text-fg">Current activity</h3>
+            {activeSeat.holder === null ? (
+              <p className="mt-1 text-sm text-fg-muted">Seat is {activeSeat.state}.</p>
+            ) : activeSeat.holder.taskId === undefined ? (
+              <p className="mt-1 text-sm text-fg-muted">
+                {activeSeat.holder.repo} · {activeSeat.holder.watcher ?? 'agent'} is using this
+                seat.
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-fg-muted">
+                {state.tasks[activeSeat.holder.taskId]?.title ?? activeSeat.holder.taskId} ·{' '}
+                {state.tasks[activeSeat.holder.taskId]?.state ?? 'running'}
+              </p>
+            )}
+          </div>
+          {activeSeat.holder?.taskId !== undefined && (
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-fg">Live log</h3>
+              <AgentLogView
+                repo={activeSeat.holder.repo}
+                taskId={activeSeat.holder.taskId}
+                attempt={attemptFor(activeSeat.holder.repo, activeSeat.holder.taskId)}
+              />
+            </div>
+          )}
+        </section>
+      )}
+      {seats !== null && seats.length > 0 && (
+        <section className="mt-8 space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold">Combined live logs</h2>
+            <p className="text-sm text-fg-muted">Live output from current seat holders.</p>
+          </div>
+          {holders.length === 0 ? (
+            <EmptyState title="No active seat logs">
+              Logs appear here while seat holders run tasks.
+            </EmptyState>
+          ) : (
+            holders.map(({ seat, holder }) => {
+              if (holder?.taskId === undefined) return null
+              return (
+                <div key={seat} className="rounded-lg border border-line bg-surface p-4">
+                  <h3 className="mb-2 text-sm font-medium text-fg">
+                    {seat} · {holder.repo} · {holder.taskId}
+                  </h3>
+                  <AgentLogView
+                    repo={holder.repo}
+                    taskId={holder.taskId}
+                    attempt={attemptFor(holder.repo, holder.taskId)}
+                  />
+                </div>
+              )
+            })
+          )}
+        </section>
       )}
     </div>
   )
