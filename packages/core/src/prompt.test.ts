@@ -161,6 +161,8 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('Never join multiple file paths with commas in a sentence')
     expect(prompt).toContain('mandatory')
     expect(prompt).toContain('deviations from')
+    expect(prompt).toContain('verification details out of this summary')
+    expect(prompt).toContain('report verification separately in a `### Verification` section')
   })
 })
 
