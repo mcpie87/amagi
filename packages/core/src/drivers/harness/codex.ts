@@ -324,6 +324,9 @@ type CodexModelCache = { models?: CodexModelCacheEntry[] }
 
 export class CodexHarness implements Harness {
   readonly kind = 'codex'
+  // `exec resume` drops `-c developer_instructions`: the thread keeps the
+  // developer message recorded when it started.
+  readonly replacesSystemPromptOnResume = false
   private readonly bin: string
   private readonly seat: string | undefined
 
@@ -386,11 +389,15 @@ export class CodexHarness implements Harness {
 
     if (opts.permissions === 'bypass') {
       argv.push('--dangerously-bypass-approvals-and-sandbox')
+    } else if (opts.permissions === 'read-only' && sessionId === null) {
+      argv.push('-s', 'read-only')
     } else if (sessionId === null) {
       // Also unsupported on `resume`; the resumed thread keeps the sandbox
       // policy it was started with, which is always this for a fresh thread.
       argv.push('-s', 'workspace-write')
     }
+
+    if (opts.outputSchema) argv.push('--output-schema', opts.outputSchema)
 
     argv.push(...(opts.extraArgs ?? []))
     argv.push(opts.prompt)

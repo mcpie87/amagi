@@ -357,6 +357,9 @@ function WatcherDetailDialog({
                           >
                             {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
                           </span>
+                          <span className="ml-2 tabular-nums text-fg-faint">
+                            {fmtElapsed((run.endedAt ?? Date.now()) - run.startedAt)}
+                          </span>
                           <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
                         </summary>
                         {run.error !== null && (
@@ -423,7 +426,7 @@ function WatcherDetailDialog({
                       key={`${entry.ts}-${index}`}
                       className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
                     >
-                      {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+                      {fmtDateTime(entry.ts, dateFormat)} {entry.message}
                     </li>
                   ))}
                 </ul>

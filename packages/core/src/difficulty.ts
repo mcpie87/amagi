@@ -1,8 +1,10 @@
 import { tmpdir } from 'node:os'
 import type { Config } from './config.ts'
-import type { Tracker, TrackerTask } from './drivers/types.ts'
+import type { AgentOutcome, Tracker, TrackerTask } from './drivers/types.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { classifyDifficultyPrompt, classifyDifficultySystemPrompt } from './prompt.ts'
+import type { Store } from './store/store.ts'
+import { recordWatcherAgentRun } from './watcher-agent.ts'
 
 export type ClaimGate = { allowed: true } | { allowed: false; reason: string }
 
@@ -99,6 +101,7 @@ export async function classifyDifficulty(
   description: string,
   config: Config,
   makeHarnessFn: typeof makeHarness = makeHarness,
+  watcherSession?: { store?: Store; source: string },
 ): Promise<string | null> {
   try {
     const harness = makeHarnessFn(config.harness.implement)
@@ -108,10 +111,21 @@ export async function classifyDifficulty(
       systemPrompt: classifyDifficultySystemPrompt(),
       ...harnessStartOpts(config.harness.implement),
     })
-    for await (const _ of proc.events()) {
-      // drain the stream so the process completes
+    let outcome: AgentOutcome
+    if (watcherSession?.store !== undefined) {
+      outcome = await recordWatcherAgentRun(proc, {
+        store: watcherSession.store,
+        role: 'triage',
+        harness: harness.kind,
+        source: watcherSession.source,
+        cwd: tmpdir(),
+      })
+    } else {
+      for await (const _ of proc.events()) {
+        // Drain the stream so the process completes.
+      }
+      outcome = await proc.done
     }
-    const outcome = await proc.done
     if (!outcome.ok) return null
     return parseDifficulty(outcome.summary ?? '', config.difficulty.levels)
   } catch {

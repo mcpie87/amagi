@@ -10,6 +10,7 @@ import {
   removeRegistryEntry,
   repoKey,
   sanitizeRepoKey,
+  updateRegistryGitIdentity,
   updateRegistryParticipation,
 } from './registry.ts'
 
@@ -97,7 +98,14 @@ describe('registry participation', () => {
   test('defaults missing participation flags to enabled', () => {
     writeFileSync(registry, JSON.stringify([{ key: 'alpha', name: 'alpha', path: '/repo/alpha' }]))
     expect(loadRegistry(registry)).toEqual([
-      { key: 'alpha', name: 'alpha', path: '/repo/alpha', workers: true, watchers: true },
+      {
+        key: 'alpha',
+        name: 'alpha',
+        path: '/repo/alpha',
+        workers: true,
+        watchers: true,
+        gitIdentity: null,
+      },
     ])
   })
 
@@ -112,6 +120,25 @@ describe('registry participation', () => {
       watchers: false,
     })
     expect(updateRegistryParticipation('missing', { watchers: false }, registry)).toBe(false)
+  })
+})
+
+describe('registry git identity', () => {
+  test('defaults missing identities to null and persists the selected source', () => {
+    writeFileSync(registry, JSON.stringify([{ key: 'alpha', name: 'alpha', path: '/repo/alpha' }]))
+    expect(loadRegistry(registry)[0]?.gitIdentity).toBeNull()
+    expect(
+      updateRegistryGitIdentity(
+        'alpha',
+        { mode: 'inline', value: '[user]\nname = Test\n' },
+        registry,
+      ),
+    ).toBe(true)
+    expect(loadRegistry(registry)[0]?.gitIdentity).toEqual({
+      mode: 'inline',
+      value: '[user]\nname = Test\n',
+    })
+    expect(updateRegistryGitIdentity('missing', null, registry)).toBe(false)
   })
 })
 

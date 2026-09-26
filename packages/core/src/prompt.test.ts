@@ -5,8 +5,10 @@ import {
   classifyMentionPrompt,
   commitMessage,
   commitSummary,
+  explainMentionPrompt,
   implementPrompt,
   implementSystemPrompt,
+  MAX_EXPLAIN_ANSWER_CHARS,
   prFailurePrompt,
   prFailureSystemPrompt,
   prTitle,
@@ -86,17 +88,26 @@ describe('prFailurePrompt', () => {
 
 describe('prTitle', () => {
   test('prepends the task code to a short title', () => {
-    expect(prTitle(task('Forgejo driver over tea'))).toBe('am-544: Forgejo driver over tea')
+    expect(prTitle(task('Forgejo driver over tea'))).toBe('[am-544] Forgejo driver over tea')
   })
 
   test('cuts a full sentence at the first clause', () => {
     expect(prTitle(task('PR titles should use task code, not full sentences'))).toBe(
-      'am-544: PR titles should use task code',
+      '[am-544] PR titles should use task code',
+    )
+  })
+
+  test('keeps comma-separated scopes and the change after them', () => {
+    expect(
+      prTitle(task('core, dashboard: show watcher agent runs in /sessions with role toggles')),
+    ).toBe('[am-544] core, dashboard: show watcher agent runs in /sessions with role toggles')
+    expect(prTitle(task('core, dashboard: show watcher runs, with role toggles'))).toBe(
+      '[am-544] core, dashboard: show watcher runs',
     )
   })
 
   test('drops a milestone-style prefix', () => {
-    expect(prTitle(task('M5: forge drivers'))).toBe('am-544: forge drivers')
+    expect(prTitle(task('M5: forge drivers'))).toBe('[am-544] forge drivers')
   })
 })
 
@@ -189,4 +200,29 @@ describe('classifyMentionPrompt', () => {
     expect(prompt).toContain('still relevant')
     expect(prompt).toContain('never ambiguous')
   })
+
+  test('routes an already-resolved question to explain', () => {
+    const prompt = classifyMentionPrompt({
+      pr: { number: 247, title: 'Old task', url: 'https://github.com/owner/repo/pull/247' },
+      mention: { user: 'reviewer', body: "@chise-maru isn't this already resolved?" },
+    })
+
+    expect(prompt).toContain('"is this already resolved?"')
+    expect(prompt).toContain('are explain')
+  })
+})
+
+test('explain prompt answers an already-resolved question briefly', () => {
+  const prompt = explainMentionPrompt({
+    pr: { number: 247, title: 'Old task', url: 'https://github.com/owner/repo/pull/247' },
+    mention: { user: 'reviewer', body: "@chise-maru isn't this already resolved?" },
+    diff: 'diff',
+    outPath: '/tmp/answer.md',
+    conflicted: false,
+  })
+
+  expect(prompt).toContain('say yes or no with one decisive fact')
+  expect(prompt).toContain('If it is resolved, stop there')
+  expect(prompt).toContain(`${MAX_EXPLAIN_ANSWER_CHARS} characters`)
+  expect(prompt).toContain('Do not recap the PR')
 })

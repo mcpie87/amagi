@@ -1,4 +1,14 @@
 import {
+  accessSync,
+  constants as fsConstants,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
@@ -6,6 +16,8 @@ import {
   canReset,
   classifyDifficulty,
   errMsg,
+  expandTilde,
+  type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
@@ -55,11 +67,13 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  GitIdentityBody,
   GitRequestBody,
   IssueCreateBody,
   IssueUpdateBody,
   ParticipationBody,
   QuestionQuery,
+  RepoCommitParam,
   RepoParam,
   RepoQuestionParam,
   RepoRegisterBody,
@@ -115,6 +129,38 @@ function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities
   return tracker.capabilities[capability]
     ? null
     : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
+}
+
+function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
+  if (identity === null) return null
+  if (identity.mode === 'path') {
+    const file = resolve(expandTilde(identity.value))
+    try {
+      accessSync(file, fsConstants.R_OK)
+      if (!statSync(file).isFile()) throw new Error('not a file')
+    } catch {
+      throw new Error(`gitconfig file is not readable: ${file}`)
+    }
+    return { mode: 'path', value: file }
+  }
+
+  const dir = mkdtempSync(`${tmpdir()}/amagi-gitconfig-`)
+  const file = `${dir}/identity.gitconfig`
+  try {
+    writeFileSync(file, identity.value)
+    const result = Bun.spawnSync(['git', 'config', '--file', file, '--list'], {
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (result.exitCode !== 0) {
+      const message = result.stderr.toString().trim() || 'invalid gitconfig'
+      throw new Error(message)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  return identity
 }
 
 /** The beads tracker's issue browser and epic closer, or null for any other tracker. */
@@ -202,6 +248,14 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   }
   if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
   return ws
+}
+
+function gitOutput(root: string, args: string[]): string {
+  const result = Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' })
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.toString().trim() || 'git command failed')
+  }
+  return result.stdout.toString()
 }
 
 export function createApp({
@@ -458,6 +512,69 @@ export function createApp({
         }
       }
       return c.json(out)
+    })
+
+    .get('/api/repos/:repo/git/log', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      try {
+        const output = gitOutput(ws.root, ['log', '-100', '--format=%H%x00%s%x00%ct%x1e'])
+        const commits = output
+          .split('\x1e')
+          .map((record) => record.trim())
+          .filter(Boolean)
+          .map((record) => {
+            const [hash, title, timestamp] = record.split('\x00')
+            return { hash, title, timestamp: Number(timestamp) }
+          })
+        return c.json({ commits })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
+
+    .get('/api/repos/:repo/git/commits/:hash', valid('param', RepoCommitParam), (c) => {
+      const { repo, hash } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      try {
+        const resolved = gitOutput(ws.root, ['rev-parse', '--verify', `${hash}^{commit}`]).trim()
+        const [title, timestamp, authorName, authorEmail, ...bodyParts] = gitOutput(ws.root, [
+          'show',
+          '-s',
+          '--format=%s%x00%ct%x00%an%x00%ae%x00%b',
+          resolved,
+        ]).split('\x00')
+        const parents = gitOutput(ws.root, ['show', '-s', '--format=%P', resolved]).trim()
+        const patch =
+          parents === ''
+            ? gitOutput(ws.root, [
+                'diff-tree',
+                '--root',
+                '--no-commit-id',
+                '-p',
+                '--no-renames',
+                '-r',
+                resolved,
+              ])
+            : gitOutput(ws.root, [
+                'diff',
+                '--no-ext-diff',
+                '--no-renames',
+                `${resolved}^`,
+                resolved,
+                '--',
+              ])
+        return c.json({
+          hash: resolved,
+          title,
+          timestamp: Number(timestamp),
+          author: authorEmail === '' ? authorName : `${authorName} <${authorEmail}>`,
+          message: bodyParts.join('\x00').trim(),
+          patch,
+        })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 404)
+      }
     })
 
     .post('/api/repos', valid('json', RepoRegisterBody), async (c) => {
@@ -1099,18 +1216,45 @@ export function createApp({
       },
     )
 
+    .get('/api/repos/:repo/git-identity', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const entry = workspaces.list().find((candidate) => candidate.key === repo)
+      if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
+      return c.json({ gitIdentity: entry.gitIdentity })
+    })
+
+    .patch(
+      '/api/repos/:repo/git-identity',
+      valid('param', RepoParam),
+      valid('json', GitIdentityBody),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        let gitIdentity: GitIdentity | null
+        try {
+          gitIdentity = validateGitIdentity(c.req.valid('json'))
+        } catch (err) {
+          return c.json({ error: errMsg(err) }, 400)
+        }
+        if (!workspaces.updateGitIdentity(repo, gitIdentity)) {
+          return c.json({ error: `unknown repository ${repo}` }, 404)
+        }
+        return c.json({ gitIdentity })
+      },
+    )
+
     .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
 
     .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
       const fleet = loadGlobalConfig().worker
-      const worker = WorkerConfig.parse({
+      const parsed = WorkerConfig.safeParse({
         id: newWorkerId(fleet.map((w) => w.id)),
         ...c.req.valid('json'),
       })
-      const next = Config.shape.worker.safeParse([...fleet, worker])
+      if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
+      const next = Config.shape.worker.safeParse([...fleet, parsed.data])
       if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
       saveFleet(next.data)
-      return c.json({ ...worker, taskId: null }, 201)
+      return c.json({ ...parsed.data, taskId: null }, 201)
     })
 
     .patch(
@@ -1131,7 +1275,9 @@ export function createApp({
         const parsed = WorkerConfig.safeParse(merged)
         if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
         const worker = parsed.data
-        saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
+        const next = Config.shape.worker.safeParse(fleet.map((w) => (w.id === id ? worker : w)))
+        if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
+        saveFleet(next.data)
         return c.json((await fleetView()).find((w) => w.id === id))
       },
     )

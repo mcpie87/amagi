@@ -4,6 +4,8 @@ import { commitFooter } from './footer.ts'
 import type { PrBodyMeta } from './pr-body.ts'
 import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from './verdict.ts'
 
+export { reviewPrompt } from './review-pack.ts'
+
 export type PromptContext = {
   task: TrackerTask
   worktree: string
@@ -225,15 +227,14 @@ export function commitMessage(
 }
 
 /**
- * PR title in `code: short name` form, not the full issue sentence. The short
- * name drops a milestone-style `M5: ` prefix and any trailing clauses, so
- * "PR titles should use task code, not full sentences" becomes
- * "am-544: PR titles should use task code".
+ * PR title in `[code] short name` form. Drop milestone prefixes and trailing
+ * clauses while preserving comma-separated scopes such as `core, dashboard:`.
  */
 export function prTitle(task: TrackerTask): string {
   const withoutMilestone = task.title.replace(/^M\d+(?:\.\d+)*\s*:\s*/, '')
-  const shortName = withoutMilestone.split(/[.,;]/)[0]?.trim() ?? withoutMilestone.trim()
-  return `${task.id}: ${shortName}`
+  const scope = withoutMilestone.match(/^\w+(?:,\s*\w+)*:\s*/)?.[0] ?? ''
+  const shortName = `${scope}${withoutMilestone.slice(scope.length).split(/[.,;]/)[0]?.trim() ?? ''}`
+  return `[${task.id}] ${shortName}`
 }
 
 export type ConflictPromptContext = {
@@ -342,7 +343,7 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
-    '- Commit your changes. Do not push; the dispatcher pushes.',
+    '- Do not commit or push. The dispatcher commits your changes and pushes them.',
     `- Write a short summary of what changed, or why no change was needed, to ${ctx.outPath}.`,
   ]
   if (ctx.conflicted) {
@@ -375,7 +376,7 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   }
   parts.push(
     '',
-    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+    'Address the feedback with the smallest change that satisfies it, then stop. The dispatcher will commit and push your changes.',
     `Write a short summary of what changed to file: ${ctx.outPath}. If no change is needed, write why. Keep it concise and suitable for a PR comment.`,
   )
   return parts.join('\n')
@@ -390,10 +391,12 @@ export type ExplainMentionContext = {
   conflicted: boolean
 }
 
+export const MAX_EXPLAIN_ANSWER_CHARS = 300
+
 export function explainMentionSystemPrompt(): string {
   return [
-    'You are explaining changes made in a pull request to a human reviewer.',
-    'Read the review comment and the diff, then write a clear explanation.',
+    "You are answering a human reviewer's question about a pull request.",
+    'Check the relevant code and diff, then answer the question directly.',
     'Do not modify any files in the repository.',
   ].join('\n')
 }
@@ -423,7 +426,7 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
     '- add-a-task: the human wants a new task tracked in the issue tracker, not done in this PR',
     '- ambiguous: only when the intent genuinely cannot be determined',
     '',
-    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" is explain.',
+    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" and "is this already resolved?" are explain.',
     '',
     'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
   ].join('\n')
@@ -435,24 +438,19 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     '',
     ctx.mention.body.trim(),
     '',
-    `Write your explanation to this file: ${ctx.outPath}`,
-    'It will be posted as a comment on the PR. Be concrete: what the changes do, why they were made, and how they fit together.',
+    `Write your answer to this file: ${ctx.outPath}`,
+    'It will be posted as a comment on the PR. Answer the question first.',
+    'For a question like "is this already resolved?", check the current code and relevant history, then say yes or no with one decisive fact. If it is resolved, stop there.',
+    `Use plain text, at most two short sentences and ${MAX_EXPLAIN_ANSWER_CHARS} characters. Do not recap the PR or list implementation details unless the human asks for them.`,
   ]
   if (ctx.conflicted) {
     parts.push(
       '',
       'The base branch does not merge cleanly into this PR: the change has drifted from',
-      'base. Report this conflict as evidence of that drift in your explanation.',
+      'base. Mention this conflict if it matters to the answer.',
     )
   }
-  parts.push(
-    '',
-    'Pull request diff:',
-    '',
-    ctx.diff,
-    '',
-    'Write the explanation to the file and stop.',
-  )
+  parts.push('', 'Pull request diff:', '', ctx.diff, '', 'Write the answer to the file and stop.')
   return parts.join('\n')
 }
 

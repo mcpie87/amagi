@@ -222,13 +222,25 @@ export const EventBody = z.discriminatedUnion('type', [
     effort: z.string().nullable(),
     cwd: z.string(),
     resumed: z.boolean(),
+    /** Unique watcher invocation key; task runs leave this unset. */
+    watcherRunId: z.string().optional(),
+    /** Human-readable origin for a watcher session. */
+    watcherSource: z.string().optional(),
   }),
-  z.object({ type: z.literal('agent.stream'), role: AgentRole, event: AgentEvent }),
+  z.object({
+    type: z.literal('agent.stream'),
+    role: AgentRole,
+    event: AgentEvent,
+    watcherRunId: z.string().optional(),
+    watcherSource: z.string().optional(),
+  }),
   z.object({
     type: z.literal('agent.exited'),
     role: AgentRole,
     exitCode: z.number().int(),
     sessionId: z.string().nullable(),
+    watcherRunId: z.string().optional(),
+    watcherSource: z.string().optional(),
   }),
   /**
    * The run's running peak input context as context events stream in. Appended each time the peak grows; the last one of a run
@@ -283,6 +295,13 @@ export const EventBody = z.discriminatedUnion('type', [
     round: z.number().int().positive(),
     findings: z.array(Finding),
     blockingIds: z.array(z.string().min(1)),
+    snapshot: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('review.failed'),
+    round: z.number().int().positive(),
+    reason: z.string().min(1),
+    snapshot: z.string().min(1),
   }),
   z.object({
     type: z.literal('review.fixed'),

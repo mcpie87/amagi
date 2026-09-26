@@ -6,7 +6,9 @@ import type { AgentRole, StoredEvent } from './events.ts'
  * endedAt/durationMs null so the UI can mark it in-flight.
  */
 export type SessionView = {
-  taskId: string
+  taskId: string | null
+  watcherRunId: string | null
+  watcherSource: string | null
   sessionId: string | null
   role: AgentRole
   harness: string
@@ -23,20 +25,22 @@ export type SessionView = {
 /**
  * Folds the event log into one session per agent run: agent.started opens a
  * session, usage streams accumulate into it, and agent.exited closes it with a
- * duration. Order is chronological; a task runs one agent at a time, so open
- * sessions are keyed by taskId (a retry re-opens and replaces the previous one,
- * which its own exit already closed).
+ * duration. Task runs are keyed by taskId; watcher runs use their unique run id
+ * because they intentionally have no task projection.
  */
 export function sessionsFromEvents(events: StoredEvent[]): SessionView[] {
   const sessions: SessionView[] = []
   const open = new Map<string, SessionView>()
 
   for (const event of events) {
-    if (event.taskId === null) continue
     switch (event.type) {
       case 'agent.started': {
+        const key = event.taskId ?? (event.watcherRunId ? `watcher:${event.watcherRunId}` : null)
+        if (key === null) break
         const session: SessionView = {
           taskId: event.taskId,
+          watcherRunId: event.watcherRunId ?? null,
+          watcherSource: event.watcherSource ?? null,
           sessionId: null,
           role: event.role,
           harness: event.harness,
@@ -49,13 +53,15 @@ export function sessionsFromEvents(events: StoredEvent[]): SessionView[] {
           cachedTokens: 0,
           costUsd: 0,
         }
-        open.set(event.taskId, session)
+        open.set(key, session)
         sessions.push(session)
         break
       }
       case 'agent.stream': {
         if (event.event.kind !== 'usage') break
-        const session = open.get(event.taskId)
+        const key = event.taskId ?? (event.watcherRunId ? `watcher:${event.watcherRunId}` : null)
+        if (key === null) break
+        const session = open.get(key)
         if (session === undefined) break
         session.usedTokens += event.event.inputTokens + event.event.outputTokens
         session.cachedTokens += event.event.cachedTokens ?? 0
@@ -63,13 +69,15 @@ export function sessionsFromEvents(events: StoredEvent[]): SessionView[] {
         break
       }
       case 'agent.exited': {
-        const session = open.get(event.taskId)
+        const key = event.taskId ?? (event.watcherRunId ? `watcher:${event.watcherRunId}` : null)
+        if (key === null) break
+        const session = open.get(key)
         if (session === undefined) break
         session.endedAt = event.ts
         session.durationMs = event.ts - session.startedAt
         session.exitCode = event.exitCode
         if (event.sessionId !== null) session.sessionId = event.sessionId
-        open.delete(event.taskId)
+        open.delete(key)
         break
       }
       default:

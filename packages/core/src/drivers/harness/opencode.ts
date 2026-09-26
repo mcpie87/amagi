@@ -144,6 +144,8 @@ export type OpencodeHarnessOptions = {
 
 export class OpencodeHarness implements Harness {
   readonly kind = 'opencode'
+  // The system prompt rides in the message, so the first one stays in the history.
+  readonly replacesSystemPromptOnResume = false
   private readonly bin: string
   private readonly seat: string | undefined
 
@@ -211,7 +213,23 @@ export class OpencodeHarness implements Harness {
       stdin: OpencodeHarness.message(opts),
       // spawnAgent layers this over opts.env, so opts.env is spread back in to keep it overridable.
       env: {
-        OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { skill: 'deny' } }),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          permission:
+            opts.permissions === 'read-only'
+              ? {
+                  read: 'allow',
+                  glob: 'allow',
+                  grep: 'allow',
+                  list: 'allow',
+                  lsp: 'allow',
+                  edit: 'deny',
+                  write: 'deny',
+                  patch: 'deny',
+                  bash: 'deny',
+                  skill: 'deny',
+                }
+              : { skill: 'deny' },
+        }),
         ...opts.env,
       },
     })

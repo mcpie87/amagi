@@ -171,14 +171,12 @@ export function taskIdFromPrBody(body: string): string | null {
 }
 
 /**
- * The task's age as a relative-time stamp for the Task line. GitHub and
- * Forgejo render `<relative-time datetime>` as a live relative age; the
- * element's text content is the plain-date fallback when they do not.
+ * The task's creation time as a fixed UTC stamp for the Task line.
  */
 function createdAgo(createdAt: number | null | undefined): string | null {
   if (createdAt === null || createdAt === undefined || Number.isNaN(createdAt)) return null
   const iso = new Date(createdAt).toISOString()
-  return `created <relative-time datetime="${iso}">${iso.slice(0, 10)}</relative-time>`
+  return `created \`${iso.slice(0, 19).replace('T', ' ')} UTC\``
 }
 
 export function formatPrBody(

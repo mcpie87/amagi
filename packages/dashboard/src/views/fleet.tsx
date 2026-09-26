@@ -1,6 +1,6 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
-import { useDashboard, useRunner } from '../store.tsx'
+import { useRunner } from '../store.tsx'
 
 const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
 type HarnessKind = (typeof HARNESS_KINDS)[number]
@@ -11,6 +11,8 @@ const HARNESS_LABEL: Record<HarnessKind, string> = {
   opencode: 'OpenCode',
 }
 
+const GIT_IDENTITY_TEMPLATE = '[user]\n\tname = Your Name\n\temail = you@example.com\n'
+
 type Worker = {
   id: string
   name: string
@@ -18,6 +20,8 @@ type Worker = {
   model?: string
   effort?: string
   seat?: string
+  count?: number
+  seatCount?: number
   enabled: boolean
   taskId: string | null
 }
@@ -301,6 +305,8 @@ function WorkerFormModal({
 }) {
   const [name, setName] = useState(initial?.name ?? defaultName(workers, 'claude'))
   const [nameTouched, setNameTouched] = useState(initial !== null)
+  const [count, setCount] = useState(String(initial?.count ?? 1))
+  const [seatCount, setSeatCount] = useState(String(initial?.seatCount ?? 1))
   const [harness, setHarness] = useState<HarnessValues>({
     kind: initial?.kind ?? 'claude',
     model: initial?.model ?? '',
@@ -309,6 +315,15 @@ function WorkerFormModal({
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const workerCount = Number(count)
+  const workerSeatCount = Number(seatCount)
+  const validCapacity =
+    Number.isInteger(workerCount) &&
+    workerCount >= 1 &&
+    workerCount <= 16 &&
+    Number.isInteger(workerSeatCount) &&
+    workerSeatCount >= 1 &&
+    workerSeatCount <= workerCount
 
   const changeHarness = (next: HarnessValues) => {
     if (!nameTouched && next.kind !== '' && next.kind !== harness.kind) {
@@ -326,6 +341,8 @@ function WorkerFormModal({
       model: orNull(harness.model),
       effort: orNull(harness.effort),
       seat: orNull(harness.seat),
+      count: workerCount,
+      seatCount: workerSeatCount,
     }
     const err =
       initial === null
@@ -346,7 +363,7 @@ function WorkerFormModal({
       error={error}
       busy={busy}
       submitLabel={initial === null ? 'Create worker' : 'Save changes'}
-      canSubmit={name.trim() !== ''}
+      canSubmit={name.trim() !== '' && validCapacity}
       onSubmit={() => void save()}
       onClose={onClose}
     >
@@ -364,6 +381,43 @@ function WorkerFormModal({
           className={input}
         />
       </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label className={label} htmlFor="worker-count">
+            Worker count
+          </label>
+          <input
+            id="worker-count"
+            type="number"
+            min={1}
+            max={16}
+            step={1}
+            value={count}
+            onChange={(e) => setCount(e.target.value)}
+            className={input}
+          />
+        </div>
+        <div>
+          <label className={label} htmlFor="worker-seat-count">
+            Seat count
+          </label>
+          <input
+            id="worker-seat-count"
+            type="number"
+            min={1}
+            max={Math.min(workerCount || 1, 16)}
+            step={1}
+            value={seatCount}
+            onChange={(e) => setSeatCount(e.target.value)}
+            className={input}
+          />
+        </div>
+      </div>
+      {!validCapacity && (
+        <p className="text-sm text-red-ink">
+          Seat count must be between 1 and worker count (maximum 16).
+        </p>
+      )}
       <HarnessFields values={harness} onChange={changeHarness} seats={seats} />
       {initial?.taskId != null && (
         <p className="text-sm text-amber-ink">
@@ -710,9 +764,8 @@ function SeatsEditor({
   )
 }
 
-/** The fleet editor: workers, watchers and per-repository participation. */
-export function FleetSettings() {
-  const { repos, refreshRepos } = useDashboard()
+/** The global fleet editor: workers, seats and watchers. */
+export function FleetWorkersSettings() {
   const [workers, setWorkers] = useState<Worker[] | null>(null)
   const [watchers, setWatchers] = useState<Watchers | null>(null)
   const [seatEntries, setSeatEntries] = useState<SeatDraft[] | null>(null)
@@ -817,17 +870,6 @@ export function FleetSettings() {
         </div>
       )}
 
-      {repos !== null && repos.length > 0 && (
-        <div className={`mt-6 ${card}`}>
-          <h2 className="mb-1 text-sm text-fg-muted">Repositories</h2>
-          <ul className="divide-y divide-line">
-            {repos.map((repo) => (
-              <ParticipationRow key={repo.key} repo={repo} onChanged={refreshRepos} />
-            ))}
-          </ul>
-        </div>
-      )}
-
       {editing !== null && workers !== null && (
         <WorkerFormModal
           initial={editing === 'new' ? null : editing}
@@ -848,4 +890,193 @@ export function FleetSettings() {
       )}
     </>
   )
+}
+
+export function RepositoryParticipationCard({
+  repo,
+  onChanged,
+}: {
+  repo: { key: string; name: string; workers: boolean; watchers: boolean }
+  onChanged: () => void
+}) {
+  const [identityMode, setIdentityMode] = useState<'path' | 'inline'>('path')
+  const [identityPath, setIdentityPath] = useState('')
+  const [identityInline, setIdentityInline] = useState(GIT_IDENTITY_TEMPLATE)
+  const [identityBusy, setIdentityBusy] = useState(false)
+  const [identityLoaded, setIdentityLoaded] = useState(false)
+  const [identityError, setIdentityError] = useState<string | null>(null)
+  const [identitySaved, setIdentitySaved] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    setIdentityLoaded(false)
+    setIdentityError(null)
+    setIdentitySaved(false)
+    setIdentityPath('')
+    setIdentityInline(GIT_IDENTITY_TEMPLATE)
+    fetch(`${apiBase}/api/repos/${repo.key}/git-identity`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as {
+          gitIdentity: { mode: 'path' | 'inline'; value: string } | null
+        }
+      })
+      .then(({ gitIdentity }) => {
+        if (!active) return
+        const mode = gitIdentity?.mode ?? 'path'
+        setIdentityMode(mode)
+        if (mode === 'path') setIdentityPath(gitIdentity?.value ?? '')
+        else setIdentityInline(gitIdentity?.value ?? '')
+        setIdentityLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        setIdentityError(err instanceof Error ? err.message : String(err))
+        setIdentityLoaded(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const saveIdentity = async (identity: { mode: 'path' | 'inline'; value: string } | null) => {
+    setIdentityBusy(true)
+    setIdentityError(null)
+    setIdentitySaved(false)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/git-identity`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(identity),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const body = (await response.json()) as {
+        gitIdentity: { mode: 'path' | 'inline'; value: string } | null
+      }
+      setIdentityMode(body.gitIdentity?.mode ?? 'path')
+      if (body.gitIdentity === null) {
+        setIdentityPath('')
+        setIdentityInline(GIT_IDENTITY_TEMPLATE)
+      } else if (body.gitIdentity.mode === 'path') {
+        setIdentityPath(body.gitIdentity.value)
+      } else {
+        setIdentityInline(body.gitIdentity.value)
+      }
+      setIdentitySaved(true)
+    } catch (err) {
+      setIdentityError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 space-y-4">
+      <div className={card}>
+        <h2 className="mb-1 text-sm text-fg-muted">Repository participation</h2>
+        <ul className="divide-y divide-line">
+          <ParticipationRow repo={repo} onChanged={onChanged} />
+        </ul>
+      </div>
+      <div className={card}>
+        <h2 className="mb-1 text-sm text-fg-muted">Git identity for amagi commits</h2>
+        <p className="mb-3 text-sm text-fg-faint">
+          Applies only to amagi-created worktrees. Leave unset to use the repository persona or
+          ambient Git identity.
+        </p>
+        {!identityLoaded ? (
+          <p className="text-sm text-fg-faint">Loading…</p>
+        ) : (
+          <>
+            <fieldset disabled={identityBusy}>
+              <legend className="sr-only">Git identity source</legend>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name={`git-identity-${repo.key}`}
+                    value="path"
+                    checked={identityMode === 'path'}
+                    onChange={() => setIdentityMode('path')}
+                  />
+                  Gitconfig file
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name={`git-identity-${repo.key}`}
+                    value="inline"
+                    checked={identityMode === 'inline'}
+                    onChange={() => setIdentityMode('inline')}
+                  />
+                  Inline text
+                </label>
+              </div>
+            </fieldset>
+            {identityMode === 'path' ? (
+              <label className="mt-3 block text-sm text-fg-muted">
+                Path to gitconfig
+                <input
+                  type="text"
+                  value={identityPath}
+                  onChange={(event) => setIdentityPath(event.currentTarget.value)}
+                  placeholder="~/.config/git/personas/work.gitconfig"
+                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                />
+              </label>
+            ) : (
+              <label className="mt-3 block text-sm text-fg-muted">
+                Gitconfig text
+                <textarea
+                  value={identityInline}
+                  onChange={(event) => setIdentityInline(event.currentTarget.value)}
+                  placeholder={GIT_IDENTITY_TEMPLATE}
+                  rows={7}
+                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                />
+              </label>
+            )}
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={identityBusy || (identityMode === 'path' && identityPath.trim() === '')}
+                onClick={() =>
+                  void saveIdentity({
+                    mode: identityMode,
+                    value: identityMode === 'path' ? identityPath : identityInline,
+                  })
+                }
+                className={secondary}
+              >
+                {identityBusy ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                disabled={identityBusy}
+                onClick={() => void saveIdentity(null)}
+                className={secondary}
+              >
+                Clear identity
+              </button>
+              {identitySaved && <span className="text-sm text-fg-faint">Saved</span>}
+            </div>
+            {identityError !== null && (
+              <p role="alert" className="mt-2 text-sm text-red-ink">
+                {identityError}
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+async function responseError(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: string }
+    return body.error ?? `Request failed (${response.status})`
+  } catch {
+    return `Request failed (${response.status})`
+  }
 }

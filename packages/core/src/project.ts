@@ -364,7 +364,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
       break
 
     case 'agent.exited':
-      if (current && event.sessionId !== null) {
+      if (current && event.sessionId !== null && event.role !== 'review') {
         writeTasks()[event.taskId] = { ...current, sessionId: event.sessionId, updatedAt: event.ts }
       }
       break

@@ -13,7 +13,11 @@ export type RegistryEntry = {
   workers: boolean
   /** Whether the server starts background pollers and watchers for this repo. */
   watchers: boolean
+  /** Git config included only by amagi-created worktrees. */
+  gitIdentity: GitIdentity | null
 }
+
+export type GitIdentity = { mode: 'path' | 'inline'; value: string }
 
 export type RegistryParticipation = Partial<Pick<RegistryEntry, 'workers' | 'watchers'>>
 
@@ -53,6 +57,7 @@ export function loadRegistry(path = registryPath()): RegistryEntry[] {
               path: entry.path,
               workers: typeof entry.workers === 'boolean' ? entry.workers : true,
               watchers: typeof entry.watchers === 'boolean' ? entry.watchers : true,
+              gitIdentity: isGitIdentity(entry.gitIdentity) ? entry.gitIdentity : null,
             },
           ]
         })
@@ -60,6 +65,14 @@ export function loadRegistry(path = registryPath()): RegistryEntry[] {
   } catch {
     return []
   }
+}
+
+function isGitIdentity(value: unknown): value is GitIdentity {
+  if (typeof value !== 'object' || value === null) return false
+  const identity = value as Partial<GitIdentity>
+  return (
+    (identity.mode === 'path' || identity.mode === 'inline') && typeof identity.value === 'string'
+  )
 }
 
 export function saveRegistry(entries: RegistryEntry[], path = registryPath()): void {
@@ -78,6 +91,21 @@ export function updateRegistryParticipation(
   const entry = entries[index]
   if (entry === undefined) return false
   entries[index] = { ...entry, ...participation }
+  saveRegistry(entries, path)
+  return true
+}
+
+export function updateRegistryGitIdentity(
+  key: string,
+  gitIdentity: GitIdentity | null,
+  path = registryPath(),
+): boolean {
+  const entries = loadRegistry(path)
+  const index = entries.findIndex((entry) => entry.key === key)
+  if (index < 0) return false
+  const entry = entries[index]
+  if (entry === undefined) return false
+  entries[index] = { ...entry, gitIdentity }
   saveRegistry(entries, path)
   return true
 }
@@ -144,6 +172,7 @@ export function addRegistryEntry(
     path: root,
     workers: true,
     watchers: true,
+    gitIdentity: null,
   }
   saveRegistry([...entries, entry], registry)
   return entry

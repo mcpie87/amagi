@@ -1,6 +1,7 @@
+import { AgentRole } from '@amagi/core/events'
 import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { type SessionView, sessionsFromEvents } from '@amagi/core/sessions'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useDashboard } from './store.tsx'
 import { Time } from './ui.tsx'
 
@@ -53,7 +54,13 @@ function StatCard({ label, value }: { label: string; value: string }) {
 
 export function SessionsView() {
   const { state } = useDashboard()
-  const sessions = useMemo(() => sessionsFromEvents(state.events), [state.events])
+  const [enabledRoles, setEnabledRoles] = useState<Set<(typeof AgentRole.options)[number]>>(
+    () => new Set(AgentRole.options),
+  )
+  const sessions = useMemo(
+    () => sessionsFromEvents(state.events).filter((s) => enabledRoles.has(s.role)),
+    [state.events, enabledRoles],
+  )
   const running = sessions.filter((s) => s.endedAt === null).length
   const completed = sessions.filter((s) => s.durationMs !== null)
   const avgDuration =
@@ -74,6 +81,35 @@ export function SessionsView() {
           {running > 0 ? ` · ${running} in flight` : ''}
         </p>
       </div>
+
+      <fieldset className="mb-4 flex flex-wrap gap-1.5">
+        <legend className="sr-only">Filter sessions by agent role</legend>
+        {AgentRole.options.map((role) => {
+          const enabled = enabledRoles.has(role)
+          return (
+            <button
+              key={role}
+              type="button"
+              aria-pressed={enabled}
+              onClick={() => {
+                setEnabledRoles((current) => {
+                  const next = new Set(current)
+                  if (next.has(role)) next.delete(role)
+                  else next.add(role)
+                  return next
+                })
+              }}
+              className={`rounded-full px-3 py-1 text-xs ring-1 ring-inset ${
+                enabled
+                  ? 'bg-sky-500/15 text-sky-700 ring-sky-500/40 dark:text-sky-300'
+                  : 'bg-surface text-fg-muted ring-line hover:text-fg'
+              }`}
+            >
+              {role}
+            </button>
+          )
+        })}
+      </fieldset>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatCard label="Total sessions" value={String(sessions.length)} />
@@ -129,12 +165,17 @@ export function SessionsView() {
         </h2>
         <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {recent.map((s) => (
-            <li key={`${s.taskId}/${s.startedAt}`} className="flex items-center gap-3 px-4 py-2.5">
+            <li
+              key={`${s.watcherRunId ?? s.taskId ?? 'session'}/${s.startedAt}`}
+              className="flex items-center gap-3 px-4 py-2.5"
+            >
               <span className="shrink-0 text-xs tabular-nums text-fg-muted">
                 <Time ts={s.startedAt} />
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-xs text-fg-muted">{s.taskId}</span>
+                <span className="block truncate font-mono text-xs text-fg-muted">
+                  {s.watcherSource ?? s.taskId}
+                </span>
                 <span className="block truncate text-sm font-medium">
                   {s.model ?? 'unknown'} · {s.harness} · {s.role}
                 </span>

@@ -128,17 +128,16 @@ describe('formatPrBody', () => {
     expect(body).not.toContain('Search for the goal')
   })
 
-  test('renders the task creation date as a relative-time stamp when known', () => {
+  test('renders the task creation time as an absolute UTC stamp when known', () => {
     const body = formatPrBody({ ...TASK, createdAt: Date.parse('2026-09-20T14:02:53Z') }, [])
 
-    expect(body).toContain(
-      '**Task:** `am-1` · created <relative-time datetime="2026-09-20T14:02:53.000Z">2026-09-20</relative-time>',
-    )
+    expect(body).toContain('**Task:** `am-1` · created `2026-09-20 14:02:53 UTC`')
+    expect(body).not.toContain('relative-time')
   })
 
   test('omits the creation date when the tracker did not report one', () => {
     expect(formatPrBody(TASK, [])).toContain('**Task:** `am-1`')
-    expect(formatPrBody({ ...TASK, createdAt: null }, [])).not.toContain('relative-time')
+    expect(formatPrBody({ ...TASK, createdAt: null }, [])).not.toContain(' · created ')
   })
 
   test('omits the changes section when nothing changed', () => {

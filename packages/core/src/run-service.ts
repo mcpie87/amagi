@@ -1,4 +1,4 @@
-import { type Config, resolveWorkerHarness, type WorkerConfig } from './config.ts'
+import { type Config, expandWorkers, resolveWorkerHarness, type WorkerConfig } from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -273,7 +273,7 @@ export class RunService implements RunServiceApi {
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
     const totalSeats = new Set(
-      this.opts.config.worker
+      this.workers()
         .filter((worker) => worker.enabled)
         .map((worker) => this.workerSeat(worker)),
     ).size
@@ -291,7 +291,7 @@ export class RunService implements RunServiceApi {
         }
         const task = this.opts.store.task(id)
         const agent = this.opts.store.currentAgent(id)
-        const worker = this.opts.config.worker.find((candidate) => candidate.id === entry?.workerId)
+        const worker = this.workers().find((candidate) => candidate.id === entry?.workerId)
         const latestEvents = this.opts.store.recentEvents(id, 100)
         const waitingSeatEvent = [...latestEvents]
           .reverse()
@@ -316,7 +316,7 @@ export class RunService implements RunServiceApi {
           // The configured harness is known at launch; only the model/effort
           // wait for the agent run to report them.
           harness:
-            this.opts.config.worker.find((worker) => worker.id === entry?.workerId)?.kind ??
+            this.workers().find((worker) => worker.id === entry?.workerId)?.kind ??
             this.opts.harness.kind,
           model: agent?.model ?? null,
           effort: agent?.effort ?? null,
@@ -335,7 +335,7 @@ export class RunService implements RunServiceApi {
       resources,
       tasks,
       autoQueue: this.autoQueue,
-      fleet: this.opts.config.worker.map((worker) => ({
+      fleet: this.workers().map((worker) => ({
         id: worker.id,
         name: worker.name,
         kind: worker.kind,
@@ -370,15 +370,17 @@ export class RunService implements RunServiceApi {
     return worker.seat ?? worker.kind
   }
 
+  private workers(): WorkerConfig[] {
+    return expandWorkers(this.opts.config.worker)
+  }
+
   private runsBySeat(): Map<string, string> {
     return this.seats
   }
 
   private availableWorkers(): WorkerConfig[] {
     const busy = this.runsBySeat()
-    return this.opts.config.worker.filter(
-      (worker) => worker.enabled && !busy.has(this.workerSeat(worker)),
-    )
+    return this.workers().filter((worker) => worker.enabled && !busy.has(this.workerSeat(worker)))
   }
 
   private availableCapacity(): number {
@@ -392,7 +394,7 @@ export class RunService implements RunServiceApi {
     const selected =
       opts?.workerId === undefined
         ? this.availableWorkers()[0]
-        : this.opts.config.worker.find((worker) => worker.id === opts.workerId)
+        : this.workers().find((worker) => worker.id === opts.workerId)
     if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
