@@ -68,6 +68,67 @@ const recorded: StoredEvent[] = [
 ]
 
 describe('dashboard state reducer', () => {
+  test('folds review rounds, findings and stop reason into the shared task projection', () => {
+    const finding = {
+      id: 'finding-1',
+      severity: 'major',
+      scope: 'in-scope',
+      path: 'src/thing.ts',
+      line: 12,
+      title: 'Missing guard',
+      evidence: 'The value is dereferenced without validation.',
+      failureScenario: 'A null value crashes the request.',
+    }
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Review me', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+      ev(3, 'am-1', 1200, { type: 'task.state', from: 'worktree_ready', to: 'implementing' }),
+      ev(4, 'am-1', 1300, { type: 'task.state', from: 'implementing', to: 'checks' }),
+      ev(5, 'am-1', 1400, { type: 'task.state', from: 'checks', to: 'reviewing' }),
+      ev(6, 'am-1', 1500, {
+        type: 'review.started',
+        round: 1,
+        finalPass: false,
+        reviewerSession: 'review-session',
+      }),
+      ev(7, 'am-1', 1600, {
+        type: 'review.finished',
+        round: 1,
+        findings: [finding],
+        blockingIds: ['finding-1'],
+      }),
+      ev(8, 'am-1', 1700, { type: 'task.state', from: 'reviewing', to: 'fixing' }),
+      ev(9, 'am-1', 1800, {
+        type: 'review.fixed',
+        round: 1,
+        replies: [{ id: 'finding-1', outcome: 'fixed', reason: 'Added a null check.' }],
+      }),
+      ev(10, 'am-1', 1900, { type: 'task.state', from: 'fixing', to: 'reviewing' }),
+      ev(11, 'am-1', 2000, {
+        type: 'review.started',
+        round: 2,
+        finalPass: false,
+        reviewerSession: 'review-session',
+      }),
+      ev(12, 'am-1', 2100, {
+        type: 'review.finished',
+        round: 2,
+        findings: [],
+        blockingIds: [],
+      }),
+      ev(13, 'am-1', 2200, {
+        type: 'review.stopped',
+        reason: 'acceptable',
+        unresolvedIds: [],
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(state.tasks['am-1']).toMatchObject({
+      reviewRound: 2,
+      reviewFindings: [],
+      reviewStopReason: 'acceptable',
+    })
+  })
+
   test('replay reconstructs the same state every time', () => {
     const a = recorded.reduce(reduceState, initialDashboardState())
     const b = recorded.reduce(reduceState, initialDashboardState())
