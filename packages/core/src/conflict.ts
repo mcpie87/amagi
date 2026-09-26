@@ -170,6 +170,7 @@ export async function resolveConflict(
       }
       const harnessConfig = watcherHarnessConfig(opts.config, 'prConflict')
       const harness = mk(harnessConfig)
+      log('info', `resolving (dispatch ${iteration}/${opts.config.loop.conflictMaxIterations})`)
       log('info', `agent: ${harness.kind} (${wt.branch})`)
       const outcome = await withHeadReflogBypassCheck(
         wt.path,
