@@ -37,6 +37,7 @@ const TASK: TrackerTask = {
 }
 
 const TASK2: TrackerTask = { ...TASK, id: 'bd-c3d4', title: 'Add a second file' }
+const TASK3: TrackerTask = { ...TASK, id: 'bd-e5f6', title: 'Add a third file' }
 
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
@@ -354,6 +355,41 @@ describe('RunService', () => {
       ],
     })
     service.dispose()
+  })
+
+  test('counted workers run concurrently on distinct counted seats', async () => {
+    const harness = new BlockingHarness()
+    const service = makeService(
+      new FakeTracker([TASK, TASK2, TASK3]),
+      harness,
+      1,
+      config({
+        worker: [
+          {
+            id: 'claude',
+            name: 'Claude',
+            kind: 'claude',
+            seat: 'subscription',
+            count: 3,
+            seatCount: 3,
+          },
+        ],
+      }),
+    )
+
+    expect((await service.status()).fleet?.map((worker) => [worker.id, worker.seat])).toEqual([
+      ['claude-1', 'subscription-1'],
+      ['claude-2', 'subscription-2'],
+      ['claude-3', 'subscription-3'],
+    ])
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    await waitFor(() => harness.starts === 3)
+    expect((await service.status()).capacity).toBe(0)
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+    await service.stop(TASK3.id)
   })
 
   test('setAutoQueue flips the reported state and toggles dispatch', async () => {

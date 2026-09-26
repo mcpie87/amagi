@@ -73,16 +73,42 @@ const WatcherHarnessConfig = z.object({
  * A named lane in the fleet. `id` is the identity (locks and run history key
  * on it); `name` is a free-text label that may be renamed or duplicated.
  */
-export const WorkerConfig = z.object({
-  id: z.string().regex(/^[a-z0-9-]+$/),
-  name: z.string().min(1),
-  kind: HarnessKind,
-  model: z.string().optional(),
-  effort: z.string().optional(),
-  seat: z.string().min(1).optional(),
-  enabled: z.boolean().default(false),
-})
+export const WorkerConfig = z
+  .object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    name: z.string().min(1),
+    kind: HarnessKind,
+    model: z.string().optional(),
+    effort: z.string().optional(),
+    seat: z.string().min(1).optional(),
+    count: z.number().int().min(1).max(MAX_WORKERS).default(1),
+    seatCount: z.number().int().min(1).max(MAX_WORKERS).default(1),
+    enabled: z.boolean().default(false),
+  })
+  .refine((worker) => worker.seatCount <= worker.count, {
+    path: ['seatCount'],
+    message: 'worker seatCount must not exceed count',
+  })
 export type WorkerConfig = z.infer<typeof WorkerConfig>
+
+/** Expands a configured worker profile into independently schedulable instances. */
+export function expandWorkers(workers: WorkerConfig[]): WorkerConfig[] {
+  return workers.flatMap((worker) =>
+    Array.from({ length: worker.count }, (_, index) => {
+      const { count, seatCount, ...profile } = worker
+      if (count === 1 && seatCount === 1) return worker
+      const seat = worker.seat ?? worker.kind
+      return {
+        ...profile,
+        count: 1,
+        seatCount: 1,
+        id: `${worker.id}-${index + 1}`,
+        name: `${worker.name} ${index + 1}`,
+        seat: seatCount === 1 ? worker.seat : `${seat}-${(index % seatCount) + 1}`,
+      }
+    }),
+  )
+}
 
 /** Resolves a harness kind while preserving repo-specific settings for the configured implement kind. */
 export function resolveHarnessKind(
@@ -124,9 +150,16 @@ export const Config = z
       .array(WorkerConfig)
       .max(MAX_WORKERS)
       .default([])
-      .refine((ws) => new Set(ws.map((w) => w.id)).size === ws.length, {
-        message: 'worker ids must be unique',
-      }),
+      .refine((ws) => ws.reduce((total, worker) => total + worker.count, 0) <= MAX_WORKERS, {
+        message: `expanded worker count must not exceed ${MAX_WORKERS}`,
+      })
+      .refine(
+        (ws) =>
+          new Set(expandWorkers(ws).map((w) => w.id)).size === ws.reduce((n, w) => n + w.count, 0),
+        {
+          message: 'worker ids must be unique after count expansion',
+        },
+      ),
     repo: z
       .object({
         baseBranch: z.string().default('main'),
@@ -510,6 +543,8 @@ export function migrateFleet(): WorkerConfig[] {
       ...(model === undefined ? {} : { model }),
       ...(effort === undefined ? {} : { effort }),
       seat: seat ?? kind,
+      count: 1,
+      seatCount: 1,
       enabled: true,
     },
   ]

@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  Config,
+  expandWorkers,
   hasStaleMaxParallel,
   loadConfig,
   loadGlobalConfig,
@@ -322,6 +324,55 @@ describe('writeConfig', () => {
 })
 
 describe('worker fleet', () => {
+  test('defaults a worker profile to one instance and one seat', () => {
+    const config = Config.parse({
+      worker: [{ id: 'claude', name: 'Claude', kind: 'claude', enabled: true }],
+    })
+
+    expect(config.worker[0]).toMatchObject({ count: 1, seatCount: 1 })
+    expect(expandWorkers(config.worker).map(({ id, name }) => ({ id, name }))).toEqual([
+      { id: 'claude', name: 'Claude' },
+    ])
+  })
+
+  test('expands worker replicas across distinct counted seat identities', () => {
+    const config = Config.parse({
+      worker: [
+        {
+          id: 'claude',
+          name: 'Claude',
+          kind: 'claude',
+          seat: 'subscription',
+          count: 3,
+          seatCount: 3,
+          enabled: true,
+        },
+      ],
+    })
+
+    expect(
+      expandWorkers(config.worker).map(({ id, name, seat, count, seatCount }) => ({
+        id,
+        name,
+        seat,
+        count,
+        seatCount,
+      })),
+    ).toEqual([
+      { id: 'claude-1', name: 'Claude 1', seat: 'subscription-1', count: 1, seatCount: 1 },
+      { id: 'claude-2', name: 'Claude 2', seat: 'subscription-2', count: 1, seatCount: 1 },
+      { id: 'claude-3', name: 'Claude 3', seat: 'subscription-3', count: 1, seatCount: 1 },
+    ])
+  })
+
+  test('rejects more seat instances than worker instances', () => {
+    expect(() =>
+      Config.parse({
+        worker: [{ id: 'claude', name: 'Claude', kind: 'claude', count: 2, seatCount: 3 }],
+      }),
+    ).toThrow(/seatCount must not exceed count/)
+  })
+
   const fleet = [
     {
       id: 'w-aaaaaa',
@@ -338,9 +389,11 @@ describe('worker fleet', () => {
     writeGlobal('[server]\nport = 9000\n')
     writeGlobalConfig({ worker: fleet })
     const config = loadGlobalConfig()
-    expect(config.worker).toEqual([...fleet])
+    expect(config.worker).toEqual(fleet.map((worker) => ({ ...worker, count: 1, seatCount: 1 })))
     expect(config.server.port).toBe(9000)
-    expect(loadConfig(repo).config.worker).toEqual([...fleet])
+    expect(loadConfig(repo).config.worker).toEqual(
+      fleet.map((worker) => ({ ...worker, count: 1, seatCount: 1 })),
+    )
   })
 
   test('seat defaults to the harness kind', () => {
@@ -386,7 +439,9 @@ describe('worker fleet', () => {
       ['Claude 1', 'claude', 'claude', 'claude-sonnet-5'],
     ])
     expect(new Set(created.map((w) => w.id)).size).toBe(1)
-    expect(loadGlobalConfig().worker).toEqual(created)
+    expect(loadGlobalConfig().worker).toEqual(
+      created.map((worker) => ({ ...worker, count: 1, seatCount: 1 })),
+    )
     const written = readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')
     expect(migrateFleet()).toEqual([])
     expect(readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')).toBe(written)

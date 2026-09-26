@@ -217,7 +217,10 @@ turn it off.
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
 
 The worker fleet is machine-wide, so define `[[worker]]` entries in the global
-config. Workers can share a seat, for example:
+config. Set `count` to create repeated instances of one worker profile. Set
+`seatCount` to give its replicas separate credential seat lock identities;
+replicas beyond that count share seats and serialize. Both fields default to
+`1`. Workers can share a seat, for example:
 
 ```toml
 [[worker]]
@@ -227,6 +230,8 @@ kind = "claude"
 model = "claude-sonnet"
 seat = "claude-subscription"
 enabled = true
+count = 3
+seatCount = 3
 
 [[worker]]
 id = "claude-careful"
@@ -262,13 +267,15 @@ Every key is optional; the table below gives the schema and defaults.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`; at most 16 workers. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
+| `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`; at most 16 expanded workers. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
 | `worker[].id` | string | required | Stable worker identity, unique across the fleet. |
 | `worker[].name` | string | required | Display name. |
 | `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` | required | Harness used by this worker. |
 | `worker[].model` | string | *(harness default)* | Model passed to the harness. |
 | `worker[].effort` | string | *(harness default)* | Reasoning effort passed to the harness. |
 | `worker[].seat` | string | `worker[].kind` | Credential seat used by the worker; workers with the same seat serialize. |
+| `worker[].count` | integer | `1` | Number of independently schedulable instances created from this profile. Instance IDs append `-1`, `-2`, and so on. |
+| `worker[].seatCount` | integer | `1` | Number of distinct seat lock identities assigned across this profile's instances. Seat identities append `-1`, `-2`, and so on. |
 | `worker[].enabled` | boolean | `false` | Whether the worker takes runs, manual or automatic. Persisted, and editable from the dashboard. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
