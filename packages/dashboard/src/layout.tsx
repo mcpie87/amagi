@@ -262,7 +262,16 @@ function AddRepoForm() {
 }
 
 const NAV_ITEMS: {
-  to: '/' | '/board' | '/issues' | '/inbox' | '/activity' | '/sessions' | '/seats' | '/settings'
+  to:
+    | '/'
+    | '/board'
+    | '/issues'
+    | '/inbox'
+    | '/activity'
+    | '/git'
+    | '/sessions'
+    | '/seats'
+    | '/settings'
   label: string
   icon: IconName
 }[] = [
@@ -271,6 +280,7 @@ const NAV_ITEMS: {
   { to: '/issues', label: 'Tasks', icon: 'tasks' },
   { to: '/inbox', label: 'Inbox', icon: 'inbox' },
   { to: '/activity', label: 'Activity', icon: 'activity' },
+  { to: '/git', label: 'Git history', icon: 'activity' },
   { to: '/sessions', label: 'Sessions', icon: 'sessions' },
   { to: '/seats', label: 'Seats', icon: 'agent' },
   { to: '/settings', label: 'Settings', icon: 'settings' },

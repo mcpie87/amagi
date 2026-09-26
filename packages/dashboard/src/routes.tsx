@@ -3,6 +3,7 @@ import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
 import { QueueView } from './views/board.tsx'
+import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
 import { IssuesView } from './views/issues.tsx'
 import { OverviewView } from './views/overview.tsx'
@@ -60,6 +61,16 @@ export const taskRoute = createRoute({
   path: '/tasks/$id',
   component: TaskDetailView,
 })
+export const gitRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/git',
+  component: GitHistoryView,
+})
+export const gitCommitRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/git/commits/$hash',
+  component: CommitDetailView,
+})
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -71,5 +82,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   seatsRoute,
   taskRoute,
+  gitRoute,
+  gitCommitRoute,
 ])
 export const router = createRouter({ routeTree })

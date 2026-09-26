@@ -35,7 +35,7 @@ import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
 import { useDateFormatPref } from '../date-format.ts'
 import { fmtDateTime, fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
-import { taskRoute } from '../routes.tsx'
+import { gitCommitRoute, taskRoute } from '../routes.tsx'
 import { useDashboard, useRunner } from '../store.tsx'
 import { Blockers, fetchIssue, type Issue, Unblocks } from './issues.tsx'
 import {
@@ -338,11 +338,13 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
                 : 'mr-auto border border-line-strong bg-raised text-fg'
             }`}
           >
-            {m.role === 'user'
-              ? m.text
-              : m.pending
-                ? `${m.text === '' ? 'worker is responding' : m.text}...`
-                : m.text}
+            {m.role === 'user' ? (
+              m.text
+            ) : m.pending ? (
+              `${m.text === '' ? 'worker is responding' : m.text}...`
+            ) : (
+              <ChatReply text={m.text} tasks={state.tasks} />
+            )}
           </div>
         ))}
       </div>
@@ -369,6 +371,95 @@ function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
   )
+}
+
+function ChatReply({ text, tasks }: { text: string; tasks: Record<string, ProjectedTask> }) {
+  let content: unknown = text
+  let structured = false
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (parsed !== null && typeof parsed === 'object') {
+      content = parsed
+      structured = true
+    }
+  } catch {
+    // Plain worker prose remains unchanged.
+  }
+
+  const taskIds = Object.keys(tasks).sort((a, b) => b.length - a.length)
+  const references = [...taskIds.map(escapeRegExp), '[a-f0-9]{7,40}'].join('|')
+  const linkedText = (value: string): ReactNode => {
+    const pattern = new RegExp(`(?<![a-z0-9_.-])(${references})(?![a-z0-9_.-])`, 'gi')
+    const parts = value.split(pattern)
+    return parts.map((part, index) => {
+      const task = tasks[part]
+      if (task !== undefined) {
+        return (
+          <Link
+            key={`${part}-${index}`}
+            to={taskRoute.to}
+            params={{ id: part }}
+            title={task.title}
+            className="text-sky-ink underline"
+          >
+            {part}
+          </Link>
+        )
+      }
+      if (/^[a-f0-9]{7,40}$/i.test(part)) {
+        return (
+          <Link
+            key={`${part}-${index}`}
+            to={gitCommitRoute.to}
+            params={{ hash: part }}
+            className="text-sky-ink underline"
+          >
+            {part}
+          </Link>
+        )
+      }
+      return part
+    })
+  }
+  const renderValue = (value: unknown): ReactNode => {
+    if (typeof value === 'string') return linkedText(value)
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    if (value === null) return 'None'
+    if (Array.isArray(value))
+      return value.map((item, index) => (
+        <div key={index} className="ml-3">
+          {renderValue(item)}
+        </div>
+      ))
+    if (typeof value === 'object')
+      return (
+        <div className="space-y-1">
+          {Object.entries(value).map(([key, item]) => (
+            <div key={key}>
+              <span className="font-medium text-fg-muted">{humanizeKey(key)}:</span>{' '}
+              {renderValue(item)}
+            </div>
+          ))}
+        </div>
+      )
+    return String(value)
+  }
+  return structured ? (
+    <div className="space-y-1">{renderValue(content)}</div>
+  ) : (
+    <span>{linkedText(text)}</span>
+  )
+}
+
+function humanizeKey(key: string): string {
+  return key
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/^./, (c) => c.toUpperCase())
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 const REPORT_LOG_LINES = 100
