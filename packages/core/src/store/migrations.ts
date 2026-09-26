@@ -1,8 +1,18 @@
+import type { Database } from 'bun:sqlite'
+
 /**
  * Inlined rather than read from .sql files on disk: `bun build --compile`
- * produces a single binary with no adjacent files to read.
+ * produces a single binary with no adjacent files to read. Never edit an
+ * applied migration: existing databases keep whatever it created.
  */
-export const MIGRATIONS: readonly { name: string; sql: string }[] = [
+export type Migration = { name: string } & ({ sql: string } | { apply: (db: Database) => void })
+
+const hasColumn = (db: Database, table: string, column: string): boolean =>
+  (db.query(`pragma table_info(${table})`).all() as { name: string }[]).some(
+    (c) => c.name === column,
+  )
+
+export const MIGRATIONS: readonly Migration[] = [
   {
     name: '001_init',
     sql: `
@@ -103,10 +113,15 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
   },
   {
     name: '010_review_projection',
-    sql: `
-      alter table tasks add column review_round integer not null default 0;
-      alter table tasks add column review_findings text;
-      alter table tasks add column review_stop_reason text;
-    `,
+    apply: (db) => {
+      // Databases created before review_round was dropped from 001_init still
+      // carry it, holding counts from the removed reviewer loop.
+      if (hasColumn(db, 'tasks', 'review_round')) db.exec('update tasks set review_round = 0')
+      else db.exec('alter table tasks add column review_round integer not null default 0')
+      db.exec(`
+        alter table tasks add column review_findings text;
+        alter table tasks add column review_stop_reason text;
+      `)
+    },
   },
 ]

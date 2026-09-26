@@ -23,7 +23,8 @@ function migrate(db: Database): void {
   for (const m of MIGRATIONS) {
     if (applied.has(m.name)) continue
     db.transaction(() => {
-      db.exec(m.sql)
+      if ('sql' in m) db.exec(m.sql)
+      else m.apply(db)
       db.query('insert into schema_migrations (name, applied_at) values (?, ?)').run(
         m.name,
         Date.now(),
