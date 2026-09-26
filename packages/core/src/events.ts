@@ -12,6 +12,8 @@ export const TASK_STATES = [
   'implementing',
   'awaiting_answer',
   'checks',
+  'reviewing',
+  'fixing',
   'committed',
   'pr_open',
   'pr_flagged',
@@ -61,7 +63,9 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
   awaiting_answer: ['implementing'],
-  checks: ['implementing', 'committed'],
+  checks: ['implementing', 'reviewing', 'committed'],
+  reviewing: ['fixing', 'checks'],
+  fixing: ['reviewing', 'checks'],
   retrying: ['implementing'],
   committed: ['pr_open'],
   pr_open: ['pr_flagged'],
@@ -90,6 +94,40 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
 
 export const AgentRole = z.enum(['implement', 'review', 'triage', 'chat', 'verify'])
 export type AgentRole = z.infer<typeof AgentRole>
+
+export const FindingSeverity = z.enum(['blocker', 'major', 'minor', 'nit'])
+export type FindingSeverity = z.infer<typeof FindingSeverity>
+export const FINDING_SEVERITIES = FindingSeverity.options
+export function findingSeverityAtOrAbove(
+  severity: FindingSeverity,
+  threshold: FindingSeverity,
+): boolean {
+  return FINDING_SEVERITIES.indexOf(severity) <= FINDING_SEVERITIES.indexOf(threshold)
+}
+export const FindingScope = z.enum(['in-scope', 'follow-up'])
+export const SuggestedPriority = z.union([z.number().int().positive(), z.string().min(1)])
+export const Finding = z.object({
+  id: z.string().min(1),
+  severity: FindingSeverity,
+  scope: FindingScope,
+  path: z.string(),
+  line: z.number().int().positive(),
+  title: z.string().min(1),
+  evidence: z.string().min(1),
+  failureScenario: z.string().min(1),
+  covers: z.string().min(1).optional(),
+  suggestedPriority: SuggestedPriority.optional(),
+})
+export type Finding = z.infer<typeof Finding>
+
+export const FindingReply = z.object({
+  id: z.string().min(1),
+  outcome: z.enum(['fixed', 'wont-fix']),
+  reason: z.string().min(1),
+})
+export type FindingReply = z.infer<typeof FindingReply>
+export const ReviewStopReason = z.enum(['acceptable', 'rounds', 'tokens', 'no-progress', 'cost'])
+export type ReviewStopReason = z.infer<typeof ReviewStopReason>
 
 /** What the triage worker decides to do with an unclaimed task. */
 export const TriageAction = z.enum(['implement', 'decompose', 'close', 'ask', 'skip'])
@@ -234,6 +272,28 @@ export const EventBody = z.discriminatedUnion('type', [
     summary: z.string(),
   }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
+  z.object({
+    type: z.literal('review.started'),
+    round: z.number().int().positive(),
+    finalPass: z.boolean(),
+    reviewerSession: z.string().nullable(),
+  }),
+  z.object({
+    type: z.literal('review.finished'),
+    round: z.number().int().positive(),
+    findings: z.array(Finding),
+    blockingIds: z.array(z.string().min(1)),
+  }),
+  z.object({
+    type: z.literal('review.fixed'),
+    round: z.number().int().positive(),
+    replies: z.array(FindingReply),
+  }),
+  z.object({
+    type: z.literal('review.stopped'),
+    reason: ReviewStopReason,
+    unresolvedIds: z.array(z.string().min(1)),
+  }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
   z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),

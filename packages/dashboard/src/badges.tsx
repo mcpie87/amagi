@@ -12,6 +12,8 @@ const stateBadge: Record<TaskState, string> = {
   implementing: 'bg-blue-soft text-blue-ink ring-blue-edge',
   awaiting_answer: 'bg-amber-soft text-amber-ink ring-amber-edge',
   checks: 'bg-violet-soft text-violet-ink ring-violet-edge',
+  reviewing: 'bg-violet-soft text-violet-ink ring-violet-edge',
+  fixing: 'bg-blue-soft text-blue-ink ring-blue-edge',
   committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',

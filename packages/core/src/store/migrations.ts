@@ -101,4 +101,12 @@ export const MIGRATIONS: readonly { name: string; sql: string }[] = [
     name: '009_event_timestamp_index',
     sql: `create index events_ts_idx on events (ts, seq);`,
   },
+  {
+    name: '010_review_projection',
+    sql: `
+      alter table tasks add column review_round integer not null default 0;
+      alter table tasks add column review_findings text;
+      alter table tasks add column review_stop_reason text;
+    `,
+  },
 ]
