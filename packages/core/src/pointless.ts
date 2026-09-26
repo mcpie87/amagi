@@ -13,6 +13,7 @@ import { cacheHome } from './paths.ts'
 import { type PrInfo, prepareConflictWorktree } from './pr-check.ts'
 import { pointlessPrompt, pointlessSystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
+import { recordWatcherAgentRun } from './watcher-agent.ts'
 
 export type FlagPointlessOptions = {
   store: Store
@@ -159,6 +160,7 @@ async function taskForVerdict(
 }
 
 type JudgePointlessOptions = {
+  store: Store
   /** Repo root the PR worktree is prepared from. */
   root: string
   repoName: string
@@ -193,7 +195,8 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
     const outDir = mkdtempSync(join(tmpdir(), `amagi-pointless-${opts.pr.number}-`))
     const outPath = join(outDir, 'verdict.md')
     try {
-      const proc = mk(opts.config.harness.implement).start({
+      const harness = mk(opts.config.harness.implement)
+      const proc = harness.start({
         cwd: wt.path,
         prompt: pointlessPrompt({
           pr: opts.pr,
@@ -206,13 +209,22 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
       })
       opts.onLog?.('info', `worktree: ${wt.path}`)
       opts.onLog?.('info', 'agent: pointlessness judge')
-      for await (const event of proc.events()) {
-        if (event.kind === 'tool_use') opts.onLog?.('info', `[tool] ${event.name}`)
-        else if (event.kind === 'text' && event.text.trim()) opts.onLog?.('agent', event.text)
-        else if (event.kind === 'error') opts.onLog?.('error', event.message)
-        else if (event.kind === 'status') opts.onLog?.('info', event.message)
-      }
-      const outcome = await proc.done
+      const outcome = await recordWatcherAgentRun(
+        proc,
+        {
+          store: opts.store,
+          role: 'triage',
+          harness: harness.kind,
+          source: `PR #${opts.pr.number} pointlessness judge`,
+          cwd: wt.path,
+        },
+        (event) => {
+          if (event.kind === 'tool_use') opts.onLog?.('info', `[tool] ${event.name}`)
+          else if (event.kind === 'text' && event.text.trim()) opts.onLog?.('agent', event.text)
+          else if (event.kind === 'error') opts.onLog?.('error', event.message)
+          else if (event.kind === 'status') opts.onLog?.('info', event.message)
+        },
+      )
       if (!outcome.ok) {
         opts.onLog?.('error', `agent failed: ${agentFailure(outcome)}`)
         console.warn(`pr pointless verdict #${opts.pr.number}: ${agentFailure(outcome)}`)
@@ -289,6 +301,7 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
           const verdict = contained
             ? (opts.contained?.get(pr.number) ?? null)
             : await judgePointless({
+                store: opts.store,
                 root: opts.cwd,
                 repoName: opts.repoName,
                 pr,

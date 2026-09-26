@@ -21,6 +21,7 @@ import {
 } from './pr-check.ts'
 import { resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
+import { recordWatcherAgentRun } from './watcher-agent.ts'
 
 export type ConflictLogLevel = 'info' | 'ok' | 'warn' | 'error' | 'agent'
 
@@ -196,13 +197,27 @@ export async function resolveConflict(
               ? {}
               : { seatActivity: { repo: opts.repo, watcher: 'pr-conflict-watcher' } }),
           })
-          for await (const event of proc.events()) {
+          const onEvent = (event: import('./events.ts').AgentEvent): void => {
             if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
             else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
             else if (event.kind === 'error') log('error', event.message)
             else if (event.kind === 'status') log('info', event.message)
           }
-          return proc.done
+          if (opts.store === undefined) {
+            for await (const event of proc.events()) onEvent(event)
+            return proc.done
+          }
+          return recordWatcherAgentRun(
+            proc,
+            {
+              store: opts.store,
+              role: 'implement',
+              harness: harness.kind,
+              source: `PR #${opts.pr.number} conflict dispatch ${iteration}`,
+              cwd: wt.path,
+            },
+            onEvent,
+          )
         },
         opts.onGitBypassed,
       )

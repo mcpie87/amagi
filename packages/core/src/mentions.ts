@@ -6,6 +6,7 @@ import { classifyDifficulty } from './difficulty.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
+import type { AgentEvent } from './events.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
@@ -23,6 +24,8 @@ import {
   takeDownPrompt,
   takeDownSystemPrompt,
 } from './prompt.ts'
+import type { Store } from './store/store.ts'
+import { recordWatcherAgentRun, type WatcherAgentSession } from './watcher-agent.ts'
 import { taskIdFromBranch } from './worktree.ts'
 
 export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'take-down' | 'ambiguous'
@@ -117,6 +120,8 @@ export type RespondToMentionOptions = {
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness | undefined
+  /** Store used by the watcher to record each LLM call as a session. */
+  store?: Store
   /** Called with live progress while a response is produced, for a status line. */
   onProgress?: (progress: MentionProgress) => void
   /** Called once classification settles, with the chosen kind and the raw reply. */
@@ -135,7 +140,10 @@ class Progress {
   private phaseStart = Date.now()
   private readonly totalStart = Date.now()
 
-  constructor(private readonly onProgress?: (p: MentionProgress) => void) {}
+  constructor(
+    private readonly onProgress?: (p: MentionProgress) => void,
+    private readonly store?: Store,
+  ) {}
 
   /** Switch to a new phase, restarting its elapsed clock and reporting immediately. */
   phase(label: string): void {
@@ -145,23 +153,33 @@ class Progress {
   }
 
   /** Waits for the agent while surfacing elapsed time, tool use, and usage. */
-  async agent(proc: AgentProcess, label: string): Promise<AgentOutcome> {
+  async agent(
+    proc: AgentProcess,
+    label: string,
+    session?: Omit<WatcherAgentSession, 'store'>,
+  ): Promise<AgentOutcome> {
     const tick = setInterval(() => this.emit(label), 1000)
-    try {
-      for await (const event of proc.events()) {
-        if (event.kind === 'usage') {
-          this.usage = {
-            inputTokens: event.inputTokens,
-            outputTokens: event.outputTokens,
-            cachedTokens: event.cachedTokens ?? 0,
-            costUsd: event.costUsd ?? null,
-          }
-        } else if (event.kind === 'tool_use') {
-          this.tool = event.name
-        } else if (event.kind === 'status') {
-          this.emit(event.message)
+    const onEvent = (event: AgentEvent): void => {
+      if (event.kind === 'usage') {
+        this.usage = {
+          inputTokens: event.inputTokens,
+          outputTokens: event.outputTokens,
+          cachedTokens: event.cachedTokens ?? 0,
+          costUsd: event.costUsd ?? null,
         }
-        this.emit(label)
+      } else if (event.kind === 'tool_use') {
+        this.tool = event.name
+      } else if (event.kind === 'status') {
+        this.emit(event.message)
+      }
+      this.emit(label)
+    }
+    try {
+      if (session !== undefined && this.store !== undefined) {
+        return await recordWatcherAgentRun(proc, { ...session, store: this.store }, onEvent)
+      }
+      for await (const event of proc.events()) {
+        onEvent(event)
       }
       return await proc.done
     } finally {
@@ -242,6 +260,7 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
 
 async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progress): Promise<void> {
   const mk = opts.makeHarnessFn ?? makeHarness
+  const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
   const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
@@ -263,13 +282,21 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
         }
         const proc = startImplementHarness(
           mk,
-          watcherHarnessConfig(opts.config, 'mention'),
+          harnessConfig,
           wt.path,
           respondToMentionPrompt(ctx),
           respondToMentionSystemPrompt(ctx),
           opts.repo,
         )
-        return { outcome: await p.agent(proc, 'fixing in worktree'), proc }
+        return {
+          outcome: await p.agent(proc, 'fixing in worktree', {
+            role: 'implement',
+            harness: harnessConfig.kind,
+            source: `PR #${opts.pr.number} mention fix-pr`,
+            cwd: wt.path,
+          }),
+          proc,
+        }
       },
       opts.onGitBypassed,
     )
@@ -322,6 +349,7 @@ async function respondToExplain(
   p: Progress,
 ): Promise<void> {
   const mk = opts.makeHarnessFn ?? makeHarness
+  const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
   const diff = await opts.driver.getPrDiff(opts.root, opts.pr.number)
@@ -334,7 +362,7 @@ async function respondToExplain(
       async () => {
         const proc = startImplementHarness(
           mk,
-          watcherHarnessConfig(opts.config, 'mention'),
+          harnessConfig,
           wt.path,
           explainMentionPrompt({
             pr: opts.pr,
@@ -346,7 +374,15 @@ async function respondToExplain(
           explainMentionSystemPrompt(),
           opts.repo,
         )
-        return { outcome: await p.agent(proc, 'explaining'), proc }
+        return {
+          outcome: await p.agent(proc, 'explaining', {
+            role: 'triage',
+            harness: harnessConfig.kind,
+            source: `PR #${opts.pr.number} mention explain`,
+            cwd: wt.path,
+          }),
+          proc,
+        }
       },
       opts.onGitBypassed,
     )
@@ -380,17 +416,23 @@ async function askClarification(opts: RespondToMentionOptions, p: Progress): Pro
 /** Lets the LLM decide the response path, rather than assuming a fixed one. */
 async function classifyMention(opts: RespondToMentionOptions, p: Progress): Promise<MentionKind> {
   const mk = opts.makeHarnessFn ?? makeHarness
+  const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
   // A throwaway cwd: classification needs no repo context and must not touch one.
   p.phase('classifying')
   const proc = startImplementHarness(
     mk,
-    watcherHarnessConfig(opts.config, 'mention'),
+    harnessConfig,
     tmpdir(),
     classifyMentionPrompt({ pr: opts.pr, mention: opts.mention }),
     classifyMentionSystemPrompt(),
     opts.repo,
   )
-  const outcome = await p.agent(proc, 'classifying')
+  const outcome = await p.agent(proc, 'classifying', {
+    role: 'triage',
+    harness: harnessConfig.kind,
+    source: `PR #${opts.pr.number} mention classification`,
+    cwd: tmpdir(),
+  })
   if (!outcome.ok) {
     throw new Error(`classifier failed: ${agentFailure(outcome)}`)
   }
@@ -423,7 +465,10 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
   ].join('\n')
   const title = addTaskTitle(opts)
   const difficulty = opts.config.difficulty.enabled
-    ? await classifyDifficulty(title, description, opts.config)
+    ? await classifyDifficulty(title, description, opts.config, opts.makeHarnessFn, {
+        ...(opts.store === undefined ? {} : { store: opts.store }),
+        source: `PR #${opts.pr.number} mention difficulty classification`,
+      })
     : null
   const task = await tracker.createTask({
     title,
@@ -455,6 +500,7 @@ async function respondToTakeDown(
   p: Progress,
 ): Promise<void> {
   const mk = opts.makeHarnessFn ?? makeHarness
+  const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
   const outPath = join(tmpdir(), `amagi-takedown-${opts.pr.number}-${opts.mention.id}.md`)
@@ -468,7 +514,7 @@ async function respondToTakeDown(
       () => {
         const proc = startImplementHarness(
           mk,
-          watcherHarnessConfig(opts.config, 'mention'),
+          harnessConfig,
           wt.path,
           takeDownPrompt({
             pr: opts.pr,
@@ -479,7 +525,12 @@ async function respondToTakeDown(
           takeDownSystemPrompt(),
           opts.repo,
         )
-        return p.agent(proc, 'judging')
+        return p.agent(proc, 'judging', {
+          role: 'triage',
+          harness: harnessConfig.kind,
+          source: `PR #${opts.pr.number} mention take-down`,
+          cwd: wt.path,
+        })
       },
       opts.onGitBypassed,
     )
@@ -512,7 +563,7 @@ async function respondToTakeDown(
 /** Responds to a single mention. Throws when the response fails so the caller can retry. */
 export async function respondToMention(opts: RespondToMentionOptions): Promise<MentionKind> {
   const run = opts.exec ?? defaultExec
-  const p = new Progress(opts.onProgress)
+  const p = new Progress(opts.onProgress, opts.store)
   const kind = await classifyMention(opts, p)
   switch (kind) {
     case 'fix-pr':
