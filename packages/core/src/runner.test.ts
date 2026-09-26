@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
@@ -178,7 +178,7 @@ class ReviewHarness implements Harness {
   readonly kind = 'codex'
   readonly calls: { resumeFrom: string | null; opts: AgentStartOptions }[] = []
 
-  constructor(private readonly outputs: string[]) {}
+  constructor(private readonly outputs: (string | ((opts: AgentStartOptions) => string))[]) {}
 
   start(opts: AgentStartOptions): AgentProcess {
     return this.run(null, opts)
@@ -200,7 +200,8 @@ class ReviewHarness implements Harness {
     if (!opts.prompt.includes('runner stores your final response')) {
       throw new Error('review prompt did not explain where findings are stored')
     }
-    const summary = this.outputs.shift() ?? '[]'
+    const output = this.outputs.shift()
+    const summary = typeof output === 'function' ? output(opts) : (output ?? '[]')
     const queue = new AsyncQueue<AgentEvent>()
     queue.push({
       kind: 'usage',
@@ -634,6 +635,126 @@ describe('Runner.runOnce', () => {
     expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
     expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
+  })
+
+  test('catches and fixes a seeded boundary defect before opening a clean PR', async () => {
+    const task: TrackerTask = {
+      ...TASK,
+      id: 'bd-range',
+      title: 'Add an inclusive range check',
+      description: 'Add isWithinRange(value, min, max) and include both endpoints.',
+      acceptanceCriteria: 'The minimum and maximum values are within the range.',
+    }
+    const file = 'src/range.js'
+    const initial =
+      'function isWithinRange(value, min, max) { return value > min && value < max }\n'
+    const fixed =
+      'function isWithinRange(value, min, max) { return value >= min && value <= max }\n'
+    const sourceAt = (cwd: string) => readFileSync(join(cwd, file), 'utf8')
+    const evaluates = (source: string) => new Function(`${source}\nreturn isWithinRange`)()
+    const finding = {
+      id: 'F-RANGE-1',
+      severity: 'major',
+      scope: 'in-scope',
+      path: file,
+      line: 1,
+      title: 'The range check excludes both endpoints',
+      evidence: 'The comparisons use > and < despite the inclusive contract.',
+      failureScenario: 'A value equal to min or max is incorrectly rejected.',
+    } as const
+    const implementer = new FakeHarness(
+      [
+        {
+          effect: (cwd) => {
+            mkdirSync(join(cwd, 'src'), { recursive: true })
+            writeFileSync(join(cwd, file), initial)
+          },
+          events: [
+            { kind: 'usage', inputTokens: 100, outputTokens: 20, cachedTokens: 0, costUsd: 0.02 },
+          ],
+        },
+        {
+          effect: (cwd, prompt) => {
+            expect(prompt).toContain('F-RANGE-1')
+            writeFileSync(join(cwd, file), fixed)
+            const replyPath = prompt.match(
+              /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+            )?.[1]
+            if (replyPath === undefined) throw new Error('review fix prompt omitted reply path')
+            writeFileSync(
+              replyPath,
+              JSON.stringify([
+                { id: 'F-RANGE-1', outcome: 'fixed', reason: 'Included both boundaries.' },
+              ]),
+            )
+          },
+          events: [
+            { kind: 'usage', inputTokens: 150, outputTokens: 40, cachedTokens: 0, costUsd: 0.03 },
+          ],
+        },
+      ],
+      'viable',
+      'claude',
+    )
+    const reviewer = new ReviewHarness([
+      ({ cwd, prompt }) => {
+        expect(prompt).toContain('Lens: typescript-javascript')
+        expect(prompt).toContain('The minimum and maximum values are within the range.')
+        const implementation = sourceAt(cwd)
+        expect(evaluates(implementation)(2, 2, 4)).toBe(false)
+        return JSON.stringify([finding])
+      },
+      ({ cwd, prompt }) => {
+        expect(prompt).toContain('Prior findings:')
+        expect(prompt).toContain('Implementer replies:')
+        expect(sourceAt(cwd)).toBe(fixed)
+        expect(evaluates(sourceAt(cwd))(2, 2, 4)).toBe(true)
+        expect(evaluates(sourceAt(cwd))(4, 2, 4)).toBe(true)
+        return '[]'
+      },
+    ])
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([task]),
+      implementer,
+      config({
+        harness: { implement: { kind: 'claude', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' }, maxRounds: 3 },
+      }),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    const events = store.events({ taskId: task.id, limit: 999 })
+    const usageByRole = (role: 'implement' | 'review') =>
+      events.reduce((tokens, event) => {
+        if (event.type !== 'agent.stream' || event.role !== role || event.event.kind !== 'usage') {
+          return tokens
+        }
+        return tokens + event.event.inputTokens + event.event.outputTokens
+      }, 0)
+    expect(result?.state).toBe('pr_open')
+    expect(reviewer.calls).toHaveLength(2)
+    expect(implementer.calls).toHaveLength(2)
+    expect(usageByRole('review')).toBe(30)
+    expect(usageByRole('implement')).toBe(310)
+    expect(events.filter((event) => event.type === 'review.finished')).toMatchObject([
+      { round: 1, findings: [finding], blockingIds: ['F-RANGE-1'] },
+      { round: 2, findings: [], blockingIds: [] },
+    ])
+    expect(events.find((event) => event.type === 'review.fixed')).toMatchObject({
+      round: 1,
+      replies: [{ id: 'F-RANGE-1', outcome: 'fixed' }],
+    })
+    expect(events.find((event) => event.type === 'review.stopped')).toMatchObject({
+      reason: 'acceptable',
+      unresolvedIds: [],
+    })
+    expect(forge.calls).toHaveLength(1)
+    expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
+    expect(forge.calls[0]?.body).toContain('Fixed: F-RANGE-1.')
   })
 
   test('counts a fresh final pass as a review round', async () => {
