@@ -107,10 +107,12 @@ function HarnessFields({
   values,
   onChange,
   inheritKind,
+  seats,
 }: {
   values: HarnessValues
   onChange: (next: HarnessValues) => void
   inheritKind?: string
+  seats: string[]
 }) {
   const { options } = useRunner()
   const kind = values.kind === '' ? undefined : values.kind
@@ -147,13 +149,22 @@ function HarnessFields({
           <label className={label} htmlFor="fleet-seat">
             Seat
           </label>
-          <input
+          <select
             id="fleet-seat"
             value={values.seat}
             onChange={(e) => set({ seat: e.target.value })}
-            placeholder={kind ?? inheritKind ?? 'harness name'}
             className={input}
-          />
+          >
+            <option value="">default ({kind ?? inheritKind ?? 'harness kind'})</option>
+            {values.seat !== '' && !seats.includes(values.seat) && (
+              <option value={values.seat}>{values.seat} (unlisted)</option>
+            )}
+            {seats.map((seat) => (
+              <option key={seat} value={seat}>
+                {seat}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
           <label className={label} htmlFor="fleet-model">
@@ -278,11 +289,13 @@ function defaultName(workers: Worker[], kind: HarnessKind): string {
 function WorkerFormModal({
   initial,
   workers,
+  seats,
   onClose,
   onSaved,
 }: {
   initial: Worker | null
   workers: Worker[]
+  seats: string[]
   onClose: () => void
   onSaved: () => void
 }) {
@@ -351,7 +364,7 @@ function WorkerFormModal({
           className={input}
         />
       </div>
-      <HarnessFields values={harness} onChange={changeHarness} />
+      <HarnessFields values={harness} onChange={changeHarness} seats={seats} />
       {initial?.taskId != null && (
         <p className="text-sm text-amber-ink">
           {initial.taskId} keeps its current settings; changes apply from the next run.
@@ -364,11 +377,13 @@ function WorkerFormModal({
 function WatcherFormModal({
   kind,
   initial,
+  seats,
   onClose,
   onSaved,
 }: {
   kind: AgentWatcherKind
   initial: AgentWatcher
+  seats: string[]
   onClose: () => void
   onSaved: () => void
 }) {
@@ -405,7 +420,12 @@ function WatcherFormModal({
       onSubmit={() => void save()}
       onClose={onClose}
     >
-      <HarnessFields values={harness} onChange={setHarness} inheritKind="implement harness" />
+      <HarnessFields
+        values={harness}
+        onChange={setHarness}
+        inheritKind="implement harness"
+        seats={seats}
+      />
     </Modal>
   )
 }
@@ -593,11 +613,109 @@ function ParticipationRow({
   )
 }
 
+type SeatDraft = { original: string | null; name: string }
+
+function SeatsEditor({
+  entries,
+  setEntries,
+  onSaved,
+}: {
+  entries: SeatDraft[] | null
+  setEntries: (entries: SeatDraft[]) => void
+  onSaved: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const names = entries?.map(({ name }) => name.trim()).filter(Boolean) ?? []
+  const valid =
+    entries?.every(({ name }) => name.trim() !== '') && new Set(names).size === names.length
+
+  const save = async () => {
+    if (entries === null || !valid) return
+    setBusy(true)
+    setError(null)
+    const seats = entries.map(({ name }) => name.trim())
+    const renames = entries.flatMap(({ original, name }) =>
+      original !== null && original !== name.trim() ? [{ from: original, to: name.trim() }] : [],
+    )
+    const err = await send('PUT', '/api/seat-names', { seats, renames })
+    setBusy(false)
+    if (err !== null) setError(err)
+    else onSaved()
+  }
+
+  return (
+    <div className={`mt-6 ${card}`}>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm text-fg-muted">Seats</h2>
+        <button
+          type="button"
+          onClick={() => setEntries([...(entries ?? []), { original: null, name: '' }])}
+          disabled={entries === null || busy}
+          className={secondary}
+        >
+          Add seat
+        </button>
+      </div>
+      <p className="mb-3 text-sm text-fg-faint">
+        Rename a seat to update every worker, watcher, and harness that uses it. Removing a seat
+        resets its references to the default seat.
+      </p>
+      {entries === null ? (
+        <p className="text-sm text-fg-faint">Loading seats...</p>
+      ) : (
+        <div className="space-y-2">
+          {entries.map((entry, index) => (
+            <div key={entry.original ?? `new-${index}`} className="flex gap-2">
+              <input
+                aria-label={`Seat ${index + 1}`}
+                value={entry.name}
+                onChange={(event) =>
+                  setEntries(
+                    entries.map((seat, i) =>
+                      i === index ? { ...seat, name: event.target.value } : seat,
+                    ),
+                  )
+                }
+                className={input}
+              />
+              <button
+                type="button"
+                onClick={() => setEntries(entries.filter((_, i) => i !== index))}
+                disabled={busy}
+                className={secondary}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          {entries.length === 0 && <p className="text-sm text-fg-faint">No named seats.</p>}
+        </div>
+      )}
+      {error !== null && <p className="mt-2 text-sm text-red-ink">{error}</p>}
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={!valid || busy}
+          className={secondary}
+        >
+          {busy ? 'Saving...' : 'Save seats'}
+        </button>
+        {entries !== null && !valid && (
+          <span className="text-sm text-amber-ink">Seat names must be unique and non-empty.</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /** The fleet editor: workers, watchers and per-repository participation. */
 export function FleetSettings() {
   const { repos, refreshRepos } = useDashboard()
   const [workers, setWorkers] = useState<Worker[] | null>(null)
   const [watchers, setWatchers] = useState<Watchers | null>(null)
+  const [seatEntries, setSeatEntries] = useState<SeatDraft[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editing, setEditing] = useState<Worker | 'new' | null>(null)
   const [editingWatcher, setEditingWatcher] = useState<AgentWatcherKind | null>(null)
@@ -615,18 +733,34 @@ export function FleetSettings() {
       )
   }, [])
 
+  const refreshSeats = useCallback(() => {
+    fetch(`${apiBase}/api/seat-names`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const body = (await res.json()) as { seats: string[] }
+        setSeatEntries(body.seats.map((name) => ({ original: name, name })))
+      })
+      .catch((err: unknown) =>
+        setLoadError(err instanceof Error ? err.message : 'could not reach the amagi server'),
+      )
+  }, [])
+
   useEffect(() => {
     refresh()
+    refreshSeats()
     // A worker's on flag and running task change underneath the page.
     const timer = setInterval(refresh, 5000)
     return () => clearInterval(timer)
-  }, [refresh])
+  }, [refresh, refreshSeats])
 
   const saved = () => {
     setEditing(null)
     setEditingWatcher(null)
     refresh()
   }
+
+  const seatsSaved = () => refreshSeats()
+  const seatNames = seatEntries?.map(({ name }) => name.trim()).filter(Boolean) ?? []
 
   return (
     <>
@@ -659,6 +793,8 @@ export function FleetSettings() {
           ))}
         </div>
       </div>
+
+      <SeatsEditor entries={seatEntries} setEntries={setSeatEntries} onSaved={seatsSaved} />
 
       {watchers !== null && (
         <div className="mt-6">
@@ -696,6 +832,7 @@ export function FleetSettings() {
         <WorkerFormModal
           initial={editing === 'new' ? null : editing}
           workers={workers}
+          seats={seatNames}
           onClose={() => setEditing(null)}
           onSaved={saved}
         />
@@ -704,6 +841,7 @@ export function FleetSettings() {
         <WatcherFormModal
           kind={editingWatcher}
           initial={watchers[editingWatcher]}
+          seats={seatNames}
           onClose={() => setEditingWatcher(null)}
           onSaved={saved}
         />

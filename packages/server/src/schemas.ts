@@ -158,6 +158,18 @@ export const WatcherUpdateBody = z
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WatcherUpdateBody = z.infer<typeof WatcherUpdateBody>
 
+export const SeatNamesUpdateBody = z
+  .object({
+    seats: z.array(z.string().trim().min(1)),
+    renames: z
+      .array(z.object({ from: z.string().min(1), to: z.string().trim().min(1) }))
+      .default([]),
+  })
+  .refine(({ seats }) => new Set(seats).size === seats.length, {
+    message: 'seat names must be unique',
+  })
+export type SeatNamesUpdateBody = z.infer<typeof SeatNamesUpdateBody>
+
 export const ParticipationBody = z
   .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })
   .refine(nonEmpty, { message: 'provide workers or watchers' })
