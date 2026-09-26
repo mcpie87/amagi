@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { lintCommitMessage } from './commit-lint.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import {
@@ -22,6 +23,7 @@ import {
   taskIdFromAmagiBranch,
   taskIdFromPrBranch,
 } from './pr-check.ts'
+import { commitMessage } from './prompt.ts'
 
 type Call = readonly string[]
 
@@ -491,6 +493,31 @@ describe('prepareConflictWorktree', () => {
     })
 
     expect(wt.conflicted).toBe(false)
+  })
+
+  test('uses a linted task commit message for a clean merge', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return ok('Merge made by the recursive strategy')
+      return undefined
+    })
+    const message = commitMessage(
+      { id: 'am-1', title: 'Do the thing' },
+      'Merge: main -> amagi/am-1-do-the-thing.',
+      { harness: 'claude', model: 'model-x', effort: 'high' },
+    )
+    await prepareConflictWorktree({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      worktreeRoot: '/wt',
+      baseBranch: 'main',
+      pr: pr(),
+      mergeMessage: message,
+      exec,
+    })
+
+    expect(lintCommitMessage(message)).toEqual([])
+    expect(calls.some((c) => c[1] === 'merge' && c[3] === message)).toBe(true)
   })
 
   test('aborts a stale merge and resets a reused worktree to the PR head', async () => {
