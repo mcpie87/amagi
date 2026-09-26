@@ -263,8 +263,8 @@ function OverviewScreen({
           <Text dimColor>offline</Text>
         ) : (
           <Text>
-            {runner.available ? 'available' : 'busy'} · {running.length}/{runner.capacity} workers ·
-            auto-queue {runner.autoQueue ? 'on' : 'off'}
+            {runner.available ? 'available' : 'busy'} · {runner.busySeats}/{runner.totalSeats} seats
+            {' · '}auto-queue {runner.autoQueue ? 'on' : 'off'}
           </Text>
         )}
         {resources.processes > 0 && (

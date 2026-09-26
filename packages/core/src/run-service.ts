@@ -37,6 +37,8 @@ export type RunnerStatus = {
   name: string
   available: boolean
   capacity: number
+  busySeats: number
+  totalSeats: number
   running: string[]
   /** Epoch ms at launch per running task, keyed by task id, for live elapsed-time display. */
   startedAt: Record<string, number>
@@ -253,6 +255,13 @@ export class RunService implements RunServiceApi {
 
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
+    const totalSeats = new Set(
+      this.opts.config.worker
+        .filter((worker) => worker.enabled)
+        .map((worker) => this.workerSeat(worker)),
+    ).size
+    const capacity = this.availableCapacity()
+    const busySeats = totalSeats - capacity
     const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
     const tasks: Record<string, RunnerTask> = {}
@@ -300,8 +309,10 @@ export class RunService implements RunServiceApi {
     for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
-      available: this.availableCapacity() > 0,
-      capacity: this.availableCapacity(),
+      available: capacity > 0,
+      capacity,
+      busySeats,
+      totalSeats,
       running,
       startedAt,
       resources,
