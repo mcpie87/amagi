@@ -24,6 +24,9 @@ export type RunnerTask = {
   seat?: string
   /** True until a harness emits agent.started after blocking on its seat. */
   waitingOnSeat?: boolean
+  /** Latest wait event and agent start timestamps for seat queue timing. */
+  waitingSince?: number
+  agentStartedAt?: number
   /** True for a foreground run that does not match a configured worker. */
   adHoc?: boolean
   /** The configured implement harness for the run. */
@@ -313,6 +316,8 @@ export class RunService implements RunServiceApi {
           workerName: worker?.name ?? null,
           seat: entry?.seat ?? worker?.seat ?? worker?.kind ?? this.opts.harness.kind,
           waitingOnSeat,
+          ...(waitingSeatEvent === undefined ? {} : { waitingSince: waitingSeatEvent.ts }),
+          ...(latestAgentStart === undefined ? {} : { agentStartedAt: latestAgentStart.ts }),
           // The configured harness is known at launch; only the model/effort
           // wait for the agent run to report them.
           harness:

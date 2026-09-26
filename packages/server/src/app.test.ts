@@ -2577,10 +2577,25 @@ describe('GET /api/seats', () => {
         {
           seat: 'claude',
           state: 'held',
-          holder: { repo: 'repo-a', taskId: 'task-a' },
-          waiters: [{ repo: 'repo-b', taskId: 'task-b' }],
+          holder: {
+            repo: 'repo-a',
+            taskId: 'task-a',
+            title: 'task-a',
+            status: 'running',
+            since: null,
+          },
+          waiters: [
+            {
+              repo: 'repo-b',
+              taskId: 'task-b',
+              title: 'task-b',
+              status: 'running',
+              since: null,
+            },
+          ],
+          eligible: [],
         },
-        { seat: 'free-seat', state: 'free', holder: null, waiters: [] },
+        { seat: 'free-seat', state: 'free', holder: null, waiters: [], eligible: [] },
       ],
     })
   })
