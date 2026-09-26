@@ -538,6 +538,42 @@ describe('Runner.runOnce', () => {
     expect(harness.calls[0]?.prompt).not.toContain('viability check is over')
   })
 
+  test('retries a no-change implementation that repeats the viability verdict', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: '{"viable": true, "reason": "still needed"}' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBeNull()
+    expect(harness.calls[1]?.prompt).toContain('Implement this task')
+  })
+
+  test('a repeated viability verdict gets a clear no-change reason', async () => {
+    const verdict = { outcome: { summary: '{"viable": true, "reason": "still needed"}' } }
+    const harness = new FakeHarness([verdict, verdict])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(harness.calls).toHaveLength(2)
+    expect(stateReason(TASK.id)).toContain('implementation agent returned a viability check')
+    expect(stateReason(TASK.id)).not.toContain('"viable"')
+  })
+
+  test('a viability verdict from the no-change explanation is not shown as the reason', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: null } },
+      { outcome: { summary: '{"viable": true, "reason": "still needed"}' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(stateReason(TASK.id)).toContain('implementation agent returned a viability check')
+    expect(stateReason(TASK.id)).not.toContain('"viable"')
+  })
+
   test('a failed viability check defaults to continuing the task', async () => {
     const harness = new FakeHarness([writesAFile], {
       outcome: { ok: false, exitCode: 1, stderr: 'model unavailable', sessionId: 'broken' },

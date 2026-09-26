@@ -586,6 +586,40 @@ export class Runner {
     if (parked === null) return
     current = mergeAgentRuns(current, parked)
 
+    if (current.summary !== null && parseViabilityDecision(current.summary) !== null) {
+      const status = await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })
+      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const commits = await execOk(this.exec, ['git', 'rev-list', '--count', `${base}..HEAD`], {
+        cwd,
+      })
+      if (status.trim() === '' && Number(commits.trim()) === 0) {
+        const retry = await this.runAgentWithRetry(
+          task.id,
+          null,
+          {
+            cwd,
+            prompt: implementPrompt(promptCtx),
+            systemPrompt: implementSystemPrompt(promptCtx),
+            ...harnessStartOpts(config.harness.implement),
+          },
+          'implement retry',
+          lease,
+          budget,
+        )
+        if (retry.stopped) return
+        current = {
+          sessionId: retry.sessionId,
+          summary: retry.summary,
+          model: retry.model,
+          effort: retry.effort,
+        }
+        if (lease.isLost) throw new LeaseLostError(task.id)
+        const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
+        if (resumed === null) return
+        current = mergeAgentRuns(current, resumed)
+      }
+    }
+
     let recoveryGiven = false
     let recoveryRetry = false
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
@@ -660,9 +694,12 @@ export class Runner {
     })
     if (!committed) {
       let reason = current.summary?.trim() !== '' ? current.summary : null
+      const viabilityEchoReason =
+        'the implementation agent returned a viability check instead of making changes; inspect the task log before retrying'
+      const repeatedViability = reason !== null && parseViabilityDecision(reason) !== null
       // The verdict is what the operator acts on for a task with no PR, so a
       // summary that skipped it sends the agent back to classify the outcome.
-      if (parseVerdict(reason) === null && current.sessionId !== null) {
+      if (!repeatedViability && parseVerdict(reason) === null && current.sessionId !== null) {
         this.transition(task.id, 'implementing')
         const why = await this.runAgentWithRetry(
           task.id,
@@ -680,6 +717,7 @@ export class Runner {
         if (why.stopped) return
         if (why.summary?.trim()) reason = why.summary
       }
+      if (reason !== null && parseViabilityDecision(reason) !== null) reason = viabilityEchoReason
       // No changes AND no agent-written explanation: never read as "already done".
       this.transition(
         task.id,
