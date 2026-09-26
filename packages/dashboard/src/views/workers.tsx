@@ -171,11 +171,14 @@ function WatcherDetailDialog({
   const dateFormat = useDateFormatPref()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const open = selected !== null
+  const [activeTab, setActiveTab] = useState<'history' | 'log'>('history')
   useEffect(() => {
     const dialog = dialogRef.current
     if (dialog === null) return
-    if (open) dialog.showModal()
-    else if (dialog.open) dialog.close()
+    if (open) {
+      setActiveTab('history')
+      dialog.showModal()
+    } else if (dialog.open) dialog.close()
   }, [open])
   if (selected === null) return null
   const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
@@ -288,117 +291,145 @@ function WatcherDetailDialog({
               </div>
             </div>
           )}
-          <div className="mt-5 border-t border-line pt-4">
-            <h3 className="text-sm font-medium text-fg">Run history</h3>
-            {history.length === 0 ? (
-              <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
-            ) : (
-              <div className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-1">
-                {historyGroups.map((group) => {
-                  if (group.length > 1) {
-                    const newest = group[0]
-                    const oldest = group[group.length - 1]
-                    if (newest === undefined || oldest === undefined) return null
-                    return (
-                      <div
-                        key={`noop-${newest.runId}-${oldest.runId}`}
-                        className="rounded border border-line bg-surface/60 px-3 py-2 text-xs text-fg"
-                      >
-                        <span className="tabular-nums">
-                          {fmtDateTime(newest.startedAt, dateFormat)} -{' '}
-                          {fmtDateTime(oldest.startedAt, dateFormat)}
-                        </span>
-                        <span className="ml-2 text-fg-faint">{group.length} runs, 0 actions</span>
-                      </div>
-                    )
-                  }
-                  const run = group[0]
-                  if (run === undefined) return null
-                  return (
-                    <details
-                      key={run.runId}
-                      className="rounded border border-line bg-surface/60 px-3 py-2"
-                    >
-                      <summary className="cursor-pointer text-xs text-fg">
-                        <span className="tabular-nums">
-                          {fmtDateTime(run.startedAt, dateFormat)}
-                        </span>
-                        <span
-                          className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+          <div className="detail-tabs mt-5 flex gap-1 border-b border-line">
+            <button
+              type="button"
+              aria-pressed={activeTab === 'history'}
+              onClick={() => setActiveTab('history')}
+              className={`rounded-t px-3 py-1.5 text-sm ${
+                activeTab === 'history'
+                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
+              }`}
+            >
+              Run history
+            </button>
+            <button
+              type="button"
+              aria-pressed={activeTab === 'log'}
+              onClick={() => setActiveTab('log')}
+              className={`rounded-t px-3 py-1.5 text-sm ${
+                activeTab === 'log'
+                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
+              }`}
+            >
+              Live log
+            </button>
+          </div>
+          {activeTab === 'history' && (
+            <div className="border-t border-line pt-4">
+              {history.length === 0 ? (
+                <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
+              ) : (
+                <div className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-1">
+                  {historyGroups.map((group) => {
+                    if (group.length > 1) {
+                      const newest = group[0]
+                      const oldest = group[group.length - 1]
+                      if (newest === undefined || oldest === undefined) return null
+                      return (
+                        <div
+                          key={`noop-${newest.runId}-${oldest.runId}`}
+                          className="rounded border border-line bg-surface/60 px-3 py-2 text-xs text-fg"
                         >
-                          {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
-                        </span>
-                        <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
-                      </summary>
-                      {run.error !== null && (
-                        <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
-                      )}
-                      {run.actions.length === 0 ? (
-                        <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
-                      ) : (
-                        <ul className="mt-2 space-y-1 text-xs">
-                          {run.actions.map((action, index) => (
-                            <li
-                              key={`${run.runId}-${index}`}
-                              className={
-                                action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'
-                              }
-                            >
-                              {action.targetType === 'task' ? (
-                                <Link
-                                  to="/tasks/$id"
-                                  params={{ id: action.targetId }}
-                                  className="text-blue-ink hover:underline"
-                                >
-                                  task {action.targetId}
-                                </Link>
-                              ) : action.url !== undefined ? (
-                                <a
-                                  href={action.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-blue-ink hover:underline"
-                                >
-                                  {action.targetType === 'mention'
-                                    ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
-                                    : `PR #${action.prNumber ?? action.targetId}`}
-                                </a>
-                              ) : (
-                                <span>
-                                  {action.targetType === 'mention'
-                                    ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
-                                    : `${action.targetType} ${action.targetId}`}
-                                </span>
-                              )}
-                              {': '}
-                              {action.result}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </details>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-          <div className="mt-4 border-t border-line pt-4">
-            <h3 className="text-sm font-medium text-fg">Live log</h3>
-            {liveLog.length === 0 ? (
-              <p className="mt-2 text-xs text-fg-faint">no activity recorded yet</p>
-            ) : (
-              <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px]">
-                {liveLog.map((entry, index) => (
-                  <li
-                    key={`${entry.ts}-${index}`}
-                    className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
-                  >
-                    {new Date(entry.ts).toLocaleTimeString()} {entry.message}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+                          <span className="tabular-nums">
+                            {fmtDateTime(newest.startedAt, dateFormat)} -{' '}
+                            {fmtDateTime(oldest.startedAt, dateFormat)}
+                          </span>
+                          <span className="ml-2 text-fg-faint">{group.length} runs, 0 actions</span>
+                        </div>
+                      )
+                    }
+                    const run = group[0]
+                    if (run === undefined) return null
+                    return (
+                      <details
+                        key={run.runId}
+                        className="rounded border border-line bg-surface/60 px-3 py-2"
+                      >
+                        <summary className="cursor-pointer text-xs text-fg">
+                          <span className="tabular-nums">
+                            {fmtDateTime(run.startedAt, dateFormat)}
+                          </span>
+                          <span
+                            className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+                          >
+                            {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
+                          </span>
+                          <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
+                        </summary>
+                        {run.error !== null && (
+                          <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
+                        )}
+                        {run.actions.length === 0 ? (
+                          <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
+                        ) : (
+                          <ul className="mt-2 space-y-1 text-xs">
+                            {run.actions.map((action, index) => (
+                              <li
+                                key={`${run.runId}-${index}`}
+                                className={
+                                  action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'
+                                }
+                              >
+                                {action.targetType === 'task' ? (
+                                  <Link
+                                    to="/tasks/$id"
+                                    params={{ id: action.targetId }}
+                                    className="text-blue-ink hover:underline"
+                                  >
+                                    task {action.targetId}
+                                  </Link>
+                                ) : action.url !== undefined ? (
+                                  <a
+                                    href={action.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-blue-ink hover:underline"
+                                  >
+                                    {action.targetType === 'mention'
+                                      ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                      : `PR #${action.prNumber ?? action.targetId}`}
+                                  </a>
+                                ) : (
+                                  <span>
+                                    {action.targetType === 'mention'
+                                      ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                      : `${action.targetType} ${action.targetId}`}
+                                  </span>
+                                )}
+                                {': '}
+                                {action.result}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </details>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {activeTab === 'log' && (
+            <div className="mt-4 border-t border-line pt-4">
+              {liveLog.length === 0 ? (
+                <p className="mt-2 text-xs text-fg-faint">no activity recorded yet</p>
+              ) : (
+                <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px]">
+                  {liveLog.map((entry, index) => (
+                    <li
+                      key={`${entry.ts}-${index}`}
+                      className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
+                    >
+                      {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           <div className="mt-4 flex justify-end">
             <button
               type="button"
