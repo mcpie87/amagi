@@ -149,7 +149,7 @@ export async function resolveConflict(
     }
     const cleanMergeMessage = watcherCommitMessage(
       task,
-      `Merged base branch '${opts.config.repo.baseBranch}' into PR #${opts.pr.number} head.`,
+      `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
       commitMeta,
     )
     const wt = await prepareConflictWorktree({
@@ -253,7 +253,7 @@ export async function resolveConflict(
       rmSync(verdictPath, { force: true })
     }
 
-    const conflictSummary = `Merged base branch '${opts.config.repo.baseBranch}' into PR #${opts.pr.number} head after ${iteration} conflict-resolution dispatch${iteration === 1 ? '' : 'es'}.`
+    const conflictSummary = `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}. Conflict #${iteration}`
     await finishMerge(run, wt.path, watcherCommitMessage(task, conflictSummary, commitMeta))
     if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
       const classification = verdict?.verdict ? ` (${verdict.verdict})` : ''

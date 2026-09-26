@@ -503,7 +503,7 @@ describe('prepareConflictWorktree', () => {
     })
     const message = commitMessage(
       { id: 'am-1', title: 'Do the thing' },
-      "Merged base branch 'main' into PR #7 head.",
+      'Merge: main -> amagi/am-1-do-the-thing.',
       { harness: 'claude', model: 'model-x', effort: 'high' },
     )
     await prepareConflictWorktree({

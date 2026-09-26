@@ -261,7 +261,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       ? undefined
       : mentionCommitMessage(
           task,
-          `Merged base branch '${opts.config.repo.baseBranch}' into PR #${opts.pr.number} head.`,
+          `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
           commitMeta,
         )
   const wt = await prWorktree(opts, run, mergeMessage)
