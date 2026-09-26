@@ -19,6 +19,10 @@ export const RepoParam = z.object({ repo: z.string().min(1) })
 
 /** Combined because hono's zValidator replaces, not merges, a validated target. */
 export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string().min(1) })
+export const RepoCommitParam = z.object({
+  repo: z.string().min(1),
+  hash: z.string().regex(/^[0-9a-f]{7,40}$/i),
+})
 export const RepoQuestionParam = z.object({
   repo: z.string().min(1),
   id: z.string().min(1),

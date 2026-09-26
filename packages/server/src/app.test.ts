@@ -109,6 +109,60 @@ afterEach(() => {
   ws.cleanup()
 })
 
+describe('GET /api/repos/:repo/git', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('workspace missing')
+    mkdirSync(workspace.root, { recursive: true })
+    const git = (args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd: workspace.root })
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+    }
+    git(['init', '-q'])
+    git(['config', 'user.name', 'Test'])
+    git(['config', 'user.email', 'test@example.com'])
+    writeFileSync(join(workspace.root, 'note.txt'), 'first version\n')
+    git(['add', 'note.txt'])
+    git(['commit', '-q', '-m', 'first change', '-m', 'First body'])
+    writeFileSync(join(workspace.root, 'note.txt'), 'second version\n')
+    git(['commit', '-qam', 'second change'])
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  test('lists repo commits and returns commit details with a first-parent file diff', async () => {
+    const log = await app.request('/api/repos/repo1/git/log')
+    expect(log.status).toBe(200)
+    const { commits } = (await log.json()) as {
+      commits: { hash: string; title: string; timestamp: number }[]
+    }
+    expect(commits.map((commit) => commit.title)).toEqual(['second change', 'first change'])
+
+    const detail = await app.request(`/api/repos/repo1/git/commits/${commits[0]?.hash}`)
+    expect(detail.status).toBe(200)
+    expect(await detail.json()).toMatchObject({
+      hash: commits[0]?.hash,
+      title: 'second change',
+      message: '',
+      patch: expect.stringContaining('+second version'),
+    })
+
+    const root = await app.request(`/api/repos/repo1/git/commits/${commits[1]?.hash}`)
+    expect(root.status).toBe(200)
+    expect(await root.json()).toMatchObject({
+      hash: commits[1]?.hash,
+      title: 'first change',
+      message: 'First body',
+      patch: expect.stringContaining('note.txt'),
+    })
+  })
+
+  test('rejects malformed commit references', async () => {
+    const response = await app.request('/api/repos/repo1/git/commits/not-a-hash')
+    expect(response.status).toBe(400)
+  })
+})
+
 describe('GET /api/repos/:repo/tasks', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
