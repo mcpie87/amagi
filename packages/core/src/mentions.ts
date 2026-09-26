@@ -185,7 +185,7 @@ class Progress {
   }
 }
 
-/** Task id (e.g. "am-544") embedded in an amagi-authored PR title like "am-544: Short name". */
+/** Task id (e.g. "am-544") embedded in an amagi-authored PR title like "[am-544] Short name". */
 export function taskIdFromPrTitle(title: string): string | null {
   return title.match(/\bam-[a-z0-9.]+\b/i)?.[0] ?? null
 }
@@ -195,7 +195,7 @@ export function taskIdFromPrTitle(title: string): string | null {
  * the body was written with at creation (works for any tracker, and survives
  * a human editing the title); the branch name matched against the tracker's
  * open ids (for PRs that predate it); the PR title, as a
- * last resort for beads ids that happen to still carry the "am-544: " prefix.
+ * last resort for beads ids that still appear in the title.
  */
 export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
   const fromBody = taskIdFromPrBody(pr.body)

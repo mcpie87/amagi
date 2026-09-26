@@ -88,17 +88,26 @@ describe('prFailurePrompt', () => {
 
 describe('prTitle', () => {
   test('prepends the task code to a short title', () => {
-    expect(prTitle(task('Forgejo driver over tea'))).toBe('am-544: Forgejo driver over tea')
+    expect(prTitle(task('Forgejo driver over tea'))).toBe('[am-544] Forgejo driver over tea')
   })
 
   test('cuts a full sentence at the first clause', () => {
     expect(prTitle(task('PR titles should use task code, not full sentences'))).toBe(
-      'am-544: PR titles should use task code',
+      '[am-544] PR titles should use task code',
+    )
+  })
+
+  test('keeps comma-separated scopes and the change after them', () => {
+    expect(
+      prTitle(task('core, dashboard: show watcher agent runs in /sessions with role toggles')),
+    ).toBe('[am-544] core, dashboard: show watcher agent runs in /sessions with role toggles')
+    expect(prTitle(task('core, dashboard: show watcher runs, with role toggles'))).toBe(
+      '[am-544] core, dashboard: show watcher runs',
     )
   })
 
   test('drops a milestone-style prefix', () => {
-    expect(prTitle(task('M5: forge drivers'))).toBe('am-544: forge drivers')
+    expect(prTitle(task('M5: forge drivers'))).toBe('[am-544] forge drivers')
   })
 })
 

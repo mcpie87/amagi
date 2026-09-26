@@ -768,6 +768,8 @@ describe('respondToMention', () => {
 
 describe('taskIdFromPrTitle', () => {
   test('extracts the amagi task id from a PR title', () => {
+    expect(taskIdFromPrTitle('[am-544] PR titles should use task code')).toBe('am-544')
+    expect(taskIdFromPrTitle('[am-3b8.2] Schema-constrained review')).toBe('am-3b8.2')
     expect(taskIdFromPrTitle('am-544: PR titles should use task code')).toBe('am-544')
     expect(taskIdFromPrTitle('am-3b8.2: Schema-constrained review')).toBe('am-3b8.2')
     expect(taskIdFromPrTitle('Do the thing')).toBeNull()
@@ -804,7 +806,7 @@ describe('resolveTaskId', () => {
   test('falls back to the PR title when the body and branch name give nothing', async () => {
     const tracker = new FakeTracker()
     const taskId = await resolveTaskId(
-      pr({ title: 'am-123: Do the thing', body: '', headRefName: 'amagi/am-1-do-the-thing' }),
+      pr({ title: '[am-123] Do the thing', body: '', headRefName: 'amagi/am-1-do-the-thing' }),
       tracker,
     )
     expect(taskId).toBe('am-123')
