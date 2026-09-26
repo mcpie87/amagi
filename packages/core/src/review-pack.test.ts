@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ejectReviewPack, reviewPrompt } from './review-pack.ts'
 
@@ -37,6 +37,58 @@ afterEach(() => {
 })
 
 describe('reviewPrompt', () => {
+  test('ships the complete built-in lens set with match globs on every non-base lens', () => {
+    const lensesDir = join(import.meta.dir, 'review', 'builtin', 'lenses')
+    const files = readdirSync(lensesDir)
+      .filter((file) => file.endsWith('.md'))
+      .sort()
+    expect(files).toEqual(
+      [
+        'api-contract.md',
+        'base.md',
+        'c-cpp.md',
+        'django.md',
+        'go.md',
+        'haskell.md',
+        'infra.md',
+        'java-kotlin.md',
+        'nix.md',
+        'python.md',
+        'react-ts.md',
+        'ruby.md',
+        'rust.md',
+        'shell.md',
+        'sql-migrations.md',
+        'typescript-javascript.md',
+      ].sort(),
+    )
+
+    for (const file of files.filter((name) => name !== 'base.md')) {
+      const content = readFileSync(join(lensesDir, file), 'utf8')
+      const frontmatter = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1]
+      expect(frontmatter, `${file} must have frontmatter`).toBeDefined()
+      expect(frontmatter, `${file} must declare match globs`).toMatch(
+        /^match\s*:\s*(?:\[[^\]]*\]|\S+)$/m,
+      )
+      const matchLine = frontmatter?.match(/^match\s*:\s*(.*)$/m)?.[1] ?? ''
+      const patterns = matchLine
+        .replace(/^\[/, '')
+        .replace(/\]$/, '')
+        .split(',')
+        .map((glob) => glob.trim().replace(/^['"]|['"]$/g, ''))
+        .filter(Boolean)
+      expect(patterns.length).toBeGreaterThan(0)
+      const lens = file.slice(0, -'.md'.length)
+      const candidates = patterns.map((pattern) =>
+        pattern.replaceAll('**/', 'sample/').replaceAll('*', 'sample'),
+      )
+      expect(prompt(candidates)).toContain(`Lens: ${lens}`)
+      for (const pattern of patterns) {
+        expect(() => new Bun.Glob(pattern)).not.toThrow()
+      }
+    }
+  })
+
   test('applies repo over user over built-in and adds new matching lenses', () => {
     const user = join(temp, 'config', 'amagi', 'review')
     writePackFile(user, 'review.md', 'User core')
@@ -112,7 +164,7 @@ describe('ejectReviewPack', () => {
 
     const repoTarget = ejectReviewPack({ repoRoot: repo, repo: true })
     expect(readFileSync(join(repoTarget, 'lenses', 'base.md'), 'utf8')).toContain(
-      'Review the whole change',
+      'Language-agnostic baseline',
     )
   })
 })
