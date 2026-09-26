@@ -416,20 +416,18 @@ function WatcherDetailDialog({
 
 /**
  * One row per configured worker plus any ad-hoc foreground run. Worker profile
- * and runtime data both come from /api/runner; the summary strip aggregates
- * resource use over live agent trees.
+ * and runtime data both come from the selected repo's runner status; the
+ * summary strip aggregates resource use over live agent trees.
  */
 function AutoQueueToggle() {
   const { status } = useRunner()
-  const { repos, selected } = useDashboard()
+  const { selected } = useDashboard()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fromStatus = status?.autoQueue ?? false
   const [on, setOn] = useState(fromStatus)
   useEffect(() => setOn(fromStatus), [fromStatus])
-  // The toggle config lives with the repo the runner serves; address that repo
-  // so it live-applies even when another repo is selected in the dashboard.
-  const runnerRepo = repos?.find((r) => r.name === status?.name)?.key ?? selected
+  const runnerRepo = selected
 
   const toggle = async () => {
     if (runnerRepo === null || busy) return

@@ -127,7 +127,7 @@ function streamMock(events: StoredEvent[], extra?: (url: string, init?: RequestI
   return (async (url: string, init?: RequestInit) => {
     const href = url.toString()
     if (href.includes('/api/repos/repo1/stream')) return sseResponse(events)
-    if (href.endsWith('/api/runner')) return json(RUNNER)
+    if (href.endsWith('/api/repos/repo1/runner')) return json(RUNNER)
     if (href.endsWith('/api/repos/repo1/ready-queue')) return json(READY)
     if (extra !== undefined) {
       const response = extra(href, init)

@@ -1,7 +1,6 @@
 import { join } from 'node:path'
 import {
   addRegistryEntry,
-  errMsg,
   loadGlobalConfig,
   loadRegistry,
   makeHarness,
@@ -67,36 +66,26 @@ export const serveCommand = defineCommand({
     const dashboardDir = join(import.meta.dir, '..', '..', '..', 'dashboard')
     await buildDashboard(dashboardDir)
     const workspaces = new Workspaces()
-    // The operator-facing runner service is bound to the repo the server is
-    // launched from, so the dashboard's launch/stop controls have one target.
-    const primary = workspaces.list()[0]
-    let runner: RunService | undefined
-    if (primary !== undefined) {
-      try {
-        const ws = workspaces.get(primary.key)
-        if (ws !== null) {
-          runner = new RunService({
-            store: ws.store,
-            tracker: ws.tracker,
-            harness: makeHarness(ws.config.harness.implement),
-            config: ws.config,
-            repoRoot: ws.root,
-            repoName: ws.name,
-            autoQueue: ws.config.loop.autoQueue && primary.workers,
-            ...(ws.forge === null ? {} : { forge: ws.forge }),
-          })
-        }
-      } catch (err) {
-        console.warn(`runner for ${primary.key} unavailable: ${errMsg(err)}`)
-      }
-    }
+    const seats = new Map<string, string>()
     const server = serve({
       workspaces,
       host: config.server.host,
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
-      runner,
-      runnerRepo: primary?.key,
+      runnerFactory: (ws) =>
+        new RunService({
+          store: ws.store,
+          tracker: ws.tracker,
+          harness: makeHarness(ws.config.harness.implement),
+          config: ws.config,
+          repoRoot: ws.root,
+          repoName: ws.name,
+          autoQueue:
+            ws.config.loop.autoQueue &&
+            (workspaces.list().find((entry) => entry.key === ws.key)?.workers ?? false),
+          seats,
+          ...(ws.forge === null ? {} : { forge: ws.forge }),
+        }),
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     for (const entry of workspaces.list()) {

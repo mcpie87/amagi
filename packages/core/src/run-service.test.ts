@@ -580,6 +580,24 @@ describe('RunService', () => {
     await service.stop(TASK.id)
   })
 
+  test('repos sharing seats run the fleet once, not once per repo', async () => {
+    const seats = new Map<string, string>()
+    const first = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1, config(), {
+      seats,
+    })
+    const second = makeService(new FakeTracker([TASK2]), new BlockingHarness(), 1, config(), {
+      seats,
+      repoName: 'other',
+    })
+    expect((await first.start()).ok).toBe(true)
+    expect((await second.status()).capacity).toBe(0)
+    expect((await second.status()).fleet?.[0]).toMatchObject({ busy: true, taskId: null })
+    expect(await second.start()).toEqual({ ok: false, status: 409, error: 'no available worker' })
+    await first.stop(TASK.id)
+    expect((await second.start()).ok).toBe(true)
+    await second.stop(TASK2.id)
+  })
+
   test('start launches the next ready task and it completes', async () => {
     const service = makeService(
       new FakeTracker([TASK]),

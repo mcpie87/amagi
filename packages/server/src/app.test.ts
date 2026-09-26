@@ -1190,7 +1190,7 @@ describe('POST /api/tasks/:id/stop', () => {
 
   test('parks a running task in cancelled', async () => {
     running('bd-1')
-    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/stop', { method: 'POST' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { task: ProjectedTask }
     expect(body.task.state).toBe('cancelled')
@@ -1198,14 +1198,14 @@ describe('POST /api/tasks/:id/stop', () => {
   })
 
   test('404s on an unknown task', async () => {
-    const res = await app.request('/api/tasks/nope/stop', { method: 'POST' })
+    const res = await app.request('/api/repos/repo1/tasks/nope/stop', { method: 'POST' })
     expect(res.status).toBe(404)
   })
 
   test('409s on an already terminal task', async () => {
     running('bd-1')
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
-    const res = await app.request('/api/tasks/bd-1/stop', { method: 'POST' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/stop', { method: 'POST' })
     expect(res.status).toBe(409)
   })
 })
@@ -1727,7 +1727,7 @@ describe('runner endpoints', () => {
         }),
       }),
     })
-    const res = await app.request('/api/runner')
+    const res = await app.request('/api/repos/repo1/runner')
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       name: 'repo1',
@@ -1766,7 +1766,7 @@ describe('runner endpoints', () => {
         },
       ],
     })
-    const res = await app.request('/api/runner')
+    const res = await app.request('/api/repos/repo1/runner')
     expect(res.status).toBe(200)
     const body = (await res.json()) as { workers?: unknown }
     expect(body.workers).toEqual([
@@ -1811,7 +1811,7 @@ describe('runner endpoints', () => {
           },
         ],
       })
-      const res = await app.request('/api/runner')
+      const res = await app.request('/api/repos/repo1/runner')
       expect(res.status).toBe(200)
       const body = (await res.json()) as {
         running: string[]
@@ -1839,9 +1839,9 @@ describe('runner endpoints', () => {
   })
 
   test('runner endpoints are 501 without a runner service', async () => {
-    expect((await app.request('/api/runner')).status).toBe(501)
-    expect((await post('/api/runs', '{}')).status).toBe(501)
-    expect((await post('/api/runs/bd-1/stop')).status).toBe(501)
+    expect((await app.request('/api/repos/repo1/runner')).status).toBe(501)
+    expect((await post('/api/repos/repo1/runs', '{}')).status).toBe(501)
+    expect((await post('/api/repos/repo1/runs/bd-1/stop')).status).toBe(501)
   })
 
   test('POST /api/runs launches the next ready task', async () => {
@@ -1855,7 +1855,7 @@ describe('runner endpoints', () => {
         },
       }),
     })
-    const res = await post('/api/runs', '{}')
+    const res = await post('/api/repos/repo1/runs', '{}')
     expect(res.status).toBe(201)
     expect(await res.json()).toEqual({ taskId: 'bd-1' })
     expect(started).toEqual([undefined])
@@ -1872,10 +1872,10 @@ describe('runner endpoints', () => {
         },
       }),
     })
-    const specific = await post('/api/runs', '{"taskId":"bd-9"}')
+    const specific = await post('/api/repos/repo1/runs', '{"taskId":"bd-9"}')
     expect(specific.status).toBe(201)
     expect(started).toEqual(['bd-9'])
-    expect((await post('/api/runs', '{"taskId":123}')).status).toBe(400)
+    expect((await post('/api/repos/repo1/runs', '{"taskId":123}')).status).toBe(400)
   })
 
   test('POST /api/runs forwards worker and model/effort overrides', async () => {
@@ -1890,7 +1890,7 @@ describe('runner endpoints', () => {
       }),
     })
     const res = await post(
-      '/api/runs',
+      '/api/repos/repo1/runs',
       '{"taskId":"bd-1","workerId":"w-fast","model":"gpt-5.6-luna","effort":"high"}',
     )
     expect(res.status).toBe(201)
@@ -1910,13 +1910,13 @@ describe('runner endpoints', () => {
         },
       }),
     })
-    expect((await post('/api/runs', '{}')).status).toBe(201)
+    expect((await post('/api/repos/repo1/runs', '{}')).status).toBe(201)
     expect(received).toEqual([{ taskId: undefined, opts: {} }])
   })
 
   test('GET /api/runner/options lists fleet workers and the default worker', async () => {
     app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
-    const res = await app.request('/api/runner/options')
+    const res = await app.request('/api/repos/repo1/runner/options')
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
       harnesses: { name: string; workerId: string; kind: string }[]
@@ -1936,7 +1936,7 @@ describe('runner endpoints', () => {
   })
 
   test('GET /api/runner/options is empty without a runner', async () => {
-    const res = await app.request('/api/runner/options')
+    const res = await app.request('/api/repos/repo1/runner/options')
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ harnesses: [], models: {}, efforts: {}, default: null })
   })
@@ -1948,7 +1948,7 @@ describe('runner endpoints', () => {
         start: async () => ({ ok: false, status: 409, error: 'runner at capacity (1/1)' }),
       }),
     })
-    const res = await post('/api/runs', '{}')
+    const res = await post('/api/repos/repo1/runs', '{}')
     expect(res.status).toBe(409)
     expect(await res.json()).toEqual({ error: 'runner at capacity (1/1)' })
   })
@@ -1966,12 +1966,12 @@ describe('runner endpoints', () => {
         },
       }),
     })
-    const ok = await post('/api/runs/bd-1/stop')
+    const ok = await post('/api/repos/repo1/runs/bd-1/stop')
     expect(ok.status).toBe(200)
     expect(await ok.json()).toEqual({ taskId: 'bd-1' })
     expect(stopped).toEqual(['bd-1'])
 
-    expect((await post('/api/runs/bd-9/stop')).status).toBe(404)
+    expect((await post('/api/repos/repo1/runs/bd-9/stop')).status).toBe(404)
   })
 })
 

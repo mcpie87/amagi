@@ -294,33 +294,59 @@ const RunnerContext = createContext<RunnerApi>({
 /** Runner availability plus launch/stop, polled so the header stays honest. */
 export function RunnerProvider({ children }: { children: ReactNode }) {
   const base = (import.meta.env.VITE_API_BASE ?? '') as string
-  const { resyncStream } = useContext(ReposContext)
+  const { resyncStream, selected } = useContext(ReposContext)
   const [status, setStatus] = useState<RunnerStatus | null>(null)
   const [options, setOptions] = useState<RunOptionsInfo | null>(null)
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
 
   const refresh = useCallback(() => {
-    fetch(`${base}/api/runner`)
+    if (selected === null) {
+      setStatus(null)
+      return
+    }
+    const repo = selected
+    fetch(`${base}/api/repos/${selected}/runner`)
       .then((r) => (r.ok ? (r.json() as Promise<RunnerStatus>) : null))
-      .then(setStatus)
-      .catch(() => setStatus(null))
-  }, [])
+      .then((value) => {
+        if (selectedRef.current === repo) setStatus(value)
+      })
+      .catch(() => {
+        if (selectedRef.current === repo) setStatus(null)
+      })
+  }, [base, selected])
 
   useEffect(() => {
+    setStatus(null)
+    setOptions(null)
     refresh()
-    fetch(`${base}/api/runner/options`)
+    if (selected === null) {
+      setOptions(null)
+      return
+    }
+    let alive = true
+    fetch(`${base}/api/repos/${selected}/runner/options`)
       .then((r) => (r.ok ? (r.json() as Promise<RunOptionsInfo>) : null))
-      .then(setOptions)
-      .catch(() => setOptions(null))
+      .then((value) => {
+        if (alive) setOptions(value)
+      })
+      .catch(() => {
+        if (alive) setOptions(null)
+      })
     const timer = setInterval(refresh, 4000)
-    return () => clearInterval(timer)
-  }, [refresh])
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [base, refresh, selected])
 
   const start = async (
     taskId?: string,
     opts?: RunOptions,
   ): Promise<{ ok: true; taskId: string } | { ok: false; error?: string }> => {
+    if (selected === null) return { ok: false, error: 'select a repository first' }
     try {
-      const res = await fetch(`${base}/api/runs`, {
+      const res = await fetch(`${base}/api/repos/${selected}/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -347,8 +373,11 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   }
 
   const stop = async (taskId: string): Promise<{ ok: boolean; error?: string }> => {
+    if (selected === null) return { ok: false, error: 'select a repository first' }
     try {
-      const res = await fetch(`${base}/api/runs/${taskId}/stop`, { method: 'POST' })
+      const res = await fetch(`${base}/api/repos/${selected}/runs/${taskId}/stop`, {
+        method: 'POST',
+      })
       refresh()
       resyncStream()
       if (res.ok) return { ok: true }

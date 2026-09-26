@@ -22,7 +22,9 @@ export type ServeOptions = {
   repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
-  /** When present, the launch/stop runner endpoints are live. */
+  /** Builds a runner from each registered workspace, including repos added live. */
+  runnerFactory?: (workspace: Workspace) => RunServiceApi
+  /** Legacy single-runner injection for server tests and embedders. */
   runner?: RunServiceApi | undefined
   /** The repo key the runner is bound to; its settings apply live to it. */
   runnerRepo?: string | undefined
@@ -263,14 +265,59 @@ export function serve({
   staticDir,
   runner,
   runnerRepo,
+  runnerFactory,
 }: ServeOptions) {
+  const runners = new Map<string, RunServiceApi>()
+  const runnerAutoQueue = new Map<string, boolean>()
+  const syncRunners = () => {
+    const entries = workspaces.list()
+    const keys = new Set(entries.map((entry) => entry.key))
+    for (const [key, service] of runners) {
+      if (keys.has(key)) continue
+      service.dispose?.()
+      runners.delete(key)
+      runnerAutoQueue.delete(key)
+    }
+    for (const entry of entries) {
+      if (runners.has(entry.key)) {
+        const workspace = workspaces.get(entry.key)
+        if (workspace !== null) {
+          const enabled = workspace.config.loop.autoQueue && entry.workers
+          if (runnerAutoQueue.get(entry.key) !== enabled) {
+            runners.get(entry.key)?.setAutoQueue(enabled)
+            runnerAutoQueue.set(entry.key, enabled)
+          }
+        }
+        continue
+      }
+      if (runnerFactory === undefined) continue
+      try {
+        const workspace = workspaces.get(entry.key)
+        if (workspace !== null) {
+          const service = runnerFactory(workspace)
+          runners.set(entry.key, service)
+          runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
+        }
+      } catch (err) {
+        console.warn(`runner for ${entry.key} unavailable: ${errMsg(err)}`)
+      }
+    }
+  }
+  syncRunners()
+  const runnerSupervisor = runnerFactory === undefined ? null : setInterval(syncRunners, 1000)
+  const runnerForRepo = (repo: string) => {
+    const service = runners.get(repo)
+    if (service !== undefined) return service
+    if (runnerRepo !== undefined) return runnerRepo === repo ? runner : undefined
+    return workspaces.list().length === 1 ? runner : undefined
+  }
   const repoPollers = startRepoPollers(workspaces, {
     gateIntervalMs: gatePollIntervalMs,
     prIntervalMs: prPollIntervalMs,
     mentionIntervalMs: mentionWatchIntervalMs,
     prConflictIntervalMs: prConflictWatchIntervalMs,
     stallIntervalMs: stallWatchIntervalMs,
-    ...(runner === undefined ? {} : { runner }),
+    ...(runnerFactory === undefined && runner !== undefined ? { runner } : {}),
     ...(runnerRepo === undefined ? {} : { runnerRepo }),
     ...(repoPollerSupervisorIntervalMs === undefined
       ? {}
@@ -281,6 +328,8 @@ export function serve({
     notify,
     runner,
     runnerRepo,
+    runnerForRepo,
+    syncRunners,
     workers: repoPollers.workers,
     liveRuns: () => loadLiveRuns(),
   })
@@ -300,7 +349,10 @@ export function serve({
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
       repoPollers.stop()
-      runner?.dispose?.()
+      if (runnerSupervisor !== null) clearInterval(runnerSupervisor)
+      for (const service of runners.values()) service.dispose?.()
+      runners.clear()
+      if (runnerFactory === undefined) runner?.dispose?.()
       return server.stop(closeActiveConnections)
     },
   }
