@@ -349,6 +349,7 @@ function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => 
 
 export function RootLayout() {
   const { repos } = useDashboard()
+  const [idleNotice, setIdleNotice] = useState<{ title: string; body: string } | null>(null)
   const [navOpen, setNavOpen] = useState(false)
   const sidebarRef = useRef<HTMLDivElement>(null)
   const openButtonRef = useRef<HTMLButtonElement>(null)
@@ -378,9 +379,35 @@ export function RootLayout() {
     return () => window.removeEventListener('keydown', onKey)
   }, [navOpen, closeNav])
 
+  useEffect(() => {
+    const onIdleNotification = (event: Event) => {
+      const detail = (event as CustomEvent<{ title: string; body: string }>).detail
+      setIdleNotice(detail)
+      window.setTimeout(() => setIdleNotice(null), 8000)
+    }
+    window.addEventListener('amagi:idle-notification', onIdleNotification)
+    return () => window.removeEventListener('amagi:idle-notification', onIdleNotification)
+  }, [])
+
   return (
     <RunnerProvider>
       <div className="app-shell">
+        {idleNotice !== null && (
+          <div
+            role="status"
+            className="fixed bottom-4 right-4 z-50 max-w-sm rounded border border-line-strong bg-surface px-4 py-3 shadow-lg"
+          >
+            <p className="font-semibold">{idleNotice.title}</p>
+            <p className="mt-1 text-sm text-fg-muted">{idleNotice.body}</p>
+            <button
+              type="button"
+              className="mt-2 text-xs text-fg-faint hover:text-fg"
+              onClick={() => setIdleNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <div ref={sidebarRef}>
           <Sidebar navOpen={navOpen} onNavigate={() => setNavOpen(false)} />
         </div>

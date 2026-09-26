@@ -78,6 +78,21 @@ describe('GET /api/repos/repo1/stream', () => {
     await stream.close()
   })
 
+  test('pushes idle notifications to connected clients without replaying old ones', async () => {
+    store.append(null, { type: 'notify.idle', title: 'Queue is idle', body: 'No tasks remain' })
+    const stream = sse(await app.request('/api/repos/repo1/stream'))
+    const live = store.append(null, {
+      type: 'notify.idle',
+      title: 'Queue is idle',
+      body: 'No tasks remain',
+    })
+
+    const [pushed] = await stream.take(1)
+    expect(pushed?.event.seq).toBe(live.seq)
+    expect(pushed?.event.type).toBe('notify.idle')
+    await stream.close()
+  })
+
   test('resumes from Last-Event-ID with no gap and no duplicate', async () => {
     const first = claim('bd-1')
     const missed = store.append('bd-1', {

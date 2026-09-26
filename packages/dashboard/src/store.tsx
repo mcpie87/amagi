@@ -202,6 +202,13 @@ function RepoStream({
     source.addEventListener('message', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data) as StoredEvent
+        if (parsed.type === 'notify.idle') {
+          window.dispatchEvent(
+            new CustomEvent('amagi:idle-notification', {
+              detail: { title: parsed.title, body: parsed.body },
+            }),
+          )
+        }
         if (parsed.seq <= latestSeqRef.current) return
         latestSeqRef.current = parsed.seq
         // agent.stream is the hot path: hundreds of lines/sec of assistant

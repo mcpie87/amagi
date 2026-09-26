@@ -341,6 +341,7 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({ type: z.literal('notify.idle'), title: z.string(), body: z.string() }),
   z.object({
     type: z.literal('watcher.run.started'),
     repo: z.string(),

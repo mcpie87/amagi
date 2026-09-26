@@ -318,6 +318,7 @@ export const Config = z
     difficulty: DifficultyConfig.prefault({}),
     notify: z
       .object({
+        idle: z.boolean().default(true),
         desktop: z.boolean().default(true),
         ntfyTopic: z.string().nullable().default(null),
         ntfyServer: z.string().default('https://ntfy.sh'),

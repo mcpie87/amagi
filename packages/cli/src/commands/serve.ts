@@ -4,12 +4,13 @@ import {
   loadGlobalConfig,
   loadRegistry,
   makeHarness,
+  makeNotifiers,
   migrateFleet,
   RunService,
   repoRoot,
   Workspaces,
 } from '@amagi/core'
-import { portInUse, serve } from '@amagi/server'
+import { portInUse, serve, streamClientCount } from '@amagi/server'
 import { defineCommand } from 'citty'
 import { bold, dim } from '../format.ts'
 
@@ -72,8 +73,9 @@ export const serveCommand = defineCommand({
       host: config.server.host,
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
-      runnerFactory: (ws) =>
-        new RunService({
+      runnerFactory: (ws) => {
+        const notifiers = makeNotifiers(ws.config)
+        return new RunService({
           store: ws.store,
           tracker: ws.tracker,
           harness: makeHarness(ws.config.harness.implement),
@@ -84,8 +86,26 @@ export const serveCommand = defineCommand({
             ws.config.loop.autoQueue &&
             (workspaces.list().find((entry) => entry.key === ws.key)?.workers ?? false),
           seats,
+          onQueueDrained: async () => {
+            const title = 'Queue is idle'
+            const body = `No more tasks can be claimed in ${ws.name}`
+            if (streamClientCount(ws.store) > 0) {
+              ws.store.append(null, { type: 'notify.idle', title, body })
+            }
+            if (ws.config.notify.idle) {
+              for (const notifier of notifiers) {
+                try {
+                  await notifier.notify(title, body)
+                } catch (err) {
+                  console.warn(`notify ${notifier.kind}: ${String(err)}`)
+                }
+                ws.store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
+              }
+            }
+          },
           ...(ws.forge === null ? {} : { forge: ws.forge }),
-        }),
+        })
+      },
     })
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
     for (const entry of workspaces.list()) {
