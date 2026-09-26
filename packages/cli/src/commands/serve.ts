@@ -74,7 +74,6 @@ export const serveCommand = defineCommand({
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
       runnerFactory: (ws) => {
-        const notifiers = makeNotifiers(ws.config)
         return new RunService({
           store: ws.store,
           tracker: ws.tracker,
@@ -93,7 +92,7 @@ export const serveCommand = defineCommand({
               ws.store.append(null, { type: 'notify.idle', title, body })
             }
             if (ws.config.notify.idle) {
-              for (const notifier of notifiers) {
+              for (const notifier of makeNotifiers(ws.config)) {
                 try {
                   await notifier.notify(title, body)
                 } catch (err) {

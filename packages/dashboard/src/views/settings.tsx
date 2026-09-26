@@ -67,19 +67,69 @@ export function SettingsView() {
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [staleMaxParallel, setStaleMaxParallel] = useState(false)
+  const [ntfyTopic, setNtfyTopic] = useState('')
+  const [ntfyServer, setNtfyServer] = useState('https://ntfy.sh')
+  const [ntfyBusy, setNtfyBusy] = useState(false)
+  const [ntfyError, setNtfyError] = useState<string | null>(null)
+  const [ntfySaved, setNtfySaved] = useState(false)
   const repo = repos?.find(({ key }) => key === selectedRepo) ?? repos?.[0]
 
   useEffect(() => {
     if (selected === null) return
+    let active = true
     setLoaded(false)
+    setNtfyError(null)
+    setNtfySaved(false)
     fetch(`${apiBase}/api/repos/${selected}/settings`)
-      .then((res) => (res.ok ? (res.json() as Promise<{ staleMaxParallel: boolean }>) : null))
+      .then((res) =>
+        res.ok
+          ? (res.json() as Promise<{
+              staleMaxParallel: boolean
+              ntfyTopic: string | null
+              ntfyServer: string
+            }>)
+          : null,
+      )
       .then((body) => {
+        if (!active) return
         setLoaded(true)
         setStaleMaxParallel(body?.staleMaxParallel ?? false)
+        setNtfyTopic(body?.ntfyTopic ?? '')
+        setNtfyServer(body?.ntfyServer ?? 'https://ntfy.sh')
       })
-      .catch(() => setLoaded(true))
+      .catch(() => {
+        if (active) setLoaded(true)
+      })
+    return () => {
+      active = false
+    }
   }, [selected])
+
+  const saveNtfy = async () => {
+    if (selected === null) return
+    setNtfyBusy(true)
+    setNtfyError(null)
+    setNtfySaved(false)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${selected}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ntfyTopic: ntfyTopic.trim(), ntfyServer: ntfyServer.trim() }),
+      })
+      if (!res.ok) {
+        const body = (await res.json()) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      const body = (await res.json()) as { ntfyTopic: string | null; ntfyServer: string }
+      setNtfyTopic(body.ntfyTopic ?? '')
+      setNtfyServer(body.ntfyServer)
+      setNtfySaved(true)
+    } catch (err) {
+      setNtfyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setNtfyBusy(false)
+    }
+  }
 
   return (
     <section className="max-w-3xl">
@@ -121,6 +171,56 @@ export function SettingsView() {
         hidden={activeTab !== 'general'}
       >
         <Appearance />
+        {selected !== null && loaded && (
+          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+            <h2 className="mb-1 text-sm text-fg-muted">ntfy notifications</h2>
+            <p className="mb-3 text-sm text-fg-faint">
+              Configure ntfy for {selected}. Leave the topic empty to disable ntfy notifications.
+            </p>
+            <label htmlFor="ntfy-topic" className="mb-1 block text-sm text-fg-muted">
+              Topic
+            </label>
+            <input
+              id="ntfy-topic"
+              type="text"
+              value={ntfyTopic}
+              onChange={(event) => {
+                setNtfyTopic(event.currentTarget.value)
+                setNtfySaved(false)
+              }}
+              className="mb-3 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+            />
+            <label htmlFor="ntfy-server" className="mb-1 block text-sm text-fg-muted">
+              Server URL
+            </label>
+            <input
+              id="ntfy-server"
+              type="url"
+              value={ntfyServer}
+              onChange={(event) => {
+                setNtfyServer(event.currentTarget.value)
+                setNtfySaved(false)
+              }}
+              className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={ntfyBusy || ntfyServer.trim() === ''}
+                onClick={() => void saveNtfy()}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+              >
+                {ntfyBusy ? 'Saving…' : 'Save'}
+              </button>
+              {ntfySaved && <span className="text-sm text-fg-faint">Saved</span>}
+            </div>
+            {ntfyError !== null && (
+              <p role="alert" className="mt-2 text-sm text-red-ink">
+                {ntfyError}
+              </p>
+            )}
+          </div>
+        )}
         {selected === null ? (
           <p className="mt-6 text-fg-faint">no repository selected</p>
         ) : (

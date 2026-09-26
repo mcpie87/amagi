@@ -1165,6 +1165,8 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       return c.json({
         autoQueue: ws.config.loop.autoQueue,
+        ntfyTopic: ws.config.notify.ntfyTopic,
+        ntfyServer: ws.config.notify.ntfyServer,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
       })
     })
@@ -1176,8 +1178,13 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue } = c.req.valid('json')
-        writeConfig(ws.root, { loop: { autoQueue } })
+        const { autoQueue, ntfyTopic, ntfyServer } = c.req.valid('json')
+        writeConfig(ws.root, {
+          loop: { autoQueue },
+          notify: { ntfyTopic, ntfyServer },
+        })
+        if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
+        if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -1187,7 +1194,11 @@ export function createApp({
             service.setAutoQueue(autoQueue && workersEnabled)
           }
         }
-        return c.json({ autoQueue: ws.config.loop.autoQueue })
+        return c.json({
+          autoQueue: ws.config.loop.autoQueue,
+          ntfyTopic: ws.config.notify.ntfyTopic,
+          ntfyServer: ws.config.notify.ntfyServer,
+        })
       },
     )
 
