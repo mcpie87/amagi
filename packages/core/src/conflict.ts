@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
@@ -11,6 +12,7 @@ import { harnessStartOpts, makeHarness } from './factory.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { type PointlessVerdict, parsePointlessVerdict } from './pointless.ts'
+import type { PrBodyMeta } from './pr-body.ts'
 import {
   iterationsFromLabels,
   type PrInfo,
@@ -19,7 +21,7 @@ import {
   stampIterationLabel,
   taskIdFromAmagiBranch,
 } from './pr-check.ts'
-import { resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
+import { commitMessage, resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
 
 export type ConflictLogLevel = 'info' | 'ok' | 'warn' | 'error' | 'agent'
@@ -72,14 +74,27 @@ async function unmergedPaths(run: Exec, cwd: string): Promise<string[]> {
     .filter((l) => l !== '')
 }
 
-/** Finishes the in-progress merge with the default merge message, never a fresh one. */
-async function finishMerge(run: Exec, cwd: string): Promise<void> {
+/** Finishes the in-progress merge with the runner's message when the task is known. */
+async function finishMerge(run: Exec, cwd: string, message?: string): Promise<void> {
   const head = await run(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd })
   if (head.exitCode !== 0) return
-  const commit = await run(['git', 'commit', '--no-edit'], { cwd })
+  const args = message === undefined ? ['git', 'commit', '--no-edit'] : ['git', 'commit', '-F', '-']
+  const commit = await run(args, { cwd, ...(message === undefined ? {} : { stdin: message }) })
   if (commit.exitCode !== 0) {
-    throw new Error(`git commit --no-edit failed: ${(commit.stderr || commit.stdout).trim()}`)
+    throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
   }
+}
+
+function watcherCommitMessage(
+  task: { id: string; title: string } | null,
+  summary: string,
+  meta: PrBodyMeta,
+): string | undefined {
+  if (task === null) return undefined
+  const message = commitMessage(task, summary, meta)
+  const errors = lintCommitMessage(message)
+  if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
+  return message
 }
 
 /**
@@ -123,6 +138,20 @@ export async function resolveConflict(
   let verdict: PointlessVerdict | undefined
 
   try {
+    const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
+    const storedTask = taskId === null ? null : (opts.store?.task(taskId) ?? null)
+    const task = storedTask === null ? null : { id: storedTask.id, title: storedTask.title }
+    const harnessConfig = watcherHarnessConfig(opts.config, 'prConflict')
+    const commitMeta: PrBodyMeta = {
+      harness: harnessConfig.kind,
+      model: harnessConfig.model ?? null,
+      effort: harnessConfig.effort ?? null,
+    }
+    const cleanMergeMessage = watcherCommitMessage(
+      task,
+      `Merged base branch '${opts.config.repo.baseBranch}' into PR #${opts.pr.number} head.`,
+      commitMeta,
+    )
     const wt = await prepareConflictWorktree({
       repoRoot: opts.repoRoot,
       repoName: opts.repoName,
@@ -130,6 +159,7 @@ export async function resolveConflict(
       baseBranch: opts.config.repo.baseBranch,
       pr: opts.pr,
       persona: opts.config.repo.persona,
+      ...(cleanMergeMessage === undefined ? {} : { mergeMessage: cleanMergeMessage }),
       exec: run,
     })
     log('info', `worktree: ${wt.path}`)
@@ -179,7 +209,6 @@ export async function resolveConflict(
         conflictFiles: unmerged,
         outPath: verdictPath,
       }
-      const harnessConfig = watcherHarnessConfig(opts.config, 'prConflict')
       const harness = mk(harnessConfig)
       log('info', `resolving (dispatch ${iteration}/${opts.config.loop.conflictMaxIterations})`)
       log('info', `agent: ${harness.kind} (${wt.branch})`)
@@ -192,6 +221,7 @@ export async function resolveConflict(
             prompt: resolveConflictPrompt(ctx),
             systemPrompt: resolveConflictSystemPrompt(ctx),
             ...harnessStartOpts(harnessConfig),
+            env: { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.repoRoot },
             ...(opts.repo === undefined
               ? {}
               : { seatActivity: { repo: opts.repo, watcher: 'pr-conflict-watcher' } }),
@@ -223,7 +253,8 @@ export async function resolveConflict(
       rmSync(verdictPath, { force: true })
     }
 
-    await finishMerge(run, wt.path)
+    const conflictSummary = `Merged base branch '${opts.config.repo.baseBranch}' into PR #${opts.pr.number} head after ${iteration} conflict-resolution dispatch${iteration === 1 ? '' : 'es'}.`
+    await finishMerge(run, wt.path, watcherCommitMessage(task, conflictSummary, commitMeta))
     if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
       const classification = verdict?.verdict ? ` (${verdict.verdict})` : ''
       const message = `base already contains the PR work; skipped the empty merge push${classification}`

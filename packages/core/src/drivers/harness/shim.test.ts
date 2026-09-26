@@ -127,6 +127,15 @@ describe('git shim', () => {
     }
   })
 
+  test('rejects watcher agent commits when its worktree and repository roots are set', () => {
+    const r = shimGit(
+      wt,
+      ['commit', '--allow-empty', '-m', 'watcher agent commit'],
+      withWorktree({ AMAGI_WORKTREE: wt, AMAGI_REPO_ROOT: other }),
+    )
+    expect(r.exitCode).toBe(1)
+  })
+
   test('allows read verbs inside the worktree', () => {
     for (const args of [
       ['status', '--porcelain'],
