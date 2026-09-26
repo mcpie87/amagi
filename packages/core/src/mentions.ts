@@ -20,6 +20,7 @@ import {
   commitMessage,
   explainMentionPrompt,
   explainMentionSystemPrompt,
+  MAX_EXPLAIN_ANSWER_CHARS,
   respondToMentionPrompt,
   respondToMentionSystemPrompt,
   takeDownPrompt,
@@ -402,10 +403,23 @@ async function respondToExplain(
     p.phase('posting comment')
     const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')
     const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
-    await opts.driver.postComment(opts.root, opts.pr.number, `${explanation}${footer}`)
+    await opts.driver.postComment(
+      opts.root,
+      opts.pr.number,
+      `${limitExplanation(explanation)}${footer}`,
+    )
   } finally {
     rmSync(outPath, { force: true })
   }
+}
+
+function limitExplanation(answer: string): string {
+  const chars = Array.from(answer)
+  if (chars.length <= MAX_EXPLAIN_ANSWER_CHARS) return answer
+  const prefix = chars.slice(0, MAX_EXPLAIN_ANSWER_CHARS - 1).join('')
+  const lastSpace = prefix.lastIndexOf(' ')
+  const end = lastSpace > MAX_EXPLAIN_ANSWER_CHARS / 2 ? lastSpace : prefix.length
+  return `${prefix.slice(0, end).trimEnd()}…`
 }
 
 async function askClarification(opts: RespondToMentionOptions, p: Progress): Promise<void> {
