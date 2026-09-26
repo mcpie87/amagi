@@ -848,7 +848,8 @@ export function RepositoryParticipationCard({
   onChanged: () => void
 }) {
   const [identityMode, setIdentityMode] = useState<'path' | 'inline'>('path')
-  const [identityValue, setIdentityValue] = useState('')
+  const [identityPath, setIdentityPath] = useState('')
+  const [identityInline, setIdentityInline] = useState(GIT_IDENTITY_TEMPLATE)
   const [identityBusy, setIdentityBusy] = useState(false)
   const [identityLoaded, setIdentityLoaded] = useState(false)
   const [identityError, setIdentityError] = useState<string | null>(null)
@@ -859,6 +860,8 @@ export function RepositoryParticipationCard({
     setIdentityLoaded(false)
     setIdentityError(null)
     setIdentitySaved(false)
+    setIdentityPath('')
+    setIdentityInline(GIT_IDENTITY_TEMPLATE)
     fetch(`${apiBase}/api/repos/${repo.key}/git-identity`)
       .then(async (response) => {
         if (!response.ok) throw new Error(await responseError(response))
@@ -868,8 +871,10 @@ export function RepositoryParticipationCard({
       })
       .then(({ gitIdentity }) => {
         if (!active) return
-        setIdentityMode(gitIdentity?.mode ?? 'path')
-        setIdentityValue(gitIdentity?.value ?? '')
+        const mode = gitIdentity?.mode ?? 'path'
+        setIdentityMode(mode)
+        if (mode === 'path') setIdentityPath(gitIdentity?.value ?? '')
+        else setIdentityInline(gitIdentity?.value ?? '')
         setIdentityLoaded(true)
       })
       .catch((err: unknown) => {
@@ -897,7 +902,14 @@ export function RepositoryParticipationCard({
         gitIdentity: { mode: 'path' | 'inline'; value: string } | null
       }
       setIdentityMode(body.gitIdentity?.mode ?? 'path')
-      setIdentityValue(body.gitIdentity?.value ?? '')
+      if (body.gitIdentity === null) {
+        setIdentityPath('')
+        setIdentityInline(GIT_IDENTITY_TEMPLATE)
+      } else if (body.gitIdentity.mode === 'path') {
+        setIdentityPath(body.gitIdentity.value)
+      } else {
+        setIdentityInline(body.gitIdentity.value)
+      }
       setIdentitySaved(true)
     } catch (err) {
       setIdentityError(err instanceof Error ? err.message : String(err))
@@ -943,10 +955,7 @@ export function RepositoryParticipationCard({
                     name={`git-identity-${repo.key}`}
                     value="inline"
                     checked={identityMode === 'inline'}
-                    onChange={() => {
-                      setIdentityMode('inline')
-                      if (identityValue === '') setIdentityValue(GIT_IDENTITY_TEMPLATE)
-                    }}
+                    onChange={() => setIdentityMode('inline')}
                   />
                   Inline text
                 </label>
@@ -957,8 +966,8 @@ export function RepositoryParticipationCard({
                 Path to gitconfig
                 <input
                   type="text"
-                  value={identityValue}
-                  onChange={(event) => setIdentityValue(event.currentTarget.value)}
+                  value={identityPath}
+                  onChange={(event) => setIdentityPath(event.currentTarget.value)}
                   placeholder="~/.config/git/personas/work.gitconfig"
                   className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
                 />
@@ -967,8 +976,8 @@ export function RepositoryParticipationCard({
               <label className="mt-3 block text-sm text-fg-muted">
                 Gitconfig text
                 <textarea
-                  value={identityValue}
-                  onChange={(event) => setIdentityValue(event.currentTarget.value)}
+                  value={identityInline}
+                  onChange={(event) => setIdentityInline(event.currentTarget.value)}
                   placeholder={GIT_IDENTITY_TEMPLATE}
                   rows={7}
                   className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
@@ -978,8 +987,13 @@ export function RepositoryParticipationCard({
             <div className="mt-3 flex items-center gap-2">
               <button
                 type="button"
-                disabled={identityBusy || (identityMode === 'path' && identityValue.trim() === '')}
-                onClick={() => void saveIdentity({ mode: identityMode, value: identityValue })}
+                disabled={identityBusy || (identityMode === 'path' && identityPath.trim() === '')}
+                onClick={() =>
+                  void saveIdentity({
+                    mode: identityMode,
+                    value: identityMode === 'path' ? identityPath : identityInline,
+                  })
+                }
                 className={secondary}
               >
                 {identityBusy ? 'Saving…' : 'Save'}
