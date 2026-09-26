@@ -17,6 +17,11 @@ function tempDirectory(): string {
 }
 
 describe('seat locks', () => {
+  test('null wait limit acquires a seat without applying the default timeout', async () => {
+    const lease = await acquireSeat('reviewer', { directory: tempDirectory(), maxWaitMs: null })
+    lease.release()
+  })
+
   test('serializes acquisitions and notifies waiters', async () => {
     const path = tempDirectory()
     const first = await acquireSeat('claude', { directory: path })

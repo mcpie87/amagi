@@ -117,7 +117,7 @@ function matchesFile(pattern: string, file: string): boolean {
 }
 
 function findingContract(): string {
-  const schema = z.toJSONSchema(Finding)
+  const schema = z.toJSONSchema(z.array(Finding))
   const severityList = FINDING_SEVERITIES.map((severity) => `- ${severity}`).join('\n')
   return [
     '## Required findings output',

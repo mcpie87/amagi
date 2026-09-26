@@ -96,6 +96,7 @@ function toTask(issue: BdIssue): TrackerTask {
     id: issue.id,
     title: issue.title,
     description: issue.description ?? '',
+    acceptanceCriteria: issue.acceptance_criteria ?? null,
     status: STATUS_MAP[issue.status ?? 'open'] ?? 'open',
     priority: issue.priority ?? null,
     type: issue.issue_type ?? null,

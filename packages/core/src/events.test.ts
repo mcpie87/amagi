@@ -65,6 +65,7 @@ describe('state machine', () => {
         round: 1,
         findings: [finding],
         blockingIds: ['finding-1'],
+        snapshot: 'tree-snapshot',
       }),
     ).toMatchObject({ type: 'review.finished', round: 1, findings: [finding] })
     expect(
