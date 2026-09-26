@@ -365,6 +365,25 @@ describe('worker fleet', () => {
     ])
   })
 
+  test('expands replicas across independently configured named seat slots', () => {
+    const config = Config.parse({
+      seats: [{ name: 'claude', count: 1 }, { name: 'codex_main', count: 2 }, 'codex_alt'],
+      worker: [{ id: 'worker-a', name: 'Worker A', kind: 'codex', seat: 'codex_main', count: 2 }],
+    })
+
+    expect(config.seats).toEqual([
+      { name: 'claude', count: 1 },
+      { name: 'codex_main', count: 2 },
+      { name: 'codex_alt', count: 1 },
+    ])
+    expect(
+      expandWorkers(config.worker, config.seats).map(({ id, name, seat }) => [id, name, seat]),
+    ).toEqual([
+      ['worker-a-1', 'Worker A 1', 'codex_main-1'],
+      ['worker-a-2', 'Worker A 2', 'codex_main-2'],
+    ])
+  })
+
   test('rejects more seat instances than worker instances', () => {
     expect(() =>
       Config.parse({

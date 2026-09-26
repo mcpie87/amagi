@@ -392,6 +392,32 @@ describe('RunService', () => {
     await service.stop(TASK3.id)
   })
 
+  test('worker replicas use configured named seat capacity', async () => {
+    const harness = new BlockingHarness()
+    const service = makeService(
+      new FakeTracker([TASK, TASK2]),
+      harness,
+      1,
+      config({
+        seats: [{ name: 'codex_main', count: 2 }],
+        worker: [
+          { id: 'worker-a', name: 'Worker A', kind: 'claude', seat: 'codex_main', count: 2 },
+        ],
+      }),
+    )
+
+    expect((await service.status()).fleet?.map(({ id, seat }) => [id, seat])).toEqual([
+      ['worker-a-1', 'codex_main-1'],
+      ['worker-a-2', 'codex_main-2'],
+    ])
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    await waitFor(() => harness.starts === 2)
+    expect((await service.status()).capacity).toBe(0)
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+  })
+
   test('setAutoQueue flips the reported state and toggles dispatch', async () => {
     const tracker = new FakeTracker([TASK])
     const harness = new BlockingHarness()
@@ -601,6 +627,7 @@ describe('RunService', () => {
       new BlockingHarness(),
       1,
       config({
+        seats: [{ name: 'shared', count: 1 }],
         worker: [
           { id: 'one', name: 'One', kind: 'claude', seat: 'shared' },
           { id: 'two', name: 'Two', kind: 'codex', seat: 'shared' },

@@ -667,7 +667,7 @@ function ParticipationRow({
   )
 }
 
-type SeatDraft = { original: string | null; name: string }
+type SeatDraft = { original: string | null; name: string; count: number }
 
 function SeatsEditor({
   entries,
@@ -682,13 +682,16 @@ function SeatsEditor({
   const [error, setError] = useState<string | null>(null)
   const names = entries?.map(({ name }) => name.trim()).filter(Boolean) ?? []
   const valid =
-    entries?.every(({ name }) => name.trim() !== '') && new Set(names).size === names.length
+    entries?.every(
+      ({ name, count }) =>
+        name.trim() !== '' && Number.isInteger(count) && count >= 1 && count <= 16,
+    ) && new Set(names).size === names.length
 
   const save = async () => {
     if (entries === null || !valid) return
     setBusy(true)
     setError(null)
-    const seats = entries.map(({ name }) => name.trim())
+    const seats = entries.map(({ name, count }) => ({ name: name.trim(), count }))
     const renames = entries.flatMap(({ original, name }) =>
       original !== null && original !== name.trim() ? [{ from: original, to: name.trim() }] : [],
     )
@@ -704,7 +707,7 @@ function SeatsEditor({
         <h2 className="text-sm text-fg-muted">Seats</h2>
         <button
           type="button"
-          onClick={() => setEntries([...(entries ?? []), { original: null, name: '' }])}
+          onClick={() => setEntries([...(entries ?? []), { original: null, name: '', count: 1 }])}
           disabled={entries === null || busy}
           className={secondary}
         >
@@ -733,6 +736,24 @@ function SeatsEditor({
                 }
                 className={input}
               />
+              <label className="flex shrink-0 items-center gap-2 text-sm text-fg-muted">
+                Slots
+                <input
+                  aria-label={`Seat ${index + 1} slots`}
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={entry.count}
+                  onChange={(event) =>
+                    setEntries(
+                      entries.map((seat, i) =>
+                        i === index ? { ...seat, count: Number(event.target.value) } : seat,
+                      ),
+                    )
+                  }
+                  className={`${input} w-20`}
+                />
+              </label>
               <button
                 type="button"
                 onClick={() => setEntries(entries.filter((_, i) => i !== index))}
@@ -790,8 +811,8 @@ export function FleetWorkersSettings() {
     fetch(`${apiBase}/api/seat-names`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const body = (await res.json()) as { seats: string[] }
-        setSeatEntries(body.seats.map((name) => ({ original: name, name })))
+        const body = (await res.json()) as { seats: { name: string; count: number }[] }
+        setSeatEntries(body.seats.map(({ name, count }) => ({ original: name, name, count })))
       })
       .catch((err: unknown) =>
         setLoadError(err instanceof Error ? err.message : 'could not reach the amagi server'),

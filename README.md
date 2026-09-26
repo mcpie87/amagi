@@ -217,28 +217,30 @@ turn it off.
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
 
 The worker fleet is machine-wide, so define `[[worker]]` entries in the global
-config. Set `count` to create repeated instances of one worker profile. Set
-`seatCount` to give its replicas separate credential seat lock identities;
-replicas beyond that count share seats and serialize. Both fields default to
-`1`. Workers can share a seat, for example:
+config. Define named credential seats independently with `[[seats]]`; each seat
+has one slot by default. Set a worker's `seat` to a named seat and `count` to
+create replicas of the same profile. Replicas use separate slots when available
+and share slots, serializing, when replicas or workers outnumber the capacity:
 
 ```toml
-[[worker]]
-id = "claude-fast"
-name = "Claude fast"
-kind = "claude"
-model = "claude-sonnet"
-seat = "claude-subscription"
-enabled = true
-count = 3
-seatCount = 3
+[[seats]]
+name = "claude"
+count = 1
+
+[[seats]]
+name = "codex_main"
+count = 2
+
+[[seats]]
+name = "codex_alt"
+count = 1
 
 [[worker]]
-id = "claude-careful"
-name = "Claude careful"
-kind = "claude"
-model = "claude-opus"
-seat = "claude-subscription"
+id = "worker-a"
+name = "Worker A"
+kind = "codex"
+seat = "codex_main"
+count = 2
 enabled = true
 ```
 
@@ -251,10 +253,8 @@ per-worker one.
 A seat names the credential an agent uses. Amagi guarantees that at most one
 agent is live on a seat at a time, even when different workers, watchers, or a
 chat reply request it. A worker without an explicit seat uses its harness kind
-as the seat name. Capacity is derived from the distinct free seats of enabled
-workers, rather than from the number of worker entries: workers
-sharing a credential must take turns, while workers on separate credentials
-can run concurrently.
+as the seat name. Enabled worker replicas can run up to their assigned seat's
+slot capacity; workers assigned to the same slot take turns.
 
 Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
 override them in a repo's `.amagi/config.toml` when needed. The `mention`,
@@ -273,10 +273,12 @@ Every key is optional; the table below gives the schema and defaults.
 | `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` | required | Harness used by this worker. |
 | `worker[].model` | string | *(harness default)* | Model passed to the harness. |
 | `worker[].effort` | string | *(harness default)* | Reasoning effort passed to the harness. |
-| `worker[].seat` | string | `worker[].kind` | Credential seat used by the worker; workers with the same seat serialize. |
+| `worker[].seat` | string | `worker[].kind` | Named credential seat used by the worker; replicas and workers share its configured slots. |
 | `worker[].count` | integer | `1` | Number of independently schedulable instances created from this profile. Instance IDs append `-1`, `-2`, and so on. |
-| `worker[].seatCount` | integer | `1` | Number of distinct seat lock identities assigned across this profile's instances. Seat identities append `-1`, `-2`, and so on. |
 | `worker[].enabled` | boolean | `false` | Whether the worker takes runs, manual or automatic. Persisted, and editable from the dashboard. |
+| `seats[]` | table array | `[]` | Named credential seats, configured with `[[seats]]`; existing string entries remain one-slot seats. |
+| `seats[].name` | string | required | Stable seat identifier referenced by `worker[].seat`. |
+| `seats[].count` | integer | `1` | Number of concurrent slots provided by the credential seat. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
 | `watchers.mention.model` | string | `harness.implement.model` | Model for mention responses. |
