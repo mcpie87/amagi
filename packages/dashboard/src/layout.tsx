@@ -42,7 +42,7 @@ function RunnerIndicator() {
       className="runner-status"
       title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
     >
-      runner: {status.running.length}/{status.capacity} {status.available ? 'free' : 'busy'}
+      runner: {status.busySeats}/{status.totalSeats} seats · {status.available ? 'free' : 'busy'}
     </span>
   )
 }

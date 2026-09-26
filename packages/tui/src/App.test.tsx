@@ -46,6 +46,8 @@ const RUNNER = {
   name: 'repo1',
   available: true,
   capacity: 2,
+  busySeats: 1,
+  totalSeats: 2,
   running: ['am-1'],
   startedAt: { 'am-1': 1_700_000_000_000 },
   resources: { 'am-1': { processes: 3, rssBytes: 123_456, cpuMs: 5_000 } },
@@ -150,9 +152,9 @@ describe('App', () => {
 
     const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
     try {
-      await waitFor(() => (instance.lastFrame() ?? '').includes('1/2 workers'))
+      await waitFor(() => (instance.lastFrame() ?? '').includes('1/2 seats'))
       const frame = instance.lastFrame() ?? ''
-      expect(frame).toContain('1/2 workers')
+      expect(frame).toContain('1/2 seats')
       expect(frame).toContain('auto-queue on')
       expect(frame).toContain('mention-watcher')
       expect(frame).toContain('Fix the thing')

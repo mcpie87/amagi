@@ -321,6 +321,8 @@ describe('RunService', () => {
       name: 'demo',
       available: true,
       capacity: 2,
+      busySeats: 0,
+      totalSeats: 2,
       running: [],
       startedAt: {},
       resources: {},
@@ -642,6 +644,21 @@ describe('RunService', () => {
       status: 409,
       error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
     })
+  })
+
+  test('status reports busy seats over total enabled seats', async () => {
+    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 3)
+    expect(await service.status()).toMatchObject({ busySeats: 0, totalSeats: 3 })
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    expect(await service.status()).toMatchObject({
+      available: true,
+      capacity: 1,
+      busySeats: 2,
+      totalSeats: 3,
+    })
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
   })
 
   test('start rejects an unknown worker id', async () => {
