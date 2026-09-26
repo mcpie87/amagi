@@ -13,6 +13,41 @@ beforeEach(() => {
 })
 
 describe('Store', () => {
+  test('activeChatAgents reports only chats without an exit event', () => {
+    store.append('bd-1', {
+      type: 'agent.started',
+      role: 'chat',
+      harness: 'claude',
+      seat: 'claude-seat',
+      model: null,
+      effort: null,
+      cwd: '/repo',
+      resumed: false,
+    })
+    store.append('bd-2', {
+      type: 'agent.started',
+      role: 'chat',
+      harness: 'codex',
+      seat: 'codex-seat',
+      model: null,
+      effort: null,
+      cwd: '/repo',
+      resumed: false,
+    })
+    expect(store.activeChatAgents()).toEqual([
+      { taskId: 'bd-1', seat: 'claude-seat' },
+      { taskId: 'bd-2', seat: 'codex-seat' },
+    ])
+
+    store.append('bd-1', {
+      type: 'agent.exited',
+      role: 'chat',
+      exitCode: 0,
+      sessionId: 'session-1',
+    })
+    expect(store.activeChatAgents()).toEqual([{ taskId: 'bd-2', seat: 'codex-seat' }])
+  })
+
   test('claiming projects a task row', () => {
     claim()
     const t = store.task('bd-1')

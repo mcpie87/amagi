@@ -148,6 +148,8 @@ export type AgentStartOptions = {
   allowedTools?: readonly string[]
   env?: Record<string, string>
   extraArgs?: readonly string[]
+  /** Identifies watcher agents while they hold a shared credential seat. */
+  seatActivity?: { repo: string; watcher: string }
 }
 
 export type AgentUsage = {

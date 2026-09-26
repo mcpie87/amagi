@@ -104,6 +104,8 @@ export type MentionClassified = {
 }
 
 export type RespondToMentionOptions = {
+  /** Registry key used to attribute live watcher harness seats. */
+  repo?: string
   root: string
   repoName: string
   pr: PrInfo
@@ -207,6 +209,7 @@ function startImplementHarness(
   cwd: string,
   prompt: string,
   systemPrompt: string,
+  repo?: string,
 ): AgentProcess {
   const harness = mk(config)
   return harness.start({
@@ -214,6 +217,7 @@ function startImplementHarness(
     prompt,
     systemPrompt,
     ...harnessStartOpts(config),
+    ...(repo === undefined ? {} : { seatActivity: { repo, watcher: 'mention-watcher' } }),
   })
 }
 
@@ -263,6 +267,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
           wt.path,
           respondToMentionPrompt(ctx),
           respondToMentionSystemPrompt(ctx),
+          opts.repo,
         )
         return { outcome: await p.agent(proc, 'fixing in worktree'), proc }
       },
@@ -339,6 +344,7 @@ async function respondToExplain(
             conflicted: wt.conflicted,
           }),
           explainMentionSystemPrompt(),
+          opts.repo,
         )
         return { outcome: await p.agent(proc, 'explaining'), proc }
       },
@@ -382,6 +388,7 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
     tmpdir(),
     classifyMentionPrompt({ pr: opts.pr, mention: opts.mention }),
     classifyMentionSystemPrompt(),
+    opts.repo,
   )
   const outcome = await p.agent(proc, 'classifying')
   if (!outcome.ok) {
@@ -470,6 +477,7 @@ async function respondToTakeDown(
             conflicted: wt.conflicted,
           }),
           takeDownSystemPrompt(),
+          opts.repo,
         )
         return p.agent(proc, 'judging')
       },

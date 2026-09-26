@@ -25,6 +25,8 @@ import type { Store } from './store/store.ts'
 export type ConflictLogLevel = 'info' | 'ok' | 'warn' | 'error' | 'agent'
 
 export type ResolveConflictOptions = {
+  /** Registry key used to attribute a live conflict watcher seat. */
+  repo?: string
   repoRoot: string
   repoName: string
   pr: PrInfo
@@ -189,6 +191,9 @@ export async function resolveConflict(
             prompt: resolveConflictPrompt(ctx),
             systemPrompt: resolveConflictSystemPrompt(ctx),
             ...harnessStartOpts(harnessConfig),
+            ...(opts.repo === undefined
+              ? {}
+              : { seatActivity: { repo: opts.repo, watcher: 'pr-conflict-watcher' } }),
           })
           for await (const event of proc.events()) {
             if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)

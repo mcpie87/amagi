@@ -156,6 +156,7 @@ export function startMentionWatcher({
             let classifiedKind: string | null = null
             try {
               await respondToMention({
+                repo,
                 root,
                 repoName,
                 pr,

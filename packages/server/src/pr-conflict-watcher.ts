@@ -305,6 +305,7 @@ export function startPrConflictWatcher({
           continue
         }
         const result: ResolveConflictResult = await resolveConflict({
+          repo,
           repoRoot: root,
           repoName,
           pr,

@@ -4,6 +4,7 @@ import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
 import { killTree } from '../../process.ts'
 import { acquireSeat } from '../../seat-lock.ts'
+import { recordWatcherSeat, removeWatcherSeat } from '../../watcher-seats.ts'
 import type { AgentOutcome, AgentProcess, AgentStartOptions, AgentUsage } from '../types.ts'
 import { harnessEnv } from './env.ts'
 
@@ -85,12 +86,18 @@ export function spawnAgent(
       }
       child = spawnUnlocked(argv, opts, translator, options)
       lease.bind(child.pid)
+      if (opts.seatActivity !== undefined) {
+        recordWatcherSeat({ ...opts.seatActivity, pid: child.pid, seat })
+      }
       for await (const event of child.events()) queue.push(event)
       return await child.done
     } catch (err) {
       if (!cancelled) queue.push({ kind: 'error', message: errMsg(err) })
       return cancelled ? cancelledOutcome() : failedOutcome(errMsg(err))
     } finally {
+      if (child !== undefined && opts.seatActivity !== undefined) {
+        removeWatcherSeat(child.pid)
+      }
       lease?.release()
       queue.close()
     }
