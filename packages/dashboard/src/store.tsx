@@ -413,8 +413,16 @@ export function useConnection(): ConnectionStatus {
 export type SeatState = {
   seat: string
   state: 'free' | 'held'
-  holder: { repo: string; taskId?: string; watcher?: string } | null
-  waiters: { repo: string; taskId: string }[]
+  holder: {
+    repo: string
+    taskId?: string
+    title?: string
+    watcher?: string
+    status?: string
+    since?: number | null
+  } | null
+  waiters: { repo: string; taskId: string; title: string; status: string; since: number | null }[]
+  eligible: { repo: string; taskId: string; title: string; status: string; since: number | null }[]
 }
 
 /** Global seat state is polled independently of the selected repository stream. */

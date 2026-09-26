@@ -14,9 +14,11 @@ import {
   ChatService,
   Config,
   canReset,
+  claimGate,
   classifyDifficulty,
   errMsg,
   expandTilde,
+  expandWorkers,
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
@@ -37,6 +39,7 @@ import {
   type RunServiceApi,
   reconcilePr,
   removeWorktree,
+  resolveWorkerHarness,
   type Store,
   type StoredEvent,
   type Tracker,
@@ -423,8 +426,21 @@ export function createApp({
     })
 
     .get('/api/seats', async (c) => {
-      type Holder = { repo: string; taskId?: string; watcher?: string }
-      type Waiter = { repo: string; taskId: string }
+      type Holder = {
+        repo: string
+        taskId?: string
+        title?: string
+        watcher?: string
+        status?: string
+        since?: number | null
+      }
+      type QueuedTask = {
+        repo: string
+        taskId: string
+        title: string
+        status: string
+        since: number | null
+      }
       const configured = new Set<string>()
       const global = loadGlobalConfig()
       for (const { name, count } of global.seats) {
@@ -447,11 +463,12 @@ export function createApp({
       }
 
       const holders = new Map<string, Holder>()
-      const waiters = new Map<string, Waiter[]>()
+      const waiters = new Map<string, QueuedTask[]>()
+      const eligible = new Map<string, QueuedTask[]>()
       const setHolder = (seat: string | undefined, holder: Holder): void => {
         if (seat !== undefined && !holders.has(seat)) holders.set(seat, holder)
       }
-      const addWaiter = (seat: string | undefined, waiter: Waiter): void => {
+      const addWaiter = (seat: string | undefined, waiter: QueuedTask): void => {
         if (seat === undefined) return
         const queue = waiters.get(seat) ?? []
         if (!queue.some((entry) => entry.repo === waiter.repo && entry.taskId === waiter.taskId)) {
@@ -464,23 +481,122 @@ export function createApp({
         const status = await service.status()
         for (const taskId of status.running) {
           const task = status.tasks[taskId]
-          if (task?.waitingOnSeat) addWaiter(task.seat, { repo, taskId })
-          else setHolder(task?.seat, { repo, taskId })
+          const ws = workspaces.get(repo)
+          const projected = ws?.store.task(taskId)
+          const taskStatus = projected?.state ?? 'running'
+          if (task?.waitingOnSeat) {
+            addWaiter(task.seat, {
+              repo,
+              taskId,
+              title: task?.title ?? projected?.title ?? taskId,
+              status: taskStatus,
+              since: task.waitingSince ?? status.startedAt[taskId] ?? null,
+            })
+          } else {
+            setHolder(task?.seat, {
+              repo,
+              taskId,
+              title: task?.title ?? projected?.title ?? taskId,
+              status: taskStatus,
+              since: task?.agentStartedAt ?? status.startedAt[taskId] ?? null,
+            })
+          }
         }
       }
       for (const run of liveRuns?.() ?? []) {
         if (!pidAlive(run.pid)) continue
-        if (run.waitingOnSeat) addWaiter(run.seat, { repo: run.repoKey, taskId: run.taskId })
-        else setHolder(run.seat, { repo: run.repoKey, taskId: run.taskId })
+        const ws = workspaces.get(run.repoKey)
+        const projected = ws?.store.task(run.taskId)
+        const events = ws?.store.events({ taskId: run.taskId, limit: 100_000 }) ?? []
+        if (run.waitingOnSeat) {
+          const waitingSince = events
+            .filter(
+              (event) =>
+                event.type === 'agent.stream' &&
+                event.event.kind === 'status' &&
+                event.event.message.startsWith('waiting for seat '),
+            )
+            .at(-1)?.ts
+          addWaiter(run.seat, {
+            repo: run.repoKey,
+            taskId: run.taskId,
+            title: run.title,
+            status: projected?.state ?? 'running',
+            since: waitingSince ?? run.startedAt,
+          })
+        } else {
+          const agentStartedAt = events.filter((event) => event.type === 'agent.started').at(-1)?.ts
+          setHolder(run.seat, {
+            repo: run.repoKey,
+            taskId: run.taskId,
+            title: run.title,
+            status: projected?.state ?? 'running',
+            since: agentStartedAt ?? run.startedAt,
+          })
+        }
       }
       for (const watcher of loadWatcherSeats()) {
-        setHolder(watcher.seat, { repo: watcher.repo, watcher: watcher.watcher })
+        setHolder(watcher.seat, {
+          repo: watcher.repo,
+          watcher: watcher.watcher,
+          status: 'watcher',
+          since: null,
+        })
       }
       for (const entry of workspaces.list()) {
         const ws = workspaces.get(entry.key)
         if (ws === null) continue
         for (const chat of ws.store.activeChatAgents()) {
-          setHolder(chat.seat, { repo: entry.key, taskId: chat.taskId })
+          const startedAt = ws.store
+            .events({ taskId: chat.taskId, limit: 100_000 })
+            .filter((event) => event.type === 'agent.started' && event.role === 'chat')
+            .at(-1)?.ts
+          setHolder(chat.seat, {
+            repo: entry.key,
+            taskId: chat.taskId,
+            title: ws.store.task(chat.taskId)?.title ?? chat.taskId,
+            status: 'chat',
+            since: startedAt ?? null,
+          })
+        }
+
+        const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+          (worker) => worker.enabled,
+        )
+        if (workers.length === 0) continue
+        const ready = await ws.tracker.ready()
+        const workersBySeat = new Map<string, (typeof workers)[number][]>()
+        for (const worker of workers) {
+          const seat = worker.seat ?? worker.kind
+          const seatWorkers = workersBySeat.get(seat) ?? []
+          seatWorkers.push(worker)
+          workersBySeat.set(seat, seatWorkers)
+        }
+        for (const [seat, seatWorkers] of workersBySeat) {
+          const tasks = eligible.get(seat) ?? []
+          for (const task of ready) {
+            const canRun = seatWorkers.some((worker) => {
+              const harness = resolveWorkerHarness(ws.config, worker)
+              return claimGate(
+                { ...ws.config, harness: { ...ws.config.harness, implement: harness } },
+                task,
+                harness.model ?? null,
+              ).allowed
+            })
+            if (
+              !canRun ||
+              tasks.some((queued) => queued.repo === entry.key && queued.taskId === task.id)
+            )
+              continue
+            tasks.push({
+              repo: entry.key,
+              taskId: task.id,
+              title: task.title,
+              status: 'ready',
+              since: task.createdAt ?? null,
+            })
+          }
+          eligible.set(seat, tasks)
         }
       }
 
@@ -490,6 +606,7 @@ export function createApp({
           state: holders.has(seat) ? 'held' : 'free',
           holder: holders.get(seat) ?? null,
           waiters: waiters.get(seat) ?? [],
+          eligible: eligible.get(seat) ?? [],
         })),
       })
     })

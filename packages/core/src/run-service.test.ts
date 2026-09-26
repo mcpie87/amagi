@@ -531,6 +531,7 @@ describe('RunService', () => {
       workerName: 'Worker 1',
       seat: 'claude',
       waitingOnSeat: false,
+      agentStartedAt: expect.any(Number),
       harness: 'claude',
       model: 'fake-model',
       effort: 'high',
