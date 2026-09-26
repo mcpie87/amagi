@@ -1,4 +1,5 @@
 import type { AgentEvent } from '../events.ts'
+import type { SeatRequestPriority } from '../seat-lock.ts'
 
 export type TrackerStatus = 'open' | 'in_progress' | 'blocked' | 'closed'
 
@@ -153,6 +154,8 @@ export type AgentStartOptions = {
   outputSchema?: string
   /** Seat wait limit in ms, or null to wait without a timeout. */
   seatMaxWaitMs?: number | null
+  /** Queue priority for this harness launch. Defaults to high. */
+  seatPriority?: SeatRequestPriority
   /** Identifies watcher agents while they hold a shared credential seat. */
   seatActivity?: { repo: string; watcher: string }
 }
