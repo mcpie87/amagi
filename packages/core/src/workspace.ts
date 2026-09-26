@@ -7,10 +7,12 @@ import { makeTracker } from './factory.ts'
 import { dbPathForRepo, registryPath as defaultRegistryPath } from './paths.ts'
 import {
   addRegistryEntry,
+  type GitIdentity,
   loadRegistry,
   type RegistryEntry,
   type RegistryParticipation,
   removeRegistryEntry,
+  updateRegistryGitIdentity,
   updateRegistryParticipation,
 } from './registry.ts'
 import { openDatabase } from './store/db.ts'
@@ -123,6 +125,10 @@ export class Workspaces {
   /** Updates per-repository server participation flags in the global registry. */
   updateParticipation(key: string, participation: RegistryParticipation): boolean {
     return updateRegistryParticipation(key, participation, this.opts.registryPath)
+  }
+
+  updateGitIdentity(key: string, gitIdentity: GitIdentity | null): boolean {
+    return updateRegistryGitIdentity(key, gitIdentity, this.opts.registryPath)
   }
 
   /** Readiness diagnostics for one registered repo. */

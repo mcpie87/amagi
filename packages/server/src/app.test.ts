@@ -2034,6 +2034,12 @@ describe('repo settings endpoints', () => {
       headers: { 'content-type': 'application/json' },
       body,
     })
+  const patchIdentity = (repo: string, body: unknown) =>
+    app.request(`/api/repos/${repo}/git-identity`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
 
   beforeEach(() => {
     ws = testWorkspaces(['repo1', 'repo2'])
@@ -2138,6 +2144,47 @@ describe('repo settings endpoints', () => {
 
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/settings')).status).toBe(404)
+  })
+
+  test('persists inline identities and rejects invalid gitconfig text', async () => {
+    expect(await (await app.request('/api/repos/repo1/git-identity')).json()).toEqual({
+      gitIdentity: null,
+    })
+    const identity = {
+      mode: 'inline' as const,
+      value: '[user]\n\tname = Test\n\temail = test@example.com\n',
+    }
+    const saved = await patchIdentity('repo1', identity)
+    expect({ status: saved.status, body: await saved.text() }).toEqual({
+      status: 200,
+      body: JSON.stringify({ gitIdentity: identity }),
+    })
+    expect(ws.workspaces.list().find((entry) => entry.key === 'repo1')?.gitIdentity).toEqual(
+      identity,
+    )
+
+    const invalid = await patchIdentity('repo1', { mode: 'inline', value: '[user\nname = bad' })
+    expect(invalid.status).toBe(400)
+    expect((await invalid.json()).error).toMatch(/bad config line|invalid/i)
+  })
+
+  test('rejects a missing path and accepts a readable gitconfig file', async () => {
+    const missing = await patchIdentity('repo1', {
+      mode: 'path',
+      value: join(tmpdir(), 'amagi-missing-identity.gitconfig'),
+    })
+    expect(missing.status).toBe(400)
+
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-identity-'))
+    try {
+      const file = join(dir, 'identity.gitconfig')
+      writeFileSync(file, '[user]\nname = Test\n')
+      const valid = await patchIdentity('repo1', { mode: 'path', value: file })
+      expect(valid.status).toBe(200)
+      expect(await valid.json()).toEqual({ gitIdentity: { mode: 'path', value: file } })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

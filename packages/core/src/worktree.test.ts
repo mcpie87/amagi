@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec, execOk } from './exec.ts'
+import { saveRegistry } from './registry.ts'
 import { listWorktrees, removeWorktreeGit } from './test-util.ts'
 import {
   branchName,
@@ -212,6 +213,58 @@ describe('createWorktree', () => {
           persona: 'nobody',
         }),
       ).rejects.toThrow(/persona not found/)
+    })
+
+    test('registry identity overrides the repo persona and stays out of shared config', async () => {
+      const state = mkdtempSync(join(tmpdir(), 'amagi-state-'))
+      const previousRegistry = process.env.AMAGI_REGISTRY
+      const previousStateHome = process.env.XDG_STATE_HOME
+      process.env.AMAGI_REGISTRY = join(state, 'registry.json')
+      process.env.XDG_STATE_HOME = state
+      try {
+        saveRegistry(
+          [
+            {
+              key: 'amagi',
+              name: 'amagi',
+              path: repo,
+              workers: true,
+              watchers: true,
+              gitIdentity: {
+                mode: 'inline',
+                value: '[user]\n\tname = Registry identity\n\temail = registry@example.com\n',
+              },
+            },
+          ],
+          process.env.AMAGI_REGISTRY,
+        )
+        const wt = await createWorktree({
+          repoRoot: repo,
+          repoName: 'amagi',
+          taskId: 'bd-registry-identity',
+          title: 'Registry identity',
+          baseBranch: 'main',
+          worktreeRoot: wtRoot,
+          persona: 'agent',
+        })
+        writeFileSync(join(wt.path, 'identity.txt'), 'identity\n')
+        await execOk(exec, ['git', 'add', '-A'], { cwd: wt.path })
+        await execOk(exec, ['git', 'commit', '-q', '-m', 'identity'], { cwd: wt.path })
+        expect(
+          (await exec(['git', 'log', '-1', '--format=%an <%ae>'], { cwd: wt.path })).stdout.trim(),
+        ).toBe('Registry identity <registry@example.com>')
+        expect(
+          (
+            await exec(['git', 'config', '--local', '--get', 'user.name'], { cwd: repo })
+          ).stdout.trim(),
+        ).toBe('Test')
+      } finally {
+        if (previousRegistry === undefined) delete process.env.AMAGI_REGISTRY
+        else process.env.AMAGI_REGISTRY = previousRegistry
+        if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+        else process.env.XDG_STATE_HOME = previousStateHome
+        rmSync(state, { recursive: true, force: true })
+      }
     })
   })
 })

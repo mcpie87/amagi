@@ -36,7 +36,14 @@ export function testWorkspaces(keys: string[], opts: TestWorkspacesOptions = {})
   const registryFile = join(dir, 'registry.json')
   const stores: Record<string, Store> = {}
   saveRegistry(
-    keys.map((key) => ({ key, name: key, path: join(dir, key), workers: true, watchers: true })),
+    keys.map((key) => ({
+      key,
+      name: key,
+      path: join(dir, key),
+      workers: true,
+      watchers: true,
+      gitIdentity: null,
+    })),
     registryFile,
   )
   const workspaces = new Workspaces({

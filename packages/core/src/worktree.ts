@@ -1,7 +1,8 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
-import { configHome } from './paths.ts'
+import { configHome, expandTilde, stateHome } from './paths.ts'
+import { findRegistryEntryByPath } from './registry.ts'
 
 const MAX_SLUG_WORDS = 5
 
@@ -92,7 +93,34 @@ export async function applyPersona(run: Exec, cwd: string, persona: string): Pro
   const file = personaGitconfig(persona)
   if (file === null) throw new Error(`persona not found: ${persona}`)
   await execOk(run, ['git', 'config', 'extensions.worktreeConfig', 'true'], { cwd })
-  await execOk(run, ['git', 'config', '--worktree', 'include.path', file], { cwd })
+  await execOk(run, ['git', 'config', '--worktree', '--replace-all', 'include.path', file], { cwd })
+}
+
+/** Applies the registry identity when set, otherwise the repo's persona fallback. */
+export async function applyRepoIdentity(
+  run: Exec,
+  cwd: string,
+  repoRoot: string,
+  persona?: string | null,
+): Promise<void> {
+  const identity = findRegistryEntryByPath(repoRoot)?.gitIdentity ?? null
+  if (identity === null) {
+    if (persona) await applyPersona(run, cwd, persona)
+    return
+  }
+
+  let file: string
+  if (identity.mode === 'path') {
+    file = resolve(expandTilde(identity.value))
+    if (!existsSync(file)) throw new Error(`git identity file not found: ${file}`)
+  } else {
+    const dir = join(stateHome(), 'amagi', 'gitconfigs')
+    mkdirSync(dir, { recursive: true })
+    file = join(dir, `${findRegistryEntryByPath(repoRoot)?.key ?? 'repo'}.gitconfig`)
+    writeFileSync(file, identity.value, { mode: 0o600 })
+  }
+  await execOk(run, ['git', 'config', 'extensions.worktreeConfig', 'true'], { cwd })
+  await execOk(run, ['git', 'config', '--worktree', '--replace-all', 'include.path', file], { cwd })
 }
 
 export async function branchExists(run: Exec, repoRoot: string, branch: string): Promise<boolean> {
@@ -122,9 +150,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     await execOk(run, args, { cwd: opts.repoRoot })
   }
 
-  if (opts.persona) {
-    await applyPersona(run, path, opts.persona)
-  }
+  await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
   if (opts.setupCmd) {
     await execOk(run, ['sh', '-c', opts.setupCmd], { cwd: path })
