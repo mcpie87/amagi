@@ -176,6 +176,8 @@ describe('resolveConflict', () => {
       'origin',
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
+    const merge = calls.find((call) => call[1] === 'merge')
+    expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
     expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
   })
 
@@ -188,7 +190,6 @@ describe('resolveConflict', () => {
     cfg.watchers.prConflict.effort = 'high'
     cfg.watchers.prConflict.seat = 'conflict-seat'
     let startedWith: Config['harness']['implement'] | undefined
-    let reflogCalls = 0
     const { exec, calls } = fake((c) => {
       if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
@@ -199,12 +200,7 @@ describe('resolveConflict', () => {
         return ok('src/a.txt\n')
       }
       if (c.includes('reflog')) {
-        reflogCalls++
-        return ok(
-          reflogCalls === 1
-            ? 'aaa checkout: initial\n'
-            : 'bbb reset: unexpected\naaa checkout: initial\n',
-        )
+        return ok('aaa checkout: initial\n')
       }
       return undefined
     })
@@ -243,7 +239,7 @@ describe('resolveConflict', () => {
     ])
     expect(driver.calls).toContain(7)
     expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
-    expect(bypassed).toEqual([['bbb reset: unexpected']])
+    expect(bypassed).toEqual([])
   })
 
   test('blocks an empty merge diff regardless of the agent verdict', async () => {

@@ -33,16 +33,32 @@ export async function withHeadReflogBypassCheck<T>(
   run: Exec,
   action: () => Promise<T>,
   onBypassed?: (entries: string[]) => void,
+  rejectBypass = false,
 ): Promise<T> {
   const before = await headReflog(cwd, run)
+  if (rejectBypass && before === null) {
+    throw new Error('cannot verify agent HEAD changes because its reflog is unavailable')
+  }
+  let result: T | undefined
+  let actionError: unknown
+  let actionFailed = false
   try {
-    return await action()
-  } finally {
-    if (before !== null && onBypassed !== undefined) {
-      const after = await headReflog(cwd, run)
-      if (after !== null) {
-        const entries = headReflogEntriesSince(before, after)
-        if (entries.length > 0) {
+    result = await action()
+  } catch (err) {
+    actionFailed = true
+    actionError = err
+  }
+  let bypassed = false
+  let reflogUnavailable = false
+  if (before !== null) {
+    const after = await headReflog(cwd, run)
+    if (after === null) {
+      reflogUnavailable = true
+    } else {
+      const entries = headReflogEntriesSince(before, after)
+      if (entries.length > 0) {
+        bypassed = true
+        if (onBypassed !== undefined) {
           try {
             onBypassed(entries)
           } catch {
@@ -52,4 +68,12 @@ export async function withHeadReflogBypassCheck<T>(
       }
     }
   }
+  if (actionFailed) throw actionError
+  if (rejectBypass && reflogUnavailable) {
+    throw new Error('cannot verify agent HEAD changes because its reflog is unavailable')
+  }
+  if (rejectBypass && bypassed) {
+    throw new Error('agent changed HEAD outside the amagi commit path')
+  }
+  return result as T
 }
