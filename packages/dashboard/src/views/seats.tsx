@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import { useSeats } from '../store.tsx'
 import { EmptyState } from '../ui.tsx'
 
@@ -41,9 +42,19 @@ export function SeatsView() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-fg-muted">
-                    {seat.holder === null
-                      ? '-'
-                      : `${seat.holder.repo} · ${seat.holder.watcher ?? seat.holder.taskId ?? 'agent'}`}
+                    {seat.holder === null ? (
+                      '-'
+                    ) : seat.holder.taskId === undefined ? (
+                      `${seat.holder.repo} · ${seat.holder.watcher ?? 'agent'}`
+                    ) : (
+                      <Link
+                        to="/tasks/$id"
+                        params={{ id: seat.holder.taskId }}
+                        className="font-medium text-fg hover:underline"
+                      >
+                        {`${seat.holder.repo} · ${seat.holder.watcher ?? seat.holder.taskId}`}
+                      </Link>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-fg-muted">
                     {seat.waiters.length === 0
