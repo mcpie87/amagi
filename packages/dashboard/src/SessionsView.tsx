@@ -130,14 +130,14 @@ export function SessionsView() {
         <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {recent.map((s) => (
             <li key={`${s.taskId}/${s.startedAt}`} className="flex items-center gap-3 px-4 py-2.5">
+              <span className="shrink-0 text-xs tabular-nums text-fg-muted">
+                <Time ts={s.startedAt} />
+              </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-mono text-xs text-fg-muted">{s.taskId}</span>
                 <span className="block truncate text-sm font-medium">
                   {s.model ?? 'unknown'} · {s.harness} · {s.role}
                 </span>
-              </span>
-              <span className="shrink-0 text-xs tabular-nums text-fg-muted">
-                <Time ts={s.startedAt} />
               </span>
               <span className="shrink-0 text-xs tabular-nums text-fg-muted">
                 {fmtDuration(s.durationMs)}

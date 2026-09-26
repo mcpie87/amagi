@@ -67,15 +67,6 @@ export function EmptyState({
 
 export function Time({ ts }: { ts: number }) {
   const date = new Date(ts)
-  const today = date.toDateString() === new Date().toDateString()
   const dateFormat = useDateFormatPref()
-  return (
-    <time dateTime={date.toISOString()} title={fmtDateTime(date, dateFormat)}>
-      {date.toLocaleString([], {
-        ...(today ? {} : { month: 'short', day: 'numeric', year: 'numeric' }),
-        hour: '2-digit',
-        minute: '2-digit',
-      })}
-    </time>
-  )
+  return <time dateTime={date.toISOString()}>{fmtDateTime(date, dateFormat)}</time>
 }
