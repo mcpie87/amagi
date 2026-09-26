@@ -292,6 +292,22 @@ export function startPrConflictWatcher({
       const baseOid = conflicts.length > 0 ? await baseHeadOid(run) : ''
       let resolvedNow = 0
       const warnings: string[] = []
+      const recordPrLog = (pr: PrInfo, message: string, level: 'info' | 'error' = 'info'): void => {
+        const result = `PR #${pr.number}: ${message}`
+        logEvent(result, level)
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(pr.number),
+          prNumber: pr.number,
+          url: pr.url,
+          result: message,
+          level,
+        })
+      }
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
@@ -314,6 +330,7 @@ export function startPrConflictWatcher({
           store,
           exec,
           makeHarnessFn,
+          onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
         nextState[key] = {
@@ -378,6 +395,8 @@ export function startPrConflictWatcher({
         contained,
         ...(exec === undefined ? {} : { exec }),
         ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+        onLog: (pr, level, message) =>
+          recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
         onAction: (pr, result, level) =>
           store.append(null, {
             type: 'watcher.action',

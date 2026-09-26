@@ -28,6 +28,8 @@ export type FlagPointlessOptions = {
   makeHarnessFn?: typeof makeHarness
   /** Per-PR results for watcher run history. Recording failures never changes the pass. */
   onAction?: (pr: PrInfo, result: string, level: 'info' | 'error') => void
+  /** Live, bounded harness events for the PR watcher run history. */
+  onLog?: (pr: PrInfo, level: 'info' | 'agent' | 'error', text: string) => void
   /**
    * PRs whose conflict resolution found base already contains their work, with
    * the resolver's verdict. They qualify like an empty diff, although their
@@ -166,6 +168,7 @@ type JudgePointlessOptions = {
   config: Config
   exec?: Exec
   makeHarnessFn?: typeof makeHarness
+  onLog?: (level: 'info' | 'agent' | 'error', text: string) => void
 }
 
 /**
@@ -201,8 +204,17 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
         systemPrompt: pointlessSystemPrompt(),
         ...harnessStartOpts(opts.config.harness.implement),
       })
+      opts.onLog?.('info', `worktree: ${wt.path}`)
+      opts.onLog?.('info', 'agent: pointlessness judge')
+      for await (const event of proc.events()) {
+        if (event.kind === 'tool_use') opts.onLog?.('info', `[tool] ${event.name}`)
+        else if (event.kind === 'text' && event.text.trim()) opts.onLog?.('agent', event.text)
+        else if (event.kind === 'error') opts.onLog?.('error', event.message)
+        else if (event.kind === 'status') opts.onLog?.('info', event.message)
+      }
       const outcome = await proc.done
       if (!outcome.ok) {
+        opts.onLog?.('error', `agent failed: ${agentFailure(outcome)}`)
         console.warn(`pr pointless verdict #${opts.pr.number}: ${agentFailure(outcome)}`)
         return null
       }
@@ -284,6 +296,9 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
                 config: opts.config,
                 ...(opts.exec === undefined ? {} : { exec: opts.exec }),
                 ...(opts.makeHarnessFn === undefined ? {} : { makeHarnessFn: opts.makeHarnessFn }),
+                ...(opts.onLog === undefined
+                  ? {}
+                  : { onLog: (level, text) => opts.onLog?.(pr, level, text) }),
               })
           const fallback = pointlessReason(pr, contained)
           const reasoning =
