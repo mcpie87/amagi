@@ -4,6 +4,8 @@ import { commitFooter } from './footer.ts'
 import type { PrBodyMeta } from './pr-body.ts'
 import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from './verdict.ts'
 
+export { reviewPrompt } from './review-pack.ts'
+
 export type PromptContext = {
   task: TrackerTask
   worktree: string
