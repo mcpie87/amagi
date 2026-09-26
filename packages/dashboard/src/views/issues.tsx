@@ -273,7 +273,7 @@ function IssueFormModal({
   )
 }
 
-/** The operator's call to close a finished epic; the worker never decides this. */
+/** Manual fallback for a finished epic when automatic closure is disabled. */
 function CloseEpicButton({
   repo,
   epic,
