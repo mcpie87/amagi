@@ -1,5 +1,13 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite'
-import type { CheckResult, EventBody, MergeStatus, StoredEvent, TaskState } from '../events.ts'
+import type {
+  CheckResult,
+  EventBody,
+  Finding,
+  MergeStatus,
+  ReviewStopReason,
+  StoredEvent,
+  TaskState,
+} from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -32,6 +40,9 @@ type RawTask = {
   checks: string | null
   checks_ok: number | null
   attempt: number
+  review_round: number
+  review_findings: string | null
+  review_stop_reason: string | null
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -70,6 +81,9 @@ const toTask = (r: RawTask): ProjectedTask => ({
       : { sha: r.last_commit_sha, subject: r.last_commit_subject ?? '' },
   checks: r.checks === null ? null : (JSON.parse(r.checks) as CheckResult[]),
   checksOk: r.checks_ok === null ? null : r.checks_ok === 1,
+  reviewRound: r.review_round,
+  reviewFindings: r.review_findings === null ? null : (JSON.parse(r.review_findings) as Finding[]),
+  reviewStopReason: r.review_stop_reason as ReviewStopReason | null,
   attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -115,6 +129,9 @@ const taskRow = (t: ProjectedTask): Row => ({
   checks: t.checks === null ? null : JSON.stringify(t.checks),
   checks_ok: t.checksOk === null ? null : t.checksOk ? 1 : 0,
   attempt: t.attempt,
+  review_round: t.reviewRound,
+  review_findings: t.reviewFindings === null ? null : JSON.stringify(t.reviewFindings),
+  review_stop_reason: t.reviewStopReason,
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({

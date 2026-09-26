@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { canTransition, isTerminal, TASK_STATES } from './events.ts'
+import {
+  canTransition,
+  EventBody,
+  findingSeverityAtOrAbove,
+  isTerminal,
+  TASK_STATES,
+} from './events.ts'
 
 describe('state machine', () => {
   test('queued tasks are non-terminal and can start work', () => {
@@ -25,6 +31,52 @@ describe('state machine', () => {
   test('questions park and resume the implementer', () => {
     expect(canTransition('implementing', 'awaiting_answer')).toBe(true)
     expect(canTransition('awaiting_answer', 'implementing')).toBe(true)
+  })
+
+  test('review states transition through rounds and back to checks', () => {
+    expect(canTransition('checks', 'reviewing')).toBe(true)
+    expect(canTransition('reviewing', 'fixing')).toBe(true)
+    expect(canTransition('fixing', 'reviewing')).toBe(true)
+    expect(canTransition('reviewing', 'checks')).toBe(true)
+    expect(canTransition('fixing', 'checks')).toBe(true)
+  })
+
+  test('finding severity uses the declared threshold ordering', () => {
+    expect(findingSeverityAtOrAbove('blocker', 'major')).toBe(true)
+    expect(findingSeverityAtOrAbove('major', 'major')).toBe(true)
+    expect(findingSeverityAtOrAbove('minor', 'major')).toBe(false)
+    expect(findingSeverityAtOrAbove('nit', 'blocker')).toBe(false)
+  })
+
+  test('review events validate findings, replies and stop reasons', () => {
+    const finding = {
+      id: 'finding-1',
+      severity: 'major',
+      scope: 'in-scope',
+      path: 'src/thing.ts',
+      line: 12,
+      title: 'Missing guard',
+      evidence: 'The value is dereferenced without validation.',
+      failureScenario: 'A null value crashes the request.',
+    }
+    expect(
+      EventBody.parse({
+        type: 'review.finished',
+        round: 1,
+        findings: [finding],
+        blockingIds: ['finding-1'],
+      }),
+    ).toMatchObject({ type: 'review.finished', round: 1, findings: [finding] })
+    expect(
+      EventBody.parse({
+        type: 'review.fixed',
+        round: 1,
+        replies: [{ id: 'finding-1', outcome: 'wont-fix', reason: 'Not reproducible.' }],
+      }),
+    ).toMatchObject({ type: 'review.fixed' })
+    expect(() =>
+      EventBody.parse({ type: 'review.stopped', reason: 'unknown', unresolvedIds: [] }),
+    ).toThrow()
   })
 
   test('a transient failure parks the task in retrying until the retry runs', () => {

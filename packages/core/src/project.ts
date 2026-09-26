@@ -1,7 +1,9 @@
 import {
   type CheckResult,
   canTransition,
+  type Finding,
   type MergeStatus,
+  type ReviewStopReason,
   type StoredEvent,
   type TaskState,
 } from './events.ts'
@@ -43,6 +45,12 @@ export type ProjectedTask = {
   lastCommit: { sha: string; subject: string } | null
   checks: CheckResult[] | null
   checksOk: boolean | null
+  /** Most recent review round, or zero before review begins in this attempt. */
+  reviewRound: number
+  /** Findings from the most recently completed review round. */
+  reviewFindings: Finding[] | null
+  /** Why the review loop stopped, if it has stopped. */
+  reviewStopReason: ReviewStopReason | null
   /** 1-based; bumped by each operator reset, which wipes the run fields. */
   attempt: number
   /** Start of the current attempt: the first claim, or the latest reset. */
@@ -234,6 +242,9 @@ export function project(state: Projection, event: StoredEvent): Projection {
             lastCommit: null,
             checks: null,
             checksOk: null,
+            reviewRound: 0,
+            reviewFindings: null,
+            reviewStopReason: null,
             attempt: 1,
             createdAt: event.ts,
             updatedAt: event.ts,
@@ -258,6 +269,9 @@ export function project(state: Projection, event: StoredEvent): Projection {
           lastCommit: null,
           checks: null,
           checksOk: null,
+          reviewRound: 0,
+          reviewFindings: null,
+          reviewStopReason: null,
           attempt: current.attempt + 1,
           createdAt: event.ts,
           updatedAt: event.ts,
@@ -290,6 +304,38 @@ export function project(state: Projection, event: StoredEvent): Projection {
           ...current,
           state: 'queued',
           statusReason: event.reason ?? null,
+          updatedAt: event.ts,
+        }
+      }
+      break
+
+    case 'review.started':
+      if (current) {
+        writeTasks()[event.taskId] = {
+          ...current,
+          reviewRound: event.round,
+          reviewStopReason: null,
+          updatedAt: event.ts,
+        }
+      }
+      break
+
+    case 'review.finished':
+      if (current) {
+        writeTasks()[event.taskId] = {
+          ...current,
+          reviewRound: event.round,
+          reviewFindings: event.findings,
+          updatedAt: event.ts,
+        }
+      }
+      break
+
+    case 'review.stopped':
+      if (current) {
+        writeTasks()[event.taskId] = {
+          ...current,
+          reviewStopReason: event.reason,
           updatedAt: event.ts,
         }
       }

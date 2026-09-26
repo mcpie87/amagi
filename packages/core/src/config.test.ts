@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,6 +8,8 @@ import {
   loadGlobalConfig,
   migrateFleet,
   newWorkerId,
+  reviewerHarnessConfig,
+  severityAtOrAbove,
   watcherHarnessConfig,
   workerSeat,
   writeConfig,
@@ -17,6 +19,7 @@ import {
 let home: string
 let repo: string
 const savedXdg = process.env.XDG_CONFIG_HOME
+const savedPath = process.env.PATH
 
 const writeGlobal = (toml: string) => {
   mkdirSync(join(home, 'amagi'), { recursive: true })
@@ -37,6 +40,8 @@ beforeEach(() => {
 afterEach(() => {
   if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
   else process.env.XDG_CONFIG_HOME = savedXdg
+  if (savedPath === undefined) delete process.env.PATH
+  else process.env.PATH = savedPath
   rmSync(home, { recursive: true, force: true })
   rmSync(repo, { recursive: true, force: true })
 })
@@ -48,6 +53,14 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
+    expect(config.review).toEqual({
+      enabled: false,
+      maxRounds: 3,
+      threshold: 'major',
+      finalPass: false,
+      maxTokens: 2_000_000,
+      lenses: [],
+    })
     expect(config.worker).toEqual([])
     expect(config.watchers).toMatchObject({
       mention: { enabled: true },
@@ -123,6 +136,40 @@ describe('loadConfig', () => {
   test('accepts a per-harness binary override', () => {
     writeRepo('[harness.implement]\nkind = "opencode"\nbin = "opencode-unconfined"\n')
     expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
+  })
+
+  test('repo review harness settings override the fleet settings', () => {
+    writeGlobal('[review.harness]\nkind = "codex"\nmodel = "global-review"\n')
+    writeRepo('[review.harness]\nkind = "opencode"\nmodel = "repo-review"\n')
+    expect(loadConfig(repo).config.review.harness).toMatchObject({
+      kind: 'opencode',
+      model: 'repo-review',
+    })
+  })
+
+  test('defaults the reviewer to an installed kind different from implement', () => {
+    const binDir = join(home, 'bin')
+    mkdirSync(binDir)
+    writeFileSync(join(binDir, 'codex'), '')
+    chmodSync(join(binDir, 'codex'), 0o755)
+    process.env.PATH = binDir
+    const config = loadConfig(repo).config
+    expect(reviewerHarnessConfig(config)).toMatchObject({ kind: 'codex' })
+    writeRepo('[review]\nenabled = true\n')
+    expect(loadConfig(repo).config.review.enabled).toBe(true)
+  })
+
+  test('enabled review requires an explicit or installed reviewer harness', () => {
+    process.env.PATH = home
+    writeRepo('[review]\nenabled = true\n')
+    expect(() => loadConfig(repo)).toThrow(/no reviewer harness is configured or installed/)
+  })
+
+  test('severity threshold comparison follows the schema ordering', () => {
+    expect(severityAtOrAbove('blocker', 'major')).toBe(true)
+    expect(severityAtOrAbove('major', 'major')).toBe(true)
+    expect(severityAtOrAbove('minor', 'major')).toBe(false)
+    expect(severityAtOrAbove('nit', 'blocker')).toBe(false)
   })
 
   test('accepts named harness definitions for the interactive picker', () => {

@@ -55,6 +55,44 @@ describe('Store', () => {
     expect(t?.title).toBe('Add SSE endpoint')
   })
 
+  test('review projection fields survive the SQL projection round trip', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'review.started',
+      round: 2,
+      finalPass: false,
+      reviewerSession: 'review-session',
+    })
+    const findings = [
+      {
+        id: 'finding-1',
+        severity: 'major' as const,
+        scope: 'in-scope' as const,
+        path: 'src/thing.ts',
+        line: 12,
+        title: 'Missing guard',
+        evidence: 'The value is dereferenced without validation.',
+        failureScenario: 'A null value crashes the request.',
+      },
+    ]
+    store.append('bd-1', {
+      type: 'review.finished',
+      round: 2,
+      findings,
+      blockingIds: ['finding-1'],
+    })
+    store.append('bd-1', {
+      type: 'review.stopped',
+      reason: 'rounds',
+      unresolvedIds: ['finding-1'],
+    })
+    expect(store.task('bd-1')).toMatchObject({
+      reviewRound: 2,
+      reviewFindings: findings,
+      reviewStopReason: 'rounds',
+    })
+  })
+
   test('sequence numbers are monotonic and returned', () => {
     const a = claim()
     const b = store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
