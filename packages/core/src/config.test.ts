@@ -66,6 +66,7 @@ describe('loadConfig', () => {
       mention: { enabled: true },
       prConflict: { enabled: true },
       stall: { enabled: true },
+      epicClose: { enabled: true },
     })
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
@@ -73,6 +74,7 @@ describe('loadConfig', () => {
     expect(config.loop.prCheckIntervalSec).toBe(300)
     expect(config.loop.mergeTreeCheck).toBe(false)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
+    expect(config.loop.epicCloseIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
     expect(config.loop.contextWarnTokens).toBe(160_000)
     expect(config.loop.contextMaxTokens).toBe(200_000)
@@ -257,9 +259,13 @@ describe('loadConfig', () => {
   })
 
   test('stall watcher keys are overridable', () => {
-    writeRepo('[loop]\nstallWatchIntervalSec = 60\nstallTimeoutSec = 7200\n')
+    writeRepo(
+      '[loop]\nstallWatchIntervalSec = 60\nepicCloseIntervalSec = 90\nstallTimeoutSec = 7200\n\n[watchers.epicClose]\nenabled = false\n',
+    )
     const config = loadConfig(repo).config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
+    expect(config.loop.epicCloseIntervalSec).toBe(90)
+    expect(config.watchers.epicClose.enabled).toBe(false)
     expect(config.loop.stallTimeoutSec).toBe(7200)
   })
 
