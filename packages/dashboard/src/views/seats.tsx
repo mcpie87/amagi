@@ -45,7 +45,8 @@ export function SeatsView() {
               {seats.map((seat) => (
                 <tr
                   key={seat.seat}
-                  className={activeSeat?.seat === seat.seat ? 'bg-raised/50' : undefined}
+                  onClick={() => setSelectedSeat(seat.seat)}
+                  className={`cursor-pointer hover:bg-raised ${activeSeat?.seat === seat.seat ? 'bg-raised/50' : ''}`}
                 >
                   <td className="px-4 py-3 font-medium text-fg">
                     <button
