@@ -2316,6 +2316,22 @@ describe('fleet endpoints', () => {
     ])
   })
 
+  test('worker count fields persist and invalid seat capacity is rejected', async () => {
+    const res = await send('POST', '/api/workers', {
+      name: 'Claude',
+      kind: 'claude',
+      count: 3,
+      seatCount: 3,
+    })
+    expect(res.status).toBe(201)
+    const { id } = (await res.json()) as { id: string }
+    expect(loadGlobalConfig().worker[0]).toMatchObject({ count: 3, seatCount: 3 })
+
+    const invalid = await send('PATCH', `/api/workers/${id}`, { count: 2 })
+    expect(invalid.status).toBe(400)
+    expect(loadGlobalConfig().worker[0]).toMatchObject({ count: 3, seatCount: 3 })
+  })
+
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
     fleet = [

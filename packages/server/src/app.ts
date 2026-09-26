@@ -1246,14 +1246,15 @@ export function createApp({
 
     .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
       const fleet = loadGlobalConfig().worker
-      const worker = WorkerConfig.parse({
+      const parsed = WorkerConfig.safeParse({
         id: newWorkerId(fleet.map((w) => w.id)),
         ...c.req.valid('json'),
       })
-      const next = Config.shape.worker.safeParse([...fleet, worker])
+      if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
+      const next = Config.shape.worker.safeParse([...fleet, parsed.data])
       if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
       saveFleet(next.data)
-      return c.json({ ...worker, taskId: null }, 201)
+      return c.json({ ...parsed.data, taskId: null }, 201)
     })
 
     .patch(
@@ -1274,7 +1275,9 @@ export function createApp({
         const parsed = WorkerConfig.safeParse(merged)
         if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
         const worker = parsed.data
-        saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
+        const next = Config.shape.worker.safeParse(fleet.map((w) => (w.id === id ? worker : w)))
+        if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
+        saveFleet(next.data)
         return c.json((await fleetView()).find((w) => w.id === id))
       },
     )
