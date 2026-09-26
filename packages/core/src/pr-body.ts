@@ -118,14 +118,31 @@ export function withAgentSections(
 }
 
 /** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
-const FILE_REF = /[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}/g
+const FILE_REF = /(?<![\w.-])[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}(?![\w])/g
 
 /** Wraps file names and paths in backticks, leaving existing code spans alone. */
 export function backtickFileRefs(text: string): string {
   return text
-    .split(/(```[\s\S]*?```|`[^`\n]+`)/g)
+    .split(/(```[\s\S]*?```|`[^`\n]+`|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
     .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
     .join('')
+}
+
+function renderDescriptionMarkdown(text: string): string {
+  return backtickFileRefs(text.replace(/</g, '&lt;').replace(/>/g, '&gt;')).replace(
+    /(^|\n)( {0,3})(#{1,6})(?=[ \t])/g,
+    (_match, lineStart, indent: string, hashes: string) => {
+      const level = Math.min(6, hashes.length + 2)
+      return `${lineStart}${indent}${'#'.repeat(level)}`
+    },
+  )
+}
+
+function normalizeWorktreeLinks(text: string): string {
+  return text.replace(/\]\(([^)]*)\)/g, (link, destination: string) => {
+    const worktreePath = destination.replaceAll('`', '').match(/(?:^|\/)worktrees\/[^/]+\/(.+)$/)
+    return worktreePath === undefined || worktreePath === null ? link : `](${worktreePath[1]})`
+  })
 }
 
 /** Provenance of the model run that produced the PR, for the body footer. */
@@ -180,7 +197,7 @@ export function formatPrBody(
   const { summary: descriptionSummary, howToUse, conclusion } = splitDescription(task.description)
   const summary = stripPreflightSection(descriptionSummary).trim()
   const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
-  lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
+  lines.push('', '### 📝 Summary', '', renderDescriptionMarkdown(normalizeWorktreeLinks(body)))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
@@ -193,7 +210,12 @@ export function formatPrBody(
   }
   const conclusionBody = conclusion ?? fallbackSummary
   if (conclusionBody !== null && conclusionBody !== undefined && conclusionBody.trim() !== '') {
-    lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
+    lines.push(
+      '',
+      '### 🧠 Conclusion',
+      '',
+      renderDescriptionMarkdown(normalizeWorktreeLinks(conclusionBody)),
+    )
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
   return `${lines.join('\n')}${footer}`
