@@ -152,6 +152,21 @@ export type PrBodyMeta = {
   effort: string | null
 }
 
+export type PrReviewSummary = {
+  unresolved: boolean
+  unresolvedIds: readonly string[]
+  unresolvedFindings: readonly {
+    id: string
+    severity: string
+    title: string
+    path: string
+    line: number
+    failureScenario: string
+    reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
+  }[]
+  history: string
+}
+
 /**
  * Key of the visible trailer older amagi PR bodies ended with, still read so
  * those PRs keep resolving to their task.
@@ -185,6 +200,7 @@ export function formatPrBody(
   meta?: PrBodyMeta,
   /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
   fallbackSummary?: string | null,
+  review?: PrReviewSummary,
 ): string {
   const created = createdAgo(task.createdAt)
   const lines = [
@@ -214,6 +230,33 @@ export function formatPrBody(
       '',
       renderDescriptionMarkdown(normalizeWorktreeLinks(conclusionBody)),
     )
+  }
+  if (review !== undefined) {
+    lines.push('', '### 🔎 Review', '', review.history)
+    if (review.unresolved) {
+      lines.push(
+        '',
+        '### ⚠️ Unresolved findings',
+        '',
+        review.unresolvedIds.length > 0
+          ? review.unresolvedIds
+              .map((id) => {
+                const finding = review.unresolvedFindings.find((entry) => entry.id === id)
+                if (finding === undefined) return `- \`${id}\``
+                return [
+                  `- **\`${finding.id}\` ${finding.severity}: ${finding.title}** (${finding.path}:${finding.line})`,
+                  `  ${finding.failureScenario}`,
+                  ...(finding.reply === null
+                    ? []
+                    : [`  Implementer reply (${finding.reply.outcome}): ${finding.reply.reason}`]),
+                ].join('\n')
+              })
+              .join('\n')
+          : '- Review ended before all findings could be resolved.',
+        '',
+        'Verdict: needs-human',
+      )
+    }
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
   return `${lines.join('\n')}${footer}`

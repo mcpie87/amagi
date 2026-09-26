@@ -85,7 +85,7 @@ class FakeTracker implements Tracker {
 }
 
 type Turn = {
-  effect?: (cwd: string) => void
+  effect?: (cwd: string, prompt: string) => void
   events?: AgentEvent[]
   outcome?: Partial<AgentOutcome>
   model?: string | null
@@ -146,7 +146,7 @@ class FakeHarness implements Harness {
     const calls = verify ? this.verifyCalls : this.calls
     calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
     const turn = verify ? this.verifyResponse : (this.turns.shift() ?? {})
-    turn.effect?.(opts.cwd)
+    turn.effect?.(opts.cwd, opts.prompt)
 
     const queue = new AsyncQueue<AgentEvent>()
     for (const e of turn.events ?? []) queue.push(e)
@@ -586,6 +586,167 @@ describe('Runner.review', () => {
 })
 
 describe('Runner.runOnce', () => {
+  const finding = {
+    id: 'F-1',
+    severity: 'major',
+    scope: 'in-scope',
+    path: 'README.md',
+    line: 1,
+    title: 'Missing behavior',
+    evidence: 'The new behavior is absent.',
+    failureScenario: 'A user cannot complete the task.',
+  } as const
+  const reviewConfig = (review: Record<string, unknown> = {}, loop: Record<string, unknown> = {}) =>
+    config({
+      harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+      review: { enabled: true, harness: { kind: 'codex' }, ...review },
+      loop,
+    })
+
+  test('fixes a blocking finding and opens a clean PR after the next review', async () => {
+    const forge = new FakePr()
+    const fixer = new FakeHarness([
+      writesAFile,
+      {
+        effect: (_cwd, prompt) => {
+          const path = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (path === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(path, JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]))
+        },
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const reviewer = new ReviewHarness([JSON.stringify([finding]), '[]'])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      reviewConfig(),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('review.fixed')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
+    expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
+    expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
+  })
+
+  test('counts a fresh final pass as a review round', async () => {
+    const reviewer = new ReviewHarness(['[]', '[]'])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      reviewConfig({ finalPass: true }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(reviewer.calls).toHaveLength(2)
+    expect(reviewer.calls[1]?.resumeFrom).toBeNull()
+    expect(
+      store.events({ taskId: TASK.id }).filter((event) => event.type === 'review.started'),
+    ).toMatchObject([
+      { round: 1, finalPass: false },
+      { round: 2, finalPass: true },
+    ])
+    expect(
+      store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
+    ).toMatchObject({ reason: 'acceptable' })
+  })
+
+  test('opens an unresolved PR after the round limit', async () => {
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      reviewConfig({ maxRounds: 1 }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('review.stopped')
+    expect(forge.calls[0]?.labels).toContain('amagi/review-unresolved')
+    expect(forge.calls[0]?.body).toContain('Verdict: needs-human')
+  })
+
+  test('opens an unresolved PR after the review token limit', async () => {
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      reviewConfig({ maxTokens: 1 }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(
+      store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
+    ).toMatchObject({ reason: 'tokens' })
+  })
+
+  test('opens an unresolved PR when blocking findings make no progress', async () => {
+    const forge = new FakePr()
+    const fixer = new FakeHarness([
+      writesAFile,
+      {
+        effect: (_cwd, prompt) => {
+          const path = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (path === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(path, JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]))
+        },
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      reviewConfig({ maxRounds: 3 }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding]), JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(
+      store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
+    ).toMatchObject({ reason: 'no-progress', unresolvedIds: ['F-1'] })
+  })
+
+  test('opens an unresolved PR when review cost is exhausted', async () => {
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      reviewConfig({}, { maxCostUsd: 0.005 }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(
+      store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
+    ).toMatchObject({ reason: 'cost' })
+  })
+
   test('an empty queue is not an error', async () => {
     expect(await makeRunner(new FakeTracker([]), new FakeHarness([])).runOnce()).toBeNull()
   })

@@ -99,7 +99,9 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `worktree_ready` | Git worktree and branch created (and `repo.setupCmd` run, if set) | `implementing` |
 | `implementing` | The implement harness is running | `awaiting_answer`, `checks` |
 | `awaiting_answer` | The agent called `amagi ask` and is parked on a human answer | `implementing` |
-| `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `committed` (checks passed) |
+| `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `reviewing` (checks passed with review enabled), `committed` (checks passed with review disabled) |
+| `reviewing` | The read-only reviewer inspects the current change | `fixing` (blocking findings), `checks` (review ends) |
+| `fixing` | The implementer answers findings and updates the change | `checks` |
 | `committed` | Changes committed to the branch | `pr_open` |
 | `pr_open` | Pull request opened against `repo.baseBranch` | `pr_flagged` |
 | `pr_flagged` | The PR's diff against base is empty; flagged with `amagi/needs-closing` and parked for the operator to close. Non-terminal: the watcher clears it back to `pr_open` if real commits arrive | `pr_open` |
@@ -109,7 +111,7 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
 | `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
-**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times and parking on `awaiting_answer` whenever the agent asks a question. The review loop (a reviewer that inspects the PR and a fixing pass that addresses its findings) is not built yet; a task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
+**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times. When `[review].enabled`, checks must pass before each review; blocking findings get a bounded implementer fix round followed by checks and another review, all before the single commit. Acceptable reviews proceed to `pr_open`; exhausted round, token, progress, or cost budgets still open a PR with unresolved findings and `amagi/review-unresolved`. The runner parks on `awaiting_answer` whenever the agent asks a question. A task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 ## The runner service
 
