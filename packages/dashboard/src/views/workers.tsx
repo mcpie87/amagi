@@ -423,7 +423,7 @@ function WatcherDetailDialog({
                       key={`${entry.ts}-${index}`}
                       className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
                     >
-                      {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+                      {fmtDateTime(entry.ts, dateFormat)} {entry.message}
                     </li>
                   ))}
                 </ul>
