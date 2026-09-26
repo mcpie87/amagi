@@ -4,7 +4,7 @@ import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
 import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
-import { FleetSettings } from './fleet.tsx'
+import { FleetWorkersSettings, RepositoryParticipationCard } from './fleet.tsx'
 
 const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -62,9 +62,12 @@ function Appearance() {
 }
 
 export function SettingsView() {
-  const { selected } = useDashboard()
+  const { repos, refreshRepos, selected } = useDashboard()
+  const [activeTab, setActiveTab] = useState<'general' | 'workers' | 'repositories'>('general')
+  const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [staleMaxParallel, setStaleMaxParallel] = useState(false)
+  const repo = repos?.find(({ key }) => key === selectedRepo) ?? repos?.[0]
 
   useEffect(() => {
     if (selected === null) return
@@ -81,18 +84,102 @@ export function SettingsView() {
   return (
     <section className="max-w-3xl">
       <h1 className="text-xl font-semibold">Settings</h1>
-      <Appearance />
-      {selected === null ? (
-        <p className="mt-6 text-fg-faint">no repository selected</p>
-      ) : (
-        loaded &&
-        staleMaxParallel && (
-          <p className="mt-6 text-sm text-amber-ink">
-            Notice: loop.maxParallel is ignored; configure workers in the global fleet.
-          </p>
-        )
-      )}
-      <FleetSettings />
+      <div
+        role="tablist"
+        aria-label="Settings sections"
+        className="mt-4 flex gap-1 border-b border-line"
+      >
+        {(
+          [
+            ['general', 'General'],
+            ['workers', 'Workers'],
+            ['repositories', 'Repositories'],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            id={`settings-tab-${id}`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === id}
+            aria-controls={`settings-panel-${id}`}
+            onClick={() => setActiveTab(id)}
+            className={`rounded-t px-3 py-2 text-sm ${
+              activeTab === id
+                ? 'bg-raised text-fg-strong'
+                : 'text-fg-muted hover:bg-raised hover:text-fg'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        id="settings-panel-general"
+        role="tabpanel"
+        aria-labelledby="settings-tab-general"
+        hidden={activeTab !== 'general'}
+      >
+        <Appearance />
+        {selected === null ? (
+          <p className="mt-6 text-fg-faint">no repository selected</p>
+        ) : (
+          loaded &&
+          staleMaxParallel && (
+            <p className="mt-6 text-sm text-amber-ink">
+              Notice: loop.maxParallel is ignored; configure workers in the global fleet.
+            </p>
+          )
+        )}
+      </div>
+      <div
+        id="settings-panel-workers"
+        role="tabpanel"
+        aria-labelledby="settings-tab-workers"
+        hidden={activeTab !== 'workers'}
+      >
+        <FleetWorkersSettings />
+      </div>
+      <div
+        id="settings-panel-repositories"
+        role="tabpanel"
+        aria-labelledby="settings-tab-repositories"
+        hidden={activeTab !== 'repositories'}
+      >
+        {repos !== null && repos.length > 1 && (
+          <div
+            role="tablist"
+            aria-label="Repositories"
+            className="mt-4 flex gap-1 border-b border-line"
+          >
+            {repos.map((entry) => (
+              <button
+                key={entry.key}
+                id={`repository-tab-${entry.key}`}
+                type="button"
+                role="tab"
+                aria-selected={repo?.key === entry.key}
+                aria-controls="repository-panel"
+                onClick={() => setSelectedRepo(entry.key)}
+                className={`rounded-t px-3 py-2 text-sm ${
+                  repo?.key === entry.key
+                    ? 'bg-raised text-fg-strong'
+                    : 'text-fg-muted hover:bg-raised hover:text-fg'
+                }`}
+              >
+                {entry.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {repo !== undefined && repos !== null && repos.length > 1 ? (
+          <div id="repository-panel" role="tabpanel" aria-labelledby={`repository-tab-${repo.key}`}>
+            <RepositoryParticipationCard repo={repo} onChanged={refreshRepos} />
+          </div>
+        ) : repo !== undefined ? (
+          <RepositoryParticipationCard repo={repo} onChanged={refreshRepos} />
+        ) : null}
+      </div>
     </section>
   )
 }
