@@ -164,6 +164,7 @@ export function startMentionWatcher({
                 config,
                 driver,
                 tracker,
+                store,
                 exec,
                 makeHarnessFn,
                 onClassified: (c) => {

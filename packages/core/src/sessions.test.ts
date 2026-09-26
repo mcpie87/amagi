@@ -6,7 +6,7 @@ function ev(seq: number, taskId: string | null, ts: number, body: object): Store
   return { seq, ts, taskId, ...body } as StoredEvent
 }
 
-const start = (seq: number, taskId: string, ts: number, extra: object = {}) =>
+const start = (seq: number, taskId: string | null, ts: number, extra: object = {}) =>
   ev(seq, taskId, ts, {
     type: 'agent.started',
     role: 'implement',
@@ -18,14 +18,14 @@ const start = (seq: number, taskId: string, ts: number, extra: object = {}) =>
     ...extra,
   })
 
-const usage = (seq: number, taskId: string, ts: number, body: object) =>
+const usage = (seq: number, taskId: string | null, ts: number, body: object) =>
   ev(seq, taskId, ts, {
     type: 'agent.stream',
     role: 'implement',
     event: { kind: 'usage', ...body },
   })
 
-const exit = (seq: number, taskId: string, ts: number, extra: object = {}) =>
+const exit = (seq: number, taskId: string | null, ts: number, extra: object = {}) =>
   ev(seq, taskId, ts, {
     type: 'agent.exited',
     role: 'implement',
@@ -45,6 +45,8 @@ describe('sessionsFromEvents', () => {
     expect(sessionsFromEvents(events)).toEqual([
       {
         taskId: 'am-1',
+        watcherRunId: null,
+        watcherSource: null,
         sessionId: 'sess-1',
         role: 'implement',
         harness: 'claude',
@@ -101,6 +103,33 @@ describe('sessionsFromEvents', () => {
   test('usage outside an open session is ignored', () => {
     const events = [usage(1, 'am-1', 1000, { inputTokens: 100, outputTokens: 10 })]
     expect(sessionsFromEvents(events)).toEqual([])
+  })
+
+  test('folds concurrent null-task watcher runs by their unique id', () => {
+    const events = [
+      start(1, null, 1000, { watcherRunId: 'watcher-a', watcherSource: 'PR #1 classify' }),
+      start(2, null, 1001, { watcherRunId: 'watcher-b', watcherSource: 'PR #2 resolve' }),
+      ev(3, null, 1100, {
+        type: 'agent.stream',
+        role: 'implement',
+        watcherRunId: 'watcher-b',
+        event: { kind: 'usage', inputTokens: 10, outputTokens: 2 },
+      }),
+      ev(4, null, 1200, {
+        type: 'agent.stream',
+        role: 'implement',
+        watcherRunId: 'watcher-a',
+        event: { kind: 'usage', inputTokens: 20, outputTokens: 3 },
+      }),
+      exit(5, null, 1300, { watcherRunId: 'watcher-b' }),
+      exit(6, null, 1400, { watcherRunId: 'watcher-a' }),
+    ]
+    const sessions = sessionsFromEvents(events)
+    expect(sessions).toHaveLength(2)
+    expect(sessions.map((s) => s.watcherSource)).toEqual(['PR #1 classify', 'PR #2 resolve'])
+    expect(sessions.map((s) => s.usedTokens)).toEqual([23, 12])
+    expect(sessions.map((s) => s.durationMs)).toEqual([400, 299])
+    expect(sessions.every((s) => s.taskId === null)).toBe(true)
   })
 
   test('non-agent events do not disturb session folding', () => {
