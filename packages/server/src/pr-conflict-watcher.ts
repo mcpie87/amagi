@@ -18,12 +18,15 @@ import {
   mergeTreeVerdict,
   type PrDriver,
   type PrInfo,
+  type PrPriority,
   type ResolveConflictResult,
   readConflictWatch,
   recordMergeTreeObservation,
   resolveConflict,
+  resolvePrPriorities,
   type Store,
   saveConflictWatch,
+  syncPrPriorityLabel,
   type Tracker,
   type WorkerActivity,
 } from '@amagi/core'
@@ -56,11 +59,13 @@ const DEFAULT_INTERVAL_MS = 300_000
  * The shared PR watcher: one listOpenPrs per tick feeds the conflict and
  * pointlessness passes over the same list, so no fourth poll loop hammers the
  * endpoint. Conflicts are resolved once per (PR head, base head) pair, so a
- * failed attempt is retried when either side moves; amagi PRs whose diff
- * against base is empty get flagged (label + comments, task parked in
- * pr_flagged), and a flag is cleared once real commits arrive. Ticks are
- * sequential: a long resolution delays the next scan rather than stacking on
- * top of it.
+ * failed attempt is retried when either side moves; a PR whose work base
+ * already contains is only re-armed by a new PR head. Amagi PRs whose diff
+ * against base is empty, or whose work base already contains, get flagged
+ * (label + comments, task parked in pr_flagged), and a flag is cleared once
+ * real commits arrive. Each tick also keeps amagi PRs' P<n> labels on their
+ * bead priority. Ticks are sequential: a long resolution delays the next scan
+ * rather than stacking on top of it.
  */
 export function startPrConflictWatcher({
   repo,
@@ -204,6 +209,44 @@ export function startPrConflictWatcher({
     )
   }
 
+  /** Keeps each amagi PR's P<n> label on its bead priority; one PR's failed write never stops the rest. */
+  async function syncPriorityLabels(prs: PrInfo[], runId: string): Promise<void> {
+    let priorities: PrPriority[]
+    try {
+      priorities = await resolvePrPriorities(prs, (id) => tracker.get(id))
+    } catch (err) {
+      logEvent(`priority lookup failed: ${errMsg(err)}`, 'error')
+      return
+    }
+    for (const [i, pr] of prs.entries()) {
+      const pri = priorities[i]
+      if (pri === undefined || !pri.amagi) continue
+      try {
+        await syncPrPriorityLabel({
+          cwd: root,
+          number: pr.number,
+          labels: pr.labels,
+          priority: pri.linked ? pri.priority : null,
+          ...(exec === undefined ? {} : { exec }),
+        })
+      } catch (err) {
+        logEvent(`PR #${pr.number}: priority label sync failed: ${errMsg(err)}`, 'error')
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(pr.number),
+          prNumber: pr.number,
+          url: pr.url,
+          result: `priority label sync failed: ${errMsg(err)}`,
+          level: 'error',
+        })
+      }
+    }
+  }
+
   async function tick(): Promise<void> {
     runs++
     const runId = `${Date.now()}-${runs}`
@@ -269,7 +312,11 @@ export function startPrConflictWatcher({
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
-        if (seen !== undefined && seen.headOid === headOid && seen.baseOid === baseOid) {
+        if (
+          seen !== undefined &&
+          seen.headOid === headOid &&
+          (seen.baseOid === baseOid || seen.contained === true)
+        ) {
           nextState[key] = seen
           continue
         }
@@ -279,6 +326,7 @@ export function startPrConflictWatcher({
           pr,
           config,
           driver,
+          store,
           exec,
           makeHarnessFn,
           onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
@@ -288,6 +336,7 @@ export function startPrConflictWatcher({
           headOid,
           baseOid,
           ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+          ...(result.contained ? { contained: true } : {}),
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
           console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
@@ -329,6 +378,11 @@ export function startPrConflictWatcher({
       }
       // Only PRs that are still conflicting stay tracked; the rest drop out.
       saveConflictWatch(statePath, nextState)
+      const contained = new Map(
+        conflicts
+          .filter((p) => nextState[String(p.number)]?.contained === true)
+          .map((p) => [p.number, nextState[String(p.number)]?.verdict ?? null]),
+      )
       const pointless = await flagPointlessPrs({
         store,
         tracker,
@@ -337,6 +391,7 @@ export function startPrConflictWatcher({
         repoName,
         prs,
         config,
+        contained,
         ...(exec === undefined ? {} : { exec }),
         ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
         onLog: (pr, level, message) =>
@@ -357,6 +412,7 @@ export function startPrConflictWatcher({
       })
       flagged += pointless.flagged
       cleared += pointless.cleared
+      await syncPriorityLabels(prs, runId)
       next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}${
         warnings.length === 0 ? '' : `; warnings: ${warnings.join('; ')}`
       }`

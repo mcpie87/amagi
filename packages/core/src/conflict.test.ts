@@ -6,6 +6,8 @@ import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from 
 import type { AgentOutcome, AgentStartOptions, Harness } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
+import { openDatabase } from './store/db.ts'
+import { Store } from './store/store.ts'
 
 type Call = readonly string[]
 
@@ -13,6 +15,8 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
   const calls: Call[] = []
   const exec: Exec = async (cmd) => {
     calls.push(cmd)
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
     if (cmd[1] === 'diff') return { exitCode: 1, stdout: '', stderr: '' }
@@ -268,9 +272,12 @@ describe('resolveConflict', () => {
     })
 
     expect(result.ok).toBe(false)
+    expect(result.contained).toBe(true)
     expect(result.message).toContain('skipped the empty merge push')
     expect(result.verdict?.verdict).toBe('CLOSE TASK')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+    // Against the commit that was merged: origin/main may have moved during the agent run.
+    expect(calls).toContainEqual(['git', 'diff', '--quiet', 'base-oid', 'HEAD'])
   })
 
   test('pushes a real merge even when the agent verdict is not resolved', async () => {
@@ -351,6 +358,44 @@ describe('resolveConflict', () => {
     expect(result.ok).toBe(false)
     expect(result.message).toContain('model overloaded')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('out of iterations, parks a pr_open task and leaves a task already off pr_open alone', async () => {
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'x', tracker: 'beads' })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('am-1', { type: 'task.state', from: null, to })
+    }
+    const capped = pr({ labels: ['amagi/iterations:3'] })
+    const run = () =>
+      resolveConflict({
+        repoRoot: '/repo',
+        repoName: 'amagi',
+        pr: capped,
+        config: config(),
+        driver: fakeDriver(),
+        store,
+        exec: fake(conflicted).exec,
+        makeHarnessFn: () => fakeHarness(),
+      })
+
+    const first = await run()
+    expect(first.ok).toBe(false)
+    expect(first.message).toContain('parked the task at needs_human')
+    expect(store.task('am-1')?.state).toBe('needs_human')
+
+    unmergedReported = false
+    const again = await run()
+    expect(again.ok).toBe(false)
+    expect(again.message).toContain('unmerged paths remain after 3 dispatches')
+    expect(again.message).not.toContain('parked')
+    expect(again.message).not.toContain('illegal transition')
   })
 
   test('catches git failures and returns ok: false', async () => {

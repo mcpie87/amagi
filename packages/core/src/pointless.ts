@@ -30,6 +30,12 @@ export type FlagPointlessOptions = {
   onAction?: (pr: PrInfo, result: string, level: 'info' | 'error') => void
   /** Live, bounded harness events for the PR watcher run history. */
   onLog?: (pr: PrInfo, level: 'info' | 'agent' | 'error', text: string) => void
+  /**
+   * PRs whose conflict resolution found base already contains their work, with
+   * the resolver's verdict. They qualify like an empty diff, although their
+   * three-dot diff is not empty, and the verdict stands in for a second agent run.
+   */
+  contained?: ReadonlyMap<number, PointlessVerdict | null>
 }
 
 export type FlagPointlessResult = { flagged: number; cleared: number }
@@ -78,9 +84,11 @@ export function parsePointlessVerdict(raw: string): PointlessVerdict {
  * button and the decision live there, and the tracker comment survives once
  * the PR is gone. Amagi flags, a human closes.
  */
-export function pointlessReason(pr: PrInfo): string {
+export function pointlessReason(pr: PrInfo, contained = false): string {
   return [
-    `This pull request appears to be pointless: its diff against \`${pr.baseRefName}\` is empty, so there is nothing to merge.`,
+    contained
+      ? `This pull request appears to be pointless: \`${pr.baseRefName}\` already contains its work, so merging \`${pr.baseRefName}\` into it leaves nothing to add.`
+      : `This pull request appears to be pointless: its diff against \`${pr.baseRefName}\` is empty, so there is nothing to merge.`,
     '',
     'The work may have already landed another way. If so, close this pull request; it will not be closed automatically.',
   ].join('\n')
@@ -222,16 +230,17 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
 }
 
 /**
- * Flags amagi-provenance open PRs whose diff against base is empty: adds the
- * needs-closing label, comments the reasoning on the PR and the proposal on
- * the tracker issue, and parks the task in pr_flagged. The empty diff is the
- * mechanical trigger; an agent verdict on top supplies the reasoning (why the
- * diff is empty in the context of the task) and a proposal (close, new, or
- * rephrase the task), and never acts on either. A later tick whose PR no
- * longer qualifies (real commits pushed) removes the label and returns the
- * task to pr_open, without a second comment. Never closes a pull request.
- * PRs without the amagi label are skipped regardless of their diff, so a
- * human's PR is never touched.
+ * Flags amagi-provenance open PRs whose diff against base is empty, or whose
+ * work base already contains (`contained`): adds the needs-closing label and
+ * comments the reasoning on the PR; when the PR's task is still pr_open, also
+ * comments the proposal on the tracker issue and parks the task in pr_flagged.
+ * The empty diff is the mechanical trigger; an agent verdict on top supplies
+ * the reasoning (why the diff is empty in the context of the task) and a
+ * proposal (close, new, or rephrase the task), and never acts on either. A
+ * later tick whose PR no longer qualifies (real commits pushed) removes the
+ * label and returns the task to pr_open, without a second comment. Never
+ * closes a pull request. PRs without the amagi label are skipped regardless
+ * of their diff, so a human's PR is never touched.
  */
 export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<FlagPointlessResult> {
   const run = opts.exec ?? defaultExec
@@ -255,50 +264,64 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
     if (!pr.labels.includes(AMAGI_LABEL)) continue
     const key = String(pr.number)
     const headOid = pr.headRefOid ?? ''
+    const contained = opts.contained?.has(pr.number) === true
     const seen = state[key]
-    if (seen !== undefined && seen.headOid === headOid) {
+    if (seen !== undefined && seen.headOid === headOid && (seen.flagged || !contained)) {
       nextState[key] = seen
       continue
     }
-    let empty: boolean
-    try {
-      empty = await prDiffEmpty(opts.cwd, pr.number, run)
-    } catch (err) {
-      console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
-      report(pr, `pointlessness check failed: ${errMsg(err)}`, 'error')
-      continue
+    let empty = contained
+    if (!empty) {
+      try {
+        empty = await prDiffEmpty(opts.cwd, pr.number, run)
+      } catch (err) {
+        console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
+        report(pr, `pointlessness check failed: ${errMsg(err)}`, 'error')
+        continue
+      }
     }
     const task = tasks.get(pr.number)
+    const alreadyFlagged = task?.state === 'pr_flagged' || pr.labels.includes(NEEDS_CLOSING_LABEL)
     if (empty) {
-      if (task !== undefined && task.state === 'pr_open') {
+      if (!alreadyFlagged) {
         try {
           await opts.driver.addLabel(opts.cwd, pr.number, NEEDS_CLOSING_LABEL)
-          const verdict = await judgePointless({
-            root: opts.cwd,
-            repoName: opts.repoName,
-            pr,
-            task: await taskForVerdict(pr, opts.tracker, task.id),
-            config: opts.config,
-            ...(opts.exec === undefined ? {} : { exec: opts.exec }),
-            ...(opts.makeHarnessFn === undefined ? {} : { makeHarnessFn: opts.makeHarnessFn }),
-            ...(opts.onLog === undefined
-              ? {}
-              : { onLog: (level, text) => opts.onLog?.(pr, level, text) }),
-          })
+          const verdict = contained
+            ? (opts.contained?.get(pr.number) ?? null)
+            : await judgePointless({
+                root: opts.cwd,
+                repoName: opts.repoName,
+                pr,
+                task: await taskForVerdict(pr, opts.tracker, task?.id ?? null),
+                config: opts.config,
+                ...(opts.exec === undefined ? {} : { exec: opts.exec }),
+                ...(opts.makeHarnessFn === undefined ? {} : { makeHarnessFn: opts.makeHarnessFn }),
+                ...(opts.onLog === undefined
+                  ? {}
+                  : { onLog: (level, text) => opts.onLog?.(pr, level, text) }),
+              })
+          const fallback = pointlessReason(pr, contained)
           const reasoning =
-            verdict !== null && verdict.reasoning !== '' ? verdict.reasoning : pointlessReason(pr)
-          const proposal =
-            verdict !== null && verdict.proposal !== '' ? verdict.proposal : pointlessReason(pr)
+            verdict !== null && verdict.reasoning !== '' ? verdict.reasoning : fallback
+          const proposal = verdict !== null && verdict.proposal !== '' ? verdict.proposal : fallback
           await opts.driver.postComment(opts.cwd, pr.number, reasoning)
-          await opts.tracker.comment(task.id, proposal)
-          opts.store.append(task.id, {
-            type: 'task.state',
-            from: 'pr_open',
-            to: 'pr_flagged',
-            reason: reasoning,
-          })
+          if (task !== undefined) {
+            await opts.tracker.comment(task.id, proposal)
+            opts.store.append(task.id, {
+              type: 'task.state',
+              from: 'pr_open',
+              to: 'pr_flagged',
+              reason: reasoning,
+            })
+          }
           flagged++
-          report(pr, 'empty-diff PR flagged for review', 'info')
+          report(
+            pr,
+            contained
+              ? 'PR already contained in base flagged for review'
+              : 'empty-diff PR flagged for review',
+            'info',
+          )
         } catch (err) {
           console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
           report(pr, `failed to flag empty-diff PR: ${errMsg(err)}`, 'error')
@@ -307,15 +330,17 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
       }
       nextState[key] = { headOid, flagged: true }
     } else {
-      if (task !== undefined && task.state === 'pr_flagged') {
+      if (alreadyFlagged) {
         try {
           await opts.driver.removeLabel(opts.cwd, pr.number, NEEDS_CLOSING_LABEL)
-          opts.store.append(task.id, {
-            type: 'task.state',
-            from: 'pr_flagged',
-            to: 'pr_open',
-            reason: 'PR is no longer pointless; its diff against base is not empty',
-          })
+          if (task?.state === 'pr_flagged') {
+            opts.store.append(task.id, {
+              type: 'task.state',
+              from: 'pr_flagged',
+              to: 'pr_open',
+              reason: 'PR is no longer pointless; its diff against base is not empty',
+            })
+          }
           cleared++
           report(pr, 'empty-diff flag cleared after PR changes', 'info')
         } catch (err) {

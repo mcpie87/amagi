@@ -55,6 +55,7 @@ class FakeGateTracker implements Tracker {
   readonly closed: { id: string; reason: string | undefined }[] = []
   readonly statuses: { id: string; status: TrackerStatus }[] = []
   releaseError: Error | null = null
+  issue: TrackerTask | null = null
 
   async ready(): Promise<TrackerTask[]> {
     return []
@@ -63,7 +64,7 @@ class FakeGateTracker implements Tracker {
     return null
   }
   async get(): Promise<TrackerTask | null> {
-    return null
+    return this.issue
   }
   async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
     throw new Error('unsupported')
@@ -861,6 +862,38 @@ describe('POST /api/repos/:repo/tasks/:id/reset', () => {
       ).toBe(true)
     },
   )
+
+  test('reopens a tracker issue closed remotely so the runner can claim it again', async () => {
+    parked('bd-1', 'needs_human')
+    tracker.issue = {
+      id: 'bd-1',
+      title: 'x',
+      description: '',
+      status: 'closed',
+      priority: 2,
+      type: 'task',
+      url: null,
+    }
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(tracker.statuses).toEqual([{ id: 'bd-1', status: 'open' }])
+  })
+
+  test('leaves an open tracker issue alone', async () => {
+    parked('bd-1', 'needs_human')
+    tracker.issue = {
+      id: 'bd-1',
+      title: 'x',
+      description: '',
+      status: 'open',
+      priority: 2,
+      type: 'task',
+      url: null,
+    }
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(tracker.statuses).toEqual([])
+  })
 
   test('starts over an in-flight task stuck before it got a worktree', async () => {
     claim('bd-1')

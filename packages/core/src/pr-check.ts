@@ -110,26 +110,64 @@ export type SyncPrPriorityLabelOptions = {
 }
 
 /**
+ * Adds labels to a PR through the REST issues endpoint, which creates missing
+ * labels on the fly. Not `gh pr edit`: with amagi's token it never attached a
+ * label, and its failures went unseen behind best-effort callers.
+ */
+export async function addPrLabels(
+  run: Exec,
+  cwd: string,
+  number: number,
+  labels: readonly string[],
+): Promise<void> {
+  await execOk(
+    run,
+    [
+      'gh',
+      'api',
+      '--method',
+      'POST',
+      `repos/{owner}/{repo}/issues/${number}/labels`,
+      '--input',
+      '-',
+    ],
+    { cwd, stdin: JSON.stringify({ labels }), env: ghEnv() },
+  )
+}
+
+/** Removes a label from a PR through the REST issues endpoint; a label already absent is not an error. */
+export async function removePrLabel(
+  run: Exec,
+  cwd: string,
+  number: number,
+  label: string,
+): Promise<void> {
+  const cmd = [
+    'gh',
+    'api',
+    '--method',
+    'DELETE',
+    `repos/{owner}/{repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
+  ]
+  const r = await run(cmd, { cwd, env: ghEnv() })
+  if (r.exitCode !== 0 && !/HTTP 404/.test(r.stderr)) throw new CommandError(cmd, r)
+}
+
+/**
  * Brings a PR's P<n> label in line with its bead priority: removes every stale
- * P0-P4 label, then adds the current one, creating it on demand. Writes are
- * best effort, like PR label creation, so a lost write does not kill the run.
+ * P0-P4 label, then adds the current one. Throws on a failed write so callers
+ * can report it; each caller decides whether one PR's failure stops the rest.
  */
 export async function syncPrPriorityLabel(opts: SyncPrPriorityLabelOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
   const want = opts.priority === null ? null : `P${opts.priority}`
-  const remove = PRIORITY_LABELS.filter((l) => l !== want && opts.labels.includes(l))
-  if (remove.length > 0) {
-    await run(
-      ['gh', 'pr', 'edit', String(opts.number), ...remove.flatMap((l) => ['--remove-label', l])],
-      { cwd: opts.cwd, env: ghEnv() },
-    )
+  for (const label of PRIORITY_LABELS) {
+    if (label !== want && opts.labels.includes(label)) {
+      await removePrLabel(run, opts.cwd, opts.number, label)
+    }
   }
   if (want !== null && !opts.labels.includes(want)) {
-    await run(['gh', 'label', 'create', want, '--force'], { cwd: opts.cwd, env: ghEnv() })
-    await run(['gh', 'pr', 'edit', String(opts.number), '--add-label', want], {
-      cwd: opts.cwd,
-      env: ghEnv(),
-    })
+    await addPrLabels(run, opts.cwd, opts.number, [want])
   }
 }
 
@@ -140,13 +178,15 @@ export function iterationLabel(n: number): string {
   return `${ITERATION_LABEL_PREFIX}${n}`
 }
 
-/** The amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
+/** The highest amagi/iterations:N count in a PR's labels, 0 when absent or unparseable. */
 export function iterationsFromLabels(labels: readonly string[] | undefined): number {
-  if (labels === undefined) return 0
-  const hit = labels.find((l) => l.startsWith(ITERATION_LABEL_PREFIX))
-  if (hit === undefined) return 0
-  const n = Number(hit.slice(ITERATION_LABEL_PREFIX.length))
-  return Number.isInteger(n) && n > 0 ? n : 0
+  let max = 0
+  for (const l of labels ?? []) {
+    if (!l.startsWith(ITERATION_LABEL_PREFIX)) continue
+    const n = Number(l.slice(ITERATION_LABEL_PREFIX.length))
+    if (Number.isInteger(n) && n > max) max = n
+  }
+  return max
 }
 
 /** The task id an amagi PR's head branch encodes (`amagi/<id>-...`), null for non-amagi PRs. */
@@ -177,20 +217,13 @@ export async function stampIterationLabel(opts: {
   if (taskId === null) return null
   const current = iterationsFromLabels(opts.pr.labels)
   const iteration = opts.iteration ?? current + 1
-  await execOk(run, ['gh', 'label', 'create', iterationLabel(iteration), '--force'], {
-    cwd: opts.cwd,
-    env: ghEnv(),
-  })
-  const edit = [
-    'gh',
-    'pr',
-    'edit',
-    String(opts.pr.number),
-    '--add-label',
-    iterationLabel(iteration),
-  ]
-  if (current > 0 && current !== iteration) edit.push('--remove-label', iterationLabel(current))
-  await execOk(run, edit, { cwd: opts.cwd, env: ghEnv() })
+  await addPrLabels(run, opts.cwd, opts.pr.number, [iterationLabel(iteration)])
+  // The snapshot's labels go stale across dispatches in one call, so the
+  // previous count is dropped even when the snapshot does not show it.
+  const stale = new Set(opts.pr.labels.filter((l) => l.startsWith(ITERATION_LABEL_PREFIX)))
+  if (iteration > 1) stale.add(iterationLabel(iteration - 1))
+  stale.delete(iterationLabel(iteration))
+  for (const label of stale) await removePrLabel(run, opts.cwd, opts.pr.number, label)
   return { taskId, iteration }
 }
 
@@ -264,6 +297,11 @@ export type ConflictWorktree = {
   branch: string
   /** False when baseBranch merges cleanly, so the agent has nothing to resolve. */
   conflicted: boolean
+  /**
+   * The base commit that was merged. Compare against this, not origin/<base>:
+   * the ref is shared with the operator's checkout and moves under a long run.
+   */
+  baseOid: string
 }
 
 /**
@@ -304,8 +342,16 @@ export async function prepareConflictWorktree(
     await applyPersona(run, path, opts.persona)
   }
 
-  const merge = await run(['git', 'merge', `origin/${opts.baseBranch}`], { cwd: path })
-  return { path, branch, conflicted: merge.exitCode !== 0 }
+  const baseOid = (
+    await execOk(run, ['git', 'rev-parse', '--verify', `origin/${opts.baseBranch}^{commit}`], {
+      cwd: opts.repoRoot,
+    })
+  ).trim()
+  const merge = await run(
+    ['git', 'merge', '-m', `Merge remote-tracking branch 'origin/${opts.baseBranch}'`, baseOid],
+    { cwd: path },
+  )
+  return { path, branch, conflicted: merge.exitCode !== 0, baseOid }
 }
 
 export type PushConflictFixOptions = {

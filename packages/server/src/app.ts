@@ -597,6 +597,14 @@ export function createApp({
           return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
         }
       }
+      // The runner only claims ready issues, so a reset of a closed one would
+      // sit in claimed until the stall watcher parks it as closed remotely.
+      try {
+        const issue = await ws.tracker.get(id)
+        if (issue?.status === 'closed') await ws.tracker.setStatus(id, 'open')
+      } catch (err) {
+        return c.json({ error: `failed to reopen tracker issue: ${errMsg(err)}` }, 500)
+      }
       try {
         await ws.tracker.release(id)
       } catch (err) {

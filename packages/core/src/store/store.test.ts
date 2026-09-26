@@ -301,6 +301,23 @@ describe('Store', () => {
     expect(store.recentEvents('bd-1', 0)).toEqual([])
   })
 
+  test('a run left open when the same watcher starts again is closed as interrupted', () => {
+    const started = (name: string, runId: string) =>
+      store.append(null, { type: 'watcher.run.started', repo: 'repo', name, runId })
+    started('pr-conflict-watcher', 'dead')
+    started('mention-watcher', 'other')
+    started('pr-conflict-watcher', 'next')
+
+    const runs = store.watcherRuns({ repo: 'repo', name: 'pr-conflict-watcher', limit: 5 })
+    expect(runs.map((r) => [r.runId, r.ok, r.endedAt === null])).toEqual([
+      ['next', null, true],
+      ['dead', false, false],
+    ])
+    expect(runs[1]?.error).toContain('interrupted')
+    const other = store.watcherRuns({ repo: 'repo', name: 'mention-watcher', limit: 5 })
+    expect(other[0]?.endedAt).toBeNull()
+  })
+
   test('watcherRuns folds durable run and action events and pages complete runs newest first', () => {
     for (const runId of ['one', 'two']) {
       store.append(null, {
