@@ -13,6 +13,7 @@ import { newCommand } from './commands/new.ts'
 import { removeCommand } from './commands/remove.ts'
 import { reposCommand } from './commands/repos.ts'
 import { respondToMentionsCommand } from './commands/respond-to-mentions.ts'
+import { reviewCommand } from './commands/review.ts'
 import { runCommand } from './commands/run.ts'
 import { serveCommand } from './commands/serve.ts'
 import { statusCommand } from './commands/status.ts'
@@ -42,6 +43,7 @@ const main = defineCommand({
     repos: reposCommand,
     add: addCommand,
     remove: removeCommand,
+    review: reviewCommand,
     'check-prs': checkPrsCommand,
     'mergeable-prs': mergeablePrsCommand,
     'respond-to-mentions': respondToMentionsCommand,
