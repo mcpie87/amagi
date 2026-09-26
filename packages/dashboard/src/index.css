@@ -121,6 +121,52 @@
   --shadow-color: rgb(24 24 27 / 0.16);
 }
 
+.diff-added {
+  background: var(--color-emerald-soft);
+}
+
+.diff-deleted {
+  background: var(--color-red-soft);
+}
+
+.diff-empty {
+  background: var(--color-neutral-soft);
+}
+
+.diff-code .hljs-comment,
+.diff-code .hljs-quote {
+  color: var(--color-fg-faint);
+}
+
+.diff-code .hljs-keyword,
+.diff-code .hljs-selector-tag,
+.diff-code .hljs-literal {
+  color: var(--color-violet-ink);
+}
+
+.diff-code .hljs-string,
+.diff-code .hljs-regexp,
+.diff-code .hljs-addition {
+  color: var(--color-emerald-ink);
+}
+
+.diff-code .hljs-number,
+.diff-code .hljs-built_in,
+.diff-code .hljs-attr {
+  color: var(--color-amber-ink);
+}
+
+.diff-code .hljs-title,
+.diff-code .hljs-title.function_,
+.diff-code .hljs-title.class_ {
+  color: var(--color-sky-ink);
+}
+
+.diff-code .hljs-meta,
+.diff-code .hljs-attribute {
+  color: var(--color-cyan-ink);
+}
+
 body {
   background: var(--color-app);
   color: var(--color-fg);
