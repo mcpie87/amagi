@@ -538,10 +538,10 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       try {
         const resolved = gitOutput(ws.root, ['rev-parse', '--verify', `${hash}^{commit}`]).trim()
-        const [title, timestamp, ...bodyParts] = gitOutput(ws.root, [
+        const [title, timestamp, authorName, authorEmail, ...bodyParts] = gitOutput(ws.root, [
           'show',
           '-s',
-          '--format=%s%x00%ct%x00%b',
+          '--format=%s%x00%ct%x00%an%x00%ae%x00%b',
           resolved,
         ]).split('\x00')
         const parents = gitOutput(ws.root, ['show', '-s', '--format=%P', resolved]).trim()
@@ -568,6 +568,7 @@ export function createApp({
           hash: resolved,
           title,
           timestamp: Number(timestamp),
+          author: authorEmail === '' ? authorName : `${authorName} <${authorEmail}>`,
           message: bodyParts.join('\x00').trim(),
           patch,
         })
