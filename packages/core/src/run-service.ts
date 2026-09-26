@@ -156,6 +156,8 @@ export type RunServiceOptions = {
   autoQueueIdleMs?: number
   /** How often to poll while a launch just succeeded (filling free slots). */
   autoQueueActiveMs?: number
+  /** Called once when automatic dispatch finds no claimable work and no run is active. */
+  onQueueDrained?: () => void | Promise<void>
   /**
    * Seat occupancy shared by every repo's RunService in one server, so the
    * fleet's seats cap concurrency across repositories rather than per repo.
@@ -189,6 +191,7 @@ export class RunService implements RunServiceApi {
   private readonly autoQueueActiveMs: number
   private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
   private autoQueuePolling = false
+  private idleNotified = false
   private stopped = false
   private readonly seats: Map<string, string>
 
@@ -246,6 +249,20 @@ export class RunService implements RunServiceApi {
     try {
       if (!this.autoQueue || this.stopped) return
       const result = await this.start()
+      if (
+        !result.ok &&
+        result.error.startsWith('no ready task to claim') &&
+        this.runs.size === 0 &&
+        this.seats.size === 0 &&
+        !this.idleNotified
+      ) {
+        this.idleNotified = true
+        try {
+          await this.opts.onQueueDrained?.()
+        } catch (err) {
+          console.warn(`idle notification failed: ${String(err)}`)
+        }
+      }
       const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
       if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
     } finally {
@@ -458,6 +475,7 @@ export class RunService implements RunServiceApi {
     worker: WorkerConfig,
     implement: Config['harness']['implement'],
   ): void {
+    this.idleNotified = false
     const { store, tracker, config, repoRoot, repoName, exec, forge } = this.opts
     const makeHarnessFn = this.opts.makeHarness ?? makeHarness
     const harness =

@@ -5,6 +5,11 @@ import { streamSSE } from 'hono/streaming'
 /** Matches the `events` default so a long backlog pages instead of truncating. */
 const BACKLOG_PAGE = 500
 const HEARTBEAT_MS = 15_000
+const connectedStreams = new WeakMap<Store, number>()
+
+export function streamClientCount(store: Store): number {
+  return connectedStreams.get(store) ?? 0
+}
 
 type Tick = 'tick'
 
@@ -22,15 +27,20 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
   const scope = { taskId }
 
   return streamSSE(c, async (stream) => {
+    connectedStreams.set(store, streamClientCount(store) + 1)
+    let released = false
     const live = new AsyncQueue<StoredEvent | Tick>()
     const unsubscribe = store.subscribe((event) => {
       if (taskId === undefined || event.taskId === taskId) live.push(event)
     })
     const heartbeat = setInterval(() => live.push('tick'), HEARTBEAT_MS)
     const release = () => {
+      if (released) return
+      released = true
       clearInterval(heartbeat)
       unsubscribe()
       live.close()
+      connectedStreams.set(store, Math.max(0, streamClientCount(store) - 1))
     }
     stream.onAbort(release)
 
@@ -42,7 +52,7 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
       for (;;) {
         const page = store.events({ ...scope, sinceSeq: cursor, limit: BACKLOG_PAGE })
         for (const event of page) {
-          await send(event)
+          if (event.type !== 'notify.idle') await send(event)
           cursor = event.seq
         }
         if (page.length < BACKLOG_PAGE || stream.aborted) break
@@ -55,8 +65,8 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
           await stream.write(': ping\n\n')
           continue
         }
-        if (event.seq <= cursor) continue
-        cursor = event.seq
+        if (event.seq <= cursor && event.type !== 'notify.idle') continue
+        cursor = Math.max(cursor, event.seq)
         await send(event)
       }
     } finally {

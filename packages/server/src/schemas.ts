@@ -113,9 +113,11 @@ export type ChatBody = z.infer<typeof ChatBody>
 export const SettingsBody = z
   .object({
     autoQueue: z.boolean().optional(),
+    ntfyTopic: z.string().trim().optional(),
+    ntfyServer: z.string().trim().min(1).optional(),
   })
-  .refine((body) => body.autoQueue !== undefined, {
-    message: 'provide autoQueue',
+  .refine((body) => Object.values(body).some((value) => value !== undefined), {
+    message: 'provide a setting',
   })
 export type SettingsBody = z.infer<typeof SettingsBody>
 

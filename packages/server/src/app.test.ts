@@ -2101,18 +2101,29 @@ describe('repo settings endpoints', () => {
     app = createApp({ workspaces: ws.workspaces })
   })
 
-  test('GET returns the auto-queue state and stale maxParallel notice flag', async () => {
+  test('GET returns the auto-queue and ntfy settings and stale maxParallel notice flag', async () => {
     const res = await app.request('/api/repos/repo1/settings')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ autoQueue: false, staleMaxParallel: false })
+    expect(await res.json()).toEqual({
+      autoQueue: false,
+      ntfyTopic: null,
+      ntfyServer: 'https://ntfy.sh',
+      staleMaxParallel: false,
+    })
   })
 
   test('PATCH persists auto-queue and updates the workspace config', async () => {
     const res = await patch('repo1', '{"autoQueue":true}')
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ autoQueue: true })
+    expect(await res.json()).toEqual({
+      autoQueue: true,
+      ntfyTopic: null,
+      ntfyServer: 'https://ntfy.sh',
+    })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
+      ntfyTopic: null,
+      ntfyServer: 'https://ntfy.sh',
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2149,6 +2160,8 @@ describe('repo settings endpoints', () => {
     expect(applied).toEqual([true])
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
+      ntfyTopic: null,
+      ntfyServer: 'https://ntfy.sh',
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2163,6 +2176,29 @@ describe('repo settings endpoints', () => {
     // the toggle only reaches the runner bound to this repo
     expect((await patch('repo2', '{"autoQueue":false}')).status).toBe(200)
     expect(applied).toEqual([true, false, true])
+  })
+
+  test('PATCH persists ntfy settings and applies them to the workspace', async () => {
+    const res = await patch(
+      'repo1',
+      JSON.stringify({ ntfyTopic: 'queue-alerts', ntfyServer: 'https://ntfy.example' }),
+    )
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      autoQueue: false,
+      ntfyTopic: 'queue-alerts',
+      ntfyServer: 'https://ntfy.example',
+    })
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    expect(workspace.config.notify.ntfyTopic).toBe('queue-alerts')
+    expect(loadConfig(workspace.root).config.notify).toMatchObject({
+      ntfyTopic: 'queue-alerts',
+      ntfyServer: 'https://ntfy.example',
+    })
+    expect((await patch('repo1', '{"ntfyTopic":""}')).status).toBe(200)
+    expect(loadConfig(workspace.root).config.notify.ntfyTopic).toBe('')
+    expect((await patch('repo1', '{"ntfyServer":""}')).status).toBe(400)
   })
 
   test('PATCH rejects an empty body', async () => {

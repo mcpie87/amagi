@@ -47,6 +47,10 @@ class FakeTracker implements Tracker {
 
   constructor(private queue: TrackerTask[] = []) {}
 
+  enqueue(task: TrackerTask): void {
+    this.queue.push(task)
+  }
+
   async ready(): Promise<TrackerTask[]> {
     return this.queue
   }
@@ -449,15 +453,26 @@ describe('RunService', () => {
 
   test('auto queue does nothing when disabled and idles after an empty poll', async () => {
     const tracker = new FakeTracker([])
+    let drained = 0
     const service = makeService(tracker, new FakeHarness(), 1, config(), {
       autoQueue: true,
       autoQueueIdleMs: 20,
       autoQueueActiveMs: 10,
+      onQueueDrained: () => {
+        drained++
+      },
     })
     // Nothing to claim, so the first poll backs off to the idle interval; a
     // second poll still finds nothing and never launches.
     await Bun.sleep(100)
     expect((await service.status()).running).toEqual([])
+    expect(drained).toBe(1)
+    tracker.enqueue(TASK)
+    service.fleetChanged()
+    await waitFor(() => store.task(TASK.id)?.state === 'no_pr')
+    await waitFor(() => drained === 2)
+    await Bun.sleep(50)
+    expect(drained).toBe(2)
     service.dispose()
   })
 
