@@ -354,7 +354,7 @@ export class RunService implements RunServiceApi {
   }
 
   private workers(): WorkerConfig[] {
-    return expandWorkers(this.opts.config.worker)
+    return expandWorkers(this.opts.config.worker, this.opts.config.seats)
   }
 
   private runsBySeat(): Map<string, string> {

@@ -91,23 +91,42 @@ export const WorkerConfig = z
   })
 export type WorkerConfig = z.infer<typeof WorkerConfig>
 
+export const SeatConfig = z.union([
+  z
+    .string()
+    .trim()
+    .min(1)
+    .transform((name) => ({ name, count: 1 })),
+  z.object({
+    name: z.string().trim().min(1),
+    count: z.number().int().min(1).max(MAX_WORKERS).default(1),
+  }),
+])
+export type SeatConfig = z.infer<typeof SeatConfig>
+
 /** Expands a configured worker profile into independently schedulable instances. */
-export function expandWorkers(workers: WorkerConfig[]): WorkerConfig[] {
-  return workers.flatMap((worker) =>
-    Array.from({ length: worker.count }, (_, index) => {
-      const { count, seatCount, ...profile } = worker
-      if (count === 1 && seatCount === 1) return worker
-      const seat = worker.seat ?? worker.kind
+export function expandWorkers(workers: WorkerConfig[], seats: SeatConfig[] = []): WorkerConfig[] {
+  const capacity = new Map(seats.map((seat) => [seat.name, seat.count]))
+  const nextSlot = new Map<string, number>()
+  return workers.flatMap((worker) => {
+    const seatName = worker.seat ?? worker.kind
+    const effectiveSeatCount = capacity.get(seatName) ?? worker.seatCount
+    return Array.from({ length: worker.count }, (_, index) => {
+      const { count, seatCount: _seatCount, ...profile } = worker
+      if (count === 1 && effectiveSeatCount === 1 && !capacity.has(seatName)) return worker
+      const slot = nextSlot.get(seatName) ?? 0
+      nextSlot.set(seatName, slot + 1)
       return {
         ...profile,
         count: 1,
         seatCount: 1,
-        id: `${worker.id}-${index + 1}`,
-        name: `${worker.name} ${index + 1}`,
-        seat: seatCount === 1 ? worker.seat : `${seat}-${(index % seatCount) + 1}`,
+        id: count === 1 ? worker.id : `${worker.id}-${index + 1}`,
+        name: count === 1 ? worker.name : `${worker.name} ${index + 1}`,
+        seat:
+          effectiveSeatCount === 1 ? seatName : `${seatName}-${(slot % effectiveSeatCount) + 1}`,
       }
-    }),
-  )
+    })
+  })
 }
 
 /** Resolves a harness kind while preserving repo-specific settings for the configured implement kind. */
@@ -144,7 +163,12 @@ const AgentWatcherConfig = z.object({
 export const Config = z
   .object({
     /** Named credential seats offered by the dashboard fleet editor. */
-    seats: z.array(z.string().trim().min(1)).default([]),
+    seats: z
+      .array(SeatConfig)
+      .default([])
+      .refine((seats) => new Set(seats.map(({ name }) => name)).size === seats.length, {
+        message: 'seat names must be unique',
+      }),
     /** The fleet: `[[worker]]` tables, global config only. */
     worker: z
       .array(WorkerConfig)

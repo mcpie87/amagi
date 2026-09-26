@@ -333,10 +333,11 @@ export function createApp({
 
     .get('/api/seat-names', (c) => {
       const global = loadGlobalConfig()
-      const seats = new Set(global.seats)
-      for (const worker of global.worker) if (worker.seat !== undefined) seats.add(worker.seat)
+      const seats = new Map(global.seats.map(({ name, count }) => [name, count]))
+      for (const worker of global.worker)
+        if (worker.seat !== undefined && !seats.has(worker.seat)) seats.set(worker.seat, 1)
       for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
-        if (watcher.seat !== undefined) seats.add(watcher.seat)
+        if (watcher.seat !== undefined && !seats.has(watcher.seat)) seats.set(watcher.seat, 1)
       }
       for (const harness of [
         global.harness.implement,
@@ -344,15 +345,20 @@ export function createApp({
         global.harness.triage,
         ...Object.values(global.harness.definitions),
       ]) {
-        if (harness.seat !== undefined) seats.add(harness.seat)
+        if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
       }
-      return c.json({ seats: [...seats].sort() })
+      return c.json({
+        seats: [...seats]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, count]) => ({ name, count })),
+      })
     })
 
     .put('/api/seat-names', valid('json', SeatNamesUpdateBody), (c) => {
-      const { seats, renames } = c.req.valid('json')
+      const { seats: seatEntries, renames } = c.req.valid('json')
+      const seats = seatEntries.map(({ name }) => name)
       const global = loadGlobalConfig()
-      const current = new Set(global.seats)
+      const current = new Set(global.seats.map(({ name }) => name))
       for (const worker of global.worker) if (worker.seat !== undefined) current.add(worker.seat)
       for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
         if (watcher.seat !== undefined) current.add(watcher.seat)
@@ -408,12 +414,12 @@ export function createApp({
       if (Object.keys(definitions).length > 0) harness.definitions = definitions
 
       writeGlobalConfig({
-        seats,
+        seats: seatEntries,
         worker,
         ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
         ...(Object.keys(harness).length === 0 ? {} : { harness }),
       })
-      return c.json({ seats: [...seats].sort() })
+      return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
 
     .get('/api/seats', async (c) => {
@@ -421,8 +427,15 @@ export function createApp({
       type Waiter = { repo: string; taskId: string }
       const configured = new Set<string>()
       const global = loadGlobalConfig()
-      for (const seat of global.seats) configured.add(seat)
-      for (const worker of global.worker) configured.add(workerSeat(worker))
+      for (const { name, count } of global.seats) {
+        for (let slot = 1; slot <= count; slot++)
+          configured.add(count === 1 ? name : `${name}-${slot}`)
+      }
+      const configuredNames = new Set(global.seats.map(({ name }) => name))
+      for (const worker of global.worker) {
+        const seat = workerSeat(worker)
+        if (!configuredNames.has(seat)) configured.add(seat)
+      }
       for (const entry of workspaces.list()) {
         const ws = workspaces.get(entry.key)
         if (ws === null) continue

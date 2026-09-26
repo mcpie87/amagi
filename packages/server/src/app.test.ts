@@ -2421,14 +2421,16 @@ describe('fleet endpoints', () => {
       },
     })
 
-    expect(await (await app.request('/api/seat-names')).json()).toEqual({ seats: ['old-seat'] })
+    expect(await (await app.request('/api/seat-names')).json()).toEqual({
+      seats: [{ name: 'old-seat', count: 1 }],
+    })
     const renamed = await send('PUT', '/api/seat-names', {
-      seats: ['new-seat'],
+      seats: [{ name: 'new-seat', count: 2 }],
       renames: [{ from: 'old-seat', to: 'new-seat' }],
     })
     expect(renamed.status).toBe(200)
     expect(loadGlobalConfig()).toMatchObject({
-      seats: ['new-seat'],
+      seats: [{ name: 'new-seat', count: 2 }],
       worker: [{ id, seat: 'new-seat' }],
       watchers: { mention: { seat: 'new-seat' } },
       harness: {
@@ -2439,7 +2441,7 @@ describe('fleet endpoints', () => {
     const occupancy = (await (await app.request('/api/seats')).json()) as {
       seats: { seat: string }[]
     }
-    expect(occupancy.seats.map(({ seat }) => seat)).toContain('new-seat')
+    expect(occupancy.seats.map(({ seat }) => seat)).toContain('new-seat-1')
 
     const removed = await send('PUT', '/api/seat-names', { seats: [] })
     expect(removed.status).toBe(200)
@@ -2451,7 +2453,9 @@ describe('fleet endpoints', () => {
     expect(config.harness.definitions.named?.seat).toBeUndefined()
 
     await send('PUT', '/api/seat-names', { seats: ['unused-seat'] })
-    expect(await (await app.request('/api/seat-names')).json()).toEqual({ seats: ['unused-seat'] })
+    expect(await (await app.request('/api/seat-names')).json()).toEqual({
+      seats: [{ name: 'unused-seat', count: 1 }],
+    })
     const withUnused = (await (await app.request('/api/seats')).json()) as {
       seats: { seat: string }[]
     }
