@@ -397,12 +397,26 @@ describe('BeadsTracker', () => {
     expect(calls.some((c) => c.includes('unclaim') || c.includes('update'))).toBe(false)
   })
 
-  test('reclaims expired native claims', async () => {
-    const { exec, calls } = fake(() => undefined)
+  test('reclaims only expired native claims amagi does not track', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('list')
+        ? ok('[{"id":"tst-pr","status":"in_progress"},{"id":"tst-lost","status":"in_progress"}]')
+        : undefined,
+    )
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
-    await tracker.reclaimExpiredClaims()
+    await tracker.reclaimExpiredClaims((id) => id === 'tst-pr')
 
-    expect(calls).toEqual([['bd', 'reclaim']])
+    expect(calls.at(-1)).toEqual(['bd', 'reclaim', '--id', 'tst-lost'])
+  })
+
+  test('never runs an unscoped reclaim when every claim is tracked', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('list') ? ok('[{"id":"tst-pr","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.reclaimExpiredClaims(() => true)
+
+    expect(calls.some((c) => c.includes('reclaim'))).toBe(false)
   })
 
   test('a closed gate reads as resolved', async () => {

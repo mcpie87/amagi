@@ -13,11 +13,84 @@ beforeEach(() => {
 })
 
 describe('Store', () => {
+  test('activeChatAgents reports only chats without an exit event', () => {
+    store.append('bd-1', {
+      type: 'agent.started',
+      role: 'chat',
+      harness: 'claude',
+      seat: 'claude-seat',
+      model: null,
+      effort: null,
+      cwd: '/repo',
+      resumed: false,
+    })
+    store.append('bd-2', {
+      type: 'agent.started',
+      role: 'chat',
+      harness: 'codex',
+      seat: 'codex-seat',
+      model: null,
+      effort: null,
+      cwd: '/repo',
+      resumed: false,
+    })
+    expect(store.activeChatAgents()).toEqual([
+      { taskId: 'bd-1', seat: 'claude-seat' },
+      { taskId: 'bd-2', seat: 'codex-seat' },
+    ])
+
+    store.append('bd-1', {
+      type: 'agent.exited',
+      role: 'chat',
+      exitCode: 0,
+      sessionId: 'session-1',
+    })
+    expect(store.activeChatAgents()).toEqual([{ taskId: 'bd-2', seat: 'codex-seat' }])
+  })
+
   test('claiming projects a task row', () => {
     claim()
     const t = store.task('bd-1')
     expect(t?.state).toBe('claimed')
     expect(t?.title).toBe('Add SSE endpoint')
+  })
+
+  test('review projection fields survive the SQL projection round trip', () => {
+    claim()
+    store.append('bd-1', {
+      type: 'review.started',
+      round: 2,
+      finalPass: false,
+      reviewerSession: 'review-session',
+    })
+    const findings = [
+      {
+        id: 'finding-1',
+        severity: 'major' as const,
+        scope: 'in-scope' as const,
+        path: 'src/thing.ts',
+        line: 12,
+        title: 'Missing guard',
+        evidence: 'The value is dereferenced without validation.',
+        failureScenario: 'A null value crashes the request.',
+      },
+    ]
+    store.append('bd-1', {
+      type: 'review.finished',
+      round: 2,
+      findings,
+      blockingIds: ['finding-1'],
+    })
+    store.append('bd-1', {
+      type: 'review.stopped',
+      reason: 'rounds',
+      unresolvedIds: ['finding-1'],
+    })
+    expect(store.task('bd-1')).toMatchObject({
+      reviewRound: 2,
+      reviewFindings: findings,
+      reviewStopReason: 'rounds',
+    })
   })
 
   test('sequence numbers are monotonic and returned', () => {
@@ -299,5 +372,65 @@ describe('Store', () => {
       'implementing',
     ])
     expect(store.recentEvents('bd-1', 0)).toEqual([])
+  })
+
+  test('a run left open when the same watcher starts again is closed as interrupted', () => {
+    const started = (name: string, runId: string) =>
+      store.append(null, { type: 'watcher.run.started', repo: 'repo', name, runId })
+    started('pr-conflict-watcher', 'dead')
+    started('mention-watcher', 'other')
+    started('pr-conflict-watcher', 'next')
+
+    const runs = store.watcherRuns({ repo: 'repo', name: 'pr-conflict-watcher', limit: 5 })
+    expect(runs.map((r) => [r.runId, r.ok, r.endedAt === null])).toEqual([
+      ['next', null, true],
+      ['dead', false, false],
+    ])
+    expect(runs[1]?.error).toContain('interrupted')
+    const other = store.watcherRuns({ repo: 'repo', name: 'mention-watcher', limit: 5 })
+    expect(other[0]?.endedAt).toBeNull()
+  })
+
+  test('watcherRuns folds durable run and action events and pages complete runs newest first', () => {
+    for (const runId of ['one', 'two']) {
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId,
+      })
+      store.append(null, {
+        type: 'watcher.action',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId,
+        targetType: 'mention',
+        targetId: runId,
+        prNumber: 45,
+        result: 'classified as explain',
+        level: 'info',
+      })
+      store.append(null, {
+        type: 'watcher.run.finished',
+        repo: 'repo',
+        name: 'mention-watcher',
+        runId,
+        ok: true,
+      })
+    }
+    const page = store.watcherRuns({ repo: 'repo', name: 'mention-watcher', limit: 1 })
+    expect(page).toHaveLength(1)
+    expect(page[0]?.runId).toBe('two')
+    expect(page[0]?.actions[0]?.prNumber).toBe(45)
+    expect(page[0]?.ok).toBe(true)
+    const beforeSeq = page[0]?.startSeq
+    expect(
+      store.watcherRuns({
+        repo: 'repo',
+        name: 'mention-watcher',
+        limit: 1,
+        ...(beforeSeq === undefined ? {} : { beforeSeq }),
+      })[0]?.runId,
+    ).toBe('one')
   })
 })

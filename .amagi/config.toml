@@ -14,4 +14,5 @@ remote = "origin"
 commands = [ "just check", "just fresh-check" ]
 
 [loop]
-maxParallel = 4
+maxParallel = 1
+autoQueue = true

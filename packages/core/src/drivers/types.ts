@@ -112,8 +112,12 @@ export interface Tracker {
   comment(id: string, body: string): Promise<void>
   setStatus(id: string, status: TrackerStatus): Promise<void>
   release(id: string): Promise<void>
-  /** Reap expired native claims that may not have a corresponding amagi store task. */
-  reclaimExpiredClaims?(): Promise<void>
+  /**
+   * Reap expired native claims on issues `tracked` rejects, i.e. ones amagi
+   * has no store task for. A tracked task's lease lapses on purpose once its
+   * run parks it (pr_open, needs_human), and it must stay claimed there.
+   */
+  reclaimExpiredClaims?(tracked: (id: string) => boolean): Promise<void>
   close(id: string, reason?: string): Promise<void>
 
   /**
@@ -144,6 +148,8 @@ export type AgentStartOptions = {
   allowedTools?: readonly string[]
   env?: Record<string, string>
   extraArgs?: readonly string[]
+  /** Identifies watcher agents while they hold a shared credential seat. */
+  seatActivity?: { repo: string; watcher: string }
 }
 
 export type AgentUsage = {

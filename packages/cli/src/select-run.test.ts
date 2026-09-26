@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { Config } from '@amagi/core'
-import { harnessChoices, type Picker, pickRunSelection, usageCounts } from './select-run.ts'
+import {
+  harnessChoices,
+  type Picker,
+  pickRunSelection,
+  pickWorkerSelection,
+  usageCounts,
+  workerChoices,
+} from './select-run.ts'
 
 const started = (seq: number, harness: string, model: string | null = null) => ({
   seq,
@@ -236,5 +243,81 @@ describe('pickRunSelection', () => {
     const { harness } = await pickRunSelection(config(), { effort: 'xhigh' }, null, listModels)
     expect(harness.kind).toBe('claude')
     expect(harness.effort).toBe('xhigh')
+  })
+})
+
+describe('pickWorkerSelection', () => {
+  const fleetConfig = () =>
+    Config.parse({
+      worker: [
+        {
+          id: 'primary',
+          name: 'Primary',
+          kind: 'opencode',
+          model: 'local/default',
+          seat: 'shared-seat',
+          enabled: true,
+        },
+        { id: 'off', name: 'Off', kind: 'claude', enabled: false },
+      ],
+      harness: {
+        implement: { kind: 'opencode', bin: 'opencode-unconfined', permissions: 'bypass' },
+      },
+    })
+
+  test('lists enabled workers with profile and seat, including off workers', () => {
+    const choices = workerChoices(fleetConfig())
+    expect(choices).toHaveLength(1)
+    expect(choices[0]?.label).toContain('Primary [primary]')
+    expect(choices[0]?.label).toContain('opencode')
+    expect(choices[0]?.label).toContain('model local/default')
+    expect(choices[0]?.label).toContain('seat shared-seat')
+  })
+
+  test('interactive selection uses the worker profile and preserves its configured harness bin', async () => {
+    const config = fleetConfig()
+    const label = workerChoices(config)[0]?.label ?? ''
+    const selection = await pickWorkerSelection(config, {}, scripted([label]))
+    expect(selection.worker.id).toBe('primary')
+    expect(selection.harness).toMatchObject({
+      kind: 'opencode',
+      model: 'local/default',
+      seat: 'shared-seat',
+      bin: 'opencode-unconfined',
+      permissions: 'bypass',
+    })
+    expect(selection.interactive).toBe(true)
+  })
+
+  test('--worker selects non-interactively and overrides only the run', async () => {
+    const config = fleetConfig()
+    const selection = await pickWorkerSelection(
+      config,
+      { worker: 'primary', harness: 'claude', model: 'opus', effort: 'high' },
+      null,
+    )
+    expect(selection.harness).toMatchObject({
+      kind: 'claude',
+      model: 'opus',
+      effort: 'high',
+      seat: 'shared-seat',
+    })
+    expect(config.worker[0]).toMatchObject({ kind: 'opencode', model: 'local/default' })
+    expect(selection.interactive).toBe(false)
+  })
+
+  test('unknown and disabled worker ids fail clearly', async () => {
+    await expect(pickWorkerSelection(fleetConfig(), { worker: 'missing' }, null)).rejects.toThrow(
+      'unknown worker "missing"',
+    )
+    await expect(pickWorkerSelection(fleetConfig(), { worker: 'off' }, null)).rejects.toThrow(
+      'worker "off" is disabled',
+    )
+  })
+
+  test('requires a worker id when there is no terminal', async () => {
+    await expect(pickWorkerSelection(fleetConfig(), {}, null)).rejects.toThrow(
+      'amagi run needs a terminal or --worker <id>',
+    )
   })
 })

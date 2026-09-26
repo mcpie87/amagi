@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import { classifyDifficulty } from './difficulty.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
@@ -11,11 +12,12 @@ import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
-import { taskIdFromPrBody } from './pr-body.ts'
+import { type PrBodyMeta, taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
   classifyMentionPrompt,
   classifyMentionSystemPrompt,
+  commitMessage,
   explainMentionPrompt,
   explainMentionSystemPrompt,
   respondToMentionPrompt,
@@ -104,6 +106,8 @@ export type MentionClassified = {
 }
 
 export type RespondToMentionOptions = {
+  /** Registry key used to attribute live watcher harness seats. */
+  repo?: string
   root: string
   repoName: string
   pr: PrInfo
@@ -186,10 +190,10 @@ export function taskIdFromPrTitle(title: string): string | null {
 }
 
 /**
- * Resolves the tracker task id for a PR, most to least reliable: the
- * `amagi-task:` body trailer set at creation (works for any tracker, and
- * survives a human editing the title); the branch name matched against the
- * tracker's open ids (for PRs that predate the trailer); the PR title, as a
+ * Resolves the tracker task id for a PR, most to least reliable: the task id
+ * the body was written with at creation (works for any tracker, and survives
+ * a human editing the title); the branch name matched against the tracker's
+ * open ids (for PRs that predate it); the PR title, as a
  * last resort for beads ids that happen to still carry the "am-544: " prefix.
  */
 export async function resolveTaskId(pr: PrInfo, tracker: Tracker): Promise<string | null> {
@@ -207,6 +211,8 @@ function startImplementHarness(
   cwd: string,
   prompt: string,
   systemPrompt: string,
+  repo?: string,
+  env?: Record<string, string>,
 ): AgentProcess {
   const harness = mk(config)
   return harness.start({
@@ -214,6 +220,8 @@ function startImplementHarness(
     prompt,
     systemPrompt,
     ...harnessStartOpts(config),
+    ...(env === undefined ? {} : { env }),
+    ...(repo === undefined ? {} : { seatActivity: { repo, watcher: 'mention-watcher' } }),
   })
 }
 
@@ -224,7 +232,7 @@ function configuredFooter(config: Config): string {
 }
 
 /** Worktree on the PR head with base merged in, shared with conflict resolution. */
-async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
+async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage?: string) {
   return prepareConflictWorktree({
     repoRoot: opts.root,
     repoName: opts.repoName,
@@ -232,6 +240,7 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
     baseBranch: opts.config.repo.baseBranch,
     pr: opts.pr,
     persona: opts.config.repo.persona,
+    ...(mergeMessage === undefined ? {} : { mergeMessage }),
     exec: run,
   })
 }
@@ -239,65 +248,116 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
 async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progress): Promise<void> {
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
-  const wt = await prWorktree(opts, run)
-  p.phase('fixing in worktree')
-  const outcome = await withHeadReflogBypassCheck(
-    wt.path,
-    run,
-    () => {
-      const proc = startImplementHarness(
-        mk,
-        watcherHarnessConfig(opts.config, 'mention'),
-        wt.path,
-        respondToMentionPrompt({
-          pr: opts.pr,
-          mention: opts.mention,
-          worktree: wt.path,
-          branch: wt.branch,
-          baseBranch: opts.config.repo.baseBranch,
-          checks: opts.config.checks.commands,
-          conflicted: wt.conflicted,
-        }),
-        respondToMentionSystemPrompt({
-          pr: opts.pr,
-          mention: opts.mention,
-          worktree: wt.path,
-          branch: wt.branch,
-          baseBranch: opts.config.repo.baseBranch,
-          checks: opts.config.checks.commands,
-          conflicted: wt.conflicted,
-        }),
-      )
-      return p.agent(proc, 'fixing in worktree')
-    },
-    opts.onGitBypassed,
-  )
-  if (!outcome.ok) {
-    throw new Error(`agent failed: ${agentFailure(outcome)}`)
+  const taskId = opts.tracker === undefined ? null : await resolveTaskId(opts.pr, opts.tracker)
+  const task = taskId === null ? null : ((await opts.tracker?.get(taskId)) ?? null)
+  const configuredHarness = watcherHarnessConfig(opts.config, 'mention')
+  const commitMeta: PrBodyMeta = {
+    harness: configuredHarness.kind,
+    model: configuredHarness.model ?? null,
+    effort: configuredHarness.effort ?? null,
   }
-  await commitWorktree(run, wt.path, opts.pr)
-  p.phase('pushing fix')
-  await pushConflictFix({
-    cwd: wt.path,
-    branch: wt.branch,
-    headRef: opts.pr.headRefName,
-    remote: opts.config.forge.remote,
-    exec: run,
-  })
+  const mergeMessage =
+    task === null
+      ? undefined
+      : mentionCommitMessage(
+          task,
+          `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
+          commitMeta,
+        )
+  const wt = await prWorktree(opts, run, mergeMessage)
+  const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
+  try {
+    p.phase('fixing in worktree')
+    const { outcome, proc } = await withHeadReflogBypassCheck(
+      wt.path,
+      run,
+      async () => {
+        const ctx = {
+          pr: opts.pr,
+          mention: opts.mention,
+          worktree: wt.path,
+          branch: wt.branch,
+          baseBranch: opts.config.repo.baseBranch,
+          checks: opts.config.checks.commands,
+          outPath,
+          conflicted: wt.conflicted,
+        }
+        const proc = startImplementHarness(
+          mk,
+          watcherHarnessConfig(opts.config, 'mention'),
+          wt.path,
+          respondToMentionPrompt(ctx),
+          respondToMentionSystemPrompt(ctx),
+          opts.repo,
+          { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
+        )
+        return { outcome: await p.agent(proc, 'fixing in worktree'), proc }
+      },
+      opts.onGitBypassed,
+    )
+    if (!outcome.ok) {
+      throw new Error(`agent failed: ${agentFailure(outcome)}`)
+    }
+    const summary = readFileSync(outPath, 'utf8').trim()
+    if (summary === '') throw new Error('agent produced no fix summary')
+    const changed = await commitWorktree(run, wt.path, opts.pr, task, summary, commitMeta)
+    p.phase('pushing fix')
+    await pushConflictFix({
+      cwd: wt.path,
+      branch: wt.branch,
+      headRef: opts.pr.headRefName,
+      remote: opts.config.forge.remote,
+      exec: run,
+    })
+    const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')
+    const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
+    const result = changed ? summary : `No change was made: ${summary}`
+    p.phase('posting comment')
+    await opts.driver.postComment(
+      opts.root,
+      opts.pr.number,
+      `@${opts.mention.user} ${result}${footer}`,
+    )
+  } finally {
+    rmSync(outPath, { force: true })
+  }
 }
 
 /** Stages and commits the fix, mirroring runner.commit: nothing to commit is fine, a git failure throws. */
-async function commitWorktree(run: Exec, cwd: string, pr: PrInfo): Promise<void> {
+function mentionCommitMessage(
+  task: { id: string; title: string },
+  summary: string,
+  meta: PrBodyMeta,
+): string {
+  const message = commitMessage(task, summary, meta)
+  const errors = lintCommitMessage(message)
+  if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
+  return message
+}
+
+async function commitWorktree(
+  run: Exec,
+  cwd: string,
+  pr: PrInfo,
+  task: { id: string; title: string } | null,
+  summary: string,
+  meta: PrBodyMeta,
+): Promise<boolean> {
   const status = await run(['git', 'status', '--porcelain'], { cwd })
-  if (status.stdout.trim() === '') return
+  if (status.stdout.trim() === '') return false
   await run(['git', 'add', '-A'], { cwd })
+  const message =
+    task === null
+      ? `Respond to review feedback on PR #${pr.number}\n\nPR: ${pr.url}`
+      : mentionCommitMessage(task, summary, meta)
   const commit = await run(['git', 'commit', '-q', '-F', '-'], {
     cwd,
-    stdin: `Respond to review feedback on PR #${pr.number}\n\nPR: ${pr.url}`,
+    stdin: message,
   })
   if (commit.exitCode !== 0) {
     throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
   }
+  return true
 }
 
 async function respondToExplain(
@@ -328,6 +388,7 @@ async function respondToExplain(
             conflicted: wt.conflicted,
           }),
           explainMentionSystemPrompt(),
+          opts.repo,
         )
         return { outcome: await p.agent(proc, 'explaining'), proc }
       },
@@ -371,6 +432,7 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
     tmpdir(),
     classifyMentionPrompt({ pr: opts.pr, mention: opts.mention }),
     classifyMentionSystemPrompt(),
+    opts.repo,
   )
   const outcome = await p.agent(proc, 'classifying')
   if (!outcome.ok) {
@@ -459,6 +521,7 @@ async function respondToTakeDown(
             conflicted: wt.conflicted,
           }),
           takeDownSystemPrompt(),
+          opts.repo,
         )
         return p.agent(proc, 'judging')
       },

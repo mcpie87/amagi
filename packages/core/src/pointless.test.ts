@@ -271,9 +271,14 @@ describe('parsePointlessVerdict', () => {
 describe('flagPointlessPrs', () => {
   test('no verdict file: falls back to the static reason on the PR and the tracker', async () => {
     const over = opts()
-    const result = await flagPointlessPrs(over)
+    const actions: string[] = []
+    const result = await flagPointlessPrs({
+      ...over,
+      onAction: (pr, action) => actions.push(`#${pr.number}: ${action}`),
+    })
 
     expect(result).toEqual({ flagged: 1, cleared: 0 })
+    expect(actions).toEqual(['#7: empty-diff PR flagged for review'])
     expect(over.store.task('bd-1')?.state).toBe('pr_flagged')
     expect(over.driver.addedLabels).toEqual(['amagi/needs-closing'])
     expect(over.driver.postedComments).toHaveLength(1)
@@ -347,6 +352,44 @@ describe('flagPointlessPrs', () => {
     expect(again).toEqual({ flagged: 0, cleared: 0 })
     expect(over.driver.postedComments).toHaveLength(1)
     expect(calls.filter((c) => c.includes('diff')).length).toBe(diffsAfterFirst)
+  })
+
+  test('a PR whose work base already contains is flagged with the resolver verdict, whatever its diff', async () => {
+    let judged = 0
+    const over = opts({
+      exec: pass(() => 'a real diff\n').exec,
+      makeHarnessFn: () => {
+        judged++
+        return fakeHarness()
+      },
+    })
+    over.prs = [pr({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' })]
+    const verdict = {
+      verdict: 'CLOSE TASK' as const,
+      reasoning: 'Main already landed this as #42.',
+      proposal: 'Close bd-1 as done by #42.',
+    }
+    // Seen at this head before the resolver found it contained: that must not skip it.
+    await flagPointlessPrs(over)
+    const result = await flagPointlessPrs({ ...over, contained: new Map([[7, verdict]]) })
+
+    expect(result).toEqual({ flagged: 1, cleared: 0 })
+    expect(judged).toBe(0)
+    expect(over.store.task('bd-1')?.state).toBe('pr_flagged')
+    expect(over.driver.addedLabels).toEqual(['amagi/needs-closing'])
+    expect(over.driver.postedComments).toEqual(['Main already landed this as #42.'])
+    expect(over.tracker.comments).toEqual([{ id: 'bd-1', body: 'Close bd-1 as done by #42.' }])
+  })
+
+  test('an empty-diff PR whose task already left pr_open is flagged on the forge only', async () => {
+    const store = new Store(openDatabase(':memory:'))
+    const over = opts({ store })
+    const result = await flagPointlessPrs(over)
+
+    expect(result).toEqual({ flagged: 1, cleared: 0 })
+    expect(over.driver.addedLabels).toEqual(['amagi/needs-closing'])
+    expect(over.driver.postedComments).toHaveLength(1)
+    expect(over.tracker.comments).toEqual([])
   })
 
   test('a head change on an already-flagged PR does not re-comment', async () => {

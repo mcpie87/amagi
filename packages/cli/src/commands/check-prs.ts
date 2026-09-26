@@ -1,5 +1,6 @@
 import {
   type Config,
+  errMsg,
   isConflicting,
   iterationsFromLabels,
   loadConfig,
@@ -149,13 +150,17 @@ export const checkPrsCommand = defineCommand({
     if (!args['dry-run']) {
       for (const { pr, pri } of ordered) {
         if (!pri.amagi) continue
-        await syncPrPriorityLabel({
-          cwd: root,
-          number: pr.number,
-          labels: pr.labels,
-          // A PR whose bead is gone or closed carries no priority label.
-          priority: pri.linked ? pri.priority : null,
-        })
+        try {
+          await syncPrPriorityLabel({
+            cwd: root,
+            number: pr.number,
+            labels: pr.labels,
+            // A PR whose bead is gone or closed carries no priority label.
+            priority: pri.linked ? pri.priority : null,
+          })
+        } catch (err) {
+          console.warn(yellow(`#${pr.number}: priority label sync failed: ${errMsg(err)}`))
+        }
       }
     }
 

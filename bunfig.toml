@@ -6,3 +6,4 @@ registry = "https://registry.npmjs.org"
 
 [test]
 coverage = false
+preload = ["./scripts/test-preload.ts"]

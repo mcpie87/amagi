@@ -1,8 +1,15 @@
-import { currentAttemptEvents, isTerminal, type StoredEvent, type TaskState } from './events.ts'
+import {
+  type AgentRole,
+  currentAttemptEvents,
+  isTerminal,
+  type StoredEvent,
+  type TaskState,
+} from './events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
   type ProjectedTask,
+  type ProjectedWatcherRun,
   type Projection,
   project,
 } from './project.ts'
@@ -17,17 +24,55 @@ export { emptyProjection, project }
  */
 export type DashboardState = Projection & {
   events: StoredEvent[]
+  /** `events` split per task, in seq order, so per-task selectors skip the global log. */
+  byTask: Record<string, StoredEvent[]>
   latestSeq: number
 }
 
 export const initialDashboardState = (): DashboardState => ({
   ...emptyProjection(),
   events: [],
+  byTask: {},
   latestSeq: 0,
 })
 
+/**
+ * Folds a batch of events in one pass: the log and each touched task's slice
+ * are copied once per batch rather than once per event, which keeps a full
+ * replay linear.
+ */
+export function reduceBatch(state: DashboardState, batch: readonly StoredEvent[]): DashboardState {
+  const last = batch.at(-1)
+  if (last === undefined) return state
+  let projection: Projection = state
+  const byTask = { ...state.byTask }
+  const grown = new Set<string>()
+  for (const event of batch) {
+    projection = project(projection, event)
+    if (event.taskId === null) continue
+    if (!grown.has(event.taskId)) {
+      byTask[event.taskId] = [...(byTask[event.taskId] ?? [])]
+      grown.add(event.taskId)
+    }
+    byTask[event.taskId]?.push(event)
+  }
+  return {
+    tasks: projection.tasks,
+    questions: projection.questions,
+    watcherRuns: projection.watcherRuns,
+    events: state.events.concat(batch),
+    byTask,
+    latestSeq: last.seq,
+  }
+}
+
 export function reduceState(state: DashboardState, event: StoredEvent): DashboardState {
-  return { ...project(state, event), events: [...state.events, event], latestSeq: event.seq }
+  return reduceBatch(state, [event])
+}
+
+/** The task's events in seq order. */
+export function taskEvents(state: DashboardState, taskId: string): StoredEvent[] {
+  return state.byTask[taskId] ?? []
 }
 
 /**
@@ -47,7 +92,7 @@ export function stateAtAttempt(
     if (e.type === 'task.reset') seen++
     return seen <= attempt
   })
-  return { ...events.reduce(project, emptyProjection()), events, latestSeq: state.latestSeq }
+  return { ...reduceBatch(initialDashboardState(), events), latestSeq: state.latestSeq }
 }
 
 /** Tasks currently owned by a run, most recently touched first. */
@@ -69,12 +114,26 @@ export function openQuestionsFor(state: DashboardState, taskId: string): Project
     .sort((a, b) => a.askedAt - b.askedAt)
 }
 
+/** Completed and in-flight watcher runs, newest first. */
+export function watcherRunsFor(
+  state: DashboardState,
+  repo: string,
+  name: string,
+  limit = Number.MAX_SAFE_INTEGER,
+): ProjectedWatcherRun[] {
+  return Object.values(state.watcherRuns)
+    .filter((run) => run.repo === repo && run.name === name)
+    .sort((a, b) => b.startSeq - a.startSeq)
+    .slice(0, limit)
+}
+
 export function currentAgentFor(
   state: DashboardState,
   taskId: string,
 ): Extract<StoredEvent, { type: 'agent.started' }> | null {
-  for (let i = state.events.length - 1; i >= 0; i--) {
-    const event = state.events[i]
+  const events = taskEvents(state, taskId)
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
     // A chat run is not the implementing agent; skip it so the task detail
     // keeps naming the agent that actually did the work.
     if (event?.taskId === taskId && event.type === 'agent.started' && event.role !== 'chat') {
@@ -92,9 +151,10 @@ export function currentUsageFor(
   let inputTokens = 0
   let outputTokens = 0
   let cachedTokens = 0
-  for (let i = state.events.length - 1; i >= 0; i--) {
-    const event = state.events[i]
-    if (event?.taskId !== taskId) continue
+  const events = taskEvents(state, taskId)
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event === undefined) continue
     // Stop at the current implementing run; earlier runs are another context.
     // Chat runs are not the implementing agent, so their usage is skipped like
     // currentAgentFor skips their starts.
@@ -139,8 +199,7 @@ export function chatTurns(state: DashboardState, taskId: string): ChatTurn[] {
     })
     open = null
   }
-  for (const event of state.events) {
-    if (event.taskId !== taskId) continue
+  for (const event of taskEvents(state, taskId)) {
     if (event.type === 'chat.message') {
       flush()
       turns.push({
@@ -171,8 +230,7 @@ export function chatTurns(state: DashboardState, taskId: string): ChatTurn[] {
 /** Whether a chat run is currently in flight for the task (worker responding). */
 export function chatInFlight(state: DashboardState, taskId: string): boolean {
   let started = false
-  for (const event of state.events) {
-    if (event.taskId !== taskId) continue
+  for (const event of taskEvents(state, taskId)) {
     if (event.type === 'agent.started' && event.role === 'chat') started = true
     else if (event.type === 'agent.exited' && event.role === 'chat') started = false
   }
@@ -190,6 +248,23 @@ export type StatusEntry = {
   reason: string | null
   /** Time spent in `to`: until the next entry, else until `now` while in flight, else null. */
   durationMs: number | null
+  runs: StatusRun[]
+}
+
+export type StatusRun = {
+  role: AgentRole
+  harness: string
+  model: string | null
+  effort: string | null
+  resumed: boolean
+  startedAt: number
+  durationMs: number | null
+  exitCode: number | null
+  inputTokens: number
+  outputTokens: number
+  costUsd: number | null
+  restart: number | null
+  label: string
 }
 
 /**
@@ -218,10 +293,15 @@ export function statusLog(
       to,
       reason: reason ?? null,
       durationMs: null,
+      runs: [],
     })
     current = to
   }
-  for (const event of currentAttemptEvents(state.events, taskId)) {
+  const events = currentAttemptEvents(taskEvents(state, taskId), taskId)
+  let activeRun: StatusRun | null = null
+  let pendingRestart: number | null = null
+  let checksSinceImplement = false
+  for (const event of events) {
     switch (event.type) {
       case 'task.claimed':
         push(event, 'claimed', 'claimed')
@@ -235,14 +315,64 @@ export function statusLog(
       case 'task.reclaimed':
         push(event, 'reclaimed', 'queued', event.reason)
         break
+      case 'run.restarted':
+        pendingRestart = event.restart
+        break
+      case 'agent.started': {
+        const label = [
+          event.role,
+          ...(event.role === 'implement' && checksSinceImplement ? ['(fix)'] : []),
+          ...(event.role === 'implement' && event.resumed ? ['(resumed)'] : []),
+          ...(pendingRestart === null ? [] : [`(restart ${pendingRestart})`]),
+        ].join(' ')
+        activeRun = {
+          role: event.role,
+          harness: event.harness,
+          model: event.model,
+          effort: event.effort,
+          resumed: event.resumed,
+          startedAt: event.ts,
+          durationMs: null,
+          exitCode: null,
+          inputTokens: 0,
+          outputTokens: 0,
+          costUsd: null,
+          restart: pendingRestart,
+          label,
+        }
+        entries.at(-1)?.runs.push(activeRun)
+        if (event.role === 'implement') checksSinceImplement = false
+        pendingRestart = null
+        break
+      }
+      case 'agent.stream':
+        if (activeRun !== null && activeRun.role === event.role && event.event.kind === 'usage') {
+          activeRun.inputTokens += event.event.inputTokens
+          activeRun.outputTokens += event.event.outputTokens
+          if (event.event.costUsd !== undefined) {
+            activeRun.costUsd = (activeRun.costUsd ?? 0) + event.event.costUsd
+          }
+        }
+        break
+      case 'agent.exited':
+        if (activeRun !== null && activeRun.role === event.role) {
+          activeRun.durationMs = event.ts - activeRun.startedAt
+          activeRun.exitCode = event.exitCode
+          activeRun = null
+        }
+        break
       default:
         break
     }
+    if (event.type === 'task.state' && event.to === 'checks') checksSinceImplement = true
   }
   for (const [i, entry] of entries.entries()) {
     const next = entries[i + 1]
     if (next !== undefined) entry.durationMs = next.ts - entry.ts
     else if (now !== null && !isTerminal(entry.to)) entry.durationMs = now - entry.ts
+  }
+  if (activeRun !== null) {
+    activeRun.durationMs = now === null ? null : now - activeRun.startedAt
   }
   return entries
 }
@@ -285,7 +415,7 @@ export function runHealth(state: DashboardState, taskId: string, now = Date.now(
   let costUsd = 0
   let costSeen = false
   const warnings: string[] = []
-  for (const event of currentAttemptEvents(state.events, taskId)) {
+  for (const event of currentAttemptEvents(taskEvents(state, taskId), taskId)) {
     switch (event.type) {
       case 'run.context':
         contextTokens = event.contextTokens

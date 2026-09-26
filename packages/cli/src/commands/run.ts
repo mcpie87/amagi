@@ -1,4 +1,5 @@
 import {
+  type Config,
   dropLiveRun,
   isTerminal,
   listModelsCached,
@@ -10,12 +11,13 @@ import {
   repoName,
   repoRoot,
   updateLiveRun,
+  type WorkerConfig,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, printBlock, red, yellow } from '../format.ts'
 import { interactive, picker } from '../picker.ts'
 import { currentRepo } from '../repo.ts'
-import { pickRunSelection, type RunSelection, usageCounts } from '../select-run.ts'
+import { pickRunSelection, pickWorkerSelection, usageCounts } from '../select-run.ts'
 
 const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
   const harness = makeHarness(cfg)
@@ -30,37 +32,55 @@ const listModelsFor = (cfg: Parameters<typeof makeHarness>[0]) => {
 export async function workOneTask(opts: {
   root: string
   taskId?: string
-  flags: { harness?: string; model?: string; effort?: string }
+  useFleet?: boolean
+  flags: { worker?: string; harness?: string; model?: string; effort?: string }
 }): Promise<void> {
   const { root, taskId } = opts
   const { config } = loadConfig(root)
   const { key, name, store } = currentRepo()
-  const selection: RunSelection = await pickRunSelection(
-    config,
-    opts.flags,
-    interactive() ? picker : null,
-    listModelsFor,
-    usageCounts(store.events()),
-  )
-
-  const implement = selection.harness
-  const matchingWorkers = config.worker.filter((candidate) => {
-    const fallback =
-      candidate.kind === config.harness.implement.kind ? config.harness.implement : null
-    return (
-      candidate.kind === implement.kind &&
-      (candidate.model ?? fallback?.model ?? null) === (implement.model ?? null) &&
-      (candidate.effort ?? fallback?.effort ?? null) === (implement.effort ?? null) &&
-      (candidate.seat ?? candidate.kind) === (implement.seat ?? implement.kind)
+  let implement: Config['harness']['implement']
+  let worker: WorkerConfig | undefined
+  let selectedWorker: WorkerConfig | undefined
+  let selectionInteractive: boolean
+  if (opts.useFleet) {
+    const selection = await pickWorkerSelection(config, opts.flags, interactive() ? picker : null)
+    implement = selection.harness
+    selectedWorker = selection.worker
+    worker = selection.worker
+    selectionInteractive = selection.interactive
+  } else {
+    const selection = await pickRunSelection(
+      config,
+      opts.flags,
+      interactive() ? picker : null,
+      listModelsFor,
+      usageCounts(store.events()),
     )
-  })
-  const worker = matchingWorkers.length === 1 ? matchingWorkers[0] : undefined
-  if (selection.interactive) {
+    implement = selection.harness
+    const picked = implement
+    const matchingWorkers = config.worker.filter((candidate) => {
+      const fallback =
+        candidate.kind === config.harness.implement.kind ? config.harness.implement : null
+      return (
+        candidate.kind === picked.kind &&
+        (candidate.model ?? fallback?.model ?? null) === (picked.model ?? null) &&
+        (candidate.effort ?? fallback?.effort ?? null) === (picked.effort ?? null) &&
+        (candidate.seat ?? candidate.kind) === (picked.seat ?? picked.kind)
+      )
+    })
+    worker = matchingWorkers.length === 1 ? matchingWorkers[0] : undefined
+    selectionInteractive = selection.interactive
+  }
+  if (selectionInteractive) {
     const bits = [
       implement.model ? `model ${implement.model}` : null,
       implement.effort ? `effort ${implement.effort}` : null,
     ].filter(Boolean)
-    console.log(dim(`harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`))
+    console.log(
+      dim(
+        `${selectedWorker ? `worker: ${selectedWorker.name} (${selectedWorker.id}), ` : ''}harness: ${implement.kind}${bits.length > 0 ? ` (${bits.join(', ')})` : ''}`,
+      ),
+    )
   }
 
   const runner = new Runner({
@@ -185,6 +205,7 @@ export const runCommand = defineCommand({
   meta: { name: 'run', description: 'Claim the next ready task and work it in its own worktree' },
   args: {
     once: { type: 'boolean', description: 'Work a single task and exit', default: true },
+    worker: { type: 'string', description: 'Worker id from the global fleet' },
     harness: {
       type: 'string',
       description: 'Harness kind to use (claude/codex/opencode)',
@@ -195,7 +216,8 @@ export const runCommand = defineCommand({
   async run({ args }) {
     await workOneTask({
       root: repoRoot(),
-      flags: { harness: args.harness, model: args.model, effort: args.effort },
+      useFleet: true,
+      flags: { worker: args.worker, harness: args.harness, model: args.model, effort: args.effort },
     })
   },
 })

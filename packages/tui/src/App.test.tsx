@@ -46,6 +46,8 @@ const RUNNER = {
   name: 'repo1',
   available: true,
   capacity: 2,
+  busySeats: 1,
+  totalSeats: 2,
   running: ['am-1'],
   startedAt: { 'am-1': 1_700_000_000_000 },
   resources: { 'am-1': { processes: 3, rssBytes: 123_456, cpuMs: 5_000 } },
@@ -96,13 +98,38 @@ const EVENTS: StoredEvent[] = [
     options: ['npm', 'nexus'],
     gateRef: null,
   }),
+  ev(5, null, {
+    type: 'watcher.run.started',
+    repo: 'repo1',
+    name: 'mention-watcher',
+    runId: 'run-2',
+  }),
+  ev(6, null, {
+    type: 'watcher.action',
+    repo: 'repo1',
+    name: 'mention-watcher',
+    runId: 'run-2',
+    targetType: 'pr',
+    targetId: '12',
+    prNumber: 12,
+    result: 'failed to read comments',
+    level: 'error',
+  }),
+  ev(7, null, {
+    type: 'watcher.run.finished',
+    repo: 'repo1',
+    name: 'mention-watcher',
+    runId: 'run-2',
+    ok: false,
+    error: 'comment service unavailable',
+  }),
 ]
 
 function streamMock(events: StoredEvent[], extra?: (url: string, init?: RequestInit) => Response) {
   return (async (url: string, init?: RequestInit) => {
     const href = url.toString()
     if (href.includes('/api/repos/repo1/stream')) return sseResponse(events)
-    if (href.endsWith('/api/runner')) return json(RUNNER)
+    if (href.endsWith('/api/repos/repo1/runner')) return json(RUNNER)
     if (href.endsWith('/api/repos/repo1/ready-queue')) return json(READY)
     if (extra !== undefined) {
       const response = extra(href, init)
@@ -125,9 +152,9 @@ describe('App', () => {
 
     const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
     try {
-      await waitFor(() => (instance.lastFrame() ?? '').includes('1/2 workers'))
+      await waitFor(() => (instance.lastFrame() ?? '').includes('1/2 seats'))
       const frame = instance.lastFrame() ?? ''
-      expect(frame).toContain('1/2 workers')
+      expect(frame).toContain('1/2 seats')
       expect(frame).toContain('auto-queue on')
       expect(frame).toContain('mention-watcher')
       expect(frame).toContain('Fix the thing')
@@ -150,8 +177,8 @@ describe('App', () => {
       await waitFor(() => (instance.lastFrame() ?? '').includes('activity log'))
       const frame = instance.lastFrame() ?? ''
       expect(frame).toContain('2 runs')
-      expect(frame).toContain('run 2 started')
-      expect(frame).toContain('PR #12: failed to read comments')
+      expect(frame).toContain('run started')
+      expect(frame).toContain('pr 12: failed to read comments')
 
       instance.stdin.write('\u001b')
       await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))

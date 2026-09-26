@@ -75,6 +75,8 @@ describe('mergeLiveRuns', () => {
     name: 'repo1',
     available: true,
     capacity: 2,
+    busySeats: 0,
+    totalSeats: 2,
     running: [],
     startedAt: {},
     resources: {},

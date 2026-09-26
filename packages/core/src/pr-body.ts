@@ -20,15 +20,9 @@ export async function diffBase(run: Exec, cwd: string, base: string): Promise<st
   return r.exitCode === 0 ? remote : base
 }
 
-export async function changesSinceBase(
-  run: Exec,
-  cwd: string,
-  base: string,
-  workingTree = false,
-): Promise<PrChange[]> {
+export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
   const ref = await diffBase(run, cwd, base)
-  const range = workingTree ? ref : `${ref}...HEAD`
-  const r = await run(['git', 'diff', '--numstat', range], { cwd })
+  const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
   return r.stdout
     .split('\n')
     .filter(Boolean)
@@ -44,6 +38,26 @@ export async function changesSinceBase(
 
 /** Headings an agent appends to the task description to document the PR. */
 const SECTION_HEADING = /^###\s+(How to use|Conclusion)\s*$/gm
+
+function stripPreflightSection(text: string): string {
+  const headings = [...text.matchAll(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)].map((m) => ({
+    index: m.index ?? 0,
+    level: m[1]?.length ?? 1,
+    title: m[2]?.trim() ?? '',
+  }))
+  let result = ''
+  let cursor = 0
+
+  for (const [i, heading] of headings.entries()) {
+    if (heading.index < cursor) continue
+    if (!/^Pre-flight(?:\s+\([^\r\n]*\))?$/i.test(heading.title)) continue
+    result += text.slice(cursor, heading.index)
+    const next = headings.slice(i + 1).find((candidate) => candidate.level <= heading.level)
+    cursor = next?.index ?? text.length
+  }
+
+  return result + text.slice(cursor)
+}
 
 /**
  * Splits a task description into its summary and any agent-authored sections:
@@ -104,14 +118,31 @@ export function withAgentSections(
 }
 
 /** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
-const FILE_REF = /[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}/g
+const FILE_REF = /(?<![\w.-])[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}(?![\w])/g
 
 /** Wraps file names and paths in backticks, leaving existing code spans alone. */
 export function backtickFileRefs(text: string): string {
   return text
-    .split(/(```[\s\S]*?```|`[^`\n]+`)/g)
+    .split(/(```[\s\S]*?```|`[^`\n]+`|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
     .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
     .join('')
+}
+
+function renderDescriptionMarkdown(text: string): string {
+  return backtickFileRefs(text.replace(/</g, '&lt;').replace(/>/g, '&gt;')).replace(
+    /(^|\n)( {0,3})(#{1,6})(?=[ \t])/g,
+    (_match, lineStart, indent: string, hashes: string) => {
+      const level = Math.min(6, hashes.length + 2)
+      return `${lineStart}${indent}${'#'.repeat(level)}`
+    },
+  )
+}
+
+function normalizeWorktreeLinks(text: string): string {
+  return text.replace(/\]\(([^)]*)\)/g, (link, destination: string) => {
+    const worktreePath = destination.replaceAll('`', '').match(/(?:^|\/)worktrees\/[^/]+\/(.+)$/)
+    return worktreePath === undefined || worktreePath === null ? link : `](${worktreePath[1]})`
+  })
 }
 
 /** Provenance of the model run that produced the PR, for the body footer. */
@@ -122,19 +153,21 @@ export type PrBodyMeta = {
 }
 
 /**
- * Key of the machine-readable trailer that links a PR back to its tracker
- * task, in the same spirit as a `Co-Authored-By:` git trailer: a plain
- * `key: value` line a regex can find regardless of how the surrounding
- * markdown evolves. branchName (worktree.ts) encodes the same id in the
- * branch name, but splitting it back out of a slug is ambiguous; the trailer
- * is unambiguous because the id is on its own line.
+ * Key of the visible trailer older amagi PR bodies ended with, still read so
+ * those PRs keep resolving to their task.
  */
 export const TASK_TRAILER_KEY = 'amagi-task'
 
-/** Reads the `amagi-task:` trailer back off a PR body, or null if absent. */
+/**
+ * Reads the task id off a PR body: the `**Task:**` line formatPrBody opens
+ * with, or the legacy `amagi-task:` trailer. branchName (worktree.ts) encodes
+ * the same id in the branch name, but splitting it back out of a slug is
+ * ambiguous; the id here sits alone in a code span, so it is not.
+ */
 export function taskIdFromPrBody(body: string): string | null {
-  const re = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
-  return body.match(re)?.[1] ?? null
+  const taskLine = /^\*\*Task:\*\*\s*`([^`\s]+)`/m
+  const trailer = new RegExp(`^${TASK_TRAILER_KEY}:\\s*(\\S+)\\s*$`, 'm')
+  return body.match(taskLine)?.[1] ?? body.match(trailer)?.[1] ?? null
 }
 
 /**
@@ -161,9 +194,10 @@ export function formatPrBody(
     '',
     `**Task:** \`${task.id}\`${created === null ? '' : ` · ${created}`}`,
   ]
-  const { summary, howToUse, conclusion } = splitDescription(task.description)
+  const { summary: descriptionSummary, howToUse, conclusion } = splitDescription(task.description)
+  const summary = stripPreflightSection(descriptionSummary).trim()
   const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
-  lines.push('', '### 📝 Summary', '', backtickFileRefs(body))
+  lines.push('', '### 📝 Summary', '', renderDescriptionMarkdown(normalizeWorktreeLinks(body)))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
@@ -176,8 +210,13 @@ export function formatPrBody(
   }
   const conclusionBody = conclusion ?? fallbackSummary
   if (conclusionBody !== null && conclusionBody !== undefined && conclusionBody.trim() !== '') {
-    lines.push('', '### 🧠 Conclusion', '', backtickFileRefs(conclusionBody))
+    lines.push(
+      '',
+      '### 🧠 Conclusion',
+      '',
+      renderDescriptionMarkdown(normalizeWorktreeLinks(conclusionBody)),
+    )
   }
   const footer = meta === undefined ? '' : modelFooter(meta.harness, meta.model, meta.effort)
-  return `${lines.join('\n')}${footer}\n\n${TASK_TRAILER_KEY}: ${task.id}`
+  return `${lines.join('\n')}${footer}`
 }

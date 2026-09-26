@@ -158,7 +158,7 @@ export function ReclaimButton({
           ? 'the runner is offline, so the task waits for a runner'
           : status.available
             ? 'the runner has a free slot'
-            : `the runner is busy (${status.running.length}/${status.capacity})`
+            : `the runner is busy (${status.busySeats}/${status.totalSeats} seats)`
       setResult({
         kind: 'ok',
         text: `queued; ${availability}. The task waits for a slot.`,

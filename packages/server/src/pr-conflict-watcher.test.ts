@@ -39,10 +39,15 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
 })
 
 /** Serves the git side of a tick: ls-remote, worktree, merge. PRs come from the driver. */
-function fakeExec(): Exec {
+function fakeExec(baseOid: () => string = () => 'base1'): Exec {
   let unmerged = false
   return async (cmd) => {
+    if (cmd.includes('ls-remote') && cmd.includes('refs/heads/main')) {
+      return { exitCode: 0, stdout: `${baseOid()}\trefs/heads/main\n`, stderr: '' }
+    }
     if (cmd.includes('MERGE_HEAD')) return { exitCode: 0, stdout: 'merge-head', stderr: '' }
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) {
       unmerged = true
@@ -209,17 +214,18 @@ const start = (
   return w
 }
 
-const stateFile = (): Record<string, { headOid: string }> =>
+const stateFile = (): Record<string, { headOid: string; baseOid?: string }> =>
   JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
 test('lists open PRs, resolves only conflicting ones, and records counters', async () => {
+  const store = new Store(openDatabase(':memory:'))
   let started = 0
   const driver = new FakePr()
   driver.prs = [pr(), pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
-  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver })
+  const w = start(fakeExec(), () => fakeHarness(() => started++), { driver, store })
 
   await Bun.sleep(60)
 
@@ -229,12 +235,19 @@ test('lists open PRs, resolves only conflicting ones, and records counters', asy
   expect(counter(w, 'conflicting')).toBe(1)
   expect(counter(w, 'resolved')).toBe(1)
   expect(started).toBe(1)
-  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base1' })
   expect(activity.runs).toBeGreaterThanOrEqual(1)
   expect(activity.successes).toBe(activity.runs)
   expect(activity.failures).toBe(0)
   expect(activity.status).toBe('active')
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
+  const runs = store.watcherRuns({ repo: 'amagi', name: 'pr-conflict-watcher', limit: 20 })
+  const run = runs.find((entry) =>
+    entry.actions.some(
+      (action) => action.prNumber === 7 && action.result === 'conflict resolution dispatched',
+    ),
+  )
+  expect(run?.ok).toBe(true)
 })
 
 test('does not re-attempt a conflicting PR until its head SHA changes', async () => {
@@ -266,7 +279,68 @@ test('re-attempts a conflicting PR once its head SHA changes', async () => {
   driver.prs = [pr({ headRefOid: head })]
   await Bun.sleep(60)
   expect(started).toBeGreaterThanOrEqual(2)
-  expect(stateFile()['7']).toEqual({ headOid: 'newsha' })
+  expect(stateFile()['7']).toEqual({ headOid: 'newsha', baseOid: 'base1' })
+})
+
+test('re-attempts a conflicting PR once the base branch moves, even on the same head', async () => {
+  let started = 0
+  let base = 'base1'
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(
+    fakeExec(() => base),
+    () => fakeHarness(() => started++),
+    { driver },
+  )
+
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  base = 'base2'
+  await Bun.sleep(60)
+  expect(started).toBe(2)
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base2' })
+})
+
+test('a PR whose work base already contains is flagged once and not re-dispatched when base moves', async () => {
+  let started = 0
+  let base = 'base1'
+  const git = fakeExec(() => base)
+  const exec: Exec = async (cmd, opts) => {
+    // The merge result equals the merged base; the PR's own three-dot diff is not empty.
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) return { exitCode: 0, stdout: '', stderr: '' }
+    if (cmd[0] === 'gh' && cmd.includes('diff')) {
+      return { exitCode: 0, stdout: 'diff --git a/x b/x\n', stderr: '' }
+    }
+    return git(cmd, opts)
+  }
+  const store = new Store(openDatabase(':memory:'))
+  openPrTask(store)
+  const driver = new FakePr()
+  driver.prs = [pr({ labels: ['amagi'] })]
+  start(
+    exec,
+    () =>
+      fakeHarness(({ prompt }) => {
+        started++
+        const outPath = prompt.match(/Verdict file: (.+)/)?.[1]
+        if (outPath !== undefined) {
+          writeFileSync(outPath, 'CLOSE TASK\nREASONING:\nLanded as #42.\nPROPOSAL:\nClose bd-1.')
+        }
+      }),
+    { driver, store },
+  )
+
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+  expect(store.task('bd-1')?.state).toBe('pr_flagged')
+  expect(driver.addedLabels).toEqual(['amagi/needs-closing'])
+  expect(driver.postedComments).toEqual(['Landed as #42.'])
+
+  base = 'base2'
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+  expect(driver.postedComments).toHaveLength(1)
 })
 
 test('a failed resolution is recorded so the same head is not retried', async () => {
@@ -291,7 +365,7 @@ test('a failed resolution is recorded so the same head is not retried', async ()
   const afterFirst = started
   await Bun.sleep(60)
   expect(started).toBe(afterFirst)
-  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef' })
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base1' })
 })
 
 test('a conflicting PR that stops conflicting drops out of the state file', async () => {
@@ -386,6 +460,8 @@ test('records merge-tree observations and divergences when the flag is on', asyn
         ? { exitCode: 1, stdout: '', stderr: '' }
         : { exitCode: 0, stdout: '', stderr: '' }
     }
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
     return { exitCode: 0, stdout: '', stderr: '' }
@@ -412,6 +488,8 @@ test('records merge-tree observations and divergences when the flag is on', asyn
 test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', async () => {
   const exec: Exec = async (cmd) => {
     if (cmd.includes('merge-tree')) return { exitCode: 0, stdout: '', stderr: '' }
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
     return { exitCode: 0, stdout: '', stderr: '' }
