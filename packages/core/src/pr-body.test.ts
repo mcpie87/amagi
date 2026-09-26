@@ -83,6 +83,16 @@ describe('backtickFileRefs', () => {
       'The summary section is now readable and consistent.',
     )
   })
+
+  test('does not wrap a prefix of a longer dotted token', () => {
+    const text = 'text is date.toLocaleString(...)'
+    expect(backtickFileRefs(text)).toBe(text)
+  })
+
+  test('does not rewrite markdown link destinations', () => {
+    const text = '[x](/a/b/C.tsx)'
+    expect(backtickFileRefs(text)).toBe(text)
+  })
 })
 
 describe('formatPrBody', () => {
@@ -135,6 +145,54 @@ describe('formatPrBody', () => {
     const body = formatPrBody(TASK, [])
     expect(body).toContain('## ✨ Add a greeting file')
     expect(body).not.toContain('What changed')
+  })
+
+  test('escapes HTML-like input and demotes internal headings below the summary heading', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          '## Goal\n\nText with <li> and <Time ts={s.startedAt}/> and <time dateTime="now">value</time>.\n\n## Context\n\nMore text.\n\n### Conclusion\n\nRendered <li> as text.',
+      },
+      [],
+    )
+
+    expect(body).toContain('#### Goal')
+    expect(body).toContain('#### Context')
+    expect(body).toContain('&lt;li&gt;')
+    expect(body).toContain('&lt;Time ts={s.startedAt}/&gt;')
+    expect(body).toContain('&lt;time dateTime="now"&gt;value&lt;/time&gt;')
+    expect(body).toContain('Rendered &lt;li&gt; as text.')
+    expect(body).not.toContain('<li>')
+    expect(body).not.toContain('<Time')
+    expect(body).not.toContain('<time')
+  })
+
+  test('keeps absolute worktree paths out of GitHub link destinations', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Summary\n\n### Conclusion\n\nSee [SessionsView.tsx](/home/user/.cache/amagi/worktrees/branch-name/packages/dashboard/src/SessionsView.tsx).',
+      },
+      [],
+    )
+
+    expect(body).toContain('[`SessionsView.tsx`](packages/dashboard/src/SessionsView.tsx)')
+    expect(body).not.toContain('/home/user/.cache/amagi/worktrees')
+  })
+
+  test('cleans injected backticks when repairing an existing worktree link', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Summary\n\n### Conclusion\n\nSee [`SessionsView.tsx`](/`home/user/.cache/amagi/worktrees/branch-name/packages/dashboard/src/SessionsView.tsx`).',
+      },
+      [],
+    )
+
+    expect(body).toContain('[`SessionsView.tsx`](packages/dashboard/src/SessionsView.tsx)')
   })
 
   test('renders the how-to-use part of the description as its own section', () => {
