@@ -357,6 +357,9 @@ function WatcherDetailDialog({
                           >
                             {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
                           </span>
+                          <span className="ml-2 tabular-nums text-fg-faint">
+                            {fmtElapsed((run.endedAt ?? Date.now()) - run.startedAt)}
+                          </span>
                           <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
                         </summary>
                         {run.error !== null && (

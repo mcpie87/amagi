@@ -73,6 +73,7 @@ import {
   IssueUpdateBody,
   ParticipationBody,
   QuestionQuery,
+  RepoCommitParam,
   RepoParam,
   RepoQuestionParam,
   RepoRegisterBody,
@@ -247,6 +248,14 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   }
   if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
   return ws
+}
+
+function gitOutput(root: string, args: string[]): string {
+  const result = Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' })
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.toString().trim() || 'git command failed')
+  }
+  return result.stdout.toString()
 }
 
 export function createApp({
@@ -503,6 +512,68 @@ export function createApp({
         }
       }
       return c.json(out)
+    })
+
+    .get('/api/repos/:repo/git/log', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      try {
+        const output = gitOutput(ws.root, ['log', '-100', '--format=%H%x00%s%x00%ct%x1e'])
+        const commits = output
+          .split('\x1e')
+          .map((record) => record.trim())
+          .filter(Boolean)
+          .map((record) => {
+            const [hash, title, timestamp] = record.split('\x00')
+            return { hash, title, timestamp: Number(timestamp) }
+          })
+        return c.json({ commits })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
+
+    .get('/api/repos/:repo/git/commits/:hash', valid('param', RepoCommitParam), (c) => {
+      const { repo, hash } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      try {
+        const resolved = gitOutput(ws.root, ['rev-parse', '--verify', `${hash}^{commit}`]).trim()
+        const [title, timestamp, ...bodyParts] = gitOutput(ws.root, [
+          'show',
+          '-s',
+          '--format=%s%x00%ct%x00%b',
+          resolved,
+        ]).split('\x00')
+        const parents = gitOutput(ws.root, ['show', '-s', '--format=%P', resolved]).trim()
+        const patch =
+          parents === ''
+            ? gitOutput(ws.root, [
+                'diff-tree',
+                '--root',
+                '--no-commit-id',
+                '-p',
+                '--no-renames',
+                '-r',
+                resolved,
+              ])
+            : gitOutput(ws.root, [
+                'diff',
+                '--no-ext-diff',
+                '--no-renames',
+                `${resolved}^`,
+                resolved,
+                '--',
+              ])
+        return c.json({
+          hash: resolved,
+          title,
+          timestamp: Number(timestamp),
+          message: bodyParts.join('\x00').trim(),
+          patch,
+        })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 404)
+      }
     })
 
     .post('/api/repos', valid('json', RepoRegisterBody), async (c) => {

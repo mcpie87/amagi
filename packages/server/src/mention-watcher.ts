@@ -3,6 +3,7 @@ import {
   type Exec,
   errMsg,
   isAgentMention,
+  type MentionProgress,
   type makeHarness,
   mentionsPath,
   type PrComment,
@@ -75,9 +76,40 @@ export function startMentionWatcher({
   let runs = 0
   let failures = 0
   let log: NonNullable<WorkerActivity['log']> = []
-  const logEvent = (message: string, level: 'info' | 'error' = 'info'): void => {
+  const logEvent = (
+    message: string,
+    level: 'info' | 'error' = 'info',
+    detail: string | null = null,
+  ): void => {
     log = [...log, { ts: Date.now(), message, level }].slice(-100)
-    activity = { ...activity, log }
+    activity = { ...activity, log, ...(detail === null ? {} : { detail }) }
+  }
+  const recordAction = (
+    runId: string,
+    targetType: 'pr' | 'mention',
+    targetId: string,
+    prNumber: number,
+    result: string,
+    level: 'info' | 'error' = 'info',
+    url?: string,
+  ): void => {
+    store.append(null, {
+      type: 'watcher.action',
+      repo,
+      name: 'mention-watcher',
+      runId,
+      targetType,
+      targetId,
+      prNumber,
+      ...(url === undefined ? {} : { url }),
+      result,
+      level,
+    })
+    logEvent(
+      `${targetType === 'mention' ? `PR #${prNumber}, mention ${targetId}` : `PR #${prNumber}`}: ${result}`,
+      level,
+      result,
+    )
   }
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
@@ -104,8 +136,9 @@ export function startMentionWatcher({
     async () => {
       runs++
       const runId = `${Date.now()}-${runs}`
+      const runStartedAt = Date.now()
       store.append(null, { type: 'watcher.run.started', repo, name: 'mention-watcher', runId })
-      logEvent(`run ${runs} started`)
+      logEvent(`run ${runs} started`, 'info', 'scanning open PRs')
       const next: WorkerActivity = {
         ...activity,
         lastRunAt: Date.now(),
@@ -118,30 +151,41 @@ export function startMentionWatcher({
         intervalMs,
         status: 'active',
       }
+      activity = next
       let scannedNow = 0
       let respondedNow = 0
       try {
         const handledPath = mentionsPath(repoName)
         const handled = readHandledMentions(handledPath)
         const prs = await driver.listOpenPrs(root)
+        logEvent(
+          `run ${runs}: found ${prs.length} open PR(s)`,
+          'info',
+          `scanning ${prs.length} open PR(s)`,
+        )
         for (const pr of prs) {
+          recordAction(
+            runId,
+            'pr',
+            String(pr.number),
+            pr.number,
+            'reading comments',
+            'info',
+            pr.url,
+          )
           let comments: PrComment[]
           try {
             comments = await driver.listComments(root, pr.number)
           } catch (err) {
-            const message = `PR #${pr.number}: failed to read comments: ${errMsg(err)}`
-            logEvent(message, 'error')
-            store.append(null, {
-              type: 'watcher.action',
-              repo,
-              name: 'mention-watcher',
+            recordAction(
               runId,
-              targetType: 'pr',
-              targetId: String(pr.number),
-              prNumber: pr.number,
-              result: `failed to read comments: ${errMsg(err)}`,
-              level: 'error',
-            })
+              'pr',
+              String(pr.number),
+              pr.number,
+              `failed to read comments: ${errMsg(err)}`,
+              'error',
+              pr.url,
+            )
             console.warn(`mention watch #${pr.number}: ${errMsg(err)}`)
             continue
           }
@@ -150,10 +194,30 @@ export function startMentionWatcher({
           const mentions = comments.filter(
             (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
           )
+          recordAction(
+            runId,
+            'pr',
+            String(pr.number),
+            pr.number,
+            `scanned ${comments.length} comment(s), found ${mentions.length} new mention(s)`,
+            'info',
+            pr.url,
+          )
           if (mentions.length > 0)
             logEvent(`PR #${pr.number}: found ${mentions.length} new mention(s)`)
           for (const mention of mentions) {
+            recordAction(
+              runId,
+              'mention',
+              mention.id,
+              pr.number,
+              `from @${mention.user}: starting classification`,
+              'info',
+              pr.url,
+            )
             let classifiedKind: string | null = null
+            let lastProgressKey = ''
+            let lastProgressAt = 0
             try {
               await respondToMention({
                 repo,
@@ -167,6 +231,23 @@ export function startMentionWatcher({
                 store,
                 exec,
                 makeHarnessFn,
+                onProgress: (progress: MentionProgress) => {
+                  const now = Date.now()
+                  const progressKey = `${progress.phase}:${progress.tool ?? ''}`
+                  if (progressKey === lastProgressKey && now - lastProgressAt < 10_000) return
+                  lastProgressKey = progressKey
+                  lastProgressAt = now
+                  const timing = `phase ${Math.ceil(progress.phaseMs / 1000)}s, total ${Math.ceil(progress.totalMs / 1000)}s`
+                  recordAction(
+                    runId,
+                    'mention',
+                    mention.id,
+                    pr.number,
+                    `${progress.phase}${progress.tool === null ? '' : `, tool ${progress.tool}`} (${timing})`,
+                    'info',
+                    pr.url,
+                  )
+                },
                 onClassified: (c) => {
                   classifiedKind = c.kind
                   store.append(null, {
@@ -175,18 +256,15 @@ export function startMentionWatcher({
                     mentionId: mention.id,
                     ...c,
                   })
-                  store.append(null, {
-                    type: 'watcher.action',
-                    repo,
-                    name: 'mention-watcher',
+                  recordAction(
                     runId,
-                    targetType: 'mention',
-                    targetId: mention.id,
-                    prNumber: pr.number,
-                    url: pr.url,
-                    result: `classified as ${c.kind}`,
-                    level: 'info',
-                  })
+                    'mention',
+                    mention.id,
+                    pr.number,
+                    `classified as ${c.kind}`,
+                    'info',
+                    pr.url,
+                  )
                 },
                 onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
               })
@@ -206,38 +284,24 @@ export function startMentionWatcher({
                         : classifiedKind === 'ambiguous'
                           ? 'clarification posted'
                           : 'response completed'
-              store.append(null, {
-                type: 'watcher.action',
-                repo,
-                name: 'mention-watcher',
-                runId,
-                targetType: 'mention',
-                targetId: mention.id,
-                prNumber: pr.number,
-                url: pr.url,
-                result,
-                level: 'info',
-              })
+              recordAction(runId, 'mention', mention.id, pr.number, result, 'info', pr.url)
             } catch (err) {
               logEvent(`PR #${pr.number}, mention ${mention.id}: ${errMsg(err)}`, 'error')
-              store.append(null, {
-                type: 'watcher.action',
-                repo,
-                name: 'mention-watcher',
+              recordAction(
                 runId,
-                targetType: 'mention',
-                targetId: mention.id,
-                prNumber: pr.number,
-                url: pr.url,
-                result: `${classifiedKind === null ? 'classification or response failed' : `${classifiedKind} failed`}: ${errMsg(err)}`,
-                level: 'error',
-              })
+                'mention',
+                mention.id,
+                pr.number,
+                `${classifiedKind === null ? 'classification or response failed' : `${classifiedKind} failed`}: ${errMsg(err)}`,
+                'error',
+                pr.url,
+              )
               console.warn(`mention watch #${pr.number} ${mention.id}: ${errMsg(err)}`)
             }
           }
         }
-        next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s)`
-        logEvent(`run ${runs} completed: ${next.detail}`)
+        next.detail = `scanned ${scannedNow} PRs, responded to ${respondedNow} mention(s) in ${Math.ceil((Date.now() - runStartedAt) / 1000)}s`
+        logEvent(`run ${runs} completed: ${next.detail}`, 'info', next.detail)
       } catch (err) {
         failures++
         next.ok = false
@@ -245,7 +309,11 @@ export function startMentionWatcher({
         next.failures = failures
         next.successes = runs - failures
         next.detail = 'scan failed'
-        logEvent(`run ${runs} failed: ${next.error}`, 'error')
+        logEvent(
+          `run ${runs} failed after ${Math.ceil((Date.now() - runStartedAt) / 1000)}s: ${next.error}`,
+          'error',
+          `scan failed after ${Math.ceil((Date.now() - runStartedAt) / 1000)}s`,
+        )
         console.warn(`mention watch: ${next.error}`)
       }
       next.counters = counters()
