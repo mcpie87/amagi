@@ -1,4 +1,14 @@
 import {
+  accessSync,
+  constants as fsConstants,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
@@ -6,6 +16,8 @@ import {
   canReset,
   classifyDifficulty,
   errMsg,
+  expandTilde,
+  type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
@@ -55,6 +67,7 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  GitIdentityBody,
   GitRequestBody,
   IssueCreateBody,
   IssueUpdateBody,
@@ -115,6 +128,38 @@ function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities
   return tracker.capabilities[capability]
     ? null
     : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
+}
+
+function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
+  if (identity === null) return null
+  if (identity.mode === 'path') {
+    const file = resolve(expandTilde(identity.value))
+    try {
+      accessSync(file, fsConstants.R_OK)
+      if (!statSync(file).isFile()) throw new Error('not a file')
+    } catch {
+      throw new Error(`gitconfig file is not readable: ${file}`)
+    }
+    return { mode: 'path', value: file }
+  }
+
+  const dir = mkdtempSync(`${tmpdir()}/amagi-gitconfig-`)
+  const file = `${dir}/identity.gitconfig`
+  try {
+    writeFileSync(file, identity.value)
+    const result = Bun.spawnSync(['git', 'config', '--file', file, '--list'], {
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (result.exitCode !== 0) {
+      const message = result.stderr.toString().trim() || 'invalid gitconfig'
+      throw new Error(message)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  return identity
 }
 
 /** The beads tracker's issue browser and epic closer, or null for any other tracker. */
@@ -1096,6 +1141,32 @@ export function createApp({
         }
         const entry = workspaces.list().find((e) => e.key === repo)
         return c.json({ workers: entry?.workers ?? false, watchers: entry?.watchers ?? false })
+      },
+    )
+
+    .get('/api/repos/:repo/git-identity', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const entry = workspaces.list().find((candidate) => candidate.key === repo)
+      if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
+      return c.json({ gitIdentity: entry.gitIdentity })
+    })
+
+    .patch(
+      '/api/repos/:repo/git-identity',
+      valid('param', RepoParam),
+      valid('json', GitIdentityBody),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        let gitIdentity: GitIdentity | null
+        try {
+          gitIdentity = validateGitIdentity(c.req.valid('json'))
+        } catch (err) {
+          return c.json({ error: errMsg(err) }, 400)
+        }
+        if (!workspaces.updateGitIdentity(repo, gitIdentity)) {
+          return c.json({ error: `unknown repository ${repo}` }, 404)
+        }
+        return c.json({ gitIdentity })
       },
     )
 

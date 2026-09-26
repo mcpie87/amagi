@@ -175,6 +175,15 @@ export const ParticipationBody = z
   .refine(nonEmpty, { message: 'provide workers or watchers' })
 export type ParticipationBody = z.infer<typeof ParticipationBody>
 
+export const GitIdentityBody = z.union([
+  z.null(),
+  z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('path'), value: z.string().trim().min(1) }),
+    z.object({ mode: z.literal('inline'), value: z.string() }),
+  ]),
+])
+export type GitIdentityBody = z.infer<typeof GitIdentityBody>
+
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({
   deadlineMs: z.coerce.number().int().min(1).default(540_000),

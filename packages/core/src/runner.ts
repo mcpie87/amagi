@@ -46,7 +46,7 @@ import {
 import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
 import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
-import { createWorktree, type WorktreeSpec } from './worktree.ts'
+import { applyRepoIdentity, createWorktree, type WorktreeSpec } from './worktree.ts'
 
 export type RunnerDeps = {
   store: Store
@@ -490,6 +490,7 @@ export class Runner {
         exec: this.exec,
       })
     }
+    await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)
     store.append(task.id, {
       type: 'worktree.created',
       path: worktree.path,

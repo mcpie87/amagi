@@ -559,6 +559,7 @@ describe('prepareConflictWorktree', () => {
         'git',
         'config',
         '--worktree',
+        '--replace-all',
         'include.path',
         join(dir, 'agent.gitconfig'),
       ])

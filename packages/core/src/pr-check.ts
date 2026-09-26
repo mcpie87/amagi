@@ -4,7 +4,7 @@ import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { cacheHome } from './paths.ts'
-import { applyPersona, branchExists } from './worktree.ts'
+import { applyRepoIdentity, branchExists } from './worktree.ts'
 
 export type PrInfo = {
   number: number
@@ -338,9 +338,7 @@ export async function prepareConflictWorktree(
     await execOk(run, ['git', 'reset', '--hard', `origin/${opts.pr.headRefName}`], { cwd: path })
   }
 
-  if (opts.persona) {
-    await applyPersona(run, path, opts.persona)
-  }
+  await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
   const baseOid = (
     await execOk(run, ['git', 'rev-parse', '--verify', `origin/${opts.baseBranch}^{commit}`], {

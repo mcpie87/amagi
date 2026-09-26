@@ -11,6 +11,8 @@ const HARNESS_LABEL: Record<HarnessKind, string> = {
   opencode: 'OpenCode',
 }
 
+const GIT_IDENTITY_TEMPLATE = '[user]\n\tname = Your Name\n\temail = you@example.com\n'
+
 type Worker = {
   id: string
   name: string
@@ -845,12 +847,170 @@ export function RepositoryParticipationCard({
   repo: { key: string; name: string; workers: boolean; watchers: boolean }
   onChanged: () => void
 }) {
+  const [identityMode, setIdentityMode] = useState<'path' | 'inline'>('path')
+  const [identityValue, setIdentityValue] = useState('')
+  const [identityBusy, setIdentityBusy] = useState(false)
+  const [identityLoaded, setIdentityLoaded] = useState(false)
+  const [identityError, setIdentityError] = useState<string | null>(null)
+  const [identitySaved, setIdentitySaved] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    setIdentityLoaded(false)
+    setIdentityError(null)
+    setIdentitySaved(false)
+    fetch(`${apiBase}/api/repos/${repo.key}/git-identity`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as {
+          gitIdentity: { mode: 'path' | 'inline'; value: string } | null
+        }
+      })
+      .then(({ gitIdentity }) => {
+        if (!active) return
+        setIdentityMode(gitIdentity?.mode ?? 'path')
+        setIdentityValue(gitIdentity?.value ?? '')
+        setIdentityLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        setIdentityError(err instanceof Error ? err.message : String(err))
+        setIdentityLoaded(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const saveIdentity = async (identity: { mode: 'path' | 'inline'; value: string } | null) => {
+    setIdentityBusy(true)
+    setIdentityError(null)
+    setIdentitySaved(false)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/git-identity`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(identity),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const body = (await response.json()) as {
+        gitIdentity: { mode: 'path' | 'inline'; value: string } | null
+      }
+      setIdentityMode(body.gitIdentity?.mode ?? 'path')
+      setIdentityValue(body.gitIdentity?.value ?? '')
+      setIdentitySaved(true)
+    } catch (err) {
+      setIdentityError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
   return (
-    <div className={`mt-6 ${card}`}>
-      <h2 className="mb-1 text-sm text-fg-muted">Repositories</h2>
-      <ul className="divide-y divide-line">
-        <ParticipationRow repo={repo} onChanged={onChanged} />
-      </ul>
+    <div className="mt-6 space-y-4">
+      <div className={card}>
+        <h2 className="mb-1 text-sm text-fg-muted">Repository participation</h2>
+        <ul className="divide-y divide-line">
+          <ParticipationRow repo={repo} onChanged={onChanged} />
+        </ul>
+      </div>
+      <div className={card}>
+        <h2 className="mb-1 text-sm text-fg-muted">Git identity for amagi commits</h2>
+        <p className="mb-3 text-sm text-fg-faint">
+          Applies only to amagi-created worktrees. Leave unset to use the repository persona or
+          ambient Git identity.
+        </p>
+        {!identityLoaded ? (
+          <p className="text-sm text-fg-faint">Loading…</p>
+        ) : (
+          <>
+            <fieldset disabled={identityBusy}>
+              <legend className="sr-only">Git identity source</legend>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name={`git-identity-${repo.key}`}
+                    value="path"
+                    checked={identityMode === 'path'}
+                    onChange={() => setIdentityMode('path')}
+                  />
+                  Gitconfig file
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name={`git-identity-${repo.key}`}
+                    value="inline"
+                    checked={identityMode === 'inline'}
+                    onChange={() => {
+                      setIdentityMode('inline')
+                      if (identityValue === '') setIdentityValue(GIT_IDENTITY_TEMPLATE)
+                    }}
+                  />
+                  Inline text
+                </label>
+              </div>
+            </fieldset>
+            {identityMode === 'path' ? (
+              <label className="mt-3 block text-sm text-fg-muted">
+                Path to gitconfig
+                <input
+                  type="text"
+                  value={identityValue}
+                  onChange={(event) => setIdentityValue(event.currentTarget.value)}
+                  placeholder="~/.config/git/personas/work.gitconfig"
+                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                />
+              </label>
+            ) : (
+              <label className="mt-3 block text-sm text-fg-muted">
+                Gitconfig text
+                <textarea
+                  value={identityValue}
+                  onChange={(event) => setIdentityValue(event.currentTarget.value)}
+                  placeholder={GIT_IDENTITY_TEMPLATE}
+                  rows={7}
+                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                />
+              </label>
+            )}
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={identityBusy || (identityMode === 'path' && identityValue.trim() === '')}
+                onClick={() => void saveIdentity({ mode: identityMode, value: identityValue })}
+                className={secondary}
+              >
+                {identityBusy ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                disabled={identityBusy}
+                onClick={() => void saveIdentity(null)}
+                className={secondary}
+              >
+                Clear identity
+              </button>
+              {identitySaved && <span className="text-sm text-fg-faint">Saved</span>}
+            </div>
+            {identityError !== null && (
+              <p role="alert" className="mt-2 text-sm text-red-ink">
+                {identityError}
+              </p>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
+}
+
+async function responseError(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: string }
+    return body.error ?? `Request failed (${response.status})`
+  } catch {
+    return `Request failed (${response.status})`
+  }
 }

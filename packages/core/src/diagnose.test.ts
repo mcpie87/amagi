@@ -25,6 +25,7 @@ const entry = (): RegistryEntry => ({
   path: repo,
   workers: true,
   watchers: true,
+  gitIdentity: null,
 })
 
 describe('diagnoseRepo', () => {
