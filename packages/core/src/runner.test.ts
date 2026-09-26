@@ -105,6 +105,7 @@ class FakeHarness implements Harness {
   /** Viability-check runs are recorded here, separate from implementation calls. */
   readonly verifyCalls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
   private readonly verifyResponse: Turn
+  replacesSystemPromptOnResume = false
   kills = 0
 
   constructor(
@@ -169,6 +170,61 @@ class FakeHarness implements Harness {
       },
       model: turn.model ?? null,
       effort: turn.effort ?? null,
+    }
+  }
+}
+
+class ReviewHarness implements Harness {
+  readonly kind = 'codex'
+  readonly calls: { resumeFrom: string | null; opts: AgentStartOptions }[] = []
+
+  constructor(private readonly outputs: string[]) {}
+
+  start(opts: AgentStartOptions): AgentProcess {
+    return this.run(null, opts)
+  }
+
+  resume(sessionId: string, opts: AgentStartOptions): AgentProcess {
+    return this.run(sessionId, opts)
+  }
+
+  async listModels(): Promise<string[]> {
+    return []
+  }
+  async listEfforts(): Promise<string[]> {
+    return []
+  }
+
+  private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
+    this.calls.push({ resumeFrom, opts })
+    if (!opts.prompt.includes('runner stores your final response')) {
+      throw new Error('review prompt did not explain where findings are stored')
+    }
+    const summary = this.outputs.shift() ?? '[]'
+    const queue = new AsyncQueue<AgentEvent>()
+    queue.push({
+      kind: 'usage',
+      inputTokens: 12,
+      outputTokens: 3,
+      cachedTokens: 0,
+      costUsd: 0.01,
+    })
+    queue.close()
+    const sessionId = `review-session-${this.calls.length}`
+    return {
+      pid: -1,
+      events: () => queue,
+      done: Promise.resolve({
+        exitCode: 0,
+        ok: true,
+        sessionId,
+        summary,
+        usage: null,
+        stderr: '',
+      }),
+      kill: async () => {},
+      model: null,
+      effort: null,
     }
   }
 }
@@ -282,6 +338,7 @@ const makeRunner = (
   forge = new FakePr(),
   runExec: Exec = exec,
   leaseHeartbeatMs?: number,
+  reviewerHarness?: Harness,
 ) =>
   new Runner({
     store,
@@ -291,6 +348,7 @@ const makeRunner = (
     repoRoot: repo,
     repoName: 'demo',
     forge,
+    reviewerHarness,
     exec: runExec,
     ...(leaseHeartbeatMs === undefined ? {} : { leaseHeartbeatMs }),
   })
@@ -426,6 +484,107 @@ const cancelMidRun = async (): Promise<void> => {
   expect((await pending)?.state).toBe('cancelled')
 }
 
+describe('Runner.review', () => {
+  const finding = {
+    id: 'F-1',
+    severity: 'major',
+    scope: 'in-scope',
+    path: 'README.md',
+    line: 1,
+    title: 'Missing behavior',
+    evidence: 'The new behavior is absent.',
+    failureScenario: 'A user cannot complete the task.',
+  } as const
+  const reviewConfig = () =>
+    config({
+      harness: { implement: { kind: 'claude', seat: 'implement-seat' } },
+      review: { harness: { kind: 'codex', seat: 'review-seat' } },
+    })
+  const registerTask = () =>
+    store.append(TASK.id, {
+      type: 'task.claimed',
+      title: TASK.title,
+      tracker: 'fake',
+      description: TASK.description,
+    })
+
+  test('valid findings resume across rounds and final pass starts a fresh session', async () => {
+    registerTask()
+    writeFileSync(join(repo, 'README.md'), '# first change\n')
+    const reviewer = new ReviewHarness([JSON.stringify([finding]), '[]', '[]'])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const first = await runner.review({ task: TASK, cwd: repo, round: 1 })
+    expect(first.ok).toBe(true)
+    expect(first.findings).toEqual([finding])
+    expect(reviewer.calls[0]?.resumeFrom).toBeNull()
+    expect(reviewer.calls[0]?.opts.permissions).toBe('read-only')
+    expect(reviewer.calls[0]?.opts.seat).toBe('review-seat')
+    expect(reviewer.calls[0]?.opts.seatMaxWaitMs).toBeNull()
+    expect(reviewer.calls[0]?.opts.outputSchema).toBeDefined()
+    expect(
+      store
+        .events({ taskId: TASK.id, limit: 999 })
+        .some(
+          (event) =>
+            event.type === 'agent.stream' &&
+            event.role === 'review' &&
+            event.event.kind === 'usage',
+        ),
+    ).toBe(true)
+
+    writeFileSync(join(repo, 'README.md'), '# second change\n')
+    const second = await runner.review({
+      task: TASK,
+      cwd: repo,
+      round: 2,
+      previousSnapshot: first.snapshot,
+      previousFindings: first.findings,
+      replies: [{ id: 'F-1', outcome: 'fixed', reason: 'Addressed.' }],
+    })
+    expect(second.ok).toBe(true)
+    expect(reviewer.calls[1]?.resumeFrom).toBe(first.reviewerSession)
+    expect(reviewer.calls[1]?.opts.prompt).toContain('-# first change\n+# second change')
+    expect(reviewer.calls[1]?.opts.prompt).not.toContain('# demo')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('Prior findings:')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
+
+    await runner.review({ task: TASK, cwd: repo, round: 3, finalPass: true })
+    expect(reviewer.calls[2]?.resumeFrom).toBeNull()
+  })
+
+  test('invalid findings are re-asked once in the same session and reported as failed', async () => {
+    registerTask()
+    const reviewer = new ReviewHarness(['not json', '{"not":"an array"}'])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const result = await runner.review({ task: TASK, cwd: repo, round: 1 })
+
+    expect(result.ok).toBe(false)
+    expect(reviewer.calls).toHaveLength(2)
+    expect(reviewer.calls[0]?.resumeFrom).toBeNull()
+    expect(reviewer.calls[1]?.resumeFrom).toBe('review-session-1')
+    expect(reviewer.calls[1]?.opts.prompt).toContain('previous output was invalid')
+    expect(types(TASK.id)).toContain('review.failed')
+  })
+})
+
 describe('Runner.runOnce', () => {
   test('an empty queue is not an error', async () => {
     expect(await makeRunner(new FakeTracker([]), new FakeHarness([])).runOnce()).toBeNull()
@@ -517,11 +676,60 @@ describe('Runner.runOnce', () => {
       events: [],
       outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
     })
+    harness.replacesSystemPromptOnResume = true
     await makeRunner(new FakeTracker([TASK]), harness).runOnce()
 
     expect(harness.calls[0]?.resumeFrom).toBe('verify-sess')
     expect(harness.calls[0]?.prompt).toContain('viability check is over')
     expect(harness.calls[0]?.prompt).toContain('Implement this task')
+  })
+
+  test('implement starts fresh when the harness keeps the check system prompt on resume', async () => {
+    const harness = new FakeHarness([writesAFile], {
+      events: [],
+      outcome: { sessionId: 'verify-sess', summary: '{"viable": true, "reason": "needed"}' },
+    })
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls[0]?.resumeFrom).toBeNull()
+    expect(harness.calls[0]?.prompt).not.toContain('viability check is over')
+  })
+
+  test('retries a no-change implementation that repeats the viability verdict', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: '{"viable": true, "reason": "still needed"}' } },
+      writesAFile,
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[1]?.resumeFrom).toBeNull()
+    expect(harness.calls[1]?.prompt).toContain('Implement this task')
+  })
+
+  test('a repeated viability verdict gets a clear no-change reason', async () => {
+    const verdict = { outcome: { summary: '{"viable": true, "reason": "still needed"}' } }
+    const harness = new FakeHarness([verdict, verdict])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(harness.calls).toHaveLength(2)
+    expect(stateReason(TASK.id)).toContain('implementation agent returned a viability check')
+    expect(stateReason(TASK.id)).not.toContain('"viable"')
+  })
+
+  test('a viability verdict from the no-change explanation is not shown as the reason', async () => {
+    const harness = new FakeHarness([
+      { outcome: { summary: null } },
+      { outcome: { summary: '{"viable": true, "reason": "still needed"}' } },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('no_pr')
+    expect(stateReason(TASK.id)).toContain('implementation agent returned a viability check')
+    expect(stateReason(TASK.id)).not.toContain('"viable"')
   })
 
   test('a failed viability check defaults to continuing the task', async () => {
@@ -600,7 +808,7 @@ describe('Runner.runOnce', () => {
     ).runOnce()
 
     expect(pr.calls).toHaveLength(1)
-    expect(pr.calls[0]?.title).toBe('bd-a1b2: Add a greeting file')
+    expect(pr.calls[0]?.title).toBe('[bd-a1b2] Add a greeting file')
     expect(pr.calls[0]?.body).toContain('## ✨ Add a greeting file')
     expect(pr.calls[0]?.body).toContain('**Task:** `bd-a1b2`')
     expect(pr.calls[0]?.body).toContain('Write `hello.txt`')
@@ -819,8 +1027,8 @@ describe('Runner.runOnce', () => {
     const body = await execOk(exec, ['git', 'log', '-1', '--format=%b'], {
       cwd: row?.worktree ?? '',
     })
-    expect(body).toContain('Changes:')
-    expect(body).toContain('- `hello.txt` +1 -0')
+    expect(body).not.toContain('Changes:')
+    expect(body.trim().split('\n').at(-1)).toStartWith('Generated by amagi · ')
     const mainLog = await execOk(exec, ['git', 'log', '--oneline', '-1'], { cwd: repo })
     expect(mainLog).toContain('init')
   })
@@ -1930,6 +2138,12 @@ describe('Runner.requestCommit', () => {
       )
     expect(created?.sha).toBe(result.sha)
     expect(created?.subject).toBe(`[${TASK.id}] ${TASK.title}`)
+    const subject = (
+      await execOk(exec, ['git', 'show', '-s', '--format=%s', 'HEAD'], {
+        cwd: wtPath,
+      })
+    ).trim()
+    expect(subject).toBe(created?.subject ?? '')
     const head = (await execOk(exec, ['git', 'rev-parse', 'HEAD'], { cwd: wtPath })).trim()
     expect(head).toBe(result.sha)
   })

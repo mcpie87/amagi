@@ -168,6 +168,21 @@ describe('CodexHarness argv', () => {
     expect(argv).not.toContain('-s')
   })
 
+  test('read-only mode selects the read-only sandbox on a fresh start', () => {
+    const argv = new CodexHarness().argv({ ...base, permissions: 'read-only' }, null)
+    expect(argv.slice(argv.indexOf('-s'), argv.indexOf('-s') + 2)).toEqual(['-s', 'read-only'])
+  })
+
+  test('passes the output schema file to codex', () => {
+    const argv = new CodexHarness().argv(
+      { ...base, outputSchema: '/tmp/findings.schema.json' },
+      null,
+    )
+    expect(
+      argv.slice(argv.indexOf('--output-schema'), argv.indexOf('--output-schema') + 2),
+    ).toEqual(['--output-schema', '/tmp/findings.schema.json'])
+  })
+
   test('bypass is still honored on resume, unlike the sandbox flag', () => {
     const argv = new CodexHarness().argv({ ...base, permissions: 'bypass' }, 'sess-42')
     expect(argv).toContain('--dangerously-bypass-approvals-and-sandbox')

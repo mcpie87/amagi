@@ -165,6 +165,8 @@ export type ClaudeHarnessOptions = {
 
 export class ClaudeHarness implements Harness {
   readonly kind = 'claude'
+  // --append-system-prompt applies per invocation; the session file does not store it.
+  readonly replacesSystemPromptOnResume = true
   private readonly bin: string
   private readonly seat: string | undefined
   private readonly defaultEffort: string | null
@@ -225,7 +227,11 @@ export class ClaudeHarness implements Harness {
     } else {
       // One argv element: --allowedTools is variadic and would otherwise
       // swallow whatever extraArgs adds next.
-      argv.push('--allowedTools', (opts.allowedTools ?? DEFAULT_ALLOWED_TOOLS).join(' '))
+      const allowedTools =
+        opts.permissions === 'read-only'
+          ? ['Read', 'Glob', 'Grep']
+          : (opts.allowedTools ?? DEFAULT_ALLOWED_TOOLS)
+      argv.push('--allowedTools', allowedTools.join(' '))
     }
 
     argv.push(...(opts.extraArgs ?? []))

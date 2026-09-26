@@ -1,7 +1,10 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { CheckResult } from './events.ts'
-import type { PrChange } from './pr-body.ts'
-import { NOT_VIABLE_VERDICTS, VERDICTS, verdictPromptLines } from './verdict.ts'
+import { commitFooter } from './footer.ts'
+import type { PrBodyMeta } from './pr-body.ts'
+import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from './verdict.ts'
+
+export { reviewPrompt } from './review-pack.ts'
 
 export type PromptContext = {
   task: TrackerTask
@@ -57,8 +60,13 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '  still write your findings, evidence, and conclusion in your final message.',
     '',
     'Your final message feeds the pull request description. Write it as:',
-    '1. A short summary of what was done. When the task has no description it is the',
-    '   PR summary, and it is the reason shown when no pull request is opened.',
+    '1. A short summary of what was done. It is the body of the commit the orchestrator',
+    '   makes, the PR summary when the task has no description, and the reason shown',
+    '   when no pull request is opened. Write it against the actual change',
+    `   (\`git diff ${base}\`), not against what you intended: open with the problem as a`,
+    '   reader who has not seen the code would understand it, then what the change does',
+    '   about it and why that matters rather than which mechanism it uses, then how you',
+    '   verified it. Do not list the changed files: the diff already shows them.',
     '2. Only if your changes add a user-facing feature (new CLI command or flag, new',
     '   config option, new API endpoint): a `### How to use` section saying how to',
     '   trigger it and what it does.',
@@ -67,6 +75,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '   task: what the changes do file by file and anything the reviewer needs to know',
     '   (deviations from the task, what was left out, why a file that looks unrelated',
     '   was touched).',
+    'Whenever the summary or Conclusion refers to more than one file, use a markdown',
+    'bullet list with one file per line. Put each path in `backticks`; you may add a',
+    'short note after it. Never join multiple file paths with commas in a sentence.',
     '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
     '   opens no pull request, so the verdict is what tells the operator what to do next.',
     ...verdictPromptLines().map((l) => `   ${l}`),
@@ -182,33 +193,48 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
   )
 }
 
-export function commitMessage(
-  task: Pick<TrackerTask, 'id' | 'title'>,
-  changes: readonly PrChange[] = [],
-): string {
-  const lines = [task.title, '', `Task: ${task.id}`]
-  if (changes.length > 0) {
-    lines.push('', 'Changes:')
-    for (const change of changes) {
-      const stat = Number.isFinite(change.additions)
-        ? `+${change.additions} -${change.deletions}`
-        : 'binary'
-      lines.push(`- \`${change.path}\` ${stat}`)
-    }
+/** Body of a commit made before the agent has reported what it did. */
+export const CHECKPOINT_COMMIT_SUMMARY =
+  'Checkpoint of work in progress, requested by the agent mid-run. The final commit on\n' +
+  'this branch summarizes the change.'
+
+/**
+ * The commit body out of the implementing run's final message: the summary it
+ * opens with, cut before its `### How to use` / `### Conclusion` sections and
+ * without the verdict line, which is for the operator.
+ */
+export function commitSummary(finalMessage: string | null | undefined): string {
+  const lines: string[] = []
+  for (const line of (finalMessage ?? '').split('\n')) {
+    if (/^#{1,6}\s/.test(line)) break
+    if (parseVerdict(line) === null) lines.push(line)
   }
-  return `${lines.join('\n')}\n`
+  const summary = lines.join('\n').trim()
+  return summary === '' ? 'The agent reported no summary of the change.' : summary
 }
 
 /**
- * PR title in `code: short name` form, not the full issue sentence. The short
- * name drops a milestone-style `M5: ` prefix and any trailing clauses, so
- * "PR titles should use task code, not full sentences" becomes
- * "am-544: PR titles should use task code".
+ * `[task-id] title`, the summary, and the PR body's amagi footer in plain
+ * text. commit-lint.ts checks this shape on every amagi commit.
+ */
+export function commitMessage(
+  task: Pick<TrackerTask, 'id' | 'title'>,
+  summary: string,
+  meta: PrBodyMeta,
+): string {
+  const footer = commitFooter(meta.harness, meta.model, meta.effort)
+  return `[${task.id}] ${task.title}\n\n${summary.trim()}\n\n${footer}\n`
+}
+
+/**
+ * PR title in `[code] short name` form. Drop milestone prefixes and trailing
+ * clauses while preserving comma-separated scopes such as `core, dashboard:`.
  */
 export function prTitle(task: TrackerTask): string {
   const withoutMilestone = task.title.replace(/^M\d+(?:\.\d+)*\s*:\s*/, '')
-  const shortName = withoutMilestone.split(/[.,;]/)[0]?.trim() ?? withoutMilestone.trim()
-  return `${task.id}: ${shortName}`
+  const scope = withoutMilestone.match(/^\w+(?:,\s*\w+)*:\s*/)?.[0] ?? ''
+  const shortName = `${scope}${withoutMilestone.slice(scope.length).split(/[.,;]/)[0]?.trim() ?? ''}`
+  return `[${task.id}] ${shortName}`
 }
 
 export type ConflictPromptContext = {
@@ -293,6 +319,7 @@ export type MentionPromptContext = {
   branch: string
   baseBranch: string
   checks: readonly string[]
+  outPath: string
   /** True when the base branch does not merge cleanly into the PR head. */
   conflicted: boolean
 }
@@ -316,7 +343,8 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
-    '- Commit your changes. Do not push; the dispatcher pushes.',
+    '- Do not commit or push. The dispatcher commits your changes and pushes them.',
+    `- Write a short summary of what changed, or why no change was needed, to ${ctx.outPath}.`,
   ]
   if (ctx.conflicted) {
     lines.push(
@@ -348,7 +376,8 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   }
   parts.push(
     '',
-    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+    'Address the feedback with the smallest change that satisfies it, then stop. The dispatcher will commit and push your changes.',
+    `Write a short summary of what changed to file: ${ctx.outPath}. If no change is needed, write why. Keep it concise and suitable for a PR comment.`,
   )
   return parts.join('\n')
 }
@@ -362,10 +391,12 @@ export type ExplainMentionContext = {
   conflicted: boolean
 }
 
+export const MAX_EXPLAIN_ANSWER_CHARS = 300
+
 export function explainMentionSystemPrompt(): string {
   return [
-    'You are explaining changes made in a pull request to a human reviewer.',
-    'Read the review comment and the diff, then write a clear explanation.',
+    "You are answering a human reviewer's question about a pull request.",
+    'Check the relevant code and diff, then answer the question directly.',
     'Do not modify any files in the repository.',
   ].join('\n')
 }
@@ -395,7 +426,7 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
     '- add-a-task: the human wants a new task tracked in the issue tracker, not done in this PR',
     '- ambiguous: only when the intent genuinely cannot be determined',
     '',
-    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" is explain.',
+    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" and "is this already resolved?" are explain.',
     '',
     'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
   ].join('\n')
@@ -407,24 +438,19 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     '',
     ctx.mention.body.trim(),
     '',
-    `Write your explanation to this file: ${ctx.outPath}`,
-    'It will be posted as a comment on the PR. Be concrete: what the changes do, why they were made, and how they fit together.',
+    `Write your answer to this file: ${ctx.outPath}`,
+    'It will be posted as a comment on the PR. Answer the question first.',
+    'For a question like "is this already resolved?", check the current code and relevant history, then say yes or no with one decisive fact. If it is resolved, stop there.',
+    `Use plain text, at most two short sentences and ${MAX_EXPLAIN_ANSWER_CHARS} characters. Do not recap the PR or list implementation details unless the human asks for them.`,
   ]
   if (ctx.conflicted) {
     parts.push(
       '',
       'The base branch does not merge cleanly into this PR: the change has drifted from',
-      'base. Report this conflict as evidence of that drift in your explanation.',
+      'base. Mention this conflict if it matters to the answer.',
     )
   }
-  parts.push(
-    '',
-    'Pull request diff:',
-    '',
-    ctx.diff,
-    '',
-    'Write the explanation to the file and stop.',
-  )
+  parts.push('', 'Pull request diff:', '', ctx.diff, '', 'Write the answer to the file and stop.')
   return parts.join('\n')
 }
 

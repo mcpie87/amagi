@@ -391,7 +391,7 @@ export function OverviewView() {
       ? queue
       : queue.filter((t) => t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
 
-  const workers = status === null ? '—' : `${status.running.length}/${status.capacity}`
+  const workers = status === null ? '—' : `${status.busySeats}/${status.totalSeats}`
 
   return (
     <section>

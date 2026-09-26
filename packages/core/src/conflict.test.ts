@@ -1,24 +1,35 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { writeFileSync } from 'node:fs'
+import { lintCommitMessage } from './commit-lint.ts'
 import { Config } from './config.ts'
 import { type ConflictLogLevel, resolveConflict } from './conflict.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type { AgentOutcome, AgentStartOptions, Harness } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
+import { openDatabase } from './store/db.ts'
+import { Store } from './store/store.ts'
 
 type Call = readonly string[]
 
-function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
+function fake(routes: (cmd: Call) => ExecResult | undefined): {
+  exec: Exec
+  calls: Call[]
+  inputs: string[]
+} {
   const calls: Call[] = []
-  const exec: Exec = async (cmd) => {
+  const inputs: string[] = []
+  const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
+    if (cmd[1] === 'commit' && opts?.stdin !== undefined) inputs.push(opts.stdin)
+    if (cmd.includes('origin/main^{commit}'))
+      return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
     if (cmd[1] === 'diff') return { exitCode: 1, stdout: '', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { exec, calls }
+  return { exec, calls, inputs }
 }
 
 function fakeDriver(
@@ -165,6 +176,8 @@ describe('resolveConflict', () => {
       'origin',
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
+    const merge = calls.find((call) => call[1] === 'merge')
+    expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
     expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
   })
 
@@ -177,7 +190,6 @@ describe('resolveConflict', () => {
     cfg.watchers.prConflict.effort = 'high'
     cfg.watchers.prConflict.seat = 'conflict-seat'
     let startedWith: Config['harness']['implement'] | undefined
-    let reflogCalls = 0
     const { exec, calls } = fake((c) => {
       if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
@@ -188,12 +200,7 @@ describe('resolveConflict', () => {
         return ok('src/a.txt\n')
       }
       if (c.includes('reflog')) {
-        reflogCalls++
-        return ok(
-          reflogCalls === 1
-            ? 'aaa checkout: initial\n'
-            : 'bbb reset: unexpected\naaa checkout: initial\n',
-        )
+        return ok('aaa checkout: initial\n')
       }
       return undefined
     })
@@ -232,7 +239,7 @@ describe('resolveConflict', () => {
     ])
     expect(driver.calls).toContain(7)
     expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
-    expect(bypassed).toEqual([['bbb reset: unexpected']])
+    expect(bypassed).toEqual([])
   })
 
   test('blocks an empty merge diff regardless of the agent verdict', async () => {
@@ -268,9 +275,12 @@ describe('resolveConflict', () => {
     })
 
     expect(result.ok).toBe(false)
+    expect(result.contained).toBe(true)
     expect(result.message).toContain('skipped the empty merge push')
     expect(result.verdict?.verdict).toBe('CLOSE TASK')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+    // Against the commit that was merged: origin/main may have moved during the agent run.
+    expect(calls).toContainEqual(['git', 'diff', '--quiet', 'base-oid', 'HEAD'])
   })
 
   test('pushes a real merge even when the agent verdict is not resolved', async () => {
@@ -306,7 +316,8 @@ describe('resolveConflict', () => {
   test('re-dispatches unresolved paths until the agent resolves them, then the runner commits', async () => {
     let diffPass = 0
     let launches = 0
-    const { exec, calls } = fake((c) => {
+    const started: AgentStartOptions[] = []
+    const { exec, calls, inputs } = fake((c) => {
       if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
@@ -317,23 +328,33 @@ describe('resolveConflict', () => {
       if (c.includes('reflog')) return ok('same head\n')
       return undefined
     })
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'Do the thing', tracker: 'beads' })
     const result = await resolveConflict({
       repoRoot: '/repo',
       repoName: 'amagi',
       pr: pr(),
       config: config(),
       driver: fakeDriver(),
+      store,
       exec,
       makeHarnessFn: () => {
         launches++
-        return fakeHarness()
+        return fakeHarness({}, (opts) => started.push(opts))
       },
     })
 
     expect(result.ok).toBe(true)
     expect(launches).toBe(2)
     expect(result.iteration).toBe(2)
-    expect(calls).toContainEqual(['git', 'commit', '--no-edit'])
+    expect(calls).toContainEqual(['git', 'commit', '-F', '-'])
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]).toContain('[am-1] Do the thing')
+    expect(inputs[0]).toContain('Merge: main -> amagi/am-1-do-the-thing. Conflict #2')
+    expect(inputs[0]?.trim().split('\n').at(-1)).toMatch(/^Generated by amagi/)
+    expect(lintCommitMessage(inputs[0] ?? '')).toEqual([])
+    expect(started.every((opts) => opts.env?.AMAGI_WORKTREE === '/wt/amagi-pr-7')).toBe(true)
+    expect(started.every((opts) => opts.env?.AMAGI_REPO_ROOT === '/repo')).toBe(true)
   })
 
   test('reports a failed agent without pushing', async () => {
@@ -351,6 +372,44 @@ describe('resolveConflict', () => {
     expect(result.ok).toBe(false)
     expect(result.message).toContain('model overloaded')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('out of iterations, parks a pr_open task and leaves a task already off pr_open alone', async () => {
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'x', tracker: 'beads' })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('am-1', { type: 'task.state', from: null, to })
+    }
+    const capped = pr({ labels: ['amagi/iterations:3'] })
+    const run = () =>
+      resolveConflict({
+        repoRoot: '/repo',
+        repoName: 'amagi',
+        pr: capped,
+        config: config(),
+        driver: fakeDriver(),
+        store,
+        exec: fake(conflicted).exec,
+        makeHarnessFn: () => fakeHarness(),
+      })
+
+    const first = await run()
+    expect(first.ok).toBe(false)
+    expect(first.message).toContain('parked the task at needs_human')
+    expect(store.task('am-1')?.state).toBe('needs_human')
+
+    unmergedReported = false
+    const again = await run()
+    expect(again.ok).toBe(false)
+    expect(again.message).toContain('unmerged paths remain after 3 dispatches')
+    expect(again.message).not.toContain('parked')
+    expect(again.message).not.toContain('illegal transition')
   })
 
   test('catches git failures and returns ok: false', async () => {

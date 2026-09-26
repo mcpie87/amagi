@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  Config,
+  expandWorkers,
   hasStaleMaxParallel,
   loadConfig,
   loadGlobalConfig,
   migrateFleet,
   newWorkerId,
+  reviewerHarnessConfig,
+  severityAtOrAbove,
   watcherHarnessConfig,
   workerSeat,
   writeConfig,
@@ -17,6 +21,7 @@ import {
 let home: string
 let repo: string
 const savedXdg = process.env.XDG_CONFIG_HOME
+const savedPath = process.env.PATH
 
 const writeGlobal = (toml: string) => {
   mkdirSync(join(home, 'amagi'), { recursive: true })
@@ -37,6 +42,8 @@ beforeEach(() => {
 afterEach(() => {
   if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
   else process.env.XDG_CONFIG_HOME = savedXdg
+  if (savedPath === undefined) delete process.env.PATH
+  else process.env.PATH = savedPath
   rmSync(home, { recursive: true, force: true })
   rmSync(repo, { recursive: true, force: true })
 })
@@ -48,11 +55,20 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
+    expect(config.review).toEqual({
+      enabled: false,
+      maxRounds: 3,
+      threshold: 'major',
+      finalPass: false,
+      maxTokens: 2_000_000,
+      lenses: [],
+    })
     expect(config.worker).toEqual([])
     expect(config.watchers).toMatchObject({
       mention: { enabled: true },
       prConflict: { enabled: true },
       stall: { enabled: true },
+      epicClose: { enabled: true },
     })
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
@@ -60,6 +76,7 @@ describe('loadConfig', () => {
     expect(config.loop.prCheckIntervalSec).toBe(300)
     expect(config.loop.mergeTreeCheck).toBe(false)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
+    expect(config.loop.epicCloseIntervalSec).toBe(300)
     expect(config.loop.stallTimeoutSec).toBe(3600)
     expect(config.loop.contextWarnTokens).toBe(160_000)
     expect(config.loop.contextMaxTokens).toBe(200_000)
@@ -125,6 +142,40 @@ describe('loadConfig', () => {
     expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
   })
 
+  test('repo review harness settings override the fleet settings', () => {
+    writeGlobal('[review.harness]\nkind = "codex"\nmodel = "global-review"\n')
+    writeRepo('[review.harness]\nkind = "opencode"\nmodel = "repo-review"\n')
+    expect(loadConfig(repo).config.review.harness).toMatchObject({
+      kind: 'opencode',
+      model: 'repo-review',
+    })
+  })
+
+  test('defaults the reviewer to an installed kind different from implement', () => {
+    const binDir = join(home, 'bin')
+    mkdirSync(binDir)
+    writeFileSync(join(binDir, 'codex'), '')
+    chmodSync(join(binDir, 'codex'), 0o755)
+    process.env.PATH = binDir
+    const config = loadConfig(repo).config
+    expect(reviewerHarnessConfig(config)).toMatchObject({ kind: 'codex' })
+    writeRepo('[review]\nenabled = true\n')
+    expect(loadConfig(repo).config.review.enabled).toBe(true)
+  })
+
+  test('enabled review requires an explicit or installed reviewer harness', () => {
+    process.env.PATH = home
+    writeRepo('[review]\nenabled = true\n')
+    expect(() => loadConfig(repo)).toThrow(/no reviewer harness is configured or installed/)
+  })
+
+  test('severity threshold comparison follows the schema ordering', () => {
+    expect(severityAtOrAbove('blocker', 'major')).toBe(true)
+    expect(severityAtOrAbove('major', 'major')).toBe(true)
+    expect(severityAtOrAbove('minor', 'major')).toBe(false)
+    expect(severityAtOrAbove('nit', 'blocker')).toBe(false)
+  })
+
   test('accepts named harness definitions for the interactive picker', () => {
     writeRepo(
       '[harness.definitions.fast]\nkind = "opencode"\npermissions = "bypass"\nmodel = "local/x"\n',
@@ -138,12 +189,12 @@ describe('loadConfig', () => {
     expect(config.harness.implement.kind).toBe('claude')
   })
 
-  test('loads workers with stable identity and defaults enabled', () => {
+  test('loads workers with stable identity and defaults them disabled', () => {
     writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
     expect(loadConfig(repo).config.worker[0]).toMatchObject({
       id: 'w-fast',
       name: 'Fast',
-      enabled: true,
+      enabled: false,
     })
   })
 
@@ -182,6 +233,17 @@ describe('loadConfig', () => {
     })
   })
 
+  test('a watcher on a different harness kind does not inherit the implement bin or args', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "codex"\nbin = "codex-unconfined"\nmodel = "gpt-x"\npermissions = "bypass"\nextraArgs = ["--foo"]\n\n' +
+        '[watchers.prConflict]\nkind = "claude"\n',
+    )
+    const harness = watcherHarnessConfig(loadConfig(repo).config, 'prConflict')
+    expect(harness).toMatchObject({ kind: 'claude', permissions: 'bypass', extraArgs: [] })
+    expect(harness.bin).toBeUndefined()
+    expect(harness.model).toBeUndefined()
+  })
+
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
     expect(() => loadConfig(repo)).toThrow(/config\.toml/)
@@ -199,9 +261,13 @@ describe('loadConfig', () => {
   })
 
   test('stall watcher keys are overridable', () => {
-    writeRepo('[loop]\nstallWatchIntervalSec = 60\nstallTimeoutSec = 7200\n')
+    writeRepo(
+      '[loop]\nstallWatchIntervalSec = 60\nepicCloseIntervalSec = 90\nstallTimeoutSec = 7200\n\n[watchers.epicClose]\nenabled = false\n',
+    )
     const config = loadConfig(repo).config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
+    expect(config.loop.epicCloseIntervalSec).toBe(90)
+    expect(config.watchers.epicClose.enabled).toBe(false)
     expect(config.loop.stallTimeoutSec).toBe(7200)
   })
 
@@ -258,6 +324,55 @@ describe('writeConfig', () => {
 })
 
 describe('worker fleet', () => {
+  test('defaults a worker profile to one instance and one seat', () => {
+    const config = Config.parse({
+      worker: [{ id: 'claude', name: 'Claude', kind: 'claude', enabled: true }],
+    })
+
+    expect(config.worker[0]).toMatchObject({ count: 1, seatCount: 1 })
+    expect(expandWorkers(config.worker).map(({ id, name }) => ({ id, name }))).toEqual([
+      { id: 'claude', name: 'Claude' },
+    ])
+  })
+
+  test('expands worker replicas across distinct counted seat identities', () => {
+    const config = Config.parse({
+      worker: [
+        {
+          id: 'claude',
+          name: 'Claude',
+          kind: 'claude',
+          seat: 'subscription',
+          count: 3,
+          seatCount: 3,
+          enabled: true,
+        },
+      ],
+    })
+
+    expect(
+      expandWorkers(config.worker).map(({ id, name, seat, count, seatCount }) => ({
+        id,
+        name,
+        seat,
+        count,
+        seatCount,
+      })),
+    ).toEqual([
+      { id: 'claude-1', name: 'Claude 1', seat: 'subscription-1', count: 1, seatCount: 1 },
+      { id: 'claude-2', name: 'Claude 2', seat: 'subscription-2', count: 1, seatCount: 1 },
+      { id: 'claude-3', name: 'Claude 3', seat: 'subscription-3', count: 1, seatCount: 1 },
+    ])
+  })
+
+  test('rejects more seat instances than worker instances', () => {
+    expect(() =>
+      Config.parse({
+        worker: [{ id: 'claude', name: 'Claude', kind: 'claude', count: 2, seatCount: 3 }],
+      }),
+    ).toThrow(/seatCount must not exceed count/)
+  })
+
   const fleet = [
     {
       id: 'w-aaaaaa',
@@ -274,9 +389,11 @@ describe('worker fleet', () => {
     writeGlobal('[server]\nport = 9000\n')
     writeGlobalConfig({ worker: fleet })
     const config = loadGlobalConfig()
-    expect(config.worker).toEqual([...fleet])
+    expect(config.worker).toEqual(fleet.map((worker) => ({ ...worker, count: 1, seatCount: 1 })))
     expect(config.server.port).toBe(9000)
-    expect(loadConfig(repo).config.worker).toEqual([...fleet])
+    expect(loadConfig(repo).config.worker).toEqual(
+      fleet.map((worker) => ({ ...worker, count: 1, seatCount: 1 })),
+    )
   })
 
   test('seat defaults to the harness kind', () => {
@@ -322,7 +439,9 @@ describe('worker fleet', () => {
       ['Claude 1', 'claude', 'claude', 'claude-sonnet-5'],
     ])
     expect(new Set(created.map((w) => w.id)).size).toBe(1)
-    expect(loadGlobalConfig().worker).toEqual(created)
+    expect(loadGlobalConfig().worker).toEqual(
+      created.map((worker) => ({ ...worker, count: 1, seatCount: 1 })),
+    )
     const written = readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')
     expect(migrateFleet()).toEqual([])
     expect(readFileSync(join(home, 'amagi', 'config.toml'), 'utf8')).toBe(written)

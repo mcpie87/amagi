@@ -1,7 +1,8 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { errMsg, loadLiveRuns } from '@amagi/core'
+import { BeadsTracker, errMsg, loadLiveRuns } from '@amagi/core'
 import { createApp } from './app.ts'
+import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
 import { type PrConflictWatcher, startPrConflictWatcher } from './pr-conflict-watcher.ts'
@@ -18,11 +19,14 @@ export type ServeOptions = {
   mentionWatchIntervalMs?: number
   prConflictWatchIntervalMs?: number
   stallWatchIntervalMs?: number
+  epicCloseIntervalMs?: number
   /** Poller supervisor interval, overridable for tests. */
   repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
-  /** When present, the launch/stop runner endpoints are live. */
+  /** Builds a runner from each registered workspace, including repos added live. */
+  runnerFactory?: (workspace: Workspace) => RunServiceApi
+  /** Legacy single-runner injection for server tests and embedders. */
   runner?: RunServiceApi | undefined
   /** The repo key the runner is bound to; its settings apply live to it. */
   runnerRepo?: string | undefined
@@ -48,9 +52,9 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
 }
 
 /**
- * Gate and PR pollers are per repo, plus an agent-mention watcher wherever a
- * forge driver exists and a stall watcher (recovers tasks whose worker stopped
- * heartbeating). A supervisor checks the registry every few seconds so a repo
+ * Gate and PR pollers are per repo, plus agent-mention and PR-conflict
+ * watchers where a forge driver exists, and stall and epic-close watchers as
+ * configured. A supervisor checks the registry every few seconds so a repo
  * added (or removed) after startup gets (or loses) its pollers without
  * restarting the server.
  */
@@ -62,6 +66,7 @@ function startRepoPollers(
     mentionIntervalMs,
     prConflictIntervalMs,
     stallIntervalMs,
+    epicCloseIntervalMs,
     runner,
     runnerRepo,
     supervisorIntervalMs,
@@ -71,6 +76,7 @@ function startRepoPollers(
     mentionIntervalMs?: number | undefined
     prConflictIntervalMs?: number | undefined
     stallIntervalMs?: number | undefined
+    epicCloseIntervalMs?: number | undefined
     runner?: { setAutoQueue(enabled: boolean): void }
     runnerRepo?: string
     supervisorIntervalMs?: number
@@ -84,6 +90,7 @@ function startRepoPollers(
       mention: MentionWatcher | null
       conflict: PrConflictWatcher | null
       stall: StallWatcher | null
+      epicClose: EpicClosePoller | null
     }
   >()
   let autoQueueAllowed: boolean | undefined
@@ -109,6 +116,7 @@ function startRepoPollers(
       p?.mention?.stop()
       p?.conflict?.stop()
       p?.stall?.stop()
+      p?.epicClose?.stop()
       pollers.delete(key)
     }
     for (const key of keys) {
@@ -124,6 +132,8 @@ function startRepoPollers(
       const mentionEnabled = forge !== null && ws.config.watchers.mention.enabled
       const conflictEnabled = forge !== null && ws.config.watchers.prConflict.enabled
       const stallEnabled = ws.config.watchers.stall.enabled
+      const epicCloseEnabled =
+        ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled
       const startMention = () =>
         forge === null
           ? null
@@ -168,6 +178,12 @@ function startRepoPollers(
               }
             : {}),
         })
+      const startEpicClose = () =>
+        startEpicClosePoller({
+          repo: ws.key,
+          tracker: ws.tracker,
+          intervalMs: epicCloseIntervalMs ?? ws.config.loop.epicCloseIntervalSec * 1000,
+        })
       const existing = pollers.get(key)
       if (existing === undefined) {
         pollers.set(key, {
@@ -190,6 +206,7 @@ function startRepoPollers(
           mention: mentionEnabled ? startMention() : null,
           conflict: conflictEnabled ? startConflict() : null,
           stall: stallEnabled ? startStall() : null,
+          epicClose: epicCloseEnabled ? startEpicClose() : null,
         })
         continue
       }
@@ -207,6 +224,12 @@ function startRepoPollers(
       else if (!stallEnabled && existing.stall !== null) {
         existing.stall.stop()
         existing.stall = null
+      }
+      if (epicCloseEnabled && existing.epicClose === null) {
+        existing.epicClose = startEpicClose()
+      } else if (!epicCloseEnabled && existing.epicClose !== null) {
+        existing.epicClose.stop()
+        existing.epicClose = null
       }
     }
   }
@@ -229,6 +252,7 @@ function startRepoPollers(
         p.mention?.stop()
         p.conflict?.stop()
         p.stall?.stop()
+        p.epicClose?.stop()
       }
       pollers.clear()
     },
@@ -259,18 +283,65 @@ export function serve({
   mentionWatchIntervalMs,
   prConflictWatchIntervalMs,
   stallWatchIntervalMs,
+  epicCloseIntervalMs,
   repoPollerSupervisorIntervalMs,
   staticDir,
   runner,
   runnerRepo,
+  runnerFactory,
 }: ServeOptions) {
+  const runners = new Map<string, RunServiceApi>()
+  const runnerAutoQueue = new Map<string, boolean>()
+  const syncRunners = () => {
+    const entries = workspaces.list()
+    const keys = new Set(entries.map((entry) => entry.key))
+    for (const [key, service] of runners) {
+      if (keys.has(key)) continue
+      service.dispose?.()
+      runners.delete(key)
+      runnerAutoQueue.delete(key)
+    }
+    for (const entry of entries) {
+      if (runners.has(entry.key)) {
+        const workspace = workspaces.get(entry.key)
+        if (workspace !== null) {
+          const enabled = workspace.config.loop.autoQueue && entry.workers
+          if (runnerAutoQueue.get(entry.key) !== enabled) {
+            runners.get(entry.key)?.setAutoQueue(enabled)
+            runnerAutoQueue.set(entry.key, enabled)
+          }
+        }
+        continue
+      }
+      if (runnerFactory === undefined) continue
+      try {
+        const workspace = workspaces.get(entry.key)
+        if (workspace !== null) {
+          const service = runnerFactory(workspace)
+          runners.set(entry.key, service)
+          runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
+        }
+      } catch (err) {
+        console.warn(`runner for ${entry.key} unavailable: ${errMsg(err)}`)
+      }
+    }
+  }
+  syncRunners()
+  const runnerSupervisor = runnerFactory === undefined ? null : setInterval(syncRunners, 1000)
+  const runnerForRepo = (repo: string) => {
+    const service = runners.get(repo)
+    if (service !== undefined) return service
+    if (runnerRepo !== undefined) return runnerRepo === repo ? runner : undefined
+    return workspaces.list().length === 1 ? runner : undefined
+  }
   const repoPollers = startRepoPollers(workspaces, {
     gateIntervalMs: gatePollIntervalMs,
     prIntervalMs: prPollIntervalMs,
     mentionIntervalMs: mentionWatchIntervalMs,
     prConflictIntervalMs: prConflictWatchIntervalMs,
     stallIntervalMs: stallWatchIntervalMs,
-    ...(runner === undefined ? {} : { runner }),
+    epicCloseIntervalMs,
+    ...(runnerFactory === undefined && runner !== undefined ? { runner } : {}),
     ...(runnerRepo === undefined ? {} : { runnerRepo }),
     ...(repoPollerSupervisorIntervalMs === undefined
       ? {}
@@ -281,6 +352,8 @@ export function serve({
     notify,
     runner,
     runnerRepo,
+    runnerForRepo,
+    syncRunners,
     workers: repoPollers.workers,
     liveRuns: () => loadLiveRuns(),
   })
@@ -300,7 +373,10 @@ export function serve({
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
       repoPollers.stop()
-      runner?.dispose?.()
+      if (runnerSupervisor !== null) clearInterval(runnerSupervisor)
+      for (const service of runners.values()) service.dispose?.()
+      runners.clear()
+      if (runnerFactory === undefined) runner?.dispose?.()
       return server.stop(closeActiveConnections)
     },
   }

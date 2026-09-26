@@ -130,6 +130,7 @@ const start = (
     config: config(),
     driver,
     tracker: {} as Tracker,
+    store: new Store(openDatabase(':memory:')),
     intervalMs: 10,
     exec,
     makeHarnessFn: () => fakeHarness(),
@@ -143,10 +144,11 @@ const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): numb
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
 test('scans every open PR each tick and responds to each unhandled mention exactly once', async () => {
+  const store = new Store(openDatabase(':memory:'))
   const driver = new FakePr()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
   driver.prs = [prInfo()]
-  const w = start(driver)
+  const w = start(driver, noopExec, { store })
 
   await Bun.sleep(60)
 
@@ -163,6 +165,35 @@ test('scans every open PR each tick and responds to each unhandled mention exact
   expect(activity.failures).toBe(0)
   expect(activity.status).toBe('active')
   expect(activity.nextRunAt).toBeGreaterThan(activity.lastRunAt)
+  const runs = store.watcherRuns({ repo: 'amagi', name: 'mention-watcher', limit: 20 })
+  const run = runs.find((entry) =>
+    entry.actions.some((action) => action.result === 'classified as ambiguous'),
+  )
+  expect(run?.ok).toBe(true)
+  expect(run?.actions.some((action) => action.result === 'reading comments')).toBe(true)
+  expect(
+    run?.actions.some((action) => action.result === 'scanned 1 comment(s), found 1 new mention(s)'),
+  ).toBe(true)
+  expect(run?.actions.some((action) => action.result.includes('classifying (phase'))).toBe(true)
+  expect(run?.actions.some((action) => action.result === 'classified as ambiguous')).toBe(true)
+  expect(run?.actions.some((action) => action.result.includes('asking clarification (phase'))).toBe(
+    true,
+  )
+  expect(run?.actions.some((action) => action.result === 'clarification posted')).toBe(true)
+})
+
+test('publishes the active scan state while a watcher run is still waiting on the forge', async () => {
+  const driver = new FakePr()
+  let release: ((prs: PrInfo[]) => void) | undefined
+  driver.listOpenPrs = () => new Promise((resolve) => (release = resolve))
+  const w = start(driver)
+
+  await Bun.sleep(1)
+  expect(w.activity().status).toBe('active')
+  expect(w.activity().detail).toBe('scanning open PRs')
+
+  release?.([prInfo()])
+  await Bun.sleep(20)
 })
 
 test('a new mention is noticed even when the PR updatedAt does not change', async () => {
@@ -231,7 +262,8 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru hi' }]
   driver.prs = [prInfo()]
   driver.failPost = 10
-  const w = start(driver)
+  const store = new Store(openDatabase(':memory:'))
+  const w = start(driver, noopExec, { store })
 
   await Bun.sleep(60)
   // Every attempt fails: nothing posted, nothing recorded as handled.
@@ -244,6 +276,12 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   await Bun.sleep(40)
   expect(driver.posted).toHaveLength(1)
   expect(counter(w, 'responded')).toBe(1)
+  const runs = store.watcherRuns({ repo: 'amagi', name: 'mention-watcher', limit: 20 })
+  expect(
+    runs.some((run) =>
+      run.actions.some((action) => action.result.includes('ambiguous failed: post failed')),
+    ),
+  ).toBe(true)
 })
 
 test('a tick that throws is counted as a failure and keeps run totals consistent', async () => {
@@ -271,7 +309,7 @@ test('records classification outcomes as mention.classified events when a store 
   await Bun.sleep(60)
 
   expect(driver.posted).toHaveLength(1)
-  const events = store.events()
+  const events = store.events().filter((event) => event.type === 'mention.classified')
   expect(events).toHaveLength(1)
   expect(events[0]).toMatchObject({
     taskId: null,

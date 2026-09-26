@@ -12,12 +12,22 @@ import {
   type DashboardState,
   runHealth,
   runHealthNearLimit,
+  watcherRunsFor,
 } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge, PILL } from '../badges.tsx'
-import { fmtBytes, fmtCpu, fmtElapsed, fmtInterval, fmtLastRun, fmtUntil } from '../format.ts'
+import { useDateFormatPref } from '../date-format.ts'
+import {
+  fmtBytes,
+  fmtCpu,
+  fmtDateTime,
+  fmtElapsed,
+  fmtInterval,
+  fmtLastRun,
+  fmtUntil,
+} from '../format.ts'
 import { useDashboard, useRunner } from '../store.tsx'
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
@@ -157,16 +167,39 @@ function WatcherDetailDialog({
   workers: WorkerActivity[]
   onClose: () => void
 }) {
+  const { state } = useDashboard()
+  const dateFormat = useDateFormatPref()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const open = selected !== null
+  const [activeTab, setActiveTab] = useState<'history' | 'log'>('history')
   useEffect(() => {
     const dialog = dialogRef.current
     if (dialog === null) return
-    if (open) dialog.showModal()
-    else if (dialog.open) dialog.close()
+    if (open) {
+      setActiveTab('history')
+      dialog.showModal()
+    } else if (dialog.open) dialog.close()
   }, [open])
   if (selected === null) return null
   const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
+  const history = watcher === null ? [] : watcherRunsFor(state, watcher.repo, watcher.name)
+  const historyGroups: (typeof history)[] = []
+  for (const run of history) {
+    const previous = historyGroups.at(-1)
+    if (run.actions.length === 0 && run.error === null) {
+      if (previous?.every((item) => item.actions.length === 0 && item.error === null)) {
+        previous.push(run)
+      } else {
+        historyGroups.push([run])
+      }
+    } else {
+      historyGroups.push([run])
+    }
+  }
+  const liveLog = history
+    .flatMap((run) => run.log)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 100)
   const statusPill =
     watcher === null
       ? PILL
@@ -191,7 +224,7 @@ function WatcherDetailDialog({
       {watcher === null ? (
         <p className="px-4 py-6 text-sm text-fg-faint">watcher no longer running</p>
       ) : (
-        <div className="p-4">
+        <div className="watcher-dialog-content p-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className={`${PILL} bg-teal-soft text-teal-ink ring-teal-edge`}>
               {watcher.name}
@@ -220,7 +253,7 @@ function WatcherDetailDialog({
               </dd>
               {watcher.lastRunAt > 0 && (
                 <dd className="text-xs tabular-nums text-fg-faint">
-                  {new Date(watcher.lastRunAt).toLocaleString()}
+                  {fmtDateTime(watcher.lastRunAt, dateFormat)}
                 </dd>
               )}
             </div>
@@ -258,6 +291,148 @@ function WatcherDetailDialog({
               </div>
             </div>
           )}
+          <div className="detail-tabs mt-5 flex gap-1 border-b border-line">
+            <button
+              type="button"
+              aria-pressed={activeTab === 'history'}
+              onClick={() => setActiveTab('history')}
+              className={`rounded-t px-3 py-1.5 text-sm ${
+                activeTab === 'history'
+                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
+              }`}
+            >
+              Run history
+            </button>
+            <button
+              type="button"
+              aria-pressed={activeTab === 'log'}
+              onClick={() => setActiveTab('log')}
+              className={`rounded-t px-3 py-1.5 text-sm ${
+                activeTab === 'log'
+                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
+              }`}
+            >
+              Live log
+            </button>
+          </div>
+          {activeTab === 'history' && (
+            <div className="border-t border-line pt-4">
+              {history.length === 0 ? (
+                <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
+              ) : (
+                <div className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-1">
+                  {historyGroups.map((group) => {
+                    if (group.length > 1) {
+                      const newest = group[0]
+                      const oldest = group[group.length - 1]
+                      if (newest === undefined || oldest === undefined) return null
+                      return (
+                        <div
+                          key={`noop-${newest.runId}-${oldest.runId}`}
+                          className="rounded border border-line bg-surface/60 px-3 py-2 text-xs text-fg"
+                        >
+                          <span className="tabular-nums">
+                            {fmtDateTime(newest.startedAt, dateFormat)} -{' '}
+                            {fmtDateTime(oldest.startedAt, dateFormat)}
+                          </span>
+                          <span className="ml-2 text-fg-faint">{group.length} runs, 0 actions</span>
+                        </div>
+                      )
+                    }
+                    const run = group[0]
+                    if (run === undefined) return null
+                    return (
+                      <details
+                        key={run.runId}
+                        className="rounded border border-line bg-surface/60 px-3 py-2"
+                      >
+                        <summary className="cursor-pointer text-xs text-fg">
+                          <span className="tabular-nums">
+                            {fmtDateTime(run.startedAt, dateFormat)}
+                          </span>
+                          <span
+                            className={`ml-2 ${run.ok === false ? 'text-red-ink' : 'text-fg-muted'}`}
+                          >
+                            {run.endedAt === null ? 'running' : run.ok ? 'completed' : 'failed'}
+                          </span>
+                          <span className="ml-2 tabular-nums text-fg-faint">
+                            {fmtElapsed((run.endedAt ?? Date.now()) - run.startedAt)}
+                          </span>
+                          <span className="ml-2 text-fg-faint">{run.actions.length} actions</span>
+                        </summary>
+                        {run.error !== null && (
+                          <p className="mt-2 break-words text-xs text-red-ink">{run.error}</p>
+                        )}
+                        {run.actions.length === 0 ? (
+                          <p className="mt-2 text-xs text-fg-faint">no actions recorded</p>
+                        ) : (
+                          <ul className="mt-2 space-y-1 text-xs">
+                            {run.actions.map((action, index) => (
+                              <li
+                                key={`${run.runId}-${index}`}
+                                className={
+                                  action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'
+                                }
+                              >
+                                {action.targetType === 'task' ? (
+                                  <Link
+                                    to="/tasks/$id"
+                                    params={{ id: action.targetId }}
+                                    className="text-blue-ink hover:underline"
+                                  >
+                                    task {action.targetId}
+                                  </Link>
+                                ) : action.url !== undefined ? (
+                                  <a
+                                    href={action.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-blue-ink hover:underline"
+                                  >
+                                    {action.targetType === 'mention'
+                                      ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                      : `PR #${action.prNumber ?? action.targetId}`}
+                                  </a>
+                                ) : (
+                                  <span>
+                                    {action.targetType === 'mention'
+                                      ? `mention ${action.targetId} on PR #${action.prNumber ?? '?'}`
+                                      : `${action.targetType} ${action.targetId}`}
+                                  </span>
+                                )}
+                                {': '}
+                                {action.result}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </details>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {activeTab === 'log' && (
+            <div className="mt-4 border-t border-line pt-4">
+              {liveLog.length === 0 ? (
+                <p className="mt-2 text-xs text-fg-faint">no activity recorded yet</p>
+              ) : (
+                <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px]">
+                  {liveLog.map((entry, index) => (
+                    <li
+                      key={`${entry.ts}-${index}`}
+                      className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
+                    >
+                      {fmtDateTime(entry.ts, dateFormat)} {entry.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           <div className="mt-4 flex justify-end">
             <button
               type="button"
@@ -275,20 +450,18 @@ function WatcherDetailDialog({
 
 /**
  * One row per configured worker plus any ad-hoc foreground run. Worker profile
- * and runtime data both come from /api/runner; the summary strip aggregates
- * resource use over live agent trees.
+ * and runtime data both come from the selected repo's runner status; the
+ * summary strip aggregates resource use over live agent trees.
  */
 function AutoQueueToggle() {
   const { status } = useRunner()
-  const { repos, selected } = useDashboard()
+  const { selected } = useDashboard()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fromStatus = status?.autoQueue ?? false
   const [on, setOn] = useState(fromStatus)
   useEffect(() => setOn(fromStatus), [fromStatus])
-  // The toggle config lives with the repo the runner serves; address that repo
-  // so it live-applies even when another repo is selected in the dashboard.
-  const runnerRepo = repos?.find((r) => r.name === status?.name)?.key ?? selected
+  const runnerRepo = selected
 
   const toggle = async () => {
     if (runnerRepo === null || busy) return
@@ -366,7 +539,7 @@ export function WorkersPanel() {
     <section className="mb-6">
       <div className="mb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
-          Workers ({running.length}/{status.capacity})
+          Workers ({status.busySeats}/{status.totalSeats} seats)
         </h2>
         <AutoQueueToggle />
       </div>

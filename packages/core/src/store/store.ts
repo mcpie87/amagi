@@ -1,9 +1,18 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite'
-import type { CheckResult, EventBody, MergeStatus, StoredEvent, TaskState } from '../events.ts'
+import type {
+  CheckResult,
+  EventBody,
+  Finding,
+  MergeStatus,
+  ReviewStopReason,
+  StoredEvent,
+  TaskState,
+} from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
   type ProjectedTask,
+  type ProjectedWatcherRun,
   type Projection,
   project,
 } from '../project.ts'
@@ -31,6 +40,9 @@ type RawTask = {
   checks: string | null
   checks_ok: number | null
   attempt: number
+  review_round: number
+  review_findings: string | null
+  review_stop_reason: string | null
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -69,6 +81,9 @@ const toTask = (r: RawTask): ProjectedTask => ({
       : { sha: r.last_commit_sha, subject: r.last_commit_subject ?? '' },
   checks: r.checks === null ? null : (JSON.parse(r.checks) as CheckResult[]),
   checksOk: r.checks_ok === null ? null : r.checks_ok === 1,
+  reviewRound: r.review_round,
+  reviewFindings: r.review_findings === null ? null : (JSON.parse(r.review_findings) as Finding[]),
+  reviewStopReason: r.review_stop_reason as ReviewStopReason | null,
   attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -114,6 +129,9 @@ const taskRow = (t: ProjectedTask): Row => ({
   checks: t.checks === null ? null : JSON.stringify(t.checks),
   checks_ok: t.checksOk === null ? null : t.checksOk ? 1 : 0,
   attempt: t.attempt,
+  review_round: t.reviewRound,
+  review_findings: t.reviewFindings === null ? null : JSON.stringify(t.reviewFindings),
+  review_stop_reason: t.reviewStopReason,
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({
@@ -329,6 +347,42 @@ export class Store {
     }))
   }
 
+  /** Durable watcher history, newest runs first. Pages are cut on run boundaries. */
+  watcherRuns(opts: {
+    repo: string
+    name: string
+    limit: number
+    beforeSeq?: number
+  }): ProjectedWatcherRun[] {
+    const beforeSeq = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER
+    const rows = this.db
+      .query(
+        `select * from events where type in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')
+         and seq < ? order by seq`,
+      )
+      .all(beforeSeq) as { seq: number; ts: number; task_id: string | null; body: string }[]
+    let projection = emptyProjection()
+    for (const row of rows) {
+      const event = {
+        seq: row.seq,
+        ts: row.ts,
+        taskId: row.task_id,
+        ...(JSON.parse(row.body) as EventBody),
+      } as StoredEvent
+      if (
+        event.type === 'watcher.run.started' ||
+        event.type === 'watcher.action' ||
+        event.type === 'watcher.run.finished'
+      ) {
+        projection = project(projection, event)
+      }
+    }
+    return Object.values(projection.watcherRuns)
+      .filter((run) => run.repo === opts.repo && run.name === opts.name)
+      .sort((a, b) => b.startSeq - a.startSeq)
+      .slice(0, opts.limit)
+  }
+
   question(id: string): ProjectedQuestion | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null
@@ -358,6 +412,26 @@ export class Store {
       }
     }
     return null
+  }
+
+  /** Chat agents whose latest start has not been closed by an exit event. */
+  activeChatAgents(): { taskId: string; seat: string }[] {
+    return this.db
+      .query(
+        `select started.task_id as taskId, json_extract(started.body, '$.seat') as seat
+         from events started
+         where started.type = 'agent.started'
+           and json_extract(started.body, '$.role') = 'chat'
+           and json_extract(started.body, '$.seat') is not null
+           and not exists (
+             select 1 from events exited
+             where exited.task_id = started.task_id
+               and exited.type = 'agent.exited'
+               and json_extract(exited.body, '$.role') = 'chat'
+               and exited.seq > started.seq
+           )`,
+      )
+      .all() as { taskId: string; seat: string }[]
   }
 
   /**

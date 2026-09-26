@@ -1,4 +1,14 @@
 import {
+  accessSync,
+  constants as fsConstants,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+import {
   BeadsTracker,
   CAPABILITY_WORDS,
   ChatService,
@@ -6,6 +16,8 @@ import {
   canReset,
   classifyDifficulty,
   errMsg,
+  expandTilde,
+  type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
@@ -13,10 +25,12 @@ import {
   isTerminal,
   type LiveRun,
   loadGlobalConfig,
+  loadWatcherSeats,
   makeHarness,
   mergeLiveRuns,
   type Notifier,
   newWorkerId,
+  pidAlive,
   type Question,
   type RegistryEntry,
   Runner,
@@ -34,6 +48,8 @@ import {
   WorkerConfig,
   type Workspace,
   type Workspaces,
+  watcherHarnessConfig,
+  workerSeat,
   writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
@@ -51,20 +67,25 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  GitIdentityBody,
   GitRequestBody,
   IssueCreateBody,
   IssueUpdateBody,
   ParticipationBody,
   QuestionQuery,
+  RepoCommitParam,
   RepoParam,
   RepoQuestionParam,
   RepoRegisterBody,
   RepoTaskIdParam,
   RunBody,
+  SeatNamesUpdateBody,
   SettingsBody,
   StreamQuery,
   TaskIdParam,
   TaskListQuery,
+  WatcherHistoryParam,
+  WatcherHistoryQuery,
   WatcherParam,
   WatcherUpdateBody,
   WorkerCreateBody,
@@ -79,9 +100,13 @@ export type ServerDeps = {
   runner?: RunServiceApi | undefined
   /** The repo key the runner is bound to, so settings apply live only to it. */
   runnerRepo?: string | undefined
-  /** Background worker activity (e.g. mention watchers), merged into /api/runner. */
+  /** Per-repository server runner, including workspaces registered at runtime. */
+  runnerForRepo?: (repo: string) => RunServiceApi | undefined
+  /** Synchronizes runner instances after registry changes. */
+  syncRunners?: () => void
+  /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
-  /** Foreground CLI workers (`just run`) outside the server runner, merged into /api/runner. */
+  /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
@@ -104,6 +129,38 @@ function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities
   return tracker.capabilities[capability]
     ? null
     : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
+}
+
+function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
+  if (identity === null) return null
+  if (identity.mode === 'path') {
+    const file = resolve(expandTilde(identity.value))
+    try {
+      accessSync(file, fsConstants.R_OK)
+      if (!statSync(file).isFile()) throw new Error('not a file')
+    } catch {
+      throw new Error(`gitconfig file is not readable: ${file}`)
+    }
+    return { mode: 'path', value: file }
+  }
+
+  const dir = mkdtempSync(`${tmpdir()}/amagi-gitconfig-`)
+  const file = `${dir}/identity.gitconfig`
+  try {
+    writeFileSync(file, identity.value)
+    const result = Bun.spawnSync(['git', 'config', '--file', file, '--list'], {
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (result.exitCode !== 0) {
+      const message = result.stderr.toString().trim() || 'invalid gitconfig'
+      throw new Error(message)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  return identity
 }
 
 /** The beads tracker's issue browser and epic closer, or null for any other tracker. */
@@ -193,11 +250,21 @@ function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
   return ws
 }
 
+function gitOutput(root: string, args: string[]): string {
+  const result = Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' })
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.toString().trim() || 'git command failed')
+  }
+  return result.stdout.toString()
+}
+
 export function createApp({
   workspaces,
   notify = [],
   runner,
   runnerRepo,
+  runnerForRepo,
+  syncRunners,
   workers,
   liveRuns,
   chatHarnessFor,
@@ -213,23 +280,32 @@ export function createApp({
     }
     return chat
   }
-  // The legacy non-scoped stop route predates the repo registry; it targets the
-  // first registered workspace, which is the default repo for single-repo use.
-  const defaultStore = (): Store | null => {
-    const entry = workspaces.list()[0]
-    return entry === undefined ? null : (workspaces.get(entry.key)?.store ?? null)
+  const runnerFor = (repo: string): RunServiceApi | undefined => {
+    const service = runnerForRepo?.(repo)
+    if (service !== undefined) return service
+    if (runnerRepo !== undefined) return runnerRepo === repo ? runner : undefined
+    return workspaces.list().length === 1 ? runner : undefined
   }
-  // The global config on disk is the fleet's truth; the served runner reads its
-  // own workspace's copy, so a save has to replace that copy too to live-apply.
+  const servedRunners = (): { repo: string; service: RunServiceApi }[] =>
+    workspaces.list().flatMap((entry) => {
+      const service = runnerFor(entry.key)
+      return service === undefined ? [] : [{ repo: entry.key, service }]
+    })
+  // The global config on disk is the fleet's truth; each served runner reads its
+  // own workspace's copy, so a save has to replace those copies too to live-apply.
   const saveFleet = (fleet: WorkerConfig[]): void => {
     writeGlobalConfig({ worker: fleet })
-    if (runnerRepo !== undefined) resolveWorkspace(workspaces, runnerRepo).config.worker = fleet
+    for (const { repo, service } of servedRunners()) {
+      resolveWorkspace(workspaces, repo).config.worker = fleet
+      service.fleetChanged()
+    }
   }
   const fleetView = async () => {
-    const live = runner === undefined ? [] : ((await runner.status()).fleet ?? [])
+    const statuses = await Promise.all(servedRunners().map(({ service }) => service.status()))
+    const live = statuses.flatMap((status) => status.fleet ?? [])
     return loadGlobalConfig().worker.map((worker) => {
-      const state = live.find((w) => w.id === worker.id)
-      return { ...worker, on: state?.on ?? false, taskId: state?.taskId ?? null }
+      const state = live.find((w) => w.id === worker.id && w.taskId !== null)
+      return { ...worker, taskId: state?.taskId ?? null }
     })
   }
   return new Hono()
@@ -253,6 +329,156 @@ export function createApp({
         }
       }
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
+    .get('/api/seat-names', (c) => {
+      const global = loadGlobalConfig()
+      const seats = new Set(global.seats)
+      for (const worker of global.worker) if (worker.seat !== undefined) seats.add(worker.seat)
+      for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
+        if (watcher.seat !== undefined) seats.add(watcher.seat)
+      }
+      for (const harness of [
+        global.harness.implement,
+        global.harness.review,
+        global.harness.triage,
+        ...Object.values(global.harness.definitions),
+      ]) {
+        if (harness.seat !== undefined) seats.add(harness.seat)
+      }
+      return c.json({ seats: [...seats].sort() })
+    })
+
+    .put('/api/seat-names', valid('json', SeatNamesUpdateBody), (c) => {
+      const { seats, renames } = c.req.valid('json')
+      const global = loadGlobalConfig()
+      const current = new Set(global.seats)
+      for (const worker of global.worker) if (worker.seat !== undefined) current.add(worker.seat)
+      for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
+        if (watcher.seat !== undefined) current.add(watcher.seat)
+      }
+      for (const harness of [
+        global.harness.implement,
+        global.harness.review,
+        global.harness.triage,
+        ...Object.values(global.harness.definitions),
+      ]) {
+        if (harness.seat !== undefined) current.add(harness.seat)
+      }
+
+      const renameMap = new Map<string, string>()
+      for (const { from, to } of renames) {
+        if (!current.has(from)) return c.json({ error: `unknown seat ${from}` }, 400)
+        if (!seats.includes(to)) return c.json({ error: `renamed seat ${to} is not defined` }, 400)
+        if (from === to || renameMap.has(from)) {
+          return c.json({ error: `invalid rename for seat ${from}` }, 400)
+        }
+        renameMap.set(from, to)
+      }
+
+      const rewrite = (seat: string | undefined): string | undefined => {
+        if (seat === undefined) return undefined
+        const next = renameMap.get(seat) ?? seat
+        return seats.includes(next) ? next : undefined
+      }
+      const worker = global.worker.map((entry) => {
+        const seat = rewrite(entry.seat)
+        if (seat === entry.seat) return entry
+        const rest = { ...entry }
+        delete rest.seat
+        return seat === undefined ? rest : { ...rest, seat }
+      })
+      const watchers: Record<string, unknown> = {}
+      for (const kind of ['mention', 'prConflict'] as const) {
+        const original = global.watchers[kind]
+        const seat = rewrite(original.seat)
+        if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
+      }
+      const harness: Record<string, unknown> = {}
+      for (const name of ['implement', 'review', 'triage'] as const) {
+        const original = global.harness[name]
+        const seat = rewrite(original.seat)
+        if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }
+      }
+      const definitions: Record<string, { seat: string | null }> = {}
+      for (const [name, original] of Object.entries(global.harness.definitions)) {
+        const seat = rewrite(original.seat)
+        if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
+      }
+      if (Object.keys(definitions).length > 0) harness.definitions = definitions
+
+      writeGlobalConfig({
+        seats,
+        worker,
+        ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
+        ...(Object.keys(harness).length === 0 ? {} : { harness }),
+      })
+      return c.json({ seats: [...seats].sort() })
+    })
+
+    .get('/api/seats', async (c) => {
+      type Holder = { repo: string; taskId?: string; watcher?: string }
+      type Waiter = { repo: string; taskId: string }
+      const configured = new Set<string>()
+      const global = loadGlobalConfig()
+      for (const seat of global.seats) configured.add(seat)
+      for (const worker of global.worker) configured.add(workerSeat(worker))
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        configured.add(ws.config.harness.implement.seat ?? ws.config.harness.implement.kind)
+        for (const watcher of ['mention', 'prConflict'] as const) {
+          const harness = watcherHarnessConfig(ws.config, watcher)
+          configured.add(harness.seat ?? harness.kind)
+        }
+      }
+
+      const holders = new Map<string, Holder>()
+      const waiters = new Map<string, Waiter[]>()
+      const setHolder = (seat: string | undefined, holder: Holder): void => {
+        if (seat !== undefined && !holders.has(seat)) holders.set(seat, holder)
+      }
+      const addWaiter = (seat: string | undefined, waiter: Waiter): void => {
+        if (seat === undefined) return
+        const queue = waiters.get(seat) ?? []
+        if (!queue.some((entry) => entry.repo === waiter.repo && entry.taskId === waiter.taskId)) {
+          queue.push(waiter)
+        }
+        waiters.set(seat, queue)
+      }
+
+      for (const { repo, service } of servedRunners()) {
+        const status = await service.status()
+        for (const taskId of status.running) {
+          const task = status.tasks[taskId]
+          if (task?.waitingOnSeat) addWaiter(task.seat, { repo, taskId })
+          else setHolder(task?.seat, { repo, taskId })
+        }
+      }
+      for (const run of liveRuns?.() ?? []) {
+        if (!pidAlive(run.pid)) continue
+        if (run.waitingOnSeat) addWaiter(run.seat, { repo: run.repoKey, taskId: run.taskId })
+        else setHolder(run.seat, { repo: run.repoKey, taskId: run.taskId })
+      }
+      for (const watcher of loadWatcherSeats()) {
+        setHolder(watcher.seat, { repo: watcher.repo, watcher: watcher.watcher })
+      }
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        for (const chat of ws.store.activeChatAgents()) {
+          setHolder(chat.seat, { repo: entry.key, taskId: chat.taskId })
+        }
+      }
+
+      return c.json({
+        seats: [...configured].sort().map((seat) => ({
+          seat,
+          state: holders.has(seat) ? 'held' : 'free',
+          holder: holders.get(seat) ?? null,
+          waiters: waiters.get(seat) ?? [],
+        })),
+      })
     })
 
     .get('/api/repos', async (c) => {
@@ -288,6 +514,69 @@ export function createApp({
       return c.json(out)
     })
 
+    .get('/api/repos/:repo/git/log', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      try {
+        const output = gitOutput(ws.root, ['log', '-100', '--format=%H%x00%s%x00%ct%x1e'])
+        const commits = output
+          .split('\x1e')
+          .map((record) => record.trim())
+          .filter(Boolean)
+          .map((record) => {
+            const [hash, title, timestamp] = record.split('\x00')
+            return { hash, title, timestamp: Number(timestamp) }
+          })
+        return c.json({ commits })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
+
+    .get('/api/repos/:repo/git/commits/:hash', valid('param', RepoCommitParam), (c) => {
+      const { repo, hash } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      try {
+        const resolved = gitOutput(ws.root, ['rev-parse', '--verify', `${hash}^{commit}`]).trim()
+        const [title, timestamp, authorName, authorEmail, ...bodyParts] = gitOutput(ws.root, [
+          'show',
+          '-s',
+          '--format=%s%x00%ct%x00%an%x00%ae%x00%b',
+          resolved,
+        ]).split('\x00')
+        const parents = gitOutput(ws.root, ['show', '-s', '--format=%P', resolved]).trim()
+        const patch =
+          parents === ''
+            ? gitOutput(ws.root, [
+                'diff-tree',
+                '--root',
+                '--no-commit-id',
+                '-p',
+                '--no-renames',
+                '-r',
+                resolved,
+              ])
+            : gitOutput(ws.root, [
+                'diff',
+                '--no-ext-diff',
+                '--no-renames',
+                `${resolved}^`,
+                resolved,
+                '--',
+              ])
+        return c.json({
+          hash: resolved,
+          title,
+          timestamp: Number(timestamp),
+          author: authorEmail === '' ? authorName : `${authorName} <${authorEmail}>`,
+          message: bodyParts.join('\x00').trim(),
+          patch,
+        })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 404)
+      }
+    })
+
     .post('/api/repos', valid('json', RepoRegisterBody), async (c) => {
       const { path, key } = c.req.valid('json')
       let entry: RegistryEntry
@@ -296,6 +585,7 @@ export function createApp({
       } catch (err) {
         return c.json({ error: errMsg(err) }, 400)
       }
+      syncRunners?.()
       const ready = await workspaces.diagnose(entry)
       return c.json({ ...entry, ready }, 201)
     })
@@ -321,6 +611,22 @@ export function createApp({
       }
       return c.json(await beads.children(id))
     })
+
+    .post(
+      '/api/repos/:repo/issues/:id/close',
+      valid('param', RepoTaskIdParam),
+      valid('json', EpicCloseBody),
+      async (c) => {
+        const { repo, id } = c.req.valid('param')
+        const { reason } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        if (beadsTracker(ws) === null) {
+          return c.json({ error: `issue closure is unavailable for ${repo}` }, 501)
+        }
+        await ws.tracker.close(id, reason)
+        return c.json({ id, status: 'closed', reason })
+      },
+    )
 
     .post(
       '/api/repos/:repo/issues',
@@ -394,9 +700,11 @@ export function createApp({
     )
 
     .delete('/api/repos/:repo', valid('param', RepoParam), (c) => {
-      if (!workspaces.remove(c.req.valid('param').repo)) {
-        return c.json({ error: `unknown repository ${c.req.valid('param').repo}` }, 404)
+      const repo = c.req.valid('param').repo
+      if (!workspaces.remove(repo)) {
+        return c.json({ error: `unknown repository ${repo}` }, 404)
       }
+      syncRunners?.()
       return c.json({ ok: true })
     })
 
@@ -448,10 +756,10 @@ export function createApp({
       return c.json(await beads.eligibleEpics())
     })
 
-    .post('/api/tasks/:id/stop', valid('param', TaskIdParam), (c) => {
-      const store = defaultStore()
-      if (store === null) return c.json({ error: 'no repository registered' }, 409)
-      const { id } = c.req.valid('param')
+    .post('/api/repos/:repo/tasks/:id/stop', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const { store } = ws
       const task = store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
       if (isTerminal(task.state)) {
@@ -466,6 +774,7 @@ export function createApp({
         to: 'cancelled',
         reason: 'operator interrupt',
       })
+      void runnerFor(repo)?.stop(id)
       return c.json({ task: store.task(id) })
     })
 
@@ -538,6 +847,7 @@ export function createApp({
       if (!canReset(task.state, task.worktree !== null)) {
         return c.json({ error: `task ${id} cannot be reset from state ${task.state}` }, 409)
       }
+      const runner = runnerFor(repo)
       if (runner !== undefined) {
         try {
           await runner.stop(id)
@@ -559,6 +869,14 @@ export function createApp({
           return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
         }
       }
+      // The runner only claims ready issues, so a reset of a closed one would
+      // sit in claimed until the stall watcher parks it as closed remotely.
+      try {
+        const issue = await ws.tracker.get(id)
+        if (issue?.status === 'closed') await ws.tracker.setStatus(id, 'open')
+      } catch (err) {
+        return c.json({ error: `failed to reopen tracker issue: ${errMsg(err)}` }, 500)
+      }
       try {
         await ws.tracker.release(id)
       } catch (err) {
@@ -578,6 +896,7 @@ export function createApp({
       if (task.state !== 'retrying') {
         return c.json({ error: `task ${id} is not deferring a retry` }, 409)
       }
+      const runner = runnerFor(repo)
       if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
       const result = await runner.retryNow(id)
       if (!result.ok) return c.json({ error: result.error }, result.status)
@@ -730,6 +1049,7 @@ export function createApp({
         // parks a live run in cancelled, releasing the tracker claim, so the
         // close below retires it without racing the run. A task not running on
         // this server's runner (CLI run, another server) is simply not stopped.
+        const runner = runnerFor(repo)
         if (runner !== undefined) {
           try {
             await runner.stop(id)
@@ -790,19 +1110,42 @@ export function createApp({
       },
     )
 
-    .get('/api/runner', async (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      let status = await runner.status()
-      if (liveRuns !== undefined) status = await mergeLiveRuns(status, liveRuns())
+    .get('/api/repos/:repo/runner', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const service = runnerFor(repo)
+      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      let status = await service.status()
+      if (liveRuns !== undefined) {
+        status = await mergeLiveRuns(status, liveRuns(), undefined, repo)
+      }
       if (workers === undefined) return c.json(status)
-      return c.json({ ...status, workers: workers() })
+      return c.json({ ...status, workers: workers().filter((worker) => worker.repo === repo) })
     })
 
-    .get('/api/runner/options', (c) => {
-      if (runner === undefined || runnerRepo === undefined) {
+    .get(
+      '/api/repos/:repo/watchers/:name/runs',
+      valid('param', WatcherHistoryParam),
+      valid('query', WatcherHistoryQuery),
+      (c) => {
+        const { repo, name } = c.req.valid('param')
+        const { limit, beforeSeq } = c.req.valid('query')
+        const ws = resolveWorkspace(workspaces, repo)
+        const runs = ws.store.watcherRuns({
+          repo,
+          name,
+          limit,
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        })
+        return c.json({ runs, nextBeforeSeq: runs.at(-1)?.startSeq ?? null })
+      },
+    )
+
+    .get('/api/repos/:repo/runner/options', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (runnerFor(repo) === undefined) {
         return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
       }
-      const ws = resolveWorkspace(workspaces, runnerRepo)
       return c.json({
         harnesses: ws.config.worker.map((worker) => ({
           name: worker.name,
@@ -837,10 +1180,11 @@ export function createApp({
         writeConfig(ws.root, { loop: { autoQueue } })
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
-          if (runner !== undefined && runnerRepo === repo) {
+          const service = runnerFor(repo)
+          if (service !== undefined) {
             const workersEnabled =
               workspaces.list().find((entry) => entry.key === repo)?.workers === true
-            runner.setAutoQueue(autoQueue && workersEnabled)
+            service.setAutoQueue(autoQueue && workersEnabled)
           }
         }
         return c.json({ autoQueue: ws.config.loop.autoQueue })
@@ -861,8 +1205,9 @@ export function createApp({
         if (!workspaces.updateParticipation(repo, participation)) {
           return c.json({ error: `unknown repository ${repo}` }, 404)
         }
-        if (body.workers !== undefined && runner !== undefined && runnerRepo === repo) {
-          runner.setAutoQueue(
+        const service = runnerFor(repo)
+        if (body.workers !== undefined && service !== undefined) {
+          service.setAutoQueue(
             resolveWorkspace(workspaces, repo).config.loop.autoQueue && body.workers,
           )
         }
@@ -871,18 +1216,45 @@ export function createApp({
       },
     )
 
+    .get('/api/repos/:repo/git-identity', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const entry = workspaces.list().find((candidate) => candidate.key === repo)
+      if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
+      return c.json({ gitIdentity: entry.gitIdentity })
+    })
+
+    .patch(
+      '/api/repos/:repo/git-identity',
+      valid('param', RepoParam),
+      valid('json', GitIdentityBody),
+      (c) => {
+        const { repo } = c.req.valid('param')
+        let gitIdentity: GitIdentity | null
+        try {
+          gitIdentity = validateGitIdentity(c.req.valid('json'))
+        } catch (err) {
+          return c.json({ error: errMsg(err) }, 400)
+        }
+        if (!workspaces.updateGitIdentity(repo, gitIdentity)) {
+          return c.json({ error: `unknown repository ${repo}` }, 404)
+        }
+        return c.json({ gitIdentity })
+      },
+    )
+
     .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
 
     .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
       const fleet = loadGlobalConfig().worker
-      const worker = WorkerConfig.parse({
+      const parsed = WorkerConfig.safeParse({
         id: newWorkerId(fleet.map((w) => w.id)),
         ...c.req.valid('json'),
       })
-      const next = Config.shape.worker.safeParse([...fleet, worker])
+      if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
+      const next = Config.shape.worker.safeParse([...fleet, parsed.data])
       if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
       saveFleet(next.data)
-      return c.json({ ...worker, on: false, taskId: null }, 201)
+      return c.json({ ...parsed.data, taskId: null }, 201)
     })
 
     .patch(
@@ -891,13 +1263,10 @@ export function createApp({
       valid('json', WorkerUpdateBody),
       async (c) => {
         const { id } = c.req.valid('param')
-        const { on, ...fields } = c.req.valid('json')
+        const fields = c.req.valid('json')
         const fleet = loadGlobalConfig().worker
         const current = fleet.find((w) => w.id === id)
         if (current === undefined) return c.json({ error: `unknown worker ${id}` }, 404)
-        if (on !== undefined && runner === undefined) {
-          return c.json({ error: 'runner service is unavailable' }, 501)
-        }
         const merged: Record<string, unknown> = { ...current }
         for (const [key, value] of Object.entries(fields)) {
           if (value === null) delete merged[key]
@@ -906,13 +1275,9 @@ export function createApp({
         const parsed = WorkerConfig.safeParse(merged)
         if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
         const worker = parsed.data
-        if (on === true && !worker.enabled) {
-          return c.json({ error: `worker ${id} is disabled; enable it before turning it on` }, 409)
-        }
-        // setWorkerOn ignores a disabled worker, so it has to go off before the save disables it.
-        if (!worker.enabled) runner?.setWorkerOn(id, false)
-        if (Object.keys(fields).length > 0) saveFleet(fleet.map((w) => (w.id === id ? worker : w)))
-        if (on !== undefined) runner?.setWorkerOn(id, on)
+        const next = Config.shape.worker.safeParse(fleet.map((w) => (w.id === id ? worker : w)))
+        if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
+        saveFleet(next.data)
         return c.json((await fleetView()).find((w) => w.id === id))
       },
     )
@@ -954,23 +1319,25 @@ export function createApp({
       },
     )
 
-    .post('/api/runs', valid('json', RunBody), async (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+    .post('/api/repos/:repo/runs', valid('param', RepoParam), valid('json', RunBody), async (c) => {
+      const { repo } = c.req.valid('param')
+      const service = runnerFor(repo)
+      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
       const { taskId, workerId, model, effort } = c.req.valid('json')
-      const opts = {
+      const result = await service.start(taskId, {
         ...(workerId === undefined ? {} : { workerId }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
-      }
-      const result = await runner.start(taskId, opts)
+      })
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId }, 201)
     })
 
-    .post('/api/runs/:id/stop', valid('param', TaskIdParam), async (c) => {
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { id } = c.req.valid('param')
-      const result = await runner.stop(id)
+    .post('/api/repos/:repo/runs/:id/stop', valid('param', RepoTaskIdParam), async (c) => {
+      const { repo, id } = c.req.valid('param')
+      const service = runnerFor(repo)
+      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
+      const result = await service.stop(id)
       if (!result.ok) return c.json({ error: result.error }, result.status)
       return c.json({ taskId: result.taskId })
     })
@@ -1158,11 +1525,12 @@ export function createApp({
       valid('json', RunBody),
       async (c) => {
         const { repo } = c.req.valid('param')
-        if (runner === undefined || runnerRepo !== repo) {
+        const service = runnerFor(repo)
+        if (service === undefined) {
           return c.json({ error: 'runner service is unavailable for this repository' }, 501)
         }
         const { taskId, workerId, model, effort } = c.req.valid('json')
-        const result = await runner.start(taskId, {
+        const result = await service.start(taskId, {
           ...(workerId === undefined ? {} : { workerId }),
           ...(model === undefined ? {} : { model }),
           ...(effort === undefined ? {} : { effort }),

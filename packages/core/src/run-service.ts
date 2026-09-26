@@ -1,4 +1,4 @@
-import { type Config, HarnessConfig, type WorkerConfig } from './config.ts'
+import { type Config, expandWorkers, resolveWorkerHarness, type WorkerConfig } from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -37,6 +37,8 @@ export type RunnerStatus = {
   name: string
   available: boolean
   capacity: number
+  busySeats: number
+  totalSeats: number
   running: string[]
   /** Epoch ms at launch per running task, keyed by task id, for live elapsed-time display. */
   startedAt: Record<string, number>
@@ -59,7 +61,6 @@ export type FleetWorkerStatus = {
   effort: string | null
   seat: string
   enabled: boolean
-  on: boolean
   busy: boolean
   /** The task this worker itself is running, as opposed to another worker on its seat. */
   taskId: string | null
@@ -122,7 +123,8 @@ export interface RunServiceApi {
   status(): Promise<RunnerStatus>
   start(taskId?: string, opts?: RunOptions): Promise<StartResult>
   stop(taskId: string): Promise<StopResult>
-  setWorkerOn(workerId: string, on: boolean): void
+  /** The fleet config changed; with auto queue on, poll now instead of after the idle backoff. */
+  fleetChanged(): void
   /**
    * Skip the backoff of a task currently deferring an automatic retry and
    * start the next attempt immediately. 404 when the task runs elsewhere.
@@ -154,6 +156,12 @@ export type RunServiceOptions = {
   autoQueueIdleMs?: number
   /** How often to poll while a launch just succeeded (filling free slots). */
   autoQueueActiveMs?: number
+  /**
+   * Seat occupancy shared by every repo's RunService in one server, so the
+   * fleet's seats cap concurrency across repositories rather than per repo.
+   * Maps seat to the `repo/task` holding it.
+   */
+  seats?: Map<string, string>
 }
 
 /**
@@ -182,21 +190,18 @@ export class RunService implements RunServiceApi {
   private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
   private autoQueuePolling = false
   private stopped = false
-  private readonly workerOn = new Map<string, boolean>()
+  private readonly seats: Map<string, string>
 
   constructor(private readonly opts: RunServiceOptions) {
-    for (const worker of opts.config.worker) this.workerOn.set(worker.id, false)
+    this.seats = opts.seats ?? new Map()
     this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
     this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
     this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
     if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
-  setWorkerOn(workerId: string, on: boolean): void {
-    if (this.opts.config.worker.some((worker) => worker.id === workerId && worker.enabled)) {
-      this.workerOn.set(workerId, on)
-      if (on && this.autoQueue) this.scheduleAutoQueuePoll(0)
-    }
+  fleetChanged(): void {
+    if (this.autoQueue) this.scheduleAutoQueuePoll(0)
   }
 
   /**
@@ -240,7 +245,7 @@ export class RunService implements RunServiceApi {
     this.autoQueuePolling = true
     try {
       if (!this.autoQueue || this.stopped) return
-      const result = await this.start(undefined, undefined, true)
+      const result = await this.start()
       const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
       if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
     } finally {
@@ -250,6 +255,13 @@ export class RunService implements RunServiceApi {
 
   async status(): Promise<RunnerStatus> {
     const running = [...this.runs.keys()]
+    const totalSeats = new Set(
+      this.workers()
+        .filter((worker) => worker.enabled)
+        .map((worker) => this.workerSeat(worker)),
+    ).size
+    const capacity = this.availableCapacity()
+    const busySeats = totalSeats - capacity
     const startedAt: Record<string, number> = {}
     const resources: Record<string, RunnerResource> = {}
     const tasks: Record<string, RunnerTask> = {}
@@ -262,7 +274,7 @@ export class RunService implements RunServiceApi {
         }
         const task = this.opts.store.task(id)
         const agent = this.opts.store.currentAgent(id)
-        const worker = this.opts.config.worker.find((candidate) => candidate.id === entry?.workerId)
+        const worker = this.workers().find((candidate) => candidate.id === entry?.workerId)
         const latestEvents = this.opts.store.recentEvents(id, 100)
         const waitingSeatEvent = [...latestEvents]
           .reverse()
@@ -287,7 +299,7 @@ export class RunService implements RunServiceApi {
           // The configured harness is known at launch; only the model/effort
           // wait for the agent run to report them.
           harness:
-            this.opts.config.worker.find((worker) => worker.id === entry?.workerId)?.kind ??
+            this.workers().find((worker) => worker.id === entry?.workerId)?.kind ??
             this.opts.harness.kind,
           model: agent?.model ?? null,
           effort: agent?.effort ?? null,
@@ -297,14 +309,16 @@ export class RunService implements RunServiceApi {
     for (const [id, entry] of this.runs) startedAt[id] = entry.startedAt
     return {
       name: this.opts.repoName,
-      available: this.availableCapacity(true) > 0,
-      capacity: this.availableCapacity(true),
+      available: capacity > 0,
+      capacity,
+      busySeats,
+      totalSeats,
       running,
       startedAt,
       resources,
       tasks,
       autoQueue: this.autoQueue,
-      fleet: this.opts.config.worker.map((worker) => ({
+      fleet: this.workers().map((worker) => ({
         id: worker.id,
         name: worker.name,
         kind: worker.kind,
@@ -312,15 +326,14 @@ export class RunService implements RunServiceApi {
         effort: worker.effort ?? null,
         seat: this.workerSeat(worker),
         enabled: worker.enabled,
-        on: this.workerOn.get(worker.id) === true,
         busy: this.runsBySeat().has(this.workerSeat(worker)),
         taskId: [...this.runs].find(([, run]) => run.workerId === worker.id)?.[0] ?? null,
       })),
     }
   }
 
-  start(taskId?: string, opts?: RunOptions, automatic = false): Promise<StartResult> {
-    const result = this.launchQueue.then(() => this.tryStart(taskId, opts, automatic))
+  start(taskId?: string, opts?: RunOptions): Promise<StartResult> {
+    const result = this.launchQueue.then(() => this.tryStart(taskId, opts))
     this.launchQueue = result.then(
       () => undefined,
       () => undefined,
@@ -333,62 +346,60 @@ export class RunService implements RunServiceApi {
     worker: WorkerConfig,
     opts: RunOptions = {},
   ): Config['harness']['implement'] {
-    const { config } = this.opts
-    const base =
-      worker.kind === config.harness.implement.kind
-        ? config.harness.implement
-        : HarnessConfig.parse({ kind: worker.kind })
-    return {
-      ...base,
-      model: opts.model ?? worker.model ?? base.model,
-      effort: opts.effort ?? worker.effort ?? base.effort,
-      seat: worker.seat ?? worker.kind,
-    }
+    return resolveWorkerHarness(this.opts.config, worker, opts)
   }
 
   private workerSeat(worker: WorkerConfig): string {
     return worker.seat ?? worker.kind
   }
 
+  private workers(): WorkerConfig[] {
+    return expandWorkers(this.opts.config.worker)
+  }
+
   private runsBySeat(): Map<string, string> {
-    return new Map([...this.runs].map(([id, run]) => [run.seat, id]))
+    return this.seats
   }
 
-  private availableWorkers(automatic: boolean): WorkerConfig[] {
+  private availableWorkers(): WorkerConfig[] {
     const busy = this.runsBySeat()
-    return this.opts.config.worker.filter(
-      (worker) =>
-        worker.enabled &&
-        (!automatic || this.workerOn.get(worker.id) === true) &&
-        !busy.has(this.workerSeat(worker)),
-    )
+    return this.workers().filter((worker) => worker.enabled && !busy.has(this.workerSeat(worker)))
   }
 
-  private availableCapacity(automatic: boolean): number {
-    return new Set(this.availableWorkers(automatic).map((worker) => this.workerSeat(worker))).size
+  private availableCapacity(): number {
+    return new Set(this.availableWorkers().map((worker) => this.workerSeat(worker))).size
   }
 
-  private async tryStart(
-    taskId?: string,
-    opts?: RunOptions,
-    automatic = false,
-  ): Promise<StartResult> {
+  private async tryStart(taskId?: string, opts?: RunOptions): Promise<StartResult> {
     if (taskId !== undefined && this.runs.has(taskId)) {
       return { ok: false, status: 409, error: `task ${taskId} is already running` }
     }
     const selected =
       opts?.workerId === undefined
-        ? this.availableWorkers(automatic)[0]
-        : this.opts.config.worker.find((worker) => worker.id === opts.workerId)
+        ? this.availableWorkers()[0]
+        : this.workers().find((worker) => worker.id === opts.workerId)
     if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
-    if (automatic && this.workerOn.get(selected.id) !== true) {
-      return { ok: false, status: 409, error: `worker ${selected.id} is off` }
-    }
-    if (this.runsBySeat().has(this.workerSeat(selected))) {
+    const seat = this.workerSeat(selected)
+    if (this.seats.has(seat)) {
       return { ok: false, status: 409, error: `worker ${selected.id} seat is busy` }
     }
+    // Held across the tracker awaits so another repo's runner cannot take the seat meanwhile.
+    const hold = `${this.opts.repoName}/pending`
+    this.seats.set(seat, hold)
+    try {
+      return await this.claimAndLaunch(selected, taskId, opts)
+    } finally {
+      if (this.seats.get(seat) === hold) this.seats.delete(seat)
+    }
+  }
+
+  private async claimAndLaunch(
+    selected: WorkerConfig,
+    taskId: string | undefined,
+    opts: RunOptions | undefined,
+  ): Promise<StartResult> {
     const implement = this.resolveHarness(selected, opts)
     // Difficulty gating reads the model the worker would actually run, so the
     // override config (not the stored default) is what gates the claim.
@@ -466,7 +477,12 @@ export class RunService implements RunServiceApi {
       forge,
     })
     const seat = this.workerSeat(worker)
-    const done = runner.runClaimed(task).finally(() => this.runs.delete(task.id))
+    const holder = `${repoName}/${task.id}`
+    this.seats.set(seat, holder)
+    const done = runner.runClaimed(task).finally(() => {
+      this.runs.delete(task.id)
+      if (this.seats.get(seat) === holder) this.seats.delete(seat)
+    })
     this.runs.set(task.id, { runner, startedAt: Date.now(), done, workerId: worker.id, seat })
   }
 }

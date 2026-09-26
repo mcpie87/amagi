@@ -114,19 +114,21 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 ## The runner service
 
 `amagi serve` also hosts an operator-facing runner service. It reports
-availability and capacity (`GET /api/runner`), launches a specific ready task
-or the next ready one (`POST /api/runs`, with an optional `{ "taskId": ... }`
-body), and stops a run it owns (`POST /api/runs/:id/stop`). Stop is graceful:
+availability and capacity (`GET /api/repos/:repo/runner`), launches a specific
+ready task or the next ready one (`POST /api/repos/:repo/runs`, with an optional
+`{ "taskId": ... }` body), and stops a run it owns
+(`POST /api/repos/:repo/runs/:id/stop`). Stop is graceful:
 the owned agent process is killed, the tracker lease is released, and the task
 is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
-server dispatches through workers in the global `worker` fleet. Automatic
-dispatch uses enabled workers that are switched on and have a free seat; manual
-dispatch can target an enabled worker while it is off. Workers sharing a seat
-serialize their runs. The dashboard surfaces runner status from the task board
+server dispatches through the enabled workers in the global `worker` fleet,
+manually or, while the global `loop.autoQueue` is on, automatically whenever an
+enabled worker has a free seat. Workers sharing a seat serialize their runs, and
+the fleet's seats are shared by every registered repository, so loading more
+repositories does not start more agents. The dashboard surfaces runner status from the task board
 and task detail pages.
 
-`GET /api/runner` also carries per-task resource usage for the runner, summed
+The repo-scoped runner endpoint also carries per-task resource usage, summed
 over each running task's whole agent process tree from `/proc` on Linux: resident
 memory (`rssBytes`), CPU time (`cpuMs`), and process count (`processes`), keyed
 by task id under `resources` plus the repo `name` the runner is bound to. The
@@ -147,9 +149,9 @@ run`) relies on the tracker's atomic claim to avoid double-claiming.
 ## The triage worker
 
 The runner only claims the next ready task, so everything not directly
-claimable is invisible to it: epics and milestones sit open, finished
-containers stay open, blocked and orphaned tasks go untouched. The **triage
-worker** (`packages/core/src/triage.ts`, `amagi triage`) is a separate decision
+claimable is invisible to it: epics and milestones, blocked tasks, and
+orphaned tasks need separate handling. The **triage worker**
+(`packages/core/src/triage.ts`, `amagi triage`) is a separate decision
 role that picks one unclaimed task a worker is not currently holding and asks a
 harness to decide what to do with it:
 
@@ -165,9 +167,16 @@ harness to decide what to do with it:
 
 Every decision is recorded as a `triage.decision` event in the store. Leaf
 tasks are triaged once; a decomposed container is re-triaged only once all its
-children have closed, so a finished epic gets closed instead of re-decomposed.
+children have closed.
 `amagi serve` also exposes `POST /api/repos/:repo/triage` to trigger a pass for
 a repo through the dashboard.
+
+While `amagi serve` runs, a per-repo epic-close sweep closes beads epics that
+`bd epic close-eligible` reports eligible, using the reason `All children
+completed`. The dashboard's Eligible epics panel remains available to preview
+and manually close epics. Set `watchers.epicClose.enabled = false` to restore
+operator-only closure for a repo; triage can still close epics for other
+reasons, such as work that is already satisfied.
 
 A per-repo **stall watcher** (`loop.stallWatchIntervalSec`, default 5 minutes)
 runs inside `amagi serve`. Every worker process records a liveness heartbeat
@@ -207,11 +216,79 @@ turn it off.
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
 
-Every key is optional; the table below is the complete schema with its default.
+The worker fleet is machine-wide, so define `[[worker]]` entries in the global
+config. Set `count` to create repeated instances of one worker profile. Set
+`seatCount` to give its replicas separate credential seat lock identities;
+replicas beyond that count share seats and serialize. Both fields default to
+`1`. Workers can share a seat, for example:
+
+```toml
+[[worker]]
+id = "claude-fast"
+name = "Claude fast"
+kind = "claude"
+model = "claude-sonnet"
+seat = "claude-subscription"
+enabled = true
+count = 3
+seatCount = 3
+
+[[worker]]
+id = "claude-careful"
+name = "Claude careful"
+kind = "claude"
+model = "claude-opus"
+seat = "claude-subscription"
+enabled = true
+```
+
+A worker is either enabled or not: `enabled` defaults to `false`, persists
+across server restarts, and can also be flipped from the dashboard. Only
+enabled workers take runs, manual or automatic. Whether runs are dispatched
+automatically is the global **Auto queue** setting (`loop.autoQueue`), not a
+per-worker one.
+
+A seat names the credential an agent uses. Amagi guarantees that at most one
+agent is live on a seat at a time, even when different workers, watchers, or a
+chat reply request it. A worker without an explicit seat uses its harness kind
+as the seat name. Capacity is derived from the distinct free seats of enabled
+workers, rather than from the number of worker entries: workers
+sharing a credential must take turns, while workers on separate credentials
+can run concurrently.
+
+Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
+override them in a repo's `.amagi/config.toml` when needed. The `mention`,
+`prConflict`, `stall`, and `epicClose` kinds default to enabled; the first two
+can override their harness kind, model, effort, and seat. The
+registered-repository registry separately controls whether the server starts
+watchers for each repo.
+
+Every key is optional; the table below gives the schema and defaults.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `worker[]` | array | `[]` | Global worker fleet. Each worker has a unique `id`, display `name`, harness `kind`, optional `model`, `effort`, and `seat`, plus `enabled` (default `true`). Capacity is the enabled, on workers with free seats. Workers start off after each server restart. |
+| `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`; at most 16 expanded workers. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
+| `worker[].id` | string | required | Stable worker identity, unique across the fleet. |
+| `worker[].name` | string | required | Display name. |
+| `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` | required | Harness used by this worker. |
+| `worker[].model` | string | *(harness default)* | Model passed to the harness. |
+| `worker[].effort` | string | *(harness default)* | Reasoning effort passed to the harness. |
+| `worker[].seat` | string | `worker[].kind` | Credential seat used by the worker; workers with the same seat serialize. |
+| `worker[].count` | integer | `1` | Number of independently schedulable instances created from this profile. Instance IDs append `-1`, `-2`, and so on. |
+| `worker[].seatCount` | integer | `1` | Number of distinct seat lock identities assigned across this profile's instances. Seat identities append `-1`, `-2`, and so on. |
+| `worker[].enabled` | boolean | `false` | Whether the worker takes runs, manual or automatic. Persisted, and editable from the dashboard. |
+| `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
+| `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
+| `watchers.mention.model` | string | `harness.implement.model` | Model for mention responses. |
+| `watchers.mention.effort` | string | `harness.implement.effort` | Reasoning effort for mention responses. |
+| `watchers.mention.seat` | string | `harness.implement.seat`, then kind | Seat used for mention responses. |
+| `watchers.prConflict.enabled` | boolean | `true` | Enable the per-repository PR conflict watcher. |
+| `watchers.prConflict.kind` | harness kind | `harness.implement.kind` | Harness for conflict resolution. |
+| `watchers.prConflict.model` | string | `harness.implement.model` | Model for conflict resolution. |
+| `watchers.prConflict.effort` | string | `harness.implement.effort` | Reasoning effort for conflict resolution. |
+| `watchers.prConflict.seat` | string | `harness.implement.seat`, then kind | Seat used for conflict resolution. |
+| `watchers.stall.enabled` | boolean | `true` | Enable the per-repository stall watcher. It does not spawn an agent and has no harness fields. |
+| `watchers.epicClose.enabled` | boolean | `true` | Enable automatic closure of beads epics whose children are all complete while `amagi serve` runs. |
 | `repo.baseBranch` | string | `"main"` | Branch new worktrees and PRs are based on. |
 | `repo.worktreeRoot` | string | `~/.cache/amagi/worktrees` (`$XDG_CACHE_HOME/amagi/worktrees`) | Where per-task worktrees are created. `~` is expanded. |
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
@@ -233,6 +310,7 @@ Every key is optional; the table below is the complete schema with its default.
 | `loop.maxCheckRounds` | integer >= 0 | `2` | Extra implement attempts handed back when `checks.commands` fail, before escalating to `needs_human`. |
 | `loop.prCheckIntervalSec` | integer >= 1 | `300` | How often the PR conflict watcher scans open PRs and dispatches a resolution agent per one conflicting with `repo.baseBranch`. Each PR is only attempted once per head SHA, so the default 5 minutes stays inside GitHub REST rate limits. |
 | `loop.stallWatchIntervalSec` | integer >= 1 | `300` | How often the stall watcher scans in-progress tasks for a worker that stopped heartbeating. Only reads the local store, so the default 5 minutes is cheap. |
+| `loop.epicCloseIntervalSec` | integer >= 1 | `300` | How often `amagi serve` closes beads epics eligible under `bd epic close-eligible`. |
 | `loop.stallTimeoutSec` | integer >= 60 | `3600` | How long a task may sit in an in-progress state with no worker heartbeat before the stall watcher reclaims it: it releases the tracker claim so the issue is ready again and parks the task back to `claimed`, keeping the worktree for the next worker to resume. |
 | `loop.doomEnabled` | boolean | `true` | Doom-loop guard: the stall watcher also scans tasks with a live worker for busy-but-not-progressing agents and stops the run. Set false to disable. |
 | `loop.doomToolWindowSec` | integer >= 1 | `600` | Repeated near-identical tool calls (same command or file) within this many seconds trip the guard. |
@@ -254,6 +332,19 @@ Every key is optional; the table below is the complete schema with its default.
 | `notify.ntfyServer` | string | `"https://ntfy.sh"` | ntfy server base URL, for self-hosted instances. |
 | `server.host` | string | `"127.0.0.1"` | Bind address for `amagi serve` and the address the CLI (`amagi ask`) talks to. |
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
+
+The server's registered-repository list is stored in
+`$XDG_STATE_HOME/amagi/registry.json` (or `~/.local/state/amagi/registry.json`).
+Each entry has `workers` and `watchers` participation flags, both defaulting to
+`true`. `workers` controls whether that repository's tasks can be dispatched by
+the automatic queue; `watchers` controls whether its background pollers and
+watchers run. Change these flags in the dashboard's repository controls.
+
+`loop.maxParallel` no longer sets capacity or creates that many workers. On
+the first `amagi serve` run when the global config has no worker table, Amagi
+uses the old `harness.implement` kind, model, effort, and seat to create one
+enabled worker. Add or remove worker entries to change the fleet;
+`amagi config` reports when the ignored old setting is still present.
 
 `server.host`/`server.port` are read from the global config only: `serve` hosts every
 registered repo, so there is no single repo config to draw them from.
@@ -325,8 +416,8 @@ amagi continue bd-1234 --harness opencode --model local/...   # same worktree, d
 
 `amagi continue` re-claims the task and drives it in the worktree and branch
 already recorded for it, so no work is lost. The same stop/restart flow is
-available over the API (`POST /api/tasks/:id/stop` and
-`POST /api/tasks/:id/reclaim`) for the dashboard.
+available over the API (`POST /api/repos/:repo/tasks/:id/stop` and
+`POST /api/repos/:repo/tasks/:id/reclaim`) for the dashboard.
 
 ## Packages
 

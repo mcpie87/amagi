@@ -121,6 +121,52 @@
   --shadow-color: rgb(24 24 27 / 0.16);
 }
 
+.diff-added {
+  background: var(--color-emerald-soft);
+}
+
+.diff-deleted {
+  background: var(--color-red-soft);
+}
+
+.diff-empty {
+  background: var(--color-neutral-soft);
+}
+
+.diff-code .hljs-comment,
+.diff-code .hljs-quote {
+  color: var(--color-fg-faint);
+}
+
+.diff-code .hljs-keyword,
+.diff-code .hljs-selector-tag,
+.diff-code .hljs-literal {
+  color: var(--color-violet-ink);
+}
+
+.diff-code .hljs-string,
+.diff-code .hljs-regexp,
+.diff-code .hljs-addition {
+  color: var(--color-emerald-ink);
+}
+
+.diff-code .hljs-number,
+.diff-code .hljs-built_in,
+.diff-code .hljs-attr {
+  color: var(--color-amber-ink);
+}
+
+.diff-code .hljs-title,
+.diff-code .hljs-title.function_,
+.diff-code .hljs-title.class_ {
+  color: var(--color-sky-ink);
+}
+
+.diff-code .hljs-meta,
+.diff-code .hljs-attribute {
+  color: var(--color-cyan-ink);
+}
+
 body {
   background: var(--color-app);
   color: var(--color-fg);
@@ -330,6 +376,7 @@ textarea::placeholder {
    a modal dialog; without this the dialog pins to the top-left corner. */
 .watcher-dialog {
   width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
   margin: auto;
   border: 1px solid var(--color-line-strong);
   border-radius: 12px;
@@ -338,6 +385,10 @@ textarea::placeholder {
   padding: 0;
   overflow: hidden;
   box-shadow: 0 20px 50px var(--shadow-color);
+}
+.watcher-dialog-content {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
 }
 .watcher-dialog::backdrop {
   background: rgba(0, 0, 0, 0.6);

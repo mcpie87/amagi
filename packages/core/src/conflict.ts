@@ -2,14 +2,18 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
+import { canTransition } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { commitFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { type PointlessVerdict, parsePointlessVerdict } from './pointless.ts'
+import type { PrBodyMeta } from './pr-body.ts'
 import {
   iterationsFromLabels,
   type PrInfo,
@@ -18,12 +22,15 @@ import {
   stampIterationLabel,
   taskIdFromAmagiBranch,
 } from './pr-check.ts'
-import { resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
+import { commitMessage, resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
+import { recordWatcherAgentRun } from './watcher-agent.ts'
 
 export type ConflictLogLevel = 'info' | 'ok' | 'warn' | 'error' | 'agent'
 
 export type ResolveConflictOptions = {
+  /** Registry key used to attribute a live conflict watcher seat. */
+  repo?: string
   repoRoot: string
   repoName: string
   pr: PrInfo
@@ -48,16 +55,19 @@ export type ResolveConflictResult = {
   iteration: number
   /** The agent's task verdict, saved by the watcher for this PR head. */
   verdict?: PointlessVerdict
+  /** Base already contains the PR's work: nothing was pushed and the PR needs closing, not resolving. */
+  contained?: true
+}
+
+/** True when the merge result adds nothing on top of the merged base commit. */
+async function conflictDiffEmpty(cwd: string, baseOid: string, run: Exec): Promise<boolean> {
+  const diff = await run(['git', 'diff', '--quiet', baseOid, 'HEAD'], { cwd })
+  if (diff.exitCode === 0) return true
+  if (diff.exitCode === 1) return false
+  throw new Error(diff.stderr.trim() || `git diff ${baseOid} HEAD failed`)
 }
 
 /** Paths still unmerged (in conflict); empty once every conflict is resolved. */
-async function conflictDiffEmpty(cwd: string, baseBranch: string, run: Exec): Promise<boolean> {
-  const diff = await run(['git', 'diff', '--quiet', `origin/${baseBranch}..HEAD`], { cwd })
-  if (diff.exitCode === 0) return true
-  if (diff.exitCode === 1) return false
-  throw new Error(diff.stderr.trim() || `git diff origin/${baseBranch}..HEAD failed`)
-}
-
 async function unmergedPaths(run: Exec, cwd: string): Promise<string[]> {
   const out = await execOk(run, ['git', 'diff', '--name-only', '--diff-filter=U'], { cwd })
   return out
@@ -66,29 +76,50 @@ async function unmergedPaths(run: Exec, cwd: string): Promise<string[]> {
     .filter((l) => l !== '')
 }
 
-/** Finishes the in-progress merge with the default merge message, never a fresh one. */
-async function finishMerge(run: Exec, cwd: string): Promise<void> {
+/** Finishes the in-progress merge with the runner's message when the task is known. */
+async function finishMerge(run: Exec, cwd: string, message?: string): Promise<void> {
   const head = await run(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd })
   if (head.exitCode !== 0) return
-  const commit = await run(['git', 'commit', '--no-edit'], { cwd })
+  const args = message === undefined ? ['git', 'commit', '--no-edit'] : ['git', 'commit', '-F', '-']
+  const commit = await run(args, { cwd, ...(message === undefined ? {} : { stdin: message }) })
   if (commit.exitCode !== 0) {
-    throw new Error(`git commit --no-edit failed: ${(commit.stderr || commit.stdout).trim()}`)
+    throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
   }
 }
 
-/** Parks the linked task at needs_human, so a PR that keeps re-conflicting stops being re-dispatched. */
-function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly string[]): void {
-  if (opts.store === undefined) return
+function watcherCommitMessage(
+  task: { id: string; title: string } | null,
+  prNumber: number,
+  summary: string,
+  meta: PrBodyMeta,
+): string {
+  const message =
+    task === null
+      ? `[pr-${prNumber}] Resolve conflicts\n\n${summary}\n\n${commitFooter(meta.harness, meta.model, meta.effort)}\n`
+      : commitMessage(task, summary, meta)
+  const errors = lintCommitMessage(message)
+  if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
+  return message
+}
+
+/**
+ * Parks the linked task at needs_human, so a PR that keeps re-conflicting
+ * stops being re-dispatched. Returns whether it parked: a task already done,
+ * or already parked by an earlier dispatch, is left where it is.
+ */
+function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly string[]): boolean {
+  if (opts.store === undefined) return false
   const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
-  if (taskId === null) return
+  if (taskId === null) return false
   const task = opts.store.task(taskId)
-  if (task === null) return
+  if (task === null || !canTransition(task.state, 'needs_human')) return false
   opts.store.append(taskId, {
     type: 'task.state',
     from: task.state,
     to: 'needs_human',
     reason: `PR #${opts.pr.number} still has unmerged paths after ${opts.config.loop.conflictMaxIterations} conflict-resolution dispatches: ${unmerged.join(', ')}`,
   })
+  return true
 }
 
 /**
@@ -112,6 +143,21 @@ export async function resolveConflict(
   let verdict: PointlessVerdict | undefined
 
   try {
+    const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
+    const storedTask = taskId === null ? null : (opts.store?.task(taskId) ?? null)
+    const task = storedTask === null ? null : { id: storedTask.id, title: storedTask.title }
+    const harnessConfig = watcherHarnessConfig(opts.config, 'prConflict')
+    const commitMeta: PrBodyMeta = {
+      harness: harnessConfig.kind,
+      model: harnessConfig.model ?? null,
+      effort: harnessConfig.effort ?? null,
+    }
+    const cleanMergeMessage = watcherCommitMessage(
+      task,
+      opts.pr.number,
+      `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
+      commitMeta,
+    )
     const wt = await prepareConflictWorktree({
       repoRoot: opts.repoRoot,
       repoName: opts.repoName,
@@ -119,6 +165,7 @@ export async function resolveConflict(
       baseBranch: opts.config.repo.baseBranch,
       pr: opts.pr,
       persona: opts.config.repo.persona,
+      mergeMessage: cleanMergeMessage,
       exec: run,
     })
     log('info', `worktree: ${wt.path}`)
@@ -126,10 +173,10 @@ export async function resolveConflict(
     const verdictPath = join(tmpdir(), `amagi-conflict-${opts.pr.number}-${randomUUID()}.md`)
 
     if (!wt.conflicted) {
-      if (await conflictDiffEmpty(wt.path, opts.config.repo.baseBranch, run)) {
+      if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
         const message = 'base already contains the PR work; skipped the empty merge push'
         log('warn', message)
-        return { ok: false, message, iteration }
+        return { ok: false, message, iteration, contained: true }
       }
       await pushConflictFix({
         cwd: wt.path,
@@ -147,8 +194,8 @@ export async function resolveConflict(
       const unmerged = await unmergedPaths(run, wt.path)
       if (unmerged.length === 0) break
       if (iteration >= opts.config.loop.conflictMaxIterations) {
-        parkAtNeedsHuman(opts, unmerged)
-        const message = `unmerged paths remain after ${iteration} dispatches; parked the task at needs_human: ${unmerged.join(', ')}`
+        const parked = parkAtNeedsHuman(opts, unmerged)
+        const message = `unmerged paths remain after ${iteration} dispatches${parked ? '; parked the task at needs_human' : ''}: ${unmerged.join(', ')}`
         log('error', message)
         return { ok: false, message, iteration }
       }
@@ -168,8 +215,8 @@ export async function resolveConflict(
         conflictFiles: unmerged,
         outPath: verdictPath,
       }
-      const harnessConfig = watcherHarnessConfig(opts.config, 'prConflict')
       const harness = mk(harnessConfig)
+      log('info', `resolving (dispatch ${iteration}/${opts.config.loop.conflictMaxIterations})`)
       log('info', `agent: ${harness.kind} (${wt.branch})`)
       const outcome = await withHeadReflogBypassCheck(
         wt.path,
@@ -180,16 +227,35 @@ export async function resolveConflict(
             prompt: resolveConflictPrompt(ctx),
             systemPrompt: resolveConflictSystemPrompt(ctx),
             ...harnessStartOpts(harnessConfig),
+            env: { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.repoRoot },
+            ...(opts.repo === undefined
+              ? {}
+              : { seatActivity: { repo: opts.repo, watcher: 'pr-conflict-watcher' } }),
           })
-          for await (const event of proc.events()) {
+          const onEvent = (event: import('./events.ts').AgentEvent): void => {
             if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
             else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
             else if (event.kind === 'error') log('error', event.message)
             else if (event.kind === 'status') log('info', event.message)
           }
-          return proc.done
+          if (opts.store === undefined) {
+            for await (const event of proc.events()) onEvent(event)
+            return proc.done
+          }
+          return recordWatcherAgentRun(
+            proc,
+            {
+              store: opts.store,
+              role: 'implement',
+              harness: harness.kind,
+              source: `PR #${opts.pr.number} conflict dispatch ${iteration}`,
+              cwd: wt.path,
+            },
+            onEvent,
+          )
         },
         opts.onGitBypassed,
+        true,
       )
       if (!outcome.ok) {
         const message = `agent failed: ${agentFailure(outcome)}`
@@ -208,12 +274,23 @@ export async function resolveConflict(
       rmSync(verdictPath, { force: true })
     }
 
-    await finishMerge(run, wt.path)
-    if (await conflictDiffEmpty(wt.path, opts.config.repo.baseBranch, run)) {
+    const conflictSummary = `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}. Conflict #${iteration}`
+    await finishMerge(
+      run,
+      wt.path,
+      watcherCommitMessage(task, opts.pr.number, conflictSummary, commitMeta),
+    )
+    if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
       const classification = verdict?.verdict ? ` (${verdict.verdict})` : ''
       const message = `base already contains the PR work; skipped the empty merge push${classification}`
       log('warn', message)
-      return { ok: false, message, iteration, ...(verdict === undefined ? {} : { verdict }) }
+      return {
+        ok: false,
+        message,
+        iteration,
+        contained: true,
+        ...(verdict === undefined ? {} : { verdict }),
+      }
     }
     await pushConflictFix({
       cwd: wt.path,
@@ -242,8 +319,15 @@ export async function resolveConflict(
   }
 }
 
-/** Last-attempted head per conflicting PR, so the watcher can skip unchanged heads. */
-export type ConflictWatchState = Record<string, { headOid: string; verdict?: PointlessVerdict }>
+/**
+ * Last-attempted PR head and base head per conflicting PR, so the watcher can
+ * skip unchanged pairs. `contained` marks a head whose work base already has;
+ * base moves cannot undo that, so only a new PR head re-arms it.
+ */
+export type ConflictWatchState = Record<
+  string,
+  { headOid: string; baseOid?: string; verdict?: PointlessVerdict; contained?: boolean }
+>
 
 export function conflictWatchPath(repoName: string): string {
   return join(cacheHome(), 'amagi', 'conflicts', `${repoName}.json`)

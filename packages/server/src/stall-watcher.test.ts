@@ -20,6 +20,7 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   released: string[] = []
   expiredClaimsReclaimed = 0
+  tracked: ((id: string) => boolean) | null = null
   /** When set, get() reports this status so recovery can react to the tracker. */
   issueStatus: TrackerStatus | null = null
 
@@ -56,8 +57,9 @@ class FakeTracker implements Tracker {
   async release(id: string): Promise<void> {
     this.released.push(id)
   }
-  async reclaimExpiredClaims(): Promise<void> {
+  async reclaimExpiredClaims(tracked: (id: string) => boolean): Promise<void> {
     this.expiredClaimsReclaimed++
+    this.tracked = tracked
   }
   async close(): Promise<void> {}
   async openGate(_id: string, _q: Question): Promise<GateRef> {
@@ -100,6 +102,30 @@ test('reclaims expired tracker claims with no store record', async () => {
   expect(watcher.activity().ok).toBe(true)
 })
 
+test('leaves the lapsed lease of a task parked with an open PR alone', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+  implementing(store)
+  for (const to of ['checks', 'committed'] as const) {
+    store.append('bd-1', { type: 'task.state', from: null, to })
+  }
+  store.append('bd-1', { type: 'pr.created', url: 'https://example.test/pr/1', number: 1 })
+  store.append('bd-1', { type: 'task.state', from: 'committed', to: 'pr_open' })
+
+  const watcher = startStallWatcher({
+    repo: 'repo1',
+    store,
+    tracker,
+    timeoutMs: 60_000,
+    intervalMs: 10,
+  })
+  watchers.push(watcher)
+  await Bun.sleep(40)
+
+  expect(tracker.tracked?.('bd-1')).toBe(true)
+  expect(tracker.tracked?.('bd-unknown')).toBe(false)
+})
+
 test('recovers a stalled implementing task, keeping its worktree, and reports it', async () => {
   const store = new Store(openDatabase(':memory:'))
   const tracker = new FakeTracker()
@@ -129,6 +155,15 @@ test('recovers a stalled implementing task, keeping its worktree, and reports it
   expect(watcher.activity().failures).toBe(0)
   expect(watcher.activity().status).toBe('active')
   expect(watcher.activity().nextRunAt).toBeGreaterThan(watcher.activity().lastRunAt)
+  const run = store
+    .watcherRuns({ repo: 'repo1', name: 'stall-watcher', limit: 20 })
+    .find((entry) => entry.actions.some((action) => action.targetId === 'bd-1'))
+  expect(run?.ok).toBe(true)
+  expect(
+    run?.actions.some(
+      (action) => action.targetId === 'bd-1' && action.result.includes('recovered after'),
+    ),
+  ).toBe(true)
 })
 
 test('a task with a fresh worker heartbeat is left alone', async () => {

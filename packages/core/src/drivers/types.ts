@@ -6,6 +6,7 @@ export type TrackerTask = {
   id: string
   title: string
   description: string
+  acceptanceCriteria?: string | null
   status: TrackerStatus
   priority: number | null
   type: string | null
@@ -112,8 +113,12 @@ export interface Tracker {
   comment(id: string, body: string): Promise<void>
   setStatus(id: string, status: TrackerStatus): Promise<void>
   release(id: string): Promise<void>
-  /** Reap expired native claims that may not have a corresponding amagi store task. */
-  reclaimExpiredClaims?(): Promise<void>
+  /**
+   * Reap expired native claims on issues `tracked` rejects, i.e. ones amagi
+   * has no store task for. A tracked task's lease lapses on purpose once its
+   * run parks it (pr_open, needs_human), and it must stay claimed there.
+   */
+  reclaimExpiredClaims?(tracked: (id: string) => boolean): Promise<void>
   close(id: string, reason?: string): Promise<void>
 
   /**
@@ -129,7 +134,7 @@ export interface Tracker {
   resolveGate(ref: GateRef): Promise<void>
 }
 
-export type Permissions = 'workspace-write' | 'bypass'
+export type Permissions = 'read-only' | 'workspace-write' | 'bypass'
 
 export type AgentStartOptions = {
   cwd: string
@@ -144,6 +149,12 @@ export type AgentStartOptions = {
   allowedTools?: readonly string[]
   env?: Record<string, string>
   extraArgs?: readonly string[]
+  /** Path to a JSON schema passed to harnesses that support constrained output. */
+  outputSchema?: string
+  /** Seat wait limit in ms, or null to wait without a timeout. */
+  seatMaxWaitMs?: number | null
+  /** Identifies watcher agents while they hold a shared credential seat. */
+  seatActivity?: { repo: string; watcher: string }
 }
 
 export type AgentUsage = {
@@ -179,6 +190,13 @@ export interface Harness {
   start(opts: AgentStartOptions): AgentProcess
   /** Continues an existing session so a fix round keeps the original context. */
   resume(sessionId: string, opts: AgentStartOptions): AgentProcess
+  /**
+   * True when `resume` delivers `systemPrompt` in place of the one the session
+   * started with. When unset or false the session keeps obeying its original
+   * system prompt, so it must not be resumed into a different role (a
+   * read-only check resumed as implement just answers the check again).
+   */
+  readonly replacesSystemPromptOnResume?: boolean
   /** Models the harness can run, listed the way the harness lists them. */
   listModels(): Promise<string[]>
   /** Reasoning-effort levels the harness can run (for `model`, when the harness scopes them), or [] when it cannot say. */

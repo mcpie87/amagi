@@ -18,6 +18,8 @@ export const cacheHome = (): string => xdg('XDG_CACHE_HOME', '.cache')
 
 export const globalConfigPath = (): string => join(configHome(), 'amagi', 'config.toml')
 export const repoConfigPath = (repoRoot: string): string => join(repoRoot, '.amagi', 'config.toml')
+export const userReviewPackPath = (): string => join(configHome(), 'amagi', 'review')
+export const repoReviewPackPath = (repoRoot: string): string => join(repoRoot, '.amagi', 'review')
 
 /**
  * One database per registered repository, so identical issue ids in different

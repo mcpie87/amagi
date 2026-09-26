@@ -202,6 +202,7 @@ describe('BeadsTracker', () => {
       id: 'tst-lmc',
       title: 'Add SSE endpoint to the server',
       description: 'Stream events to the dashboard',
+      acceptanceCriteria: null,
       status: 'open',
       priority: 1,
       type: 'task',
@@ -397,12 +398,26 @@ describe('BeadsTracker', () => {
     expect(calls.some((c) => c.includes('unclaim') || c.includes('update'))).toBe(false)
   })
 
-  test('reclaims expired native claims', async () => {
-    const { exec, calls } = fake(() => undefined)
+  test('reclaims only expired native claims amagi does not track', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('list')
+        ? ok('[{"id":"tst-pr","status":"in_progress"},{"id":"tst-lost","status":"in_progress"}]')
+        : undefined,
+    )
     const tracker = new BeadsTracker({ cwd: '/repo', exec })
-    await tracker.reclaimExpiredClaims()
+    await tracker.reclaimExpiredClaims((id) => id === 'tst-pr')
 
-    expect(calls).toEqual([['bd', 'reclaim']])
+    expect(calls.at(-1)).toEqual(['bd', 'reclaim', '--id', 'tst-lost'])
+  })
+
+  test('never runs an unscoped reclaim when every claim is tracked', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('list') ? ok('[{"id":"tst-pr","status":"in_progress"}]') : undefined,
+    )
+    const tracker = new BeadsTracker({ cwd: '/repo', exec })
+    await tracker.reclaimExpiredClaims(() => true)
+
+    expect(calls.some((c) => c.includes('reclaim'))).toBe(false)
   })
 
   test('a closed gate reads as resolved', async () => {
@@ -551,6 +566,7 @@ describe('BeadsTracker', () => {
         id: 'tst-abc',
         title: 'Blocker',
         description: '',
+        acceptanceCriteria: null,
         status: 'blocked',
         priority: 1,
         type: 'task',
@@ -561,6 +577,7 @@ describe('BeadsTracker', () => {
         id: 'tst-human',
         title: 'Human step',
         description: '',
+        acceptanceCriteria: null,
         status: 'open',
         priority: 3,
         type: 'task',

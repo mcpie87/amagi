@@ -42,7 +42,7 @@ function RunnerIndicator() {
       className="runner-status"
       title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
     >
-      runner: {status.running.length}/{status.capacity} {status.available ? 'free' : 'busy'}
+      runner: {status.busySeats}/{status.totalSeats} seats · {status.available ? 'free' : 'busy'}
     </span>
   )
 }
@@ -262,7 +262,16 @@ function AddRepoForm() {
 }
 
 const NAV_ITEMS: {
-  to: '/' | '/board' | '/issues' | '/inbox' | '/activity' | '/sessions' | '/settings'
+  to:
+    | '/'
+    | '/board'
+    | '/issues'
+    | '/inbox'
+    | '/activity'
+    | '/git'
+    | '/sessions'
+    | '/seats'
+    | '/settings'
   label: string
   icon: IconName
 }[] = [
@@ -271,7 +280,9 @@ const NAV_ITEMS: {
   { to: '/issues', label: 'Tasks', icon: 'tasks' },
   { to: '/inbox', label: 'Inbox', icon: 'inbox' },
   { to: '/activity', label: 'Activity', icon: 'activity' },
+  { to: '/git', label: 'Git history', icon: 'activity' },
   { to: '/sessions', label: 'Sessions', icon: 'sessions' },
+  { to: '/seats', label: 'Seats', icon: 'agent' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
 ]
 

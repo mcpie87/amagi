@@ -37,6 +37,7 @@ const TASK: TrackerTask = {
 }
 
 const TASK2: TrackerTask = { ...TASK, id: 'bd-c3d4', title: 'Add a second file' }
+const TASK3: TrackerTask = { ...TASK, id: 'bd-e5f6', title: 'Add a third file' }
 
 class FakeTracker implements Tracker {
   readonly kind = 'fake'
@@ -247,13 +248,15 @@ let repo: string
 let wtRoot: string
 let store: Store
 
-const config = (over: Record<string, unknown> = {}) =>
-  Config.parse({
+const config = (over: Record<string, unknown> = {}) => {
+  const { worker = [{ id: 'worker-1', name: 'Worker 1', kind: 'claude' }], ...rest } = over
+  return Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    worker: [{ id: 'worker-1', name: 'Worker 1', kind: 'claude' }],
+    worker: (worker as Record<string, unknown>[]).map((w) => ({ enabled: true, ...w })),
     checks: { commands: [], format: null, lint: null },
-    ...over,
+    ...rest,
   })
+}
 
 const makeService = (
   tracker: Tracker,
@@ -272,7 +275,7 @@ const makeService = (
           seat: `seat-${i + 1}`,
         }))
       : cfg.worker
-  const service = new RunService({
+  return new RunService({
     store,
     tracker,
     harness,
@@ -282,8 +285,6 @@ const makeService = (
     forge: new FakePr(),
     ...over,
   })
-  for (const worker of workers) service.setWorkerOn(worker.id, true)
-  return service
 }
 
 const waitFor = async (fn: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> => {
@@ -321,6 +322,8 @@ describe('RunService', () => {
       name: 'demo',
       available: true,
       capacity: 2,
+      busySeats: 0,
+      totalSeats: 2,
       running: [],
       startedAt: {},
       resources: {},
@@ -335,7 +338,6 @@ describe('RunService', () => {
           effort: null,
           seat: 'seat-1',
           enabled: true,
-          on: true,
           busy: false,
           taskId: null,
         },
@@ -347,13 +349,47 @@ describe('RunService', () => {
           effort: null,
           seat: 'seat-2',
           enabled: true,
-          on: true,
           busy: false,
           taskId: null,
         },
       ],
     })
     service.dispose()
+  })
+
+  test('counted workers run concurrently on distinct counted seats', async () => {
+    const harness = new BlockingHarness()
+    const service = makeService(
+      new FakeTracker([TASK, TASK2, TASK3]),
+      harness,
+      1,
+      config({
+        worker: [
+          {
+            id: 'claude',
+            name: 'Claude',
+            kind: 'claude',
+            seat: 'subscription',
+            count: 3,
+            seatCount: 3,
+          },
+        ],
+      }),
+    )
+
+    expect((await service.status()).fleet?.map((worker) => [worker.id, worker.seat])).toEqual([
+      ['claude-1', 'subscription-1'],
+      ['claude-2', 'subscription-2'],
+      ['claude-3', 'subscription-3'],
+    ])
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    await waitFor(() => harness.starts === 3)
+    expect((await service.status()).capacity).toBe(0)
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
+    await service.stop(TASK3.id)
   })
 
   test('setAutoQueue flips the reported state and toggles dispatch', async () => {
@@ -462,10 +498,10 @@ describe('RunService', () => {
     await service.stop(TASK.id)
   })
 
-  test('worker on state changes capacity and auto queue skips workers that are off', async () => {
+  test('a disabled worker adds no capacity and the auto queue skips it', async () => {
     const workers = [
       { id: 'one', name: 'One', kind: 'claude' as const, seat: 'seat-a' },
-      { id: 'two', name: 'Two', kind: 'codex' as const, seat: 'seat-b' },
+      { id: 'two', name: 'Two', kind: 'codex' as const, seat: 'seat-b', enabled: false },
     ]
     const service = makeService(
       new FakeTracker([TASK, TASK2]),
@@ -474,21 +510,24 @@ describe('RunService', () => {
       config({ worker: workers }),
       { autoQueue: true, autoQueueActiveMs: 10 },
     )
-    service.setWorkerOn('two', false)
     expect((await service.status()).capacity).toBe(1)
     await waitFor(() => store.task(TASK.id)?.state === 'implementing')
-    await service.stop(TASK.id)
-    service.setWorkerOn('one', false)
+    await new Promise((r) => setTimeout(r, 30))
+    expect(store.task(TASK2.id)).toBeNull()
     expect((await service.status()).capacity).toBe(0)
+    await service.stop(TASK.id)
     service.dispose()
   })
 
-  test('turning a worker on dispatches without waiting out the idle backoff', async () => {
+  test('enabling a worker dispatches without waiting out the idle backoff', async () => {
+    const cfg = config({
+      worker: [{ id: 'one', name: 'One', kind: 'claude', seat: 'seat-a', enabled: false }],
+    })
     const service = new RunService({
       store,
       tracker: new FakeTracker([TASK]),
       harness: new BlockingHarness(),
-      config: config({ worker: [{ id: 'one', name: 'One', kind: 'claude', seat: 'seat-a' }] }),
+      config: cfg,
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
@@ -497,20 +536,21 @@ describe('RunService', () => {
     })
     await new Promise((r) => setTimeout(r, 20))
     expect(store.task(TASK.id)).toBeNull()
-    service.setWorkerOn('one', true)
+    cfg.worker = cfg.worker.map((worker) => ({ ...worker, enabled: true }))
+    service.fleetChanged()
     await waitFor(() => store.task(TASK.id)?.state === 'implementing')
     await service.stop(TASK.id)
     service.dispose()
   })
 
-  test('manual dispatch accepts an off worker without turning it on and rejects disabled workers', async () => {
+  test('manual dispatch rejects disabled workers', async () => {
     const service = new RunService({
       store,
       tracker: new FakeTracker([TASK]),
       harness: new BlockingHarness(),
       config: config({
         worker: [
-          { id: 'off', name: 'Off', kind: 'claude', seat: 'seat-off' },
+          { id: 'one', name: 'One', kind: 'claude', seat: 'seat-one' },
           { id: 'disabled', name: 'Disabled', kind: 'codex', enabled: false },
         ],
       }),
@@ -524,20 +564,19 @@ describe('RunService', () => {
       status: 409,
       error: 'worker disabled is disabled',
     })
-    expect(await service.start(undefined, { workerId: 'off' })).toEqual({
+    expect(await service.start(undefined, { workerId: 'one' })).toEqual({
       ok: true,
       taskId: TASK.id,
     })
     expect((await service.status()).fleet).toEqual([
       {
-        id: 'off',
-        name: 'Off',
+        id: 'one',
+        name: 'One',
         kind: 'claude',
         model: null,
         effort: null,
-        seat: 'seat-off',
+        seat: 'seat-one',
         enabled: true,
-        on: false,
         busy: true,
         taskId: TASK.id,
       },
@@ -549,7 +588,6 @@ describe('RunService', () => {
         effort: null,
         seat: 'codex',
         enabled: false,
-        on: false,
         busy: false,
         taskId: null,
       },
@@ -578,6 +616,24 @@ describe('RunService', () => {
     })
     expect((await service.status()).capacity).toBe(0)
     await service.stop(TASK.id)
+  })
+
+  test('repos sharing seats run the fleet once, not once per repo', async () => {
+    const seats = new Map<string, string>()
+    const first = makeService(new FakeTracker([TASK]), new BlockingHarness(), 1, config(), {
+      seats,
+    })
+    const second = makeService(new FakeTracker([TASK2]), new BlockingHarness(), 1, config(), {
+      seats,
+      repoName: 'other',
+    })
+    expect((await first.start()).ok).toBe(true)
+    expect((await second.status()).capacity).toBe(0)
+    expect((await second.status()).fleet?.[0]).toMatchObject({ busy: true, taskId: null })
+    expect(await second.start()).toEqual({ ok: false, status: 409, error: 'no available worker' })
+    await first.stop(TASK.id)
+    expect((await second.start()).ok).toBe(true)
+    await second.stop(TASK2.id)
   })
 
   test('start launches the next ready task and it completes', async () => {
@@ -624,6 +680,21 @@ describe('RunService', () => {
       status: 409,
       error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
     })
+  })
+
+  test('status reports busy seats over total enabled seats', async () => {
+    const service = makeService(new FakeTracker([TASK, TASK2]), new BlockingHarness(), 3)
+    expect(await service.status()).toMatchObject({ busySeats: 0, totalSeats: 3 })
+    expect((await service.start()).ok).toBe(true)
+    expect((await service.start()).ok).toBe(true)
+    expect(await service.status()).toMatchObject({
+      available: true,
+      capacity: 1,
+      busySeats: 2,
+      totalSeats: 3,
+    })
+    await service.stop(TASK.id)
+    await service.stop(TASK2.id)
   })
 
   test('start rejects an unknown worker id', async () => {

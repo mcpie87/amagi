@@ -19,6 +19,10 @@ export const RepoParam = z.object({ repo: z.string().min(1) })
 
 /** Combined because hono's zValidator replaces, not merges, a validated target. */
 export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string().min(1) })
+export const RepoCommitParam = z.object({
+  repo: z.string().min(1),
+  hash: z.string().regex(/^[0-9a-f]{7,40}$/i),
+})
 export const RepoQuestionParam = z.object({
   repo: z.string().min(1),
   id: z.string().min(1),
@@ -123,7 +127,9 @@ export const WorkerCreateBody = z.object({
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
   seat: z.string().trim().min(1).optional(),
-  enabled: z.boolean().default(true),
+  count: z.number().int().min(1).max(16).default(1),
+  seatCount: z.number().int().min(1).max(16).default(1),
+  enabled: z.boolean().default(false),
 })
 export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
 
@@ -135,14 +141,19 @@ export const WorkerUpdateBody = z
     model: z.string().trim().min(1).nullable().optional(),
     effort: z.string().trim().min(1).nullable().optional(),
     seat: z.string().trim().min(1).nullable().optional(),
+    count: z.number().int().min(1).max(16).optional(),
+    seatCount: z.number().int().min(1).max(16).optional(),
     enabled: z.boolean().optional(),
-    /** Runtime only: whether the auto-queue may dispatch to this worker. Never persisted. */
-    on: z.boolean().optional(),
   })
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>
 
 export const WatcherParam = z.object({ kind: z.enum(['mention', 'prConflict', 'stall']) })
+export const WatcherHistoryParam = z.object({ repo: z.string().min(1), name: z.string().min(1) })
+export const WatcherHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  beforeSeq: z.coerce.number().int().min(1).optional(),
+})
 
 export const WatcherUpdateBody = z
   .object({
@@ -155,10 +166,31 @@ export const WatcherUpdateBody = z
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WatcherUpdateBody = z.infer<typeof WatcherUpdateBody>
 
+export const SeatNamesUpdateBody = z
+  .object({
+    seats: z.array(z.string().trim().min(1)),
+    renames: z
+      .array(z.object({ from: z.string().min(1), to: z.string().trim().min(1) }))
+      .default([]),
+  })
+  .refine(({ seats }) => new Set(seats).size === seats.length, {
+    message: 'seat names must be unique',
+  })
+export type SeatNamesUpdateBody = z.infer<typeof SeatNamesUpdateBody>
+
 export const ParticipationBody = z
   .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })
   .refine(nonEmpty, { message: 'provide workers or watchers' })
 export type ParticipationBody = z.infer<typeof ParticipationBody>
+
+export const GitIdentityBody = z.union([
+  z.null(),
+  z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('path'), value: z.string().trim().min(1) }),
+    z.object({ mode: z.literal('inline'), value: z.string() }),
+  ]),
+])
+export type GitIdentityBody = z.infer<typeof GitIdentityBody>
 
 /** Defaults to the loop.questionTimeoutSec the runner hands the agent. */
 export const AwaitQuery = z.object({

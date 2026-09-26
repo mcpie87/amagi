@@ -3,9 +3,11 @@ import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
 import { QueueView } from './views/board.tsx'
+import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
 import { IssuesView } from './views/issues.tsx'
 import { OverviewView } from './views/overview.tsx'
+import { SeatsView } from './views/seats.tsx'
 import { SettingsView } from './views/settings.tsx'
 import { TaskDetailView } from './views/task-detail.tsx'
 
@@ -23,8 +25,10 @@ const boardRoute = createRoute({
 export const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
-  validateSearch: (search: Record<string, unknown>): { issue?: string } =>
-    typeof search.issue === 'string' ? { issue: search.issue } : {},
+  validateSearch: (search: Record<string, unknown>): { issue?: string; epic?: string } => ({
+    ...(typeof search.issue === 'string' ? { issue: search.issue } : {}),
+    ...(typeof search.epic === 'string' ? { epic: search.epic } : {}),
+  }),
   component: IssuesView,
 })
 const inboxRoute = createRoute({
@@ -47,10 +51,25 @@ const settingsRoute = createRoute({
   path: '/settings',
   component: SettingsView,
 })
+const seatsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/seats',
+  component: SeatsView,
+})
 export const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
   component: TaskDetailView,
+})
+export const gitRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/git',
+  component: GitHistoryView,
+})
+export const gitCommitRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/git/commits/$hash',
+  component: CommitDetailView,
 })
 
 const routeTree = rootRoute.addChildren([
@@ -61,6 +80,9 @@ const routeTree = rootRoute.addChildren([
   activityRoute,
   sessionsRoute,
   settingsRoute,
+  seatsRoute,
   taskRoute,
+  gitRoute,
+  gitCommitRoute,
 ])
 export const router = createRouter({ routeTree })

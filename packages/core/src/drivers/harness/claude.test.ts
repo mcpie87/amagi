@@ -136,6 +136,11 @@ describe('ClaudeHarness argv', () => {
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe(DEFAULT_ALLOWED_TOOLS.join(' '))
   })
 
+  test('read-only mode only allows repository inspection tools', () => {
+    const argv = new ClaudeHarness().argv({ ...base, permissions: 'read-only' }, null)
+    expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('Read Glob Grep')
+  })
+
   test('the tool list is a single argv element so extraArgs cannot be swallowed', () => {
     const argv = new ClaudeHarness().argv({ ...base, extraArgs: ['--add-dir', '/other'] }, null)
     expect(argv[argv.indexOf('--allowedTools') + 2]).toBe('--add-dir')
