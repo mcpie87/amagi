@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { lintCommitMessage } from './commit-lint.ts'
 import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -289,6 +290,8 @@ export type PrepareConflictWorktreeOptions = {
   pr: PrInfo
   /** Git persona name; the matching ~/.config/git/personas/<name>.gitconfig is included. */
   persona?: string | null
+  /** Linted message for a clean merge commit; absent keeps the legacy message. */
+  mergeMessage?: string
   exec?: Exec
 }
 
@@ -347,10 +350,13 @@ export async function prepareConflictWorktree(
       cwd: opts.repoRoot,
     })
   ).trim()
-  const merge = await run(
-    ['git', 'merge', '-m', `Merge remote-tracking branch 'origin/${opts.baseBranch}'`, baseOid],
-    { cwd: path },
-  )
+  const legacyMessage = `Merge remote-tracking branch 'origin/${opts.baseBranch}'`
+  const message = opts.mergeMessage ?? legacyMessage
+  if (opts.mergeMessage !== undefined) {
+    const errors = lintCommitMessage(opts.mergeMessage)
+    if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
+  }
+  const merge = await run(['git', 'merge', '-m', message, baseOid], { cwd: path })
   return { path, branch, conflicted: merge.exitCode !== 0, baseOid }
 }
 

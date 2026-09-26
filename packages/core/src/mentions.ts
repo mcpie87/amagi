@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import { classifyDifficulty } from './difficulty.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
@@ -11,11 +12,12 @@ import { harnessStartOpts, makeHarness } from './factory.ts'
 import { modelFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
-import { taskIdFromPrBody } from './pr-body.ts'
+import { type PrBodyMeta, taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
 import {
   classifyMentionPrompt,
   classifyMentionSystemPrompt,
+  commitMessage,
   explainMentionPrompt,
   explainMentionSystemPrompt,
   respondToMentionPrompt,
@@ -210,6 +212,7 @@ function startImplementHarness(
   prompt: string,
   systemPrompt: string,
   repo?: string,
+  env?: Record<string, string>,
 ): AgentProcess {
   const harness = mk(config)
   return harness.start({
@@ -217,6 +220,7 @@ function startImplementHarness(
     prompt,
     systemPrompt,
     ...harnessStartOpts(config),
+    ...(env === undefined ? {} : { env }),
     ...(repo === undefined ? {} : { seatActivity: { repo, watcher: 'mention-watcher' } }),
   })
 }
@@ -228,7 +232,7 @@ function configuredFooter(config: Config): string {
 }
 
 /** Worktree on the PR head with base merged in, shared with conflict resolution. */
-async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
+async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage?: string) {
   return prepareConflictWorktree({
     repoRoot: opts.root,
     repoName: opts.repoName,
@@ -236,6 +240,7 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
     baseBranch: opts.config.repo.baseBranch,
     pr: opts.pr,
     persona: opts.config.repo.persona,
+    ...(mergeMessage === undefined ? {} : { mergeMessage }),
     exec: run,
   })
 }
@@ -243,7 +248,23 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec) {
 async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progress): Promise<void> {
   const mk = opts.makeHarnessFn ?? makeHarness
   p.phase('preparing worktree')
-  const wt = await prWorktree(opts, run)
+  const taskId = opts.tracker === undefined ? null : await resolveTaskId(opts.pr, opts.tracker)
+  const task = taskId === null ? null : ((await opts.tracker?.get(taskId)) ?? null)
+  const configuredHarness = watcherHarnessConfig(opts.config, 'mention')
+  const commitMeta: PrBodyMeta = {
+    harness: configuredHarness.kind,
+    model: configuredHarness.model ?? null,
+    effort: configuredHarness.effort ?? null,
+  }
+  const mergeMessage =
+    task === null
+      ? undefined
+      : mentionCommitMessage(
+          task,
+          `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}.`,
+          commitMeta,
+        )
+  const wt = await prWorktree(opts, run, mergeMessage)
   const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('fixing in worktree')
@@ -268,6 +289,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
           respondToMentionPrompt(ctx),
           respondToMentionSystemPrompt(ctx),
           opts.repo,
+          { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
         )
         return { outcome: await p.agent(proc, 'fixing in worktree'), proc }
       },
@@ -276,7 +298,9 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
     if (!outcome.ok) {
       throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }
-    const changed = await commitWorktree(run, wt.path, opts.pr)
+    const summary = readFileSync(outPath, 'utf8').trim()
+    if (summary === '') throw new Error('agent produced no fix summary')
+    const changed = await commitWorktree(run, wt.path, opts.pr, task, summary, commitMeta)
     p.phase('pushing fix')
     await pushConflictFix({
       cwd: wt.path,
@@ -285,8 +309,6 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       remote: opts.config.forge.remote,
       exec: run,
     })
-    const summary = readFileSync(outPath, 'utf8').trim()
-    if (summary === '') throw new Error('agent produced no fix summary')
     const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')
     const footer = modelFooter(kind, proc.model ?? model ?? null, proc.effort ?? effort ?? null)
     const result = changed ? summary : `No change was made: ${summary}`
@@ -302,13 +324,35 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
 }
 
 /** Stages and commits the fix, mirroring runner.commit: nothing to commit is fine, a git failure throws. */
-async function commitWorktree(run: Exec, cwd: string, pr: PrInfo): Promise<boolean> {
+function mentionCommitMessage(
+  task: { id: string; title: string },
+  summary: string,
+  meta: PrBodyMeta,
+): string {
+  const message = commitMessage(task, summary, meta)
+  const errors = lintCommitMessage(message)
+  if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
+  return message
+}
+
+async function commitWorktree(
+  run: Exec,
+  cwd: string,
+  pr: PrInfo,
+  task: { id: string; title: string } | null,
+  summary: string,
+  meta: PrBodyMeta,
+): Promise<boolean> {
   const status = await run(['git', 'status', '--porcelain'], { cwd })
   if (status.stdout.trim() === '') return false
   await run(['git', 'add', '-A'], { cwd })
+  const message =
+    task === null
+      ? `Respond to review feedback on PR #${pr.number}\n\nPR: ${pr.url}`
+      : mentionCommitMessage(task, summary, meta)
   const commit = await run(['git', 'commit', '-q', '-F', '-'], {
     cwd,
-    stdin: `Respond to review feedback on PR #${pr.number}\n\nPR: ${pr.url}`,
+    stdin: message,
   })
   if (commit.exitCode !== 0) {
     throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
