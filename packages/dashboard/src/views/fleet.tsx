@@ -20,6 +20,8 @@ type Worker = {
   model?: string
   effort?: string
   seat?: string
+  count?: number
+  seatCount?: number
   enabled: boolean
   taskId: string | null
 }
@@ -303,6 +305,8 @@ function WorkerFormModal({
 }) {
   const [name, setName] = useState(initial?.name ?? defaultName(workers, 'claude'))
   const [nameTouched, setNameTouched] = useState(initial !== null)
+  const [count, setCount] = useState(String(initial?.count ?? 1))
+  const [seatCount, setSeatCount] = useState(String(initial?.seatCount ?? 1))
   const [harness, setHarness] = useState<HarnessValues>({
     kind: initial?.kind ?? 'claude',
     model: initial?.model ?? '',
@@ -311,6 +315,15 @@ function WorkerFormModal({
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const workerCount = Number(count)
+  const workerSeatCount = Number(seatCount)
+  const validCapacity =
+    Number.isInteger(workerCount) &&
+    workerCount >= 1 &&
+    workerCount <= 16 &&
+    Number.isInteger(workerSeatCount) &&
+    workerSeatCount >= 1 &&
+    workerSeatCount <= workerCount
 
   const changeHarness = (next: HarnessValues) => {
     if (!nameTouched && next.kind !== '' && next.kind !== harness.kind) {
@@ -328,6 +341,8 @@ function WorkerFormModal({
       model: orNull(harness.model),
       effort: orNull(harness.effort),
       seat: orNull(harness.seat),
+      count: workerCount,
+      seatCount: workerSeatCount,
     }
     const err =
       initial === null
@@ -348,7 +363,7 @@ function WorkerFormModal({
       error={error}
       busy={busy}
       submitLabel={initial === null ? 'Create worker' : 'Save changes'}
-      canSubmit={name.trim() !== ''}
+      canSubmit={name.trim() !== '' && validCapacity}
       onSubmit={() => void save()}
       onClose={onClose}
     >
@@ -366,6 +381,43 @@ function WorkerFormModal({
           className={input}
         />
       </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label className={label} htmlFor="worker-count">
+            Worker count
+          </label>
+          <input
+            id="worker-count"
+            type="number"
+            min={1}
+            max={16}
+            step={1}
+            value={count}
+            onChange={(e) => setCount(e.target.value)}
+            className={input}
+          />
+        </div>
+        <div>
+          <label className={label} htmlFor="worker-seat-count">
+            Seat count
+          </label>
+          <input
+            id="worker-seat-count"
+            type="number"
+            min={1}
+            max={Math.min(workerCount || 1, 16)}
+            step={1}
+            value={seatCount}
+            onChange={(e) => setSeatCount(e.target.value)}
+            className={input}
+          />
+        </div>
+      </div>
+      {!validCapacity && (
+        <p className="text-sm text-red-ink">
+          Seat count must be between 1 and worker count (maximum 16).
+        </p>
+      )}
       <HarnessFields values={harness} onChange={changeHarness} seats={seats} />
       {initial?.taskId != null && (
         <p className="text-sm text-amber-ink">

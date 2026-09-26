@@ -343,7 +343,7 @@ export function respondToMentionSystemPrompt(ctx: MentionPromptContext): string 
     'Rules:',
     '- Stay inside this worktree. Do not touch other checkouts of this repository.',
     '- The PR is a completed task; make the smallest change that addresses the feedback, without reworking unrelated code.',
-    '- Commit your changes. Do not push; the dispatcher pushes.',
+    '- Do not commit or push. The dispatcher commits your changes and pushes them.',
     `- Write a short summary of what changed, or why no change was needed, to ${ctx.outPath}.`,
   ]
   if (ctx.conflicted) {
@@ -376,7 +376,7 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
   }
   parts.push(
     '',
-    'Address the feedback with the smallest change that satisfies it, commit, and stop.',
+    'Address the feedback with the smallest change that satisfies it, then stop. The dispatcher will commit and push your changes.',
     `Write a short summary of what changed to file: ${ctx.outPath}. If no change is needed, write why. Keep it concise and suitable for a PR comment.`,
   )
   return parts.join('\n')

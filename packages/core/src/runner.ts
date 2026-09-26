@@ -15,7 +15,8 @@ import {
   type CheckResult,
   currentAttemptEvents,
   Finding,
-  type FindingReply,
+  FindingReply,
+  findingSeverityAtOrAbove,
   isTerminal,
   type Finding as ReviewFinding,
   type StoredEvent,
@@ -162,6 +163,18 @@ function taskCost(events: StoredEvent[]): { costUsd: number; costSeen: boolean }
   return { costUsd, costSeen }
 }
 
+function reviewTokens(events: StoredEvent[]): number {
+  return events.reduce((total, event) => {
+    if (event.type !== 'agent.stream') return total
+    if (event.event.kind !== 'usage') return total
+    return total + event.event.inputTokens + event.event.outputTokens
+  }, 0)
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
 /** Best-effort JSON extraction of the viability decision; anything else is a null. */
 function parseViabilityDecision(
   reply: string,
@@ -256,6 +269,22 @@ export type ReviewRoundResult = {
   reviewerSession: string | null
   snapshot: string
   reason: string | null
+}
+
+type ReviewPrSummary = {
+  run: AgentRun
+  unresolved: boolean
+  unresolvedIds: string[]
+  unresolvedFindings: {
+    id: string
+    severity: string
+    title: string
+    path: string
+    line: number
+    failureScenario: string
+    reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
+  }[]
+  history: string
 }
 
 /**
@@ -457,7 +486,13 @@ export class Runner {
       type: 'review.finished',
       round,
       findings,
-      blockingIds: [],
+      blockingIds: findings
+        .filter(
+          (finding) =>
+            finding.scope === 'in-scope' &&
+            findingSeverityAtOrAbove(finding.severity, config.review.threshold),
+        )
+        .map((finding) => finding.id),
       snapshot,
     })
     return { ok: true, findings, reviewerSession, snapshot, reason: null }
@@ -637,6 +672,305 @@ export class Runner {
       to,
       reason,
     })
+  }
+
+  private async reviewAndFix(
+    task: TrackerTask,
+    cwd: string,
+    initialRun: AgentRun,
+    lease: Lease,
+    budget: TaskBudget,
+  ): Promise<ReviewPrSummary | null> {
+    const { config, store } = this.deps
+    let run = initialRun
+    let snapshot: string | undefined
+    let priorFindings: ReviewFinding[] = []
+    let priorReplies: FindingReply[] = []
+    let reviewerSession: string | null = null
+    let previousBlocking: string[] | null = null
+    let finalPassUsed = false
+    let finalPassPending = false
+    let round = 0
+    let tokenCount = 0
+    const reviewStartSeq = store.events({ taskId: task.id, limit: 1_000_000 }).at(-1)?.seq ?? 0
+    let latestFindings: ReviewFinding[] = []
+    const fixedIds = new Set<string>()
+    const withdrawnIds = new Set<string>()
+    let unresolvedIds: string[] = []
+    let failure: string | null = null
+    let stopReason: 'acceptable' | 'rounds' | 'tokens' | 'no-progress' | 'cost' | null = null
+
+    while (stopReason === null) {
+      this.throwIfCancelled(task.id)
+      if (budget.spentReason() !== null) {
+        stopReason = 'cost'
+        break
+      }
+      round++
+      this.transition(task.id, 'reviewing')
+      const finalPass = finalPassPending
+      finalPassPending = false
+      let result: ReviewRoundResult
+      try {
+        result = await this.review(
+          {
+            task,
+            cwd,
+            round,
+            ...(finalPass ? { finalPass: true } : {}),
+            ...(!finalPass && snapshot !== undefined ? { previousSnapshot: snapshot } : {}),
+            ...(!finalPass && snapshot !== undefined ? { previousFindings: priorFindings } : {}),
+            ...(!finalPass && priorReplies.length > 0 ? { replies: priorReplies } : {}),
+            ...(reviewerSession === null ? {} : { reviewerSession }),
+          },
+          budget,
+        )
+      } catch (error) {
+        if (budget.spentReason() !== null) {
+          stopReason = 'cost'
+          break
+        }
+        throw error
+      }
+      reviewerSession = result.reviewerSession
+      snapshot = result.snapshot
+      tokenCount = reviewTokens(
+        store
+          .events({ taskId: task.id, limit: 1_000_000 })
+          .filter((event) => event.seq > reviewStartSeq),
+      )
+      if (!result.ok) {
+        failure = result.reason ?? 'reviewer failed to produce valid findings'
+        unresolvedIds = [`review-failed-round-${round}`]
+        stopReason =
+          budget.spentReason() !== null
+            ? 'cost'
+            : config.review.maxTokens > 0 && tokenCount > config.review.maxTokens
+              ? 'tokens'
+              : 'rounds'
+        break
+      }
+
+      const findings = result.findings
+      const blocking = findings.filter(
+        (finding) =>
+          finding.scope === 'in-scope' &&
+          findingSeverityAtOrAbove(finding.severity, config.review.threshold),
+      )
+      latestFindings = findings
+      for (const prior of priorFindings) {
+        if (!findings.some((finding) => finding.id === prior.id)) withdrawnIds.add(prior.id)
+      }
+      unresolvedIds = blocking.map((finding) => finding.id)
+      const currentBlocking = [...unresolvedIds].sort()
+      if (config.review.maxTokens > 0 && tokenCount > config.review.maxTokens) {
+        stopReason = 'tokens'
+        break
+      }
+      if (budget.spentReason() !== null) {
+        stopReason = 'cost'
+        break
+      }
+      if (blocking.length === 0) {
+        if (config.review.finalPass && !finalPassUsed) {
+          finalPassUsed = true
+          if (round >= config.review.maxRounds) {
+            stopReason = 'rounds'
+            break
+          }
+          finalPassPending = true
+          continue
+        }
+        stopReason = 'acceptable'
+        break
+      }
+
+      if (previousBlocking !== null && sameStrings(currentBlocking, previousBlocking)) {
+        stopReason = 'no-progress'
+        break
+      }
+      if (round >= config.review.maxRounds) {
+        stopReason = 'rounds'
+        break
+      }
+      previousBlocking = currentBlocking
+      priorFindings = findings
+      const optional = findings.filter(
+        (finding) =>
+          finding.scope === 'in-scope' &&
+          !findingSeverityAtOrAbove(finding.severity, config.review.threshold),
+      )
+      const replyPath = join(runStateDir(task.id), `review-replies-${round}-${Date.now()}.json`)
+      const schemaPath = `${replyPath}.schema.json`
+      writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(z.array(FindingReply)), null, 2))
+      const prompt = [
+        'Fix the blocking review findings below. Resume this implementer session and preserve the existing work.',
+        `Blocking findings, each must be answered as fixed or wont-fix with a reason:\n${JSON.stringify(blocking, null, 2)}`,
+        `Below-threshold in-scope findings are optional; consider these while fixing:\n${JSON.stringify(optional, null, 2)}`,
+        `Write only a JSON array of FindingReply objects to ${replyPath}\nRequired schema: ${JSON.stringify(z.toJSONSchema(z.array(FindingReply)))}`,
+        'Every blocking finding id must appear exactly once. Do not omit a finding. A wont-fix reply needs a specific reason.',
+      ].join('\n\n')
+      this.transition(task.id, 'fixing')
+      let fix: AgentRun & { stopped: boolean }
+      try {
+        fix = await this.runAgentWithRetry(
+          task.id,
+          run.sessionId,
+          {
+            cwd,
+            prompt,
+            permissions: config.harness.implement.permissions,
+            extraArgs: config.harness.implement.extraArgs,
+          },
+          'fix review',
+          lease,
+          budget,
+        )
+      } catch (error) {
+        if (budget.spentReason() !== null) {
+          stopReason = 'cost'
+          break
+        }
+        throw error
+      }
+      if (fix.stopped) return null
+      run = mergeAgentRuns(run, fix)
+      const resumed = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
+      if (resumed === null) return null
+      run = mergeAgentRuns(run, resumed)
+      let replies: FindingReply[]
+      try {
+        replies = z.array(FindingReply).parse(JSON.parse(readFileSync(replyPath, 'utf8')))
+        const replyIds = replies.map((reply) => reply.id)
+        if (
+          new Set(replyIds).size !== replyIds.length ||
+          blocking.some((finding) => !replyIds.includes(finding.id)) ||
+          replies.some((reply) => !blocking.some((finding) => finding.id === reply.id))
+        ) {
+          throw new Error('replies must cover every blocking finding exactly once')
+        }
+      } catch (error) {
+        failure = `implementer replies were invalid: ${errMsg(error)}`
+        unresolvedIds = blocking.map((finding) => finding.id)
+        stopReason = 'rounds'
+        rmSync(replyPath, { force: true })
+        rmSync(schemaPath, { force: true })
+        break
+      }
+      rmSync(replyPath, { force: true })
+      rmSync(schemaPath, { force: true })
+      store.append(task.id, { type: 'review.fixed', round, replies })
+      priorReplies = replies
+      for (const reply of replies) if (reply.outcome === 'fixed') fixedIds.add(reply.id)
+
+      let checksPassed = false
+      for (let checkRound = 0; checkRound <= config.loop.maxCheckRounds; checkRound++) {
+        this.transition(task.id, 'checks')
+        const checks = await this.runChecks(cwd)
+        this.throwIfBudgetExhausted(task.id, budget)
+        checksPassed = checks.every((check) => check.exitCode === 0)
+        store.append(task.id, {
+          type: 'checks.finished',
+          ok: checksPassed,
+          results: checks,
+        })
+        if (checksPassed) break
+        if (checkRound === config.loop.maxCheckRounds) {
+          failure = 'checks still fail after the review fix round'
+          unresolvedIds = blocking.map((finding) => finding.id)
+          stopReason = 'rounds'
+          break
+        }
+        this.transition(task.id, 'implementing')
+        let checkFix: AgentRun & { stopped: boolean }
+        try {
+          checkFix = await this.runAgentWithRetry(
+            task.id,
+            run.sessionId,
+            {
+              cwd,
+              prompt: fixChecksPrompt(checks),
+              permissions: config.harness.implement.permissions,
+              extraArgs: config.harness.implement.extraArgs,
+            },
+            'fix checks',
+            lease,
+            budget,
+          )
+        } catch (error) {
+          if (budget.spentReason() !== null) {
+            stopReason = 'cost'
+            break
+          }
+          throw error
+        }
+        if (checkFix.stopped) return null
+        run = mergeAgentRuns(run, checkFix)
+        const checked = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
+        if (checked === null) return null
+        run = mergeAgentRuns(run, checked)
+      }
+      if (!checksPassed) break
+      const sinceReview = store
+        .events({ taskId: task.id, limit: 1_000_000 })
+        .filter((event) => event.seq > reviewStartSeq)
+      tokenCount = reviewTokens(sinceReview)
+      if (config.review.maxTokens > 0 && tokenCount > config.review.maxTokens) {
+        stopReason = 'tokens'
+        break
+      }
+      if (budget.spentReason() !== null) {
+        stopReason = 'cost'
+        break
+      }
+    }
+
+    const finalEvents = store
+      .events({ taskId: task.id, limit: 1_000_000 })
+      .filter((event) => event.seq > reviewStartSeq)
+    tokenCount = reviewTokens(finalEvents)
+    this.transition(task.id, 'checks')
+    store.append(task.id, {
+      type: 'review.stopped',
+      reason: stopReason ?? 'rounds',
+      unresolvedIds,
+    })
+    const minorFindings = latestFindings.filter(
+      (finding) =>
+        finding.scope === 'in-scope' &&
+        !findingSeverityAtOrAbove(finding.severity, config.review.threshold),
+    )
+    const history = [
+      `Review rounds: ${round}.`,
+      fixedIds.size > 0 ? `Fixed: ${[...fixedIds].join(', ')}.` : 'Fixed: none.',
+      withdrawnIds.size > 0 ? `Withdrawn disputes: ${[...withdrawnIds].join(', ')}.` : '',
+      minorFindings.length > 0
+        ? `Remaining minors/nits: ${minorFindings.map((finding) => `${finding.id} ${finding.title}`).join('; ')}.`
+        : 'Remaining minors/nits: none.',
+      failure === null ? '' : `Unresolved review: ${failure}`,
+    ]
+      .filter(Boolean)
+      .join('\n')
+    return {
+      run,
+      unresolved: stopReason !== 'acceptable',
+      unresolvedIds,
+      unresolvedFindings: latestFindings
+        .filter((finding) => unresolvedIds.includes(finding.id))
+        .map((finding) => {
+          const reply = priorReplies.find((entry) => entry.id === finding.id)
+          return {
+            id: finding.id,
+            severity: finding.severity,
+            title: finding.title,
+            path: finding.path,
+            line: finding.line,
+            failureScenario: finding.failureScenario,
+            reply: reply === undefined ? null : { outcome: reply.outcome, reason: reply.reason },
+          }
+        }),
+      history,
+    }
   }
 
   /** Whether the operator interrupted the run via the store's `cancelled` state. */
@@ -899,8 +1233,19 @@ export class Runner {
       current = mergeAgentRuns(current, resumed)
     }
 
+    let reviewSummary: ReviewPrSummary | null = null
+    if (config.review.enabled) {
+      reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
+      if (reviewSummary === null) return
+      current = reviewSummary.run
+    }
+
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
-      summary: commitSummary(current.summary),
+      summary: commitSummary(
+        reviewSummary?.unresolved
+          ? withVerdictLine(current.summary ?? '', 'needs-human')
+          : current.summary,
+      ),
       model: current.model,
       effort: current.effort,
     })
@@ -952,7 +1297,10 @@ export class Runner {
       budget,
       current.model,
       current.effort,
-      current.summary,
+      reviewSummary?.unresolved
+        ? withVerdictLine(current.summary ?? '', 'needs-human')
+        : current.summary,
+      reviewSummary,
     )
     this.throwIfCancelled(task.id)
   }
@@ -1025,6 +1373,7 @@ export class Runner {
     model: string | null,
     effort: string | null,
     fallbackSummary?: string | null,
+    reviewSummary?: ReviewPrSummary | null,
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
@@ -1090,8 +1439,19 @@ export class Runner {
           effort: effort ?? config.harness.implement.effort ?? null,
         },
         summary,
+        reviewSummary === undefined || reviewSummary === null
+          ? undefined
+          : {
+              unresolved: reviewSummary.unresolved,
+              unresolvedIds: reviewSummary.unresolvedIds,
+              unresolvedFindings: reviewSummary.unresolvedFindings,
+              history: reviewSummary.history,
+            },
       ),
-      labels: amagiLabels(current.type),
+      labels: [
+        ...amagiLabels(current.type),
+        ...(reviewSummary?.unresolved ? ['amagi/review-unresolved'] : []),
+      ],
     }
     try {
       const pr = await forge.createPr(opts)
