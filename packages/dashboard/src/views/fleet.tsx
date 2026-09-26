@@ -1,6 +1,6 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
-import { useDashboard, useRunner } from '../store.tsx'
+import { useRunner } from '../store.tsx'
 
 const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
 type HarnessKind = (typeof HARNESS_KINDS)[number]
@@ -710,9 +710,8 @@ function SeatsEditor({
   )
 }
 
-/** The fleet editor: workers, watchers and per-repository participation. */
-export function FleetSettings() {
-  const { repos, refreshRepos } = useDashboard()
+/** The global fleet editor: workers, seats and watchers. */
+export function FleetWorkersSettings() {
   const [workers, setWorkers] = useState<Worker[] | null>(null)
   const [watchers, setWatchers] = useState<Watchers | null>(null)
   const [seatEntries, setSeatEntries] = useState<SeatDraft[] | null>(null)
@@ -817,17 +816,6 @@ export function FleetSettings() {
         </div>
       )}
 
-      {repos !== null && repos.length > 0 && (
-        <div className={`mt-6 ${card}`}>
-          <h2 className="mb-1 text-sm text-fg-muted">Repositories</h2>
-          <ul className="divide-y divide-line">
-            {repos.map((repo) => (
-              <ParticipationRow key={repo.key} repo={repo} onChanged={refreshRepos} />
-            ))}
-          </ul>
-        </div>
-      )}
-
       {editing !== null && workers !== null && (
         <WorkerFormModal
           initial={editing === 'new' ? null : editing}
@@ -847,5 +835,22 @@ export function FleetSettings() {
         />
       )}
     </>
+  )
+}
+
+export function RepositoryParticipationCard({
+  repo,
+  onChanged,
+}: {
+  repo: { key: string; name: string; workers: boolean; watchers: boolean }
+  onChanged: () => void
+}) {
+  return (
+    <div className={`mt-6 ${card}`}>
+      <h2 className="mb-1 text-sm text-fg-muted">Repositories</h2>
+      <ul className="divide-y divide-line">
+        <ParticipationRow repo={repo} onChanged={onChanged} />
+      </ul>
+    </div>
   )
 }

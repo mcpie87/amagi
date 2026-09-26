@@ -168,6 +168,7 @@ export const Config = z
         mention: AgentWatcherConfig.prefault({ enabled: true }),
         prConflict: AgentWatcherConfig.prefault({ enabled: true }),
         stall: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
+        epicClose: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
       })
       .prefault({}),
     loop: z
@@ -210,6 +211,8 @@ export const Config = z
          * reads the local store and checks one timestamp per task.
          */
         stallWatchIntervalSec: z.number().int().min(1).default(300),
+        /** How often the server closes beads epics whose children are all complete. */
+        epicCloseIntervalSec: z.number().int().min(1).default(300),
         /**
          * How long a task may sit in an in-progress state with no worker
          * heartbeat before the stall watcher reclaims it (release the tracker
