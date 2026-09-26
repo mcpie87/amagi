@@ -397,6 +397,26 @@ export class Store {
     return null
   }
 
+  /** Chat agents whose latest start has not been closed by an exit event. */
+  activeChatAgents(): { taskId: string; seat: string }[] {
+    return this.db
+      .query(
+        `select started.task_id as taskId, json_extract(started.body, '$.seat') as seat
+         from events started
+         where started.type = 'agent.started'
+           and json_extract(started.body, '$.role') = 'chat'
+           and json_extract(started.body, '$.seat') is not null
+           and not exists (
+             select 1 from events exited
+             where exited.task_id = started.task_id
+               and exited.type = 'agent.exited'
+               and json_extract(exited.body, '$.role') = 'chat'
+               and exited.seq > started.seq
+           )`,
+      )
+      .all() as { taskId: string; seat: string }[]
+  }
+
   /**
    * Lazily minted credential that binds an ask/answer to its task. A column
    * rather than an event so the secret never reaches the SSE stream; the cost

@@ -6,6 +6,7 @@ import { QueueView } from './views/board.tsx'
 import { InboxView } from './views/inbox.tsx'
 import { IssuesView } from './views/issues.tsx'
 import { OverviewView } from './views/overview.tsx'
+import { SeatsView } from './views/seats.tsx'
 import { SettingsView } from './views/settings.tsx'
 import { TaskDetailView } from './views/task-detail.tsx'
 
@@ -49,6 +50,11 @@ const settingsRoute = createRoute({
   path: '/settings',
   component: SettingsView,
 })
+const seatsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/seats',
+  component: SeatsView,
+})
 export const taskRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/tasks/$id',
@@ -63,6 +69,7 @@ const routeTree = rootRoute.addChildren([
   activityRoute,
   sessionsRoute,
   settingsRoute,
+  seatsRoute,
   taskRoute,
 ])
 export const router = createRouter({ routeTree })

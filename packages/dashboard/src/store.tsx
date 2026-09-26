@@ -402,3 +402,37 @@ export function useRunner(): RunnerApi {
 export function useConnection(): ConnectionStatus {
   return useContext(ConnectionContext)
 }
+
+export type SeatState = {
+  seat: string
+  state: 'free' | 'held'
+  holder: { repo: string; taskId?: string; watcher?: string } | null
+  waiters: { repo: string; taskId: string }[]
+}
+
+/** Global seat state is polled independently of the selected repository stream. */
+export function useSeats(): SeatState[] | null {
+  const [seats, setSeats] = useState<SeatState[] | null>(null)
+  useEffect(() => {
+    let active = true
+    const refresh = () => {
+      fetch(`${apiBase}/api/seats`)
+        .then((response) =>
+          response.ok ? (response.json() as Promise<{ seats: SeatState[] }>) : null,
+        )
+        .then((value) => {
+          if (active) setSeats(value?.seats ?? null)
+        })
+        .catch(() => {
+          if (active) setSeats(null)
+        })
+    }
+    refresh()
+    const timer = setInterval(refresh, 4000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+  return seats
+}

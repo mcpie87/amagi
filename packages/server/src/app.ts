@@ -13,10 +13,12 @@ import {
   isTerminal,
   type LiveRun,
   loadGlobalConfig,
+  loadWatcherSeats,
   makeHarness,
   mergeLiveRuns,
   type Notifier,
   newWorkerId,
+  pidAlive,
   type Question,
   type RegistryEntry,
   Runner,
@@ -34,6 +36,8 @@ import {
   WorkerConfig,
   type Workspace,
   type Workspaces,
+  watcherHarnessConfig,
+  workerSeat,
   writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
@@ -270,6 +274,70 @@ export function createApp({
         }
       }
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
+    .get('/api/seats', async (c) => {
+      type Holder = { repo: string; taskId?: string; watcher?: string }
+      type Waiter = { repo: string; taskId: string }
+      const configured = new Set<string>()
+      const global = loadGlobalConfig()
+      for (const worker of global.worker) configured.add(workerSeat(worker))
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        configured.add(ws.config.harness.implement.seat ?? ws.config.harness.implement.kind)
+        for (const watcher of ['mention', 'prConflict'] as const) {
+          const harness = watcherHarnessConfig(ws.config, watcher)
+          configured.add(harness.seat ?? harness.kind)
+        }
+      }
+
+      const holders = new Map<string, Holder>()
+      const waiters = new Map<string, Waiter[]>()
+      const setHolder = (seat: string | undefined, holder: Holder): void => {
+        if (seat !== undefined && !holders.has(seat)) holders.set(seat, holder)
+      }
+      const addWaiter = (seat: string | undefined, waiter: Waiter): void => {
+        if (seat === undefined) return
+        const queue = waiters.get(seat) ?? []
+        if (!queue.some((entry) => entry.repo === waiter.repo && entry.taskId === waiter.taskId)) {
+          queue.push(waiter)
+        }
+        waiters.set(seat, queue)
+      }
+
+      for (const { repo, service } of servedRunners()) {
+        const status = await service.status()
+        for (const taskId of status.running) {
+          const task = status.tasks[taskId]
+          if (task?.waitingOnSeat) addWaiter(task.seat, { repo, taskId })
+          else setHolder(task?.seat, { repo, taskId })
+        }
+      }
+      for (const run of liveRuns?.() ?? []) {
+        if (!pidAlive(run.pid)) continue
+        if (run.waitingOnSeat) addWaiter(run.seat, { repo: run.repoKey, taskId: run.taskId })
+        else setHolder(run.seat, { repo: run.repoKey, taskId: run.taskId })
+      }
+      for (const watcher of loadWatcherSeats()) {
+        setHolder(watcher.seat, { repo: watcher.repo, watcher: watcher.watcher })
+      }
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        for (const chat of ws.store.activeChatAgents()) {
+          setHolder(chat.seat, { repo: entry.key, taskId: chat.taskId })
+        }
+      }
+
+      return c.json({
+        seats: [...configured].sort().map((seat) => ({
+          seat,
+          state: holders.has(seat) ? 'held' : 'free',
+          holder: holders.get(seat) ?? null,
+          waiters: waiters.get(seat) ?? [],
+        })),
+      })
     })
 
     .get('/api/repos', async (c) => {

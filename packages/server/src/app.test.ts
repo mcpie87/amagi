@@ -2291,6 +2291,72 @@ describe('fleet endpoints', () => {
   })
 })
 
+describe('GET /api/seats', () => {
+  const savedConfigHome = process.env.XDG_CONFIG_HOME
+  let configHome: string
+
+  beforeEach(() => {
+    configHome = mkdtempSync(join(tmpdir(), 'amagi-seats-home-'))
+    process.env.XDG_CONFIG_HOME = configHome
+    ws = testWorkspaces(['repo-a', 'repo-b'])
+    const repoB = ws.workspaces.get('repo-b')
+    if (repoB === null) throw new Error('repo-b workspace missing')
+    repoB.config.harness.implement.seat = 'free-seat'
+    const status = (repo: string, taskId: string, waitingOnSeat: boolean) => ({
+      name: repo,
+      available: false,
+      capacity: 1,
+      running: [taskId],
+      startedAt: {},
+      resources: {},
+      tasks: {
+        [taskId]: {
+          title: taskId,
+          seat: 'claude',
+          waitingOnSeat,
+          harness: 'claude',
+          model: null,
+          effort: null,
+        },
+      },
+      autoQueue: false,
+    })
+    app = createApp({
+      workspaces: ws.workspaces,
+      runnerForRepo: (repo) =>
+        ({
+          status: async () =>
+            repo === 'repo-a'
+              ? status('repo-a', 'task-a', false)
+              : status('repo-b', 'task-b', true),
+        }) as RunServiceApi,
+    })
+  })
+
+  afterEach(() => {
+    ws.cleanup()
+    rmSync(configHome, { recursive: true, force: true })
+    if (savedConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = savedConfigHome
+  })
+
+  test('aggregates holders and waiters across repos and lists free configured seats', async () => {
+    const res = await app.request('/api/seats')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      seats: [
+        {
+          seat: 'claude',
+          state: 'held',
+          holder: { repo: 'repo-a', taskId: 'task-a' },
+          waiters: [{ repo: 'repo-b', taskId: 'task-b' }],
+        },
+        { seat: 'free-seat', state: 'free', holder: null, waiters: [] },
+      ],
+    })
+  })
+})
+
 describe('GET /api/repos/:repo/tasks/:id', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
