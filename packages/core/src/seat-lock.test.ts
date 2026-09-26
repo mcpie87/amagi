@@ -55,6 +55,28 @@ describe('seat locks', () => {
     expect(order).toEqual([1, 2, 3])
   })
 
+  test('serves higher priority requests first and keeps FIFO within each priority', async () => {
+    const path = tempDirectory()
+    const first = await acquireSeat('codex', { directory: path })
+    const order: string[] = []
+    const requests = [
+      ['low-1', 'low'],
+      ['high-1', 'high'],
+      ['low-2', 'low'],
+      ['high-2', 'high'],
+    ] as const
+    const waiters = requests.map(async ([name, priority]) => {
+      const lease = await acquireSeat('codex', { directory: path, priority })
+      order.push(name)
+      lease.release()
+    })
+
+    await Bun.sleep(100)
+    first.release()
+    await Promise.all(waiters)
+    expect(order).toEqual(['high-1', 'high-2', 'low-1', 'low-2'])
+  })
+
   test('allows different seat names concurrently', async () => {
     const path = tempDirectory()
     const first = await acquireSeat('claude', { directory: path })

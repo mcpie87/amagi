@@ -227,6 +227,7 @@ export async function resolveConflict(
             prompt: resolveConflictPrompt(ctx),
             systemPrompt: resolveConflictSystemPrompt(ctx),
             ...harnessStartOpts(harnessConfig),
+            seatPriority: 'low',
             env: { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.repoRoot },
             ...(opts.repo === undefined
               ? {}

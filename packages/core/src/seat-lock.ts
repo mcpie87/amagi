@@ -28,11 +28,16 @@ type SeatTicket = {
   id: string
   pid: number
   startedAt: number
+  priority?: SeatRequestPriority
 }
+
+export type SeatRequestPriority = 'high' | 'low'
 
 type SeatHolder = SeatTicket
 
 export type SeatLockOptions = {
+  /** Requests at a higher priority are served first; equal priorities stay FIFO. Defaults to high. */
+  priority?: SeatRequestPriority
   /** Maximum time to wait for this seat before rejecting. Defaults to five minutes, null waits indefinitely. */
   maxWaitMs?: number | null
   /** Called once when another holder or waiter is ahead. */
@@ -145,9 +150,12 @@ function queuedTickets(dir: string, holderId: string | undefined): SeatTicket[] 
       rmSync(path, { force: true })
       continue
     }
-    tickets.push(ticket)
+    tickets.push({ ...ticket, priority: ticket.priority ?? 'high' })
   }
-  return tickets.sort((a, b) => a.id.localeCompare(b.id))
+  return tickets.sort((a, b) => {
+    const priority = (a.priority === 'low' ? 1 : 0) - (b.priority === 'low' ? 1 : 0)
+    return priority || a.id.localeCompare(b.id)
+  })
 }
 
 function ticketStale(path: string): boolean {
@@ -193,7 +201,12 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
     sequence += 1
     writeFileSync(sequencePath, String(sequence))
     const ticketId = `${String(sequence).padStart(12, '0')}-${randomUUID()}`
-    const ticket: SeatTicket = { id: ticketId, pid: process.pid, startedAt: Date.now() }
+    const ticket: SeatTicket = {
+      id: ticketId,
+      pid: process.pid,
+      startedAt: Date.now(),
+      priority: options.priority ?? 'high',
+    }
     writeFileSync(ticketPath(dir, ticketId), JSON.stringify(ticket), { flag: 'wx' })
     return ticketId
   })
