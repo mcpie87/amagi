@@ -82,6 +82,8 @@ export type RunnerDeps = {
   forge?: PrDriver | undefined
   /** Override the configured reviewer harness in tests. */
   reviewerHarness?: Harness | undefined
+  /** Resolved reviewer worker profile, when the fleet assigns one. */
+  reviewerConfig?: Config['harness']['implement'] | undefined
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
   /**
@@ -430,7 +432,7 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig = reviewerHarnessConfig(config)
+    const reviewerConfig = this.deps.reviewerConfig ?? reviewerHarnessConfig(config)
     const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
