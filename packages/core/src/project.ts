@@ -336,6 +336,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         writeTasks()[event.taskId] = {
           ...current,
           reviewStopReason: event.reason,
+          reviewFindings: event.findings ?? current.reviewFindings,
           updatedAt: event.ts,
         }
       }

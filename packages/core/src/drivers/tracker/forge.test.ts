@@ -35,6 +35,9 @@ const GH_VIEW = `{
   "createdAt": "2026-09-20T14:02:53Z"
 }`
 
+const GH_PROPOSED = GH_VIEW.replace('"labels": []', '"labels": [{ "name": "proposed" }]')
+const GH_READY_PROPOSED = GH_READY.replace('"labels": []', '"labels": [{ "name": "proposed" }]')
+
 const GH_COMMENTS = `{
   "comments": [
     { "body": "[amagi] question q-1\\n\\nRetries per-request or per-connection?" },
@@ -115,6 +118,16 @@ describe('GithubTracker', () => {
     const { exec } = fake(() => ok(GH_READY))
     const ids = await new GithubTracker({ cwd: '/repo', exec }).openIds()
     expect(ids).toEqual(['3', '5'])
+  })
+
+  test('proposed issues are hidden from ready and rejected by explicit claim', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('view') ? ok(GH_PROPOSED) : ok(GH_READY_PROPOSED),
+    )
+    const tracker = new GithubTracker({ cwd: '/repo', exec })
+    expect(await tracker.ready()).toEqual([])
+    expect(await tracker.claim('3')).toBeNull()
+    expect(calls.some((call) => call.includes('edit'))).toBe(false)
   })
 
   test('claim marks the issue with the claim label', async () => {

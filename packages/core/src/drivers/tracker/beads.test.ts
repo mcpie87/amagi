@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Exec, ExecResult } from '../../exec.ts'
-import { BeadsTracker, gateTitle, HUMAN_ONLY_LABEL } from './beads.ts'
+import { BeadsTracker, gateTitle, HUMAN_ONLY_LABEL, PROPOSED_LABEL } from './beads.ts'
 
 /** Recorded from bd 1.3.0. */
 const READY_JSON = `[
@@ -283,8 +283,21 @@ describe('BeadsTracker', () => {
     await tracker.claim()
 
     for (const call of calls) {
-      expect(call[call.indexOf('--exclude-label') + 1]).toBe(HUMAN_ONLY_LABEL)
+      const labels = call.flatMap((arg, index) =>
+        arg === '--exclude-label' ? [call[index + 1]] : [],
+      )
+      expect(labels).toEqual([HUMAN_ONLY_LABEL, PROPOSED_LABEL])
     }
+  })
+
+  test('an explicitly requested proposed issue is never claimed', async () => {
+    const proposed = READY_JSON.replace(
+      '"status": "open",',
+      '"status": "open",\n    "labels": ["proposed"],',
+    )
+    const { exec, calls } = fake((c) => (c.includes('show') ? ok(proposed) : undefined))
+    expect(await new BeadsTracker({ cwd: '/repo', exec }).claim('tst-lmc')).toBeNull()
+    expect(calls.some((call) => call.includes('update'))).toBe(false)
   })
 
   test('actor is threaded through for provenance', async () => {

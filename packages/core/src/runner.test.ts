@@ -603,6 +603,85 @@ describe('Runner.runOnce', () => {
       loop,
     })
 
+  test('files uncovered follow-ups once and links both proposals and covered issues in the PR', async () => {
+    class CreatingTracker extends FakeTracker {
+      override readonly capabilities: TrackerCapabilities = {
+        create: true,
+        edit: true,
+        dependencies: true,
+      }
+      readonly created: { input: CreateTrackerTask; task: TrackerTask }[] = []
+
+      override async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+        const task: TrackerTask = {
+          id: 'bd-proposal',
+          title: input.title,
+          description: input.description,
+          status: 'open',
+          priority: input.priority,
+          type: 'task',
+          url: null,
+        }
+        this.created.push({ input, task })
+        return task
+      }
+
+      override async get(id?: string): Promise<TrackerTask | null> {
+        return this.created.find((entry) => entry.task.id === id)?.task ?? null
+      }
+
+      override async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
+        const entry = this.created.find((item) => item.task.id === id)
+        if (entry === undefined) throw new Error(`unknown issue ${id}`)
+        entry.task.description = input.description ?? entry.task.description
+        return entry.task
+      }
+    }
+    const tracker = new CreatingTracker([TASK])
+    const forge = new FakePr()
+    const uncovered = {
+      ...finding,
+      id: 'F-2',
+      scope: 'follow-up',
+      title: 'Handle the stale cache',
+      path: 'src/cache.ts',
+      line: 12,
+      evidence: 'The cache is never invalidated.',
+      failureScenario: 'Users keep seeing stale values.',
+      suggestedPriority: 2,
+    }
+    const covered = {
+      ...uncovered,
+      id: 'F-3',
+      title: 'Reuse existing retry handling',
+      covers: 'bd-existing',
+    }
+    const result = await makeRunner(
+      tracker,
+      new FakeHarness([writesAFile]),
+      reviewConfig({ maxRounds: 1 }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([uncovered, covered])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]?.input).toMatchObject({
+      title: 'Handle the stale cache',
+      priority: 2,
+      labels: ['proposed'],
+      parent: TASK.id,
+    })
+    expect(tracker.created[0]?.input.description).toContain('src/cache.ts:12')
+    expect(tracker.created[0]?.input.description).toContain('Source task: bd-a1b2')
+    expect(tracker.created[0]?.task.description).toContain('https://example.com/demo/pull/7')
+    expect(forge.calls[0]?.body).toContain('bd-proposal')
+    expect(forge.calls[0]?.body).toContain('bd-existing')
+    expect(types(TASK.id)).toContain('review.proposal-filed')
+  })
+
   test('fixes a blocking finding and opens a clean PR after the next review', async () => {
     const forge = new FakePr()
     const fixer = new FakeHarness([
