@@ -161,6 +161,8 @@ export type RunServiceOptions = {
   autoQueueActiveMs?: number
   /** Called once when automatic dispatch finds no claimable work and no run is active. */
   onQueueDrained?: () => void | Promise<void>
+  /** Called after each runner finishes, with its final projected task. */
+  onTaskFinished?: (result: NonNullable<RunOnceResult>) => void | Promise<void>
   /**
    * Seat occupancy shared by every repo's RunService in one server, so the
    * fleet's seats cap concurrency across repositories rather than per repo.
@@ -502,10 +504,20 @@ export class RunService implements RunServiceApi {
     const seat = this.workerSeat(worker)
     const holder = `${repoName}/${task.id}`
     this.seats.set(seat, holder)
-    const done = runner.runClaimed(task).finally(() => {
-      this.runs.delete(task.id)
-      if (this.seats.get(seat) === holder) this.seats.delete(seat)
-    })
+    const done = runner
+      .runClaimed(task)
+      .then(async (result) => {
+        try {
+          if (result !== null) await this.opts.onTaskFinished?.(result)
+        } catch (err) {
+          console.warn(`completion notification failed for ${task.id}: ${String(err)}`)
+        }
+        return result
+      })
+      .finally(() => {
+        this.runs.delete(task.id)
+        if (this.seats.get(seat) === holder) this.seats.delete(seat)
+      })
     this.runs.set(task.id, { runner, startedAt: Date.now(), done, workerId: worker.id, seat })
   }
 }
