@@ -74,7 +74,9 @@ function WorkerSlot({
         </div>
         {worker !== null && (
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-            <span>harness: {worker.kind}</span>
+            <span>
+              harness: {worker.kind}-#{worker.displaySlot}
+            </span>
             <span>model: {worker.model ?? 'default'}</span>
             <span>effort: {worker.effort ?? 'default'}</span>
             <span>seat: {worker.seat}</span>
@@ -131,7 +133,9 @@ function WorkerSlot({
         {task !== undefined && <Badge state={task.state} />}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-        <span>harness: {agentLabel}</span>
+        <span>
+          harness: {worker === null ? agentLabel : `${worker.kind}-#${worker.displaySlot}`}
+        </span>
         <span>model: {modelLabel}</span>
         <span>effort: {taskInfo?.effort ?? agent?.effort ?? worker?.effort ?? 'unknown'}</span>
         <span>seat: {taskInfo?.seat ?? worker?.seat ?? agent?.seat ?? agentLabel}</span>
