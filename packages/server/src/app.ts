@@ -1308,8 +1308,15 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const { autoQueue, ntfyTopic, ntfyServer } = c.req.valid('json')
         writeConfig(ws.root, {
-          loop: { autoQueue },
-          notify: { ntfyTopic, ntfyServer },
+          ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
+          ...(ntfyTopic === undefined && ntfyServer === undefined
+            ? {}
+            : {
+                notify: {
+                  ...(ntfyTopic === undefined ? {} : { ntfyTopic }),
+                  ...(ntfyServer === undefined ? {} : { ntfyServer }),
+                },
+              }),
         })
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer

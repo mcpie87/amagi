@@ -562,6 +562,46 @@ describe('Runner.review', () => {
     expect(reviewer.calls[2]?.resumeFrom).toBeNull()
   })
 
+  test('parks without committing when checks fail after a review fix', async () => {
+    const forge = new FakePr()
+    const harness = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          const replyPath = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (replyPath === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(
+            replyPath,
+            JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Fixed.' }]),
+          )
+          writeFileSync(join(cwd, 'review-broke-checks'), 'broken\n')
+        },
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' }, maxRounds: 2 },
+        checks: { commands: ['test ! -e review-broke-checks'] },
+        loop: { maxCheckRounds: 0 },
+      }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('after review fix')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(forge.calls).toHaveLength(0)
+  })
+
   test('invalid findings are re-asked once in the same session and reported as failed', async () => {
     registerTask()
     const reviewer = new ReviewHarness(['not json', '{"not":"an array"}'])

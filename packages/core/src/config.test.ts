@@ -378,10 +378,35 @@ describe('worker fleet', () => {
       { name: 'codex_alt', count: 1 },
     ])
     expect(
-      expandWorkers(config.worker, config.seats).map(({ id, name, seat }) => [id, name, seat]),
+      expandWorkers(config.worker, config.seats).map(({ id, name, seat, displaySlot }) => [
+        id,
+        name,
+        seat,
+        displaySlot,
+      ]),
     ).toEqual([
-      ['worker-a-1', 'Worker A 1', 'codex_main-1'],
-      ['worker-a-2', 'Worker A 2', 'codex_main-2'],
+      ['worker-a-1', 'Worker A 1', 'codex_main-1', 1],
+      ['worker-a-2', 'Worker A 2', 'codex_main-2', 2],
+    ])
+  })
+
+  test('assigns display slots across profiles sharing a counted named seat', () => {
+    const config = Config.parse({
+      seats: [{ name: 'codex_42', count: 2 }],
+      worker: [
+        { id: 'first', name: 'First', kind: 'codex', seat: 'codex_42' },
+        { id: 'second', name: 'Second', kind: 'codex', seat: 'codex_42' },
+      ],
+    })
+
+    expect(
+      expandWorkers(config.worker, config.seats).map(({ seat, displaySlot }) => [
+        seat,
+        displaySlot,
+      ]),
+    ).toEqual([
+      ['codex_42-1', 1],
+      ['codex_42-2', 2],
     ])
   })
 

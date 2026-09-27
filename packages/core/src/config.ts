@@ -105,21 +105,29 @@ export const SeatConfig = z.union([
 export type SeatConfig = z.infer<typeof SeatConfig>
 
 /** Expands a configured worker profile into independently schedulable instances. */
-export function expandWorkers(workers: WorkerConfig[], seats: SeatConfig[] = []): WorkerConfig[] {
+export type ExpandedWorkerConfig = WorkerConfig & { displaySlot: number }
+
+export function expandWorkers(
+  workers: WorkerConfig[],
+  seats: SeatConfig[] = [],
+): ExpandedWorkerConfig[] {
   const capacity = new Map(seats.map((seat) => [seat.name, seat.count]))
   const nextSlot = new Map<string, number>()
   return workers.flatMap((worker) => {
     const seatName = worker.seat ?? worker.kind
     const effectiveSeatCount = capacity.get(seatName) ?? worker.seatCount
     return Array.from({ length: worker.count }, (_, index) => {
+      if (worker.count === 1 && effectiveSeatCount === 1 && !capacity.has(seatName)) {
+        return { ...worker, displaySlot: 1 }
+      }
       const { count, seatCount: _seatCount, ...profile } = worker
-      if (count === 1 && effectiveSeatCount === 1 && !capacity.has(seatName)) return worker
       const slot = nextSlot.get(seatName) ?? 0
       nextSlot.set(seatName, slot + 1)
       return {
         ...profile,
         count: 1,
         seatCount: 1,
+        displaySlot: (slot % effectiveSeatCount) + 1,
         id: count === 1 ? worker.id : `${worker.id}-${index + 1}`,
         name: count === 1 ? worker.name : `${worker.name} ${index + 1}`,
         seat:
