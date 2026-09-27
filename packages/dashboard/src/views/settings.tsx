@@ -4,7 +4,8 @@ import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
 import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
-import { FleetWorkersSettings, RepositoryParticipationCard } from './fleet.tsx'
+import { FleetWorkersSettings } from './fleet.tsx'
+import { RepositorySettingsCard } from './repository-settings.tsx'
 
 const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -386,10 +387,10 @@ export function SettingsView() {
         )}
         {repo !== undefined && repos !== null && repos.length > 1 ? (
           <div id="repository-panel" role="tabpanel" aria-labelledby={`repository-tab-${repo.key}`}>
-            <RepositoryParticipationCard repo={repo} onChanged={refreshRepos} />
+            <RepositorySettingsCard repo={repo} onChanged={refreshRepos} />
           </div>
         ) : repo !== undefined ? (
-          <RepositoryParticipationCard repo={repo} onChanged={refreshRepos} />
+          <RepositorySettingsCard repo={repo} onChanged={refreshRepos} />
         ) : null}
       </div>
     </section>
