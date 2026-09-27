@@ -206,7 +206,7 @@ describe('loadConfig', () => {
   test('watcher settings default on and inherit implement harness fields', () => {
     writeRepo(
       '[harness.implement]\nkind = "claude"\nmodel = "base-model"\neffort = "medium"\nseat = "shared"\n\n' +
-        '[watchers.mention]\nenabled = false\nmodel = "mention-model"\nseat = "mention-seat"\n\n' +
+        '[watchers.mention]\nenabled = false\nmodel = "mention-model"\nseat = "mention-seat"\nallowedAuthors = ["alice", "bob"]\n\n' +
         '[watchers.prConflict]\neffort = "high"\n\n' +
         '[watchers.stall]\nenabled = false\n',
     )
@@ -216,6 +216,7 @@ describe('loadConfig', () => {
       enabled: false,
       model: 'mention-model',
       seat: 'mention-seat',
+      allowedAuthors: ['alice', 'bob'],
     })
     expect(config.watchers.prConflict.enabled).toBe(true)
     expect(config.watchers.stall.enabled).toBe(false)

@@ -282,6 +282,7 @@ Every key is optional; the table below gives the schema and defaults.
 | `seats[].name` | string | required | Stable seat identifier referenced by `worker[].seat`. |
 | `seats[].count` | integer | `1` | Number of concurrent slots provided by the credential seat. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
+| `watchers.mention.allowedAuthors` | string[] | `[]` | Exact forge usernames whose mentions may trigger responses. Empty or omitted disables mention-triggered responses. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
 | `watchers.mention.model` | string | `harness.implement.model` | Model for mention responses. |
 | `watchers.mention.effort` | string | `harness.implement.effort` | Reasoning effort for mention responses. |

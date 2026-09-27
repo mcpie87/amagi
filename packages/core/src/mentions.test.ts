@@ -285,16 +285,28 @@ describe('handled mentions', () => {
 
 describe('isAgentMention', () => {
   test('matches the handle case-insensitively, ignores the agent itself and non-mentions', () => {
-    expect(isAgentMention({ id: '1', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru')).toBe(
-      true,
-    )
     expect(
-      isAgentMention({ id: '2', user: 'alice', body: 'why, @Chise-Maru?' }, 'chise-maru'),
+      isAgentMention({ id: '1', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru', ['bob']),
     ).toBe(true)
     expect(
-      isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru'),
+      isAgentMention({ id: '2', user: 'alice', body: 'why, @Chise-Maru?' }, 'chise-maru', [
+        'alice',
+      ]),
+    ).toBe(true)
+    expect(
+      isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru', [
+        'chise-maru',
+      ]),
     ).toBe(false)
-    expect(isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru')).toBe(false)
+    expect(
+      isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru', ['bob']),
+    ).toBe(false)
+    expect(
+      isAgentMention({ id: '5', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru', ['Bob']),
+    ).toBe(false)
+    expect(isAgentMention({ id: '6', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru')).toBe(
+      false,
+    )
   })
 
   test('matches the PR #102 relevance question, which is a mention but not a fix request', () => {
@@ -306,28 +318,50 @@ describe('isAgentMention', () => {
           body: '@chise-maru is still change still relevant compared to current repo state?',
         },
         'chise-maru',
+        ['mcpie87'],
       ),
     ).toBe(true)
   })
 })
 
 describe('listPrMentions', () => {
-  test('keeps human mentions of the handle, drops the agent and non-mentions', async () => {
+  test('keeps allowlisted mentions and drops disallowed authors, the agent, and non-mentions', async () => {
     const driver = new FakeDriver()
     driver.comments = [
       { id: '1', user: 'bob', body: '@chise-maru remove this file' },
       { id: '2', user: 'chise-maru', body: '@chise-maru self mention' },
       { id: '3', user: 'bob', body: 'no handle here' },
       { id: '4', user: 'alice', body: 'Why did you add this, @Chise-Maru?' },
+      { id: '5', user: 'mallory', body: '@chise-maru please change this' },
     ]
     const mentions = await listPrMentions({
       driver,
       cwd: '/repo',
       pr: pr(),
       handle: 'chise-maru',
+      allowedAuthors: ['bob', 'alice'],
     })
 
     expect(mentions.map((m) => m.id)).toEqual(['1', '4'])
+  })
+
+  test('returns no mentions when the allowlist is empty', async () => {
+    const driver = new FakeDriver()
+    driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru remove this file' }]
+
+    const mentions = await listPrMentions({
+      driver,
+      cwd: '/repo',
+      pr: pr(),
+      handle: 'chise-maru',
+      allowedAuthors: [],
+    })
+
+    expect(mentions).toEqual([])
+  })
+
+  test('the omitted configuration defaults the author allowlist to empty', () => {
+    expect(config().watchers.mention.allowedAuthors).toEqual([])
   })
 })
 

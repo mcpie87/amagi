@@ -168,6 +168,11 @@ const AgentWatcherConfig = z.object({
   ...WatcherHarnessConfig.shape,
 })
 
+const MentionWatcherConfig = AgentWatcherConfig.extend({
+  /** Forge usernames allowed to trigger agent responses to PR mentions. */
+  allowedAuthors: z.array(z.string().min(1)).default([]),
+})
+
 export const Config = z
   .object({
     /** Named credential seats offered by the dashboard fleet editor. */
@@ -230,7 +235,7 @@ export const Config = z
     review: ReviewConfig.prefault({}),
     watchers: z
       .object({
-        mention: AgentWatcherConfig.prefault({ enabled: true }),
+        mention: MentionWatcherConfig.prefault({ enabled: true }),
         prConflict: AgentWatcherConfig.prefault({ enabled: true }),
         stall: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
         epicClose: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
