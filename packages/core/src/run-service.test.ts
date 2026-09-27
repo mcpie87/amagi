@@ -23,6 +23,7 @@ import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
 import { RunService, type RunServiceOptions } from './run-service.ts'
+import type { RunOnceResult } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 
@@ -679,15 +680,25 @@ describe('RunService', () => {
   })
 
   test('start launches the next ready task and it completes', async () => {
+    let finished: NonNullable<RunOnceResult> | undefined
     const service = makeService(
       new FakeTracker([TASK]),
       new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      1,
+      config(),
+      {
+        onTaskFinished: (result) => {
+          finished = result
+        },
+      },
     )
     const res = await service.start()
     expect(res).toEqual({ ok: true, taskId: TASK.id })
 
     await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
     await waitFor(async () => (await service.status()).running.length === 0)
+    expect(finished?.task.prUrl).toContain('https://example.com/pull/')
+    expect(finished?.state).toBe('pr_open')
   })
 
   test('start launches a specific ready task', async () => {

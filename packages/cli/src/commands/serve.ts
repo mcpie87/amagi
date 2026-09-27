@@ -102,6 +102,22 @@ export const serveCommand = defineCommand({
               }
             }
           },
+          onTaskFinished: async ({ task }) => {
+            if (task.state !== 'pr_open' || task.prUrl === null) return
+            const needsHuman =
+              task.reviewStopReason !== null && task.reviewStopReason !== 'acceptable'
+            const title = `${task.id} ${needsHuman ? 'needs human review' : 'done'}`
+            const reason = task.reviewStopReason ?? 'review disabled'
+            const body = `${task.title}\n${task.prUrl}\nReview stop reason: ${reason}`
+            for (const notifier of makeNotifiers(ws.config)) {
+              try {
+                await notifier.notify(title, body)
+              } catch (err) {
+                console.warn(`notify ${notifier.kind}: ${String(err)}`)
+              }
+              ws.store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
+            }
+          },
           ...(ws.forge === null ? {} : { forge: ws.forge }),
         })
       },
