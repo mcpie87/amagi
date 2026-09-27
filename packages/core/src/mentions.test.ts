@@ -34,6 +34,8 @@ import {
 } from './mentions.ts'
 import type { PrInfo } from './pr-check.ts'
 import { MAX_EXPLAIN_ANSWER_CHARS } from './prompt.ts'
+import { openDatabase } from './store/db.ts'
+import { Store } from './store/store.ts'
 
 type Call = readonly string[]
 
@@ -406,6 +408,59 @@ describe('respondToMention', () => {
       'Do not commit or push. The dispatcher commits your changes and pushes them.',
     )
     expect(bypassed).toEqual([])
+  })
+
+  test('a fix-pr mention with failing mandatory checks parks the task without committing or pushing', async () => {
+    const { exec, calls } = fake((command) => {
+      if (command[0] === 'sh' && command[2] === 'just check') return fail('typecheck failed')
+      if (command[1] === 'status') return { exitCode: 0, stdout: ' M src/fix.ts\n', stderr: '' }
+      return command.includes('rev-parse') ? fail('') : undefined
+    })
+    const cfg = config()
+    cfg.loop.maxCheckRounds = 0
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'Do the thing', tracker: 'fake' })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('am-1', { type: 'task.state', from: null, to })
+    }
+    const driver = new FakeDriver()
+
+    await expect(
+      respondToMention({
+        root: '/repo',
+        repoName: 'amagi',
+        pr: pr({ body: '**Task:** `am-1`' }),
+        mention: { id: 'failed-checks', user: 'bob', body: 'please fix this' },
+        config: cfg,
+        driver,
+        tracker: new FakeTracker(),
+        store,
+        exec,
+        makeHarnessFn: () =>
+          summaryHarness(
+            'Fixed the parser edge case.',
+            join(tmpdir(), 'amagi-fix-pr-7-failed-checks.md'),
+          ),
+      }),
+    ).rejects.toThrow(
+      'mandatory checks still fail after repair attempts:\n$ just check\nexit 1\ntypecheck failed',
+    )
+
+    expect(store.task('am-1')?.state).toBe('needs_human')
+    expect(
+      store
+        .events({ taskId: 'am-1' })
+        .some((event) => event.type === 'task.state' && event.reason?.includes('just check')),
+    ).toBe(true)
+    expect(calls.some((command) => command[1] === 'commit')).toBe(false)
+    expect(calls.some((command) => command[1] === 'push')).toBe(false)
+    expect(driver.posted).toHaveLength(0)
   })
 
   test('a fix-pr mention with no tracker uses a lint-clean PR commit message', async () => {

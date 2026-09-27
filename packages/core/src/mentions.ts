@@ -333,9 +333,6 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       opts.onGitBypassed,
       true,
     )
-    if (!outcome.ok) {
-      throw new Error(`agent failed: ${agentFailure(outcome)}`)
-    }
     if (!checks.every((result) => result.exitCode === 0)) {
       const detail = checks
         .filter((result) => result.exitCode !== 0)
@@ -352,10 +349,15 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
           type: 'task.state',
           from: taskRow.state,
           to: 'needs_human',
-          reason: `PR #${opts.pr.number} mention fix failed mandatory checks:\n${detail}`,
+          reason: `PR #${opts.pr.number} mention fix failed mandatory checks:\n${detail}${outcome.ok ? '' : `\nRepair agent failed: ${agentFailure(outcome)}`}`,
         })
       }
-      throw new Error(`mandatory checks still fail after repair attempts:\n${detail}`)
+      throw new Error(
+        `mandatory checks still fail after repair attempts:\n${detail}${outcome.ok ? '' : `\nRepair agent failed: ${agentFailure(outcome)}`}`,
+      )
+    }
+    if (!outcome.ok) {
+      throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }
     const summary = readFileSync(outPath, 'utf8').trim()
     if (summary === '') throw new Error('agent produced no fix summary')

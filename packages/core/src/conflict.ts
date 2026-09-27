@@ -297,7 +297,19 @@ export async function resolveConflict(
         true,
       )
       if (!outcome.ok) {
-        const message = `agent failed: ${agentFailure(outcome)}`
+        const failedChecks = checkResults?.filter((result) => result.exitCode !== 0) ?? []
+        const checkDetail = failedChecks
+          .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+          .join('\n')
+        const reason =
+          failedChecks.length === 0
+            ? null
+            : `PR #${opts.pr.number} conflict resolution failed mandatory checks:\n${checkDetail}\nRepair agent failed: ${agentFailure(outcome)}`
+        const parked = reason === null ? false : parkAtNeedsHuman(opts, reason)
+        const message =
+          reason === null
+            ? `agent failed: ${agentFailure(outcome)}`
+            : `${reason}${parked ? '; parked the task at needs_human' : ''}`
         log('error', message)
         rmSync(verdictPath, { force: true })
         return { ok: false, message, iteration }

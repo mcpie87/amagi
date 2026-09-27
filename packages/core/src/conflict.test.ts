@@ -400,6 +400,46 @@ describe('resolveConflict', () => {
     expect(calls.some((c) => c.includes('push'))).toBe(false)
   })
 
+  test('parks with failed check details when a conflict repair agent fails', async () => {
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'x', tracker: 'beads' })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('am-1', { type: 'task.state', from: null, to })
+    }
+    const { exec, calls } = fake((command) => {
+      if (command[0] === 'sh') return fail('check failed')
+      return conflicted(command)
+    })
+    let launches = 0
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      store,
+      exec,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness(launches === 1 ? {} : { ok: false, stderr: 'repair failed' })
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('just check')
+    expect(result.message).toContain('check failed')
+    expect(result.message).toContain('repair failed')
+    expect(result.message).toContain('parked the task at needs_human')
+    expect(store.task('am-1')?.state).toBe('needs_human')
+    expect(calls.some((command) => command.includes('push'))).toBe(false)
+  })
+
   test('out of iterations, parks a pr_open task and leaves a task already off pr_open alone', async () => {
     const store = new Store(openDatabase(':memory:'))
     store.append('am-1', { type: 'task.claimed', title: 'x', tracker: 'beads' })

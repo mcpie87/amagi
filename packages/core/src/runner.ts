@@ -24,7 +24,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
-import { MANDATORY_WORKER_CHECKS } from './mandatory-checks.ts'
+import { MANDATORY_WORKER_CHECKS, runMandatoryWorkerChecks } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -274,6 +274,7 @@ export type ReviewRoundResult = {
 
 type ReviewPrSummary = {
   run: AgentRun
+  verification: CheckResult[]
   unresolved: boolean
   unresolvedIds: string[]
   unresolvedFindings: {
@@ -699,6 +700,7 @@ export class Runner {
     const withdrawnIds = new Set<string>()
     let unresolvedIds: string[] = []
     let failure: string | null = null
+    let verification: CheckResult[] = []
     let stopReason: 'acceptable' | 'rounds' | 'tokens' | 'no-progress' | 'cost' | null = null
 
     while (stopReason === null) {
@@ -875,12 +877,21 @@ export class Runner {
           ok: checksPassed,
           results: checks,
         })
-        if (checksPassed) break
-        if (checkRound === config.loop.maxCheckRounds) {
-          failure = 'checks still fail after the review fix round'
-          unresolvedIds = blocking.map((finding) => finding.id)
-          stopReason = 'rounds'
+        if (checksPassed) {
+          verification = checks
           break
+        }
+        if (checkRound === config.loop.maxCheckRounds) {
+          const detail = checks
+            .filter((check) => check.exitCode !== 0)
+            .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
+            .join('\n')
+          this.transition(
+            task.id,
+            'needs_human',
+            `mandatory checks still fail after review fixes:\n${detail}`,
+          )
+          return null
         }
         this.transition(task.id, 'implementing')
         let checkFix: AgentRun & { stopped: boolean }
@@ -897,6 +908,12 @@ export class Runner {
             'fix checks',
             lease,
             budget,
+            'implement',
+            this.deps.harness,
+            `mandatory checks failed before review repair:\n${checks
+              .filter((check) => check.exitCode !== 0)
+              .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
+              .join('\n')}\nRepair agent failure: `,
           )
         } catch (error) {
           if (budget.spentReason() !== null) {
@@ -954,6 +971,7 @@ export class Runner {
       .join('\n')
     return {
       run,
+      verification,
       unresolved: stopReason !== 'acceptable',
       unresolvedIds,
       unresolvedFindings: latestFindings
@@ -1177,6 +1195,10 @@ export class Runner {
       this.throwIfBudgetExhausted(task.id, budget)
       const ok = results.every((r) => r.exitCode === 0)
       store.append(task.id, { type: 'checks.finished', ok, results })
+      const failureDetail = results
+        .filter((result) => result.exitCode !== 0)
+        .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+        .join('\n')
 
       if (ok) {
         finalChecks = results
@@ -1191,7 +1213,11 @@ export class Runner {
           const action = await this.recoverFailingChecks(task.id, results, lease, budget)
           if (action === null) return
           if (action === 'park') {
-            this.transition(task.id, 'needs_human', 'project checks still failing')
+            this.transition(
+              task.id,
+              'needs_human',
+              `project checks still failing:\n${failureDetail}`,
+            )
             return
           }
           if (action === 'rebase') {
@@ -1200,7 +1226,7 @@ export class Runner {
               this.transition(
                 task.id,
                 'needs_human',
-                'project checks still failing; updating the worktree to the latest base failed',
+                `project checks still failing; updating the worktree to the latest base failed:\n${failureDetail}`,
               )
               return
             }
@@ -1211,7 +1237,7 @@ export class Runner {
           round = -1
           continue
         }
-        this.transition(task.id, 'needs_human', 'project checks still failing')
+        this.transition(task.id, 'needs_human', `project checks still failing:\n${failureDetail}`)
         return
       }
 
@@ -1243,6 +1269,7 @@ export class Runner {
       reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
       if (reviewSummary === null) return
       current = reviewSummary.run
+      if (reviewSummary.verification.length > 0) finalChecks = reviewSummary.verification
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
@@ -1881,6 +1908,7 @@ export class Runner {
     budget: TaskBudget | null,
     role: AgentRole = 'implement',
     harness: Harness = this.deps.harness,
+    failureContext = '',
   ): Promise<AgentRun & { stopped: boolean }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
@@ -1903,7 +1931,7 @@ export class Runner {
           this.transition(
             taskId,
             'needs_human',
-            `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+            `${failureContext}context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
           )
           return { sessionId, stopped: true, summary, model, effort }
         }
@@ -1930,7 +1958,7 @@ export class Runner {
       if (lease?.isLost) throw new LeaseLostError(taskId)
 
       if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
-        this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
+        this.transition(taskId, 'needs_human', `${failureContext}${run.detail ?? 'agent failed'}`)
         return { sessionId, stopped: true, summary, model, effort }
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
@@ -2147,6 +2175,23 @@ export class Runner {
     const task = this.deps.store.task(taskId)
     if (task === null) return { ok: false, error: `unknown task ${taskId}` }
     try {
+      const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
+      if (status.stdout.trim() === '') {
+        return { ok: false, error: 'nothing to commit; the worktree is clean' }
+      }
+      const checks = await runMandatoryWorkerChecks(this.exec, cwd)
+      const checksPassed = checks.every((check) => check.exitCode === 0)
+      this.deps.store.append(taskId, { type: 'checks.finished', ok: checksPassed, results: checks })
+      if (!checksPassed) {
+        const detail = checks
+          .filter((check) => check.exitCode !== 0)
+          .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
+          .join('\n')
+        return {
+          ok: false,
+          error: `mandatory checks failed; fix the failures and retry:\n${detail}`,
+        }
+      }
       const staged = await this.stageAndCommit(
         task,
         cwd,

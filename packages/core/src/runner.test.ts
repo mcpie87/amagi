@@ -338,6 +338,7 @@ const makeRunner = (
   runExec: Exec = exec,
   leaseHeartbeatMs?: number,
   reviewerHarness?: Harness,
+  mandatoryFailure: string | null = null,
 ) =>
   new Runner({
     store,
@@ -352,7 +353,11 @@ const makeRunner = (
       cmd[0] === 'sh' &&
       cmd[1] === '-c' &&
       (cmd[2] === 'just check' || cmd[2] === 'just fresh-check')
-        ? Promise.resolve({ exitCode: 0, stdout: '', stderr: '' })
+        ? Promise.resolve(
+            mandatoryFailure !== null && cmd[2] === 'just check'
+              ? { exitCode: 1, stdout: '', stderr: mandatoryFailure }
+              : { exitCode: 0, stdout: '', stderr: '' },
+          )
         : runExec(cmd, opts),
     ...(leaseHeartbeatMs === undefined ? {} : { leaseHeartbeatMs }),
   })
@@ -638,6 +643,49 @@ describe('Runner.runOnce', () => {
     expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
     expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
+  })
+
+  test('parks and skips commit when review fix checks keep failing', async () => {
+    const forge = new FakePr()
+    const fixer = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          const path = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (path === undefined) throw new Error('review fix prompt omitted reply path')
+          rmSync(join(cwd, 'good.txt'), { force: true })
+          writeFileSync(path, JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]))
+        },
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const reviewer = new ReviewHarness([JSON.stringify([finding])])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' } },
+        loop: { maxCheckRounds: 0 },
+        checks: { commands: ['test -f good.txt'] },
+      }),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    writeFileSync(join(repo, 'good.txt'), 'ok\n')
+    await execOk(exec, ['git', 'add', 'good.txt'], { cwd: repo })
+    await execOk(exec, ['git', 'commit', '-q', '-m', 'add check fixture'], { cwd: repo })
+    const result = await runner.runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(forge.calls).toHaveLength(0)
+    expect(stateReason(TASK.id)).toContain('checks still fail after review fixes')
+    expect(stateReason(TASK.id)).toContain('test -f good.txt')
   })
 
   test('counts a fresh final pass as a review round', async () => {
@@ -2334,6 +2382,31 @@ describe('Runner.requestCommit', () => {
     if (result.ok) return
     expect(result.error).toContain('nothing to commit')
     expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
+  })
+
+  test('failed mandatory checks block a checkpoint commit and return the failure details', async () => {
+    const wtPath = await withWorktree()
+    writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
+
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([]),
+      config(),
+      new FakePr(),
+      exec,
+      undefined,
+      undefined,
+      'typecheck failed',
+    ).requestCommit(TASK.id, wtPath)
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error).toContain('just check')
+    expect(result.error).toContain('typecheck failed')
+    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
+    expect((await execOk(exec, ['git', 'status', '--porcelain'], { cwd: wtPath })).trim()).not.toBe(
+      '',
+    )
   })
 
   test('an unknown task is a failure', async () => {
