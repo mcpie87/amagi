@@ -42,7 +42,8 @@ import { fmtDateTime, fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import { gitCommitRoute, taskRoute } from '../routes.tsx'
 import { useDashboard, useRunner } from '../store.tsx'
-import { Blockers, fetchIssue, type Issue, Unblocks } from './issues.tsx'
+import { Blockers, Unblocks } from './issue-dependencies.tsx'
+import { fetchIssue, type Issue } from './issue-model.ts'
 import {
   AnswerBox,
   AttemptSwitcher,
