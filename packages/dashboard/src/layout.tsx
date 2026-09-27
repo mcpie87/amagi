@@ -360,6 +360,7 @@ function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => 
 export function RootLayout() {
   const { repos } = useDashboard()
   const [idleNotice, setIdleNotice] = useState<{ title: string; body: string } | null>(null)
+  const [desktopFailure, setDesktopFailure] = useState<{ title: string; body: string } | null>(null)
   const [navOpen, setNavOpen] = useState(false)
   const sidebarRef = useRef<HTMLDivElement>(null)
   const openButtonRef = useRef<HTMLButtonElement>(null)
@@ -399,6 +400,15 @@ export function RootLayout() {
     return () => window.removeEventListener('amagi:idle-notification', onIdleNotification)
   }, [])
 
+  useEffect(() => {
+    const onDesktopFailure = (event: Event) => {
+      const detail = (event as CustomEvent<{ title: string; body: string }>).detail
+      setDesktopFailure(detail)
+    }
+    window.addEventListener('amagi:desktop-notification-failure', onDesktopFailure)
+    return () => window.removeEventListener('amagi:desktop-notification-failure', onDesktopFailure)
+  }, [])
+
   return (
     <RunnerProvider>
       <div className="app-shell">
@@ -413,6 +423,22 @@ export function RootLayout() {
               type="button"
               className="mt-2 text-xs text-fg-faint hover:text-fg"
               onClick={() => setIdleNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+        {desktopFailure !== null && (
+          <div
+            role="alert"
+            className="fixed bottom-4 left-4 z-50 max-w-sm rounded border border-red-ink bg-surface px-4 py-3 shadow-lg"
+          >
+            <p className="font-semibold">Desktop notification failed: {desktopFailure.title}</p>
+            <p className="mt-1 text-sm text-fg-muted">{desktopFailure.body}</p>
+            <button
+              type="button"
+              className="mt-2 text-xs text-fg-faint hover:text-fg"
+              onClick={() => setDesktopFailure(null)}
             >
               Dismiss
             </button>

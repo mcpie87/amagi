@@ -209,6 +209,13 @@ function RepoStream({
             }),
           )
         }
+        if (parsed.type === 'notify.failed' && parsed.channel === 'libnotify') {
+          window.dispatchEvent(
+            new CustomEvent('amagi:desktop-notification-failure', {
+              detail: { title: parsed.title, body: parsed.detail },
+            }),
+          )
+        }
         if (parsed.seq <= latestSeqRef.current) return
         latestSeqRef.current = parsed.seq
         // agent.stream is the hot path: hundreds of lines/sec of assistant

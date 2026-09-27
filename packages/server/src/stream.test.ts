@@ -93,6 +93,27 @@ describe('GET /api/repos/repo1/stream', () => {
     await stream.close()
   })
 
+  test('pushes desktop failure alerts without replaying old ones', async () => {
+    store.append(null, {
+      type: 'notify.failed',
+      channel: 'libnotify',
+      title: 'Task needs input',
+      detail: 'notify-send unavailable',
+    })
+    const stream = sse(await app.request('/api/repos/repo1/stream'))
+    const live = store.append(null, {
+      type: 'notify.failed',
+      channel: 'libnotify',
+      title: 'Another task needs input',
+      detail: 'notify-send unavailable',
+    })
+
+    const [pushed] = await stream.take(1)
+    expect(pushed?.event.seq).toBe(live.seq)
+    expect(pushed?.event.type).toBe('notify.failed')
+    await stream.close()
+  })
+
   test('resumes from Last-Event-ID with no gap and no duplicate', async () => {
     const first = claim('bd-1')
     const missed = store.append('bd-1', {

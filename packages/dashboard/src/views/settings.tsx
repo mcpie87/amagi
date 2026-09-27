@@ -69,9 +69,16 @@ export function SettingsView() {
   const [staleMaxParallel, setStaleMaxParallel] = useState(false)
   const [ntfyTopic, setNtfyTopic] = useState('')
   const [ntfyServer, setNtfyServer] = useState('https://ntfy.sh')
+  const [savedNtfyTopic, setSavedNtfyTopic] = useState('')
+  const [savedNtfyServer, setSavedNtfyServer] = useState('https://ntfy.sh')
   const [ntfyBusy, setNtfyBusy] = useState(false)
   const [ntfyError, setNtfyError] = useState<string | null>(null)
   const [ntfySaved, setNtfySaved] = useState(false)
+  const [desktopFailureAlerts, setDesktopFailureAlerts] = useState(false)
+  const [desktopBusy, setDesktopBusy] = useState(false)
+  const [desktopResult, setDesktopResult] = useState<string | null>(null)
+  const [ntfyTestBusy, setNtfyTestBusy] = useState(false)
+  const [ntfyTestResult, setNtfyTestResult] = useState<string | null>(null)
   const repo = repos?.find(({ key }) => key === selectedRepo) ?? repos?.[0]
 
   useEffect(() => {
@@ -80,6 +87,8 @@ export function SettingsView() {
     setLoaded(false)
     setNtfyError(null)
     setNtfySaved(false)
+    setDesktopResult(null)
+    setNtfyTestResult(null)
     fetch(`${apiBase}/api/repos/${selected}/settings`)
       .then((res) =>
         res.ok
@@ -87,6 +96,7 @@ export function SettingsView() {
               staleMaxParallel: boolean
               ntfyTopic: string | null
               ntfyServer: string
+              desktopFailureAlerts: boolean
             }>)
           : null,
       )
@@ -96,6 +106,9 @@ export function SettingsView() {
         setStaleMaxParallel(body?.staleMaxParallel ?? false)
         setNtfyTopic(body?.ntfyTopic ?? '')
         setNtfyServer(body?.ntfyServer ?? 'https://ntfy.sh')
+        setSavedNtfyTopic(body?.ntfyTopic ?? '')
+        setSavedNtfyServer(body?.ntfyServer ?? 'https://ntfy.sh')
+        setDesktopFailureAlerts(body?.desktopFailureAlerts ?? false)
       })
       .catch(() => {
         if (active) setLoaded(true)
@@ -123,11 +136,59 @@ export function SettingsView() {
       const body = (await res.json()) as { ntfyTopic: string | null; ntfyServer: string }
       setNtfyTopic(body.ntfyTopic ?? '')
       setNtfyServer(body.ntfyServer)
+      setSavedNtfyTopic(body.ntfyTopic ?? '')
+      setSavedNtfyServer(body.ntfyServer)
       setNtfySaved(true)
     } catch (err) {
       setNtfyError(err instanceof Error ? err.message : String(err))
     } finally {
       setNtfyBusy(false)
+    }
+  }
+
+  const saveDesktopFailureAlerts = async (enabled: boolean) => {
+    if (selected === null) return
+    setDesktopBusy(true)
+    setDesktopResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${selected}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ desktopFailureAlerts: enabled }),
+      })
+      if (!res.ok) {
+        const body = (await res.json()) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      setDesktopFailureAlerts(enabled)
+      setDesktopResult('Saved')
+    } catch (err) {
+      setDesktopResult(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDesktopBusy(false)
+    }
+  }
+
+  const testNotification = async (channel: 'desktop' | 'ntfy') => {
+    if (selected === null) return
+    const isDesktop = channel === 'desktop'
+    const setBusy = isDesktop ? setDesktopBusy : setNtfyTestBusy
+    const setResult = isDesktop ? setDesktopResult : setNtfyTestResult
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${selected}/settings/test-${channel}`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const body = (await res.json()) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      setResult('Test notification sent')
+    } catch (err) {
+      setResult(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -173,6 +234,39 @@ export function SettingsView() {
         <Appearance />
         {selected !== null && loaded && (
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+            <h2 className="mb-1 text-sm text-fg-muted">Desktop notifications</h2>
+            <p className="mb-3 text-sm text-fg-faint">
+              Desktop delivery stays enabled. Choose whether delivery failures appear in the
+              dashboard.
+            </p>
+            <label className="flex items-center gap-2 text-sm text-fg">
+              <input
+                type="checkbox"
+                checked={desktopFailureAlerts}
+                disabled={desktopBusy}
+                onChange={(event) => void saveDesktopFailureAlerts(event.currentTarget.checked)}
+              />
+              Show desktop delivery failures in the dashboard
+            </label>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={desktopBusy}
+                onClick={() => void testNotification('desktop')}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+              >
+                {desktopBusy ? 'Sending…' : 'Send test desktop notification'}
+              </button>
+              {desktopResult !== null && (
+                <span role="status" className="text-sm text-fg-faint">
+                  {desktopResult}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {selected !== null && loaded && (
+          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">ntfy notifications</h2>
             <p className="mb-3 text-sm text-fg-faint">
               Configure ntfy for {selected}. Leave the topic empty to disable ntfy notifications.
@@ -214,6 +308,24 @@ export function SettingsView() {
               </button>
               {ntfySaved && <span className="text-sm text-fg-faint">Saved</span>}
             </div>
+            <button
+              type="button"
+              disabled={
+                ntfyTestBusy ||
+                savedNtfyTopic === '' ||
+                ntfyTopic.trim() !== savedNtfyTopic ||
+                ntfyServer.trim() !== savedNtfyServer
+              }
+              onClick={() => void testNotification('ntfy')}
+              className="mt-3 rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+            >
+              {ntfyTestBusy ? 'Sending…' : 'Send test ntfy notification'}
+            </button>
+            {ntfyTestResult !== null && (
+              <p role="status" className="mt-2 text-sm text-fg-faint">
+                {ntfyTestResult}
+              </p>
+            )}
             {ntfyError !== null && (
               <p role="alert" className="mt-2 text-sm text-red-ink">
                 {ntfyError}

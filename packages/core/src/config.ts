@@ -388,6 +388,7 @@ export const Config = z
       .object({
         idle: z.boolean().default(true),
         desktop: z.boolean().default(true),
+        desktopFailureAlerts: z.boolean().default(false),
         ntfyTopic: z.string().nullable().default(null),
         ntfyServer: z.string().default('https://ntfy.sh'),
       })

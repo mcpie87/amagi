@@ -115,6 +115,7 @@ export const SettingsBody = z
     autoQueue: z.boolean().optional(),
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
+    desktopFailureAlerts: z.boolean().optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',
