@@ -2487,24 +2487,38 @@ describe('fleet endpoints', () => {
         review: { kind: 'codex', seat: 'stale-review-seat' },
         definitions: { named: { kind: 'codex', seat: 'old-seat' } },
       },
+      review: { harness: { kind: 'codex', seat: 'review-seat' } },
     })
 
     expect(await (await app.request('/api/seat-names')).json()).toEqual({
-      seats: [{ name: 'old-seat', count: 1 }],
+      seats: [
+        { name: 'old-seat', count: 1 },
+        { name: 'review-seat', count: 1 },
+      ],
     })
     const renamed = await send('PUT', '/api/seat-names', {
-      seats: [{ name: 'new-seat', count: 2 }],
-      renames: [{ from: 'old-seat', to: 'new-seat' }],
+      seats: [
+        { name: 'new-seat', count: 2 },
+        { name: 'new-review-seat', count: 1 },
+      ],
+      renames: [
+        { from: 'old-seat', to: 'new-seat' },
+        { from: 'review-seat', to: 'new-review-seat' },
+      ],
     })
     expect(renamed.status).toBe(200)
     expect(loadGlobalConfig()).toMatchObject({
-      seats: [{ name: 'new-seat', count: 2 }],
+      seats: [
+        { name: 'new-seat', count: 2 },
+        { name: 'new-review-seat', count: 1 },
+      ],
       worker: [{ id, seat: 'new-seat' }],
       watchers: { mention: { seat: 'new-seat' } },
       harness: {
         implement: { seat: 'new-seat' },
         definitions: { named: { seat: 'new-seat' } },
       },
+      review: { harness: { seat: 'new-review-seat' } },
     })
     const occupancy = (await (await app.request('/api/seats')).json()) as {
       seats: { seat: string }[]
@@ -2519,6 +2533,7 @@ describe('fleet endpoints', () => {
     expect(config.watchers.mention.seat).toBeUndefined()
     expect(config.harness.implement.seat).toBeUndefined()
     expect(config.harness.definitions.named?.seat).toBeUndefined()
+    expect(config.review.harness?.seat).toBeUndefined()
 
     await send('PUT', '/api/seat-names', { seats: ['unused-seat'] })
     expect(await (await app.request('/api/seat-names')).json()).toEqual({

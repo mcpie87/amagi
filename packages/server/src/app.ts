@@ -345,6 +345,7 @@ export function createApp({
       for (const harness of [
         global.harness.implement,
         global.harness.triage,
+        ...(global.review.harness ? [global.review.harness] : []),
         ...Object.values(global.harness.definitions),
       ]) {
         if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
@@ -368,6 +369,7 @@ export function createApp({
       for (const harness of [
         global.harness.implement,
         global.harness.triage,
+        ...(global.review.harness ? [global.review.harness] : []),
         ...Object.values(global.harness.definitions),
       ]) {
         if (harness.seat !== undefined) current.add(harness.seat)
@@ -413,12 +415,17 @@ export function createApp({
         if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
       }
       if (Object.keys(definitions).length > 0) harness.definitions = definitions
+      const reviewSeat = global.review.harness?.seat
+      const renamedReviewSeat = rewrite(reviewSeat)
 
       writeGlobalConfig({
         seats: seatEntries,
         worker,
         ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
         ...(Object.keys(harness).length === 0 ? {} : { harness }),
+        ...(renamedReviewSeat === reviewSeat
+          ? {}
+          : { review: { harness: { seat: renamedReviewSeat ?? null } } }),
       })
       return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
