@@ -64,9 +64,9 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   implementing: ['awaiting_answer', 'checks', 'retrying'],
   awaiting_answer: ['implementing'],
   checks: ['implementing', 'reviewing', 'committed'],
-  reviewing: ['fixing', 'checks'],
+  reviewing: ['fixing', 'checks', 'retrying'],
   fixing: ['reviewing', 'checks'],
-  retrying: ['implementing'],
+  retrying: ['implementing', 'reviewing'],
   committed: ['pr_open'],
   pr_open: ['pr_flagged'],
   // A flagged PR is parked for the operator, not terminal: the watcher owns

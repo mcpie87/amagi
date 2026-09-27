@@ -51,9 +51,22 @@ import {
   whyNoChangesPrompt,
   withRestartHandoff,
 } from './prompt.ts'
-import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
+import {
+  backoffDelayMs,
+  isSessionLimit,
+  isTransientFailure,
+  isUsageLimit,
+  usageLimitExpiry,
+} from './retry.ts'
 import { reviewPrompt } from './review-pack.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
+import {
+  acquireUsageProbe,
+  clearUsageHold,
+  readUsageHold,
+  recordUsageHold,
+  usageHoldKey,
+} from './usage-hold.ts'
 import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
 import { applyRepoIdentity, createWorktree, type WorktreeSpec } from './worktree.ts'
 
@@ -1891,10 +1904,31 @@ export class Runner {
     let model: string | null = null
     let effort: string | null = null
     let runOpts = opts
+    const implement = config.harness.implement
+    const holdKey = usageHoldKey(
+      harness.kind,
+      opts.model ?? implement.model ?? null,
+      opts.seat ?? implement.seat,
+    )
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
-      this.throwIfCancelled(taskId)
+      const waitingOnUsageHold = readUsageHold(holdKey) !== null
+      const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
+      if (waitingOnUsageHold && !this.isCancelled(taskId))
+        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+      let run: Awaited<ReturnType<Runner['runAgent']>>
+      try {
+        run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
+      } catch (err) {
+        releaseProbe?.()
+        throw err
+      }
+      try {
+        this.throwIfCancelled(taskId)
+      } catch (err) {
+        releaseProbe?.()
+        throw err
+      }
       sessionId = run.sessionId
       summary = run.summary
       model = run.model
@@ -1903,6 +1937,7 @@ export class Runner {
         // Checked before ok: a hard kill must stop the run even when the
         // process happens to report a clean exit.
         if (this.contextRestarts >= config.loop.contextMaxRestarts) {
+          releaseProbe?.()
           this.transition(
             taskId,
             'needs_human',
@@ -1927,14 +1962,51 @@ export class Runner {
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
         this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+        releaseProbe?.()
         continue
       }
-      if (run.ok) return { sessionId, stopped: false, summary, model, effort }
-      if (lease?.isLost) throw new LeaseLostError(taskId)
+      if (run.ok) {
+        clearUsageHold(holdKey)
+        releaseProbe?.()
+        return { sessionId, stopped: false, summary, model, effort }
+      }
+      if (lease?.isLost) {
+        releaseProbe?.()
+        throw new LeaseLostError(taskId)
+      }
 
-      if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
+      const usageLimited = isUsageLimit(run.detail ?? '')
+      if (
+        !isTransientFailure(run.detail ?? '') ||
+        (!usageLimited && attempt > config.loop.maxRetries)
+      ) {
+        releaseProbe?.()
         this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
         return { sessionId, stopped: true, summary, model, effort }
+      }
+      if (usageLimited) {
+        const detail = run.detail ?? 'provider usage limit reached'
+        const expiresAt = usageLimitExpiry(detail)
+        const hold = recordUsageHold(
+          holdKey,
+          harness.kind,
+          opts.model ?? implement.model ?? run.model,
+          detail,
+          expiresAt,
+        )
+        const reason = `${harness.kind}+${hold.model} usage limit hold until ${new Date(expiresAt).toLocaleString()}`
+        store.append(taskId, {
+          type: 'retry.scheduled',
+          attempt,
+          delayMs: Math.max(0, expiresAt - Date.now()),
+          reason,
+          detail,
+        })
+        this.transition(taskId, 'retrying', reason)
+        if (isSessionLimit(detail)) sessionId = null
+        releaseProbe?.()
+        this.throwIfCancelled(taskId)
+        continue
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
       store.append(taskId, {
@@ -1947,6 +2019,7 @@ export class Runner {
       // A session that hit its own limit (turn/context window) is spent and
       // cannot be resumed; the retry starts a fresh session in the same worktree.
       if (isSessionLimit(run.detail ?? '')) sessionId = null
+      releaseProbe?.()
       if (role !== 'review') this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out,
       // and a retry-now request skips the wait for an immediate retry.

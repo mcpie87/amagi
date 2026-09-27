@@ -26,6 +26,7 @@ import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
+import { readUsageHold, usageHoldKey } from './usage-hold.ts'
 
 const TASK: TrackerTask = {
   id: 'bd-a1b2',
@@ -323,6 +324,8 @@ class FakePr implements PrDriver {
 let repo: string
 let wtRoot: string
 let store: Store
+let stateRoot: string
+let previousStateHome: string | undefined
 
 const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
@@ -374,6 +377,9 @@ beforeEach(async () => {
   delete process.env.GITHUB_TOKEN
   repo = mkdtempSync(join(tmpdir(), 'amagi-run-repo-'))
   wtRoot = mkdtempSync(join(tmpdir(), 'amagi-run-wt-'))
+  stateRoot = mkdtempSync(join(tmpdir(), 'amagi-run-state-'))
+  previousStateHome = process.env.XDG_STATE_HOME
+  process.env.XDG_STATE_HOME = stateRoot
   store = new Store(openDatabase(':memory:'))
   await execOk(exec, ['git', 'init', '-q', '-b', 'main', '.'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
@@ -387,6 +393,9 @@ afterEach(() => {
   store.close()
   rmSync(repo, { recursive: true, force: true })
   rmSync(wtRoot, { recursive: true, force: true })
+  rmSync(stateRoot, { recursive: true, force: true })
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousStateHome
 })
 
 const writesAFile: Turn = {
@@ -1926,6 +1935,35 @@ describe('Runner.runOnce', () => {
     expect(scheduled[0]?.detail).toBe('rate limit exceeded')
     expect(store.task(TASK.id)?.retryCount).toBe(1)
     expect(states(TASK.id)).toContain('retrying')
+  })
+
+  test('a usage limit parks the task and records a shared hold past the retry budget', async () => {
+    const harness = new FakeHarness([
+      {
+        outcome: {
+          ok: false,
+          exitCode: 1,
+          stderr: "You've hit your usage limit, resets at 23:59",
+          sessionId: 'sess-1',
+        },
+      },
+    ])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'claude', model: 'sonnet' } },
+        loop: { maxRetries: 0 },
+      }),
+    )
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.task(TASK.id)?.state === 'retrying')
+    expect(stateReason(TASK.id)).toContain('fake+sonnet usage limit hold until')
+    expect(readUsageHold(usageHoldKey('fake', 'sonnet'))?.reason).toContain('usage limit')
+    expect(harness.calls).toHaveLength(1)
+    runner.cancel()
+    expect((await pending)?.state).toBe('cancelled')
   })
 
   test('a session-limit failure defers, retries in a fresh session, and keeps one worktree', async () => {

@@ -13,6 +13,7 @@ import { makeHarness } from './factory.ts'
 import { processTreeStats } from './process.ts'
 import { Runner, type RunOnceResult } from './runner.ts'
 import type { Store } from './store/store.ts'
+import { readUsageHold, usageHoldKey } from './usage-hold.ts'
 
 /** Summed over the agent's whole process tree (see process.ts). */
 export type RunnerResource = {
@@ -433,6 +434,16 @@ export class RunService implements RunServiceApi {
     opts: RunOptions | undefined,
   ): Promise<StartResult> {
     const implement = this.resolveHarness(selected, opts)
+    const holdKey = usageHoldKey(implement.kind, implement.model ?? null, implement.seat)
+    const activeHold = readUsageHold(holdKey)
+    if (activeHold) {
+      const expiry = new Date(activeHold.expiresAt).toLocaleString()
+      return {
+        ok: false,
+        status: 409,
+        error: `${activeHold.harness}+${activeHold.model} usage limit hold until ${expiry}`,
+      }
+    }
     // Difficulty gating reads the model the worker would actually run, so the
     // override config (not the stored default) is what gates the claim.
     const runConfig = { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }

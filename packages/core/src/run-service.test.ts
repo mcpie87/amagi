@@ -26,6 +26,7 @@ import { RunService, type RunServiceOptions } from './run-service.ts'
 import type { RunOnceResult } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
+import { recordUsageHold, usageHoldKey } from './usage-hold.ts'
 
 const TASK: TrackerTask = {
   id: 'bd-a1b2',
@@ -252,6 +253,8 @@ class FakePr implements PrDriver {
 let repo: string
 let wtRoot: string
 let store: Store
+let stateRoot: string
+let previousStateHome: string | undefined
 
 const config = (over: Record<string, unknown> = {}) => {
   const { worker = [{ id: 'worker-1', name: 'Worker 1', kind: 'claude' }], ...rest } = over
@@ -305,6 +308,9 @@ beforeEach(async () => {
   delete process.env.GITHUB_TOKEN
   repo = mkdtempSync(join(tmpdir(), 'amagi-runservice-repo-'))
   wtRoot = mkdtempSync(join(tmpdir(), 'amagi-runservice-wt-'))
+  stateRoot = mkdtempSync(join(tmpdir(), 'amagi-runservice-state-'))
+  previousStateHome = process.env.XDG_STATE_HOME
+  process.env.XDG_STATE_HOME = stateRoot
   store = new Store(openDatabase(':memory:'))
   await execOk(exec, ['git', 'init', '-q', '-b', 'main', '.'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
@@ -318,9 +324,45 @@ afterEach(() => {
   store.close()
   rmSync(repo, { recursive: true, force: true })
   rmSync(wtRoot, { recursive: true, force: true })
+  rmSync(stateRoot, { recursive: true, force: true })
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousStateHome
 })
 
 describe('RunService', () => {
+  test('does not claim a ready task while its harness and model are held', async () => {
+    const tracker = new FakeTracker([TASK])
+    let spawned = 0
+    const harness: Harness = {
+      kind: 'claude',
+      start: (opts) => {
+        spawned++
+        return new FakeHarness().start(opts)
+      },
+      resume: () => {
+        throw new Error('unexpected resume')
+      },
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+    const cfg = config({ harness: { implement: { kind: 'claude', model: 'sonnet' } } })
+    const key = usageHoldKey('claude', 'sonnet')
+    recordUsageHold(key, 'claude', 'sonnet', 'usage limit reached', Date.now() + 60_000)
+    const service = makeService(tracker, harness, 1, cfg, { autoQueue: true, autoQueueIdleMs: 10 })
+
+    const result = await service.start()
+    expect(result).toMatchObject({ ok: false, status: 409 })
+    expect(result.ok ? '' : result.error).toContain('claude+sonnet usage limit hold')
+    expect(await tracker.ready()).toEqual([TASK])
+    expect(spawned).toBe(0)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(store.task(TASK.id)).toBeNull()
+    expect(store.events({ taskId: TASK.id }).some((event) => event.type === 'agent.started')).toBe(
+      false,
+    )
+    service.dispose()
+  })
+
   test('status reports availability and capacity', async () => {
     const service = makeService(new FakeTracker(), new FakeHarness(), 2)
     expect(await service.status()).toEqual({
