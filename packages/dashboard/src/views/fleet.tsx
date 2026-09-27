@@ -927,6 +927,59 @@ export function RepositoryParticipationCard({
   const [identityError, setIdentityError] = useState<string | null>(null)
   const [identitySaved, setIdentitySaved] = useState(false)
 
+  const [epicCloseEnabled, setEpicCloseEnabled] = useState(false)
+  const [epicCloseAvailable, setEpicCloseAvailable] = useState(false)
+  const [epicCloseLoaded, setEpicCloseLoaded] = useState(false)
+  const [epicCloseBusy, setEpicCloseBusy] = useState(false)
+  const [epicCloseError, setEpicCloseError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setEpicCloseLoaded(false)
+    setEpicCloseError(null)
+    fetch(`${apiBase}/api/repos/${repo.key}/settings`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as {
+          epicCloseEnabled: boolean
+          epicCloseAvailable: boolean
+        }
+      })
+      .then((settings) => {
+        if (!active) return
+        setEpicCloseEnabled(settings.epicCloseEnabled)
+        setEpicCloseAvailable(settings.epicCloseAvailable)
+        setEpicCloseLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        setEpicCloseError(err instanceof Error ? err.message : String(err))
+        setEpicCloseLoaded(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const setEpicClose = async (enabled: boolean) => {
+    setEpicCloseBusy(true)
+    setEpicCloseError(null)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ epicCloseEnabled: enabled }),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const settings = (await response.json()) as { epicCloseEnabled: boolean }
+      setEpicCloseEnabled(settings.epicCloseEnabled)
+    } catch (err) {
+      setEpicCloseError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setEpicCloseBusy(false)
+    }
+  }
+
   useEffect(() => {
     let active = true
     setIdentityLoaded(false)
@@ -997,6 +1050,31 @@ export function RepositoryParticipationCard({
         <ul className="divide-y divide-line">
           <ParticipationRow repo={repo} onChanged={onChanged} />
         </ul>
+      </div>
+      <div className={card}>
+        <h2 className="mb-1 text-sm text-fg-muted">Automatic epic closure</h2>
+        <p className="mb-3 text-sm text-fg-faint">
+          Automatically close eligible Beads epics when all their child tasks are complete.
+        </p>
+        {!epicCloseLoaded ? (
+          <p className="text-sm text-fg-faint">Loading…</p>
+        ) : (
+          <label className="flex items-center gap-2 text-sm text-fg">
+            <input
+              type="checkbox"
+              checked={epicCloseEnabled}
+              disabled={epicCloseBusy || !epicCloseAvailable}
+              onChange={(event) => void setEpicClose(event.currentTarget.checked)}
+            />
+            Enable automatic epic closure
+            {!epicCloseAvailable && ' (available for Beads repositories)'}
+          </label>
+        )}
+        {epicCloseError !== null && (
+          <p role="alert" className="mt-2 text-sm text-red-ink">
+            {epicCloseError}
+          </p>
+        )}
       </div>
       <div className={card}>
         <h2 className="mb-1 text-sm text-fg-muted">Git identity for amagi commits</h2>

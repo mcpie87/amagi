@@ -1332,6 +1332,9 @@ export function createApp({
       const ws = resolveWorkspace(workspaces, repo)
       return c.json({
         autoQueue: ws.config.loop.autoQueue,
+        epicCloseEnabled:
+          ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled,
+        epicCloseAvailable: ws.tracker instanceof BeadsTracker,
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
@@ -1346,9 +1349,13 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts } = c.req.valid('json')
+        const { autoQueue, epicCloseEnabled, ntfyTopic, ntfyServer, desktopFailureAlerts } =
+          c.req.valid('json')
         writeConfig(ws.root, {
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
+          ...(epicCloseEnabled === undefined
+            ? {}
+            : { watchers: { epicClose: { enabled: epicCloseEnabled } } }),
           ...(ntfyTopic === undefined &&
           ntfyServer === undefined &&
           desktopFailureAlerts === undefined
@@ -1361,6 +1368,9 @@ export function createApp({
                 },
               }),
         })
+        if (epicCloseEnabled !== undefined) {
+          ws.config.watchers.epicClose.enabled = epicCloseEnabled
+        }
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
         if (desktopFailureAlerts !== undefined) {
@@ -1377,6 +1387,9 @@ export function createApp({
         }
         return c.json({
           autoQueue: ws.config.loop.autoQueue,
+          epicCloseEnabled:
+            ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled,
+          epicCloseAvailable: ws.tracker instanceof BeadsTracker,
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
