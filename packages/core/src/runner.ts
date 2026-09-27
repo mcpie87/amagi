@@ -877,54 +877,9 @@ export class Runner {
       priorReplies = replies
       for (const reply of replies) if (reply.outcome === 'fixed') fixedIds.add(reply.id)
 
-      let checksPassed = false
-      for (let checkRound = 0; checkRound <= config.loop.maxCheckRounds; checkRound++) {
-        this.transition(task.id, 'checks')
-        const checks = await this.runChecks(cwd)
-        this.throwIfBudgetExhausted(task.id, budget)
-        checksPassed = checks.every((check) => check.exitCode === 0)
-        store.append(task.id, {
-          type: 'checks.finished',
-          ok: checksPassed,
-          results: checks,
-        })
-        if (checksPassed) break
-        if (checkRound === config.loop.maxCheckRounds) {
-          failure = 'checks still fail after the review fix round'
-          unresolvedIds = blocking.map((finding) => finding.id)
-          stopReason = 'rounds'
-          break
-        }
-        this.transition(task.id, 'implementing')
-        let checkFix: AgentRun & { stopped: boolean }
-        try {
-          checkFix = await this.runAgentWithRetry(
-            task.id,
-            run.sessionId,
-            {
-              cwd,
-              prompt: fixChecksPrompt(checks),
-              permissions: config.harness.implement.permissions,
-              extraArgs: config.harness.implement.extraArgs,
-            },
-            'fix checks',
-            lease,
-            budget,
-          )
-        } catch (error) {
-          if (budget.spentReason() !== null) {
-            stopReason = 'cost'
-            break
-          }
-          throw error
-        }
-        if (checkFix.stopped) return null
-        run = mergeAgentRuns(run, checkFix)
-        const checked = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
-        if (checked === null) return null
-        run = mergeAgentRuns(run, checked)
-      }
-      if (!checksPassed) break
+      const checked = await this.runCheckRounds(task, cwd, run, lease, budget, 'needs-human')
+      if (checked === null) return null
+      run = checked
       const sinceReview = store
         .events({ taskId: task.id, limit: 1_000_000 })
         .filter((event) => event.seq > reviewStartSeq)
@@ -1093,7 +1048,7 @@ export class Runner {
     budget: TaskBudget,
     resume = false,
   ): Promise<void> {
-    const { store, config } = this.deps
+    const { config } = this.deps
     // The claimed task is a lite ready row without notes or comments; re-read the
     // full issue so the agent sees the tracker context (and never needs bd inside
     // the worktree, where it has no database). Best effort, like the PR-body re-read.
@@ -1198,72 +1153,9 @@ export class Runner {
       }
     }
 
-    let recoveryGiven = false
-    let recoveryRetry = false
-    for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
-      this.throwIfCancelled(task.id)
-      this.transition(task.id, 'checks')
-      const results = await this.runChecks(cwd)
-      this.throwIfBudgetExhausted(task.id, budget)
-      const ok = results.every((r) => r.exitCode === 0)
-      store.append(task.id, { type: 'checks.finished', ok, results })
-
-      if (ok) break
-      // The fix rounds are spent, or nothing is left to resume. Rather than
-      // parking the task silently (a stale worktree makes checks fail that a
-      // fresh base passes), ask the operator once how to proceed and apply it.
-      if (round === config.loop.maxCheckRounds || (current.sessionId === null && !recoveryRetry)) {
-        if (!recoveryGiven) {
-          recoveryGiven = true
-          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
-          if (action === null) return
-          if (action === 'park') {
-            this.transition(task.id, 'needs_human', 'project checks still failing')
-            return
-          }
-          if (action === 'rebase') {
-            const rebased = await this.updateFromBase(cwd)
-            if (!rebased) {
-              this.transition(
-                task.id,
-                'needs_human',
-                'project checks still failing; updating the worktree to the latest base failed',
-              )
-              return
-            }
-          }
-          // 'retry' or a successful 'rebase': give the fix rounds another full
-          // pass, resuming the recorded session or starting a fresh one.
-          recoveryRetry = true
-          round = -1
-          continue
-        }
-        this.transition(task.id, 'needs_human', 'project checks still failing')
-        return
-      }
-
-      this.transition(task.id, 'implementing')
-      const fix = await this.runAgentWithRetry(
-        task.id,
-        current.sessionId,
-        {
-          cwd,
-          prompt: fixChecksPrompt(results),
-          permissions: config.harness.implement.permissions,
-          extraArgs: config.harness.implement.extraArgs,
-        },
-        'fix checks',
-        lease,
-        budget,
-      )
-      if (fix.stopped) return
-      current = mergeAgentRuns(current, fix)
-      if (lease.isLost) throw new LeaseLostError(task.id)
-
-      const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
-      if (resumed === null) return
-      current = mergeAgentRuns(current, resumed)
-    }
+    const checked = await this.runCheckRounds(task, cwd, current, lease, budget)
+    if (checked === null) return
+    current = checked
 
     let reviewSummary: ReviewPrSummary | null = null
     if (config.review.enabled) {
@@ -2090,6 +1982,84 @@ export class Runner {
       if (r.exitCode !== 0) break
     }
     return results
+  }
+
+  private async runCheckRounds(
+    task: TrackerTask,
+    cwd: string,
+    initialRun: AgentRun,
+    lease: Lease,
+    budget: TaskBudget,
+    onExhausted: 'recover' | 'needs-human' = 'recover',
+  ): Promise<AgentRun | null> {
+    const { config, store } = this.deps
+    let run = initialRun
+    let recoveryGiven = false
+    let recoveryRetry = false
+    for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
+      this.throwIfCancelled(task.id)
+      this.transition(task.id, 'checks')
+      const results = await this.runChecks(cwd)
+      this.throwIfBudgetExhausted(task.id, budget)
+      const ok = results.every((result) => result.exitCode === 0)
+      store.append(task.id, { type: 'checks.finished', ok, results })
+      if (ok) return run
+
+      if (round === config.loop.maxCheckRounds || (run.sessionId === null && !recoveryRetry)) {
+        if (onExhausted === 'needs-human') {
+          this.transition(task.id, 'needs_human', 'project checks still failing after review fix')
+          return null
+        }
+        if (!recoveryGiven) {
+          recoveryGiven = true
+          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
+          if (action === null) return null
+          if (action === 'park') {
+            this.transition(task.id, 'needs_human', 'project checks still failing')
+            return null
+          }
+          if (action === 'rebase') {
+            const rebased = await this.updateFromBase(cwd)
+            if (!rebased) {
+              this.transition(
+                task.id,
+                'needs_human',
+                'project checks still failing; updating the worktree to the latest base failed',
+              )
+              return null
+            }
+          }
+          recoveryRetry = true
+          round = -1
+          continue
+        }
+        this.transition(task.id, 'needs_human', 'project checks still failing')
+        return null
+      }
+
+      this.transition(task.id, 'implementing')
+      const fix = await this.runAgentWithRetry(
+        task.id,
+        run.sessionId,
+        {
+          cwd,
+          prompt: fixChecksPrompt(results),
+          permissions: config.harness.implement.permissions,
+          extraArgs: config.harness.implement.extraArgs,
+        },
+        'fix checks',
+        lease,
+        budget,
+      )
+      if (fix.stopped) return null
+      run = mergeAgentRuns(run, fix)
+      if (lease.isLost) throw new LeaseLostError(task.id)
+
+      const resumed = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
+      if (resumed === null) return null
+      run = mergeAgentRuns(run, resumed)
+    }
+    return null
   }
 
   /**
