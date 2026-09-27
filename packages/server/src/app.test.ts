@@ -2549,9 +2549,18 @@ describe('fleet endpoints', () => {
   test('watchers are updated in the global config and the stall watcher takes only enabled', async () => {
     const res = await send('PATCH', '/api/watchers/mention', { kind: 'codex', model: 'gpt-x' })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ enabled: true, kind: 'codex', model: 'gpt-x' })
+    expect(await res.json()).toEqual({
+      enabled: true,
+      allowedAuthors: [],
+      kind: 'codex',
+      model: 'gpt-x',
+    })
     await send('PATCH', '/api/watchers/mention', { model: null, enabled: false })
-    expect(loadGlobalConfig().watchers.mention).toEqual({ enabled: false, kind: 'codex' })
+    expect(loadGlobalConfig().watchers.mention).toEqual({
+      enabled: false,
+      allowedAuthors: [],
+      kind: 'codex',
+    })
     expect((await send('PATCH', '/api/watchers/stall', { model: 'x' })).status).toBe(400)
     expect((await send('PATCH', '/api/watchers/stall', { enabled: false })).status).toBe(200)
     expect(loadGlobalConfig().watchers.stall.enabled).toBe(false)

@@ -19,7 +19,11 @@ import {
 import { startMentionWatcher } from './mention-watcher.ts'
 
 const config = (): Config =>
-  Config.parse({ repo: { baseBranch: 'main' }, checks: { commands: [] } })
+  Config.parse({
+    repo: { baseBranch: 'main' },
+    checks: { commands: [] },
+    watchers: { mention: { allowedAuthors: ['bob', 'alice'] } },
+  })
 
 const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
