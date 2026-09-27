@@ -2453,6 +2453,7 @@ describe('fleet endpoints', () => {
     writeGlobalConfig({
       harness: {
         implement: { kind: 'claude', seat: 'old-seat' },
+        review: { kind: 'codex', seat: 'stale-review-seat' },
         definitions: { named: { kind: 'codex', seat: 'old-seat' } },
       },
     })

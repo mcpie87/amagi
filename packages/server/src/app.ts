@@ -344,7 +344,6 @@ export function createApp({
       }
       for (const harness of [
         global.harness.implement,
-        global.harness.review,
         global.harness.triage,
         ...Object.values(global.harness.definitions),
       ]) {
@@ -368,7 +367,6 @@ export function createApp({
       }
       for (const harness of [
         global.harness.implement,
-        global.harness.review,
         global.harness.triage,
         ...Object.values(global.harness.definitions),
       ]) {
@@ -404,7 +402,7 @@ export function createApp({
         if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
       }
       const harness: Record<string, unknown> = {}
-      for (const name of ['implement', 'review', 'triage'] as const) {
+      for (const name of ['implement', 'triage'] as const) {
         const original = global.harness[name]
         const seat = rewrite(original.seat)
         if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }

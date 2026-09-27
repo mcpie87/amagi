@@ -55,6 +55,7 @@ describe('loadConfig', () => {
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
+    expect(config.harness).not.toHaveProperty('review')
     expect(config.review).toEqual({
       enabled: false,
       maxRounds: 3,
