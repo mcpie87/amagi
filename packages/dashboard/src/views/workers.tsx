@@ -1,5 +1,5 @@
 import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
-import { fmtTokens } from '@amagi/core/format'
+import { fmtBytes, fmtCpu, fmtTokens } from '@amagi/core/format'
 import type {
   FleetWorkerStatus,
   RunnerResource,
@@ -19,15 +19,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge, PILL } from '../badges.tsx'
 import { useDateFormatPref } from '../date-format.ts'
-import {
-  fmtBytes,
-  fmtCpu,
-  fmtDateTime,
-  fmtElapsed,
-  fmtInterval,
-  fmtLastRun,
-  fmtUntil,
-} from '../format.ts'
+import { fmtDateTime, fmtElapsed, fmtInterval, fmtLastRun, fmtUntil } from '../format.ts'
 import { useDashboard, useRunner } from '../store.tsx'
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
