@@ -90,12 +90,16 @@ export abstract class ForgeTracker implements Tracker {
   protected abstract setState(id: string, closed: boolean): Promise<void>
 
   async ready(limit = 20): Promise<TrackerTask[]> {
-    return (await this.listOpen(limit)).filter((i) => !isClaimed(i)).map(toTask)
+    return (await this.listOpen(limit))
+      .filter((i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'))
+      .map(toTask)
   }
 
   async claim(id?: string): Promise<TrackerTask | null> {
     const target = id ?? (await this.ready(1))[0]?.id
     if (target === undefined) return null
+    const existing = await this.getIssue(target)
+    if (existing === null || existing.labels.some((label) => label.name === 'proposed')) return null
     await this.addClaimLabel(target)
     const issue = await this.getIssue(target)
     return issue === null ? null : toTask(issue)

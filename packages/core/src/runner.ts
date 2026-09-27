@@ -7,6 +7,7 @@ import { type Config, reviewerHarnessConfig } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
+import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { errMsg } from './errors.ts'
 import {
@@ -284,6 +285,19 @@ type ReviewPrSummary = {
     failureScenario: string
     reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
   }[]
+  findings: ReviewFinding[]
+  followUps: {
+    id: string
+    title: string
+    path: string
+    line: number
+    evidence: string
+    failureScenario: string
+    covers?: string
+    proposalId?: string
+    proposalUrl?: string | null
+  }[]
+  proposalCreationSupported: boolean
   history: string
 }
 
@@ -934,6 +948,7 @@ export class Runner {
       type: 'review.stopped',
       reason: stopReason ?? 'rounds',
       unresolvedIds,
+      findings: latestFindings,
     })
     const minorFindings = latestFindings.filter(
       (finding) =>
@@ -969,6 +984,23 @@ export class Runner {
             reply: reply === undefined ? null : { outcome: reply.outcome, reason: reply.reason },
           }
         }),
+      findings: latestFindings,
+      followUps: [
+        ...new Map(
+          latestFindings
+            .filter((finding) => finding.scope === 'follow-up')
+            .map((finding) => [finding.id, finding] as const),
+        ).values(),
+      ].map((finding) => ({
+        id: finding.id,
+        title: finding.title,
+        path: finding.path,
+        line: finding.line,
+        evidence: finding.evidence,
+        failureScenario: finding.failureScenario,
+        ...(finding.covers === undefined ? {} : { covers: finding.covers }),
+      })),
+      proposalCreationSupported: this.deps.tracker.capabilities.create,
       history,
     }
   }
@@ -1289,6 +1321,7 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
+    if (reviewSummary !== null) await this.fileFollowUps(task, reviewSummary)
     await this.openPullRequest(
       task,
       cwd,
@@ -1361,6 +1394,88 @@ export class Runner {
     }
     this.transition(task.id, 'no_pr', withVerdictLine(reason, verdict))
     return null
+  }
+
+  private async fileFollowUps(task: TrackerTask, review: ReviewPrSummary): Promise<void> {
+    if (!this.deps.tracker.capabilities.create) return
+    for (const followUp of review.followUps) {
+      if (followUp.covers !== undefined) continue
+      const finding = review.findings.find((entry) => entry.id === followUp.id)
+      if (finding === undefined) continue
+      const suggested = finding.suggestedPriority
+      const priority =
+        typeof suggested === 'number'
+          ? suggested
+          : typeof suggested === 'string'
+            ? (suggested.match(/^(?:P)?([0-4])$/i)?.[1] ?? null)
+            : null
+      const description = [
+        `Finding: ${finding.path}:${finding.line}`,
+        '',
+        `Evidence: ${finding.evidence}`,
+        '',
+        `Failure scenario: ${finding.failureScenario}`,
+        '',
+        'Why this is outside the source task: this is a follow-up finding outside the scope of the implemented task.',
+        '',
+        `Source task: ${task.id}`,
+        'Source PR: added when the pull request is opened.',
+      ].join('\n')
+      try {
+        const created = await this.deps.tracker.createTask({
+          title: finding.title,
+          description,
+          acceptanceCriteria: null,
+          priority: priority === null ? null : Number(priority),
+          labels: [PROPOSED_LABEL],
+          dependencies: [],
+          parent: task.id,
+        })
+        followUp.proposalId = created.id
+        followUp.proposalUrl = created.url
+        this.deps.store.append(task.id, {
+          type: 'review.proposal-filed',
+          findingId: finding.id,
+          issueId: created.id,
+          title: created.title,
+          url: created.url,
+        })
+      } catch (error) {
+        this.deps.store.append(task.id, {
+          type: 'error',
+          message: `filing follow-up finding ${finding.id} failed: ${errMsg(error)}`,
+          fatal: false,
+        })
+      }
+    }
+  }
+
+  private async updateProposalPrLinks(
+    taskId: string,
+    review: ReviewPrSummary | null | undefined,
+    prUrl: string,
+  ): Promise<void> {
+    if (review === null || review === undefined || !this.deps.tracker.capabilities.edit) return
+    for (const followUp of review.followUps) {
+      if (followUp.proposalId === undefined) continue
+      const finding = review.findings.find((entry) => entry.id === followUp.id)
+      if (finding === undefined) continue
+      try {
+        const proposal = await this.deps.tracker.get(followUp.proposalId)
+        if (proposal === null) continue
+        const description = proposal.description.replace(
+          'Source PR: added when the pull request is opened.',
+          `Source PR: ${prUrl}`,
+        )
+        await this.deps.tracker.updateTask(followUp.proposalId, { description })
+      } catch (error) {
+        this.deps.store.append(taskId, {
+          type: 'error',
+          message: `adding source PR ${prUrl} to proposal ${followUp.proposalId} failed: ${errMsg(error)}`,
+          fatal: false,
+        })
+      }
+    }
   }
 
   /** Pushes the worktree branch and opens a pull request, with one recovery attempt on failure. */
@@ -1445,6 +1560,8 @@ export class Runner {
               unresolved: reviewSummary.unresolved,
               unresolvedIds: reviewSummary.unresolvedIds,
               unresolvedFindings: reviewSummary.unresolvedFindings,
+              followUps: reviewSummary.followUps,
+              proposalCreationSupported: reviewSummary.proposalCreationSupported,
               history: reviewSummary.history,
             },
       ),
@@ -1457,6 +1574,7 @@ export class Runner {
       const pr = await forge.createPr(opts)
       store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
       this.transition(task.id, 'pr_open')
+      await this.updateProposalPrLinks(task.id, reviewSummary, pr.url)
     } catch (err) {
       const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
@@ -1491,6 +1609,7 @@ export class Runner {
         const pr = await forge.createPr(opts)
         store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
         this.transition(task.id, 'pr_open')
+        await this.updateProposalPrLinks(task.id, reviewSummary, pr.url)
       } catch (retryErr) {
         this.throwIfCancelled(task.id)
         const retryMessage = errMsg(retryErr)
