@@ -313,6 +313,13 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: ReviewStopReason,
     unresolvedIds: z.array(z.string().min(1)),
   }),
+  z.object({
+    type: z.literal('review.proposal-filed'),
+    findingId: z.string().min(1),
+    issueId: z.string().min(1),
+    title: z.string().min(1),
+    url: z.string().nullable(),
+  }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
   z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),

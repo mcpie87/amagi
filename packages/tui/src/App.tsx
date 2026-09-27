@@ -2,6 +2,7 @@ import {
   activeTasks,
   agentLogStore,
   type DashboardState,
+  FINDING_SEVERITIES,
   fmtDuration,
   fmtTokens,
   isTerminal,
@@ -9,6 +10,8 @@ import {
   type ProjectedQuestion,
   type ProjectedTask,
   relTime,
+  reviewHistoryFor,
+  reviewWaitingSeat,
   runHealth,
   runHealthNearLimit,
   type StoredEvent,
@@ -26,6 +29,8 @@ import { useOverview } from './useOverview.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
+  reviewing: 'magenta',
+  fixing: 'blue',
   needs_human: 'red',
   done: 'green',
 }
@@ -184,10 +189,12 @@ function QueueScreen({
         <Box flexDirection="column" marginTop={1}>
           {tasks.map((task, i) => {
             const nearLimit = runHealthNearLimit(runHealth(state, task.id, now))
+            const waitingSeat = reviewWaitingSeat(state, task.id)
             return (
               <Box key={task.id} gap={1}>
                 {i === selected ? <Text color="cyan">{'>'}</Text> : <Text> </Text>}
                 <Badge state={task.state} />
+                {waitingSeat !== null && <Text color="yellow">waiting for seat {waitingSeat}</Text>}
                 {nearLimit && <Text color="yellow">!</Text>}
                 <Text wrap="truncate">{task.title}</Text>
                 <Text dimColor>
@@ -485,6 +492,8 @@ function TaskDetail({
 }) {
   const task = state.tasks[taskId]
   const questions = openQuestionsFor(state, taskId)
+  const reviewHistory = reviewHistoryFor(state, taskId)
+  const waitingSeat = reviewWaitingSeat(state, taskId)
   const [qIndex, setQIndex] = useState(0)
   const [mode, setMode] = useState<AnswerMode>({ kind: 'browse' })
   const logKey = `${repo}/${taskId}`
@@ -597,6 +606,7 @@ function TaskDetail({
         <Badge state={task.state} />
       </Box>
       <Text dimColor>{task.id}</Text>
+      {waitingSeat !== null && <Text color="yellow">waiting for seat {waitingSeat}</Text>}
 
       <Box flexDirection="column" marginTop={1}>
         <DetailRow label="tracker" value={task.tracker} />
@@ -661,6 +671,42 @@ function TaskDetail({
           }
         />
       </Box>
+
+      {reviewHistory.rounds.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>review</Text>
+          {reviewHistory.rounds.map((round) => (
+            <Box key={round.round} flexDirection="column" marginTop={1}>
+              <Text>
+                round {round.round}
+                {round.finalPass ? ' · final pass' : ''}
+                {!round.completed ? ' · in progress' : ''}
+              </Text>
+              {FINDING_SEVERITIES.flatMap((severity) => {
+                const findings = round.findings.filter((finding) => finding.severity === severity)
+                return findings.length === 0
+                  ? []
+                  : [
+                      <Box key={severity} flexDirection="column">
+                        <Text dimColor>{severity}</Text>
+                        {findings.map((finding) => (
+                          <Text key={finding.id} wrap="truncate">
+                            {finding.outcome} {finding.id} {finding.title} ({finding.path}:
+                            {finding.line})
+                            {finding.proposal ? ` · proposal ${finding.proposal.issueId}` : ''}
+                          </Text>
+                        ))}
+                      </Box>,
+                    ]
+              })}
+              {round.failed !== null && <Text color="red">failed: {round.failed}</Text>}
+            </Box>
+          ))}
+          {reviewHistory.stopReason !== null && (
+            <Text dimColor>stopped: {reviewHistory.stopReason}</Text>
+          )}
+        </Box>
+      )}
 
       {health.warnings.length > 0 && (
         <Box flexDirection="column" marginTop={1}>

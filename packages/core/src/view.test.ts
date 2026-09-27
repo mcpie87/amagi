@@ -10,6 +10,8 @@ import {
   openQuestionsFor,
   reduceBatch,
   reduceState,
+  reviewHistoryFor,
+  reviewWaitingSeat,
   runHealth,
   runHealthNearLimit,
   stateAtAttempt,
@@ -79,6 +81,14 @@ describe('dashboard state reducer', () => {
       evidence: 'The value is dereferenced without validation.',
       failureScenario: 'A null value crashes the request.',
     }
+    const disputed = {
+      ...finding,
+      id: 'finding-2',
+      severity: 'minor',
+      title: 'Prefer a clearer name',
+    }
+    const withdrawn = { ...finding, id: 'finding-3', severity: 'nit', title: 'Optional cleanup' }
+    const unresolved = { ...finding, id: 'finding-4', severity: 'blocker', title: 'Still crashes' }
     const state = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Review me', tracker: 'bd' }),
       ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
@@ -94,39 +104,83 @@ describe('dashboard state reducer', () => {
       ev(7, 'am-1', 1600, {
         type: 'review.finished',
         round: 1,
-        findings: [finding],
+        findings: [finding, disputed, withdrawn],
         blockingIds: ['finding-1'],
       }),
       ev(8, 'am-1', 1700, { type: 'task.state', from: 'reviewing', to: 'fixing' }),
       ev(9, 'am-1', 1800, {
         type: 'review.fixed',
         round: 1,
-        replies: [{ id: 'finding-1', outcome: 'fixed', reason: 'Added a null check.' }],
+        replies: [
+          { id: 'finding-1', outcome: 'fixed', reason: 'Added a null check.' },
+          {
+            id: 'finding-2',
+            outcome: 'wont-fix',
+            reason: 'This is a subjective naming preference.',
+          },
+        ],
       }),
       ev(10, 'am-1', 1900, { type: 'task.state', from: 'fixing', to: 'reviewing' }),
       ev(11, 'am-1', 2000, {
         type: 'review.started',
         round: 2,
-        finalPass: false,
+        finalPass: true,
         reviewerSession: 'review-session',
       }),
       ev(12, 'am-1', 2100, {
         type: 'review.finished',
         round: 2,
-        findings: [],
-        blockingIds: [],
+        findings: [unresolved],
+        blockingIds: ['finding-4'],
       }),
       ev(13, 'am-1', 2200, {
         type: 'review.stopped',
-        reason: 'acceptable',
-        unresolvedIds: [],
+        reason: 'rounds',
+        unresolvedIds: ['finding-4'],
+      }),
+      ev(14, 'am-1', 2300, {
+        type: 'review.proposal-filed',
+        findingId: 'finding-3',
+        issueId: 'proposal-1',
+        title: 'Optional cleanup',
+        url: 'https://example.test/issues/proposal-1',
       }),
     ].reduce(reduceState, initialDashboardState())
     expect(state.tasks['am-1']).toMatchObject({
       reviewRound: 2,
-      reviewFindings: [],
-      reviewStopReason: 'acceptable',
+      reviewFindings: [unresolved],
+      reviewStopReason: 'rounds',
     })
+    const history = reviewHistoryFor(state, 'am-1')
+    expect(history.stopReason).toBe('rounds')
+    expect(history.rounds).toMatchObject([
+      {
+        round: 1,
+        finalPass: false,
+        findings: [
+          { id: 'finding-1', outcome: 'fixed', outcomeReason: 'Added a null check.' },
+          {
+            id: 'finding-2',
+            outcome: 'disputed',
+            outcomeReason: 'This is a subjective naming preference.',
+          },
+          { id: 'finding-3', outcome: 'withdrawn', proposal: { issueId: 'proposal-1' } },
+        ],
+      },
+      { round: 2, finalPass: true, findings: [{ id: 'finding-4', outcome: 'unresolved' }] },
+    ])
+  })
+
+  test('reports the reviewer seat while its agent waits to start', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Review me', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.stream',
+        role: 'review',
+        event: { kind: 'status', message: 'waiting for seat reviewer-seat' },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(reviewWaitingSeat(state, 'am-1')).toBe('reviewer-seat')
   })
 
   test('replay reconstructs the same state every time', () => {
