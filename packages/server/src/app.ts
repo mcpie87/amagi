@@ -25,12 +25,14 @@ import {
   HUMAN_ONLY_LABEL,
   hasStaleMaxParallel,
   isTerminal,
+  LibnotifyNotifier,
   type LiveRun,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
   mergeLiveRuns,
   type Notifier,
+  NtfyNotifier,
   newWorkerId,
   pidAlive,
   type Question,
@@ -180,20 +182,26 @@ const authorized = (c: Context, store: Store, id: string): boolean =>
 
 /**
  * Best effort: a notifier (e.g. a missing notify-send) must never break the
- * ask request, so failures are logged and still recorded as notify.sent so
- * the dashboard shows what was attempted.
+ * ask request. Desktop failures are recorded separately when their dashboard
+ * alert is enabled; other failures remain best effort.
  */
 async function notifyChannels(
   notifiers: Notifier[],
   store: Store,
   title: string,
   body: string,
+  desktopFailureAlerts = false,
 ): Promise<void> {
   for (const notifier of notifiers) {
     try {
       await notifier.notify(title, body)
     } catch (err) {
-      console.warn(`notify ${notifier.kind}: ${errMsg(err)}`)
+      const detail = errMsg(err)
+      console.warn(`notify ${notifier.kind}: ${detail}`)
+      if (notifier.kind === 'libnotify' && desktopFailureAlerts) {
+        store.append(null, { type: 'notify.failed', channel: notifier.kind, title, detail })
+        continue
+      }
     }
     store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
   }
@@ -1297,6 +1305,7 @@ export function createApp({
         autoQueue: ws.config.loop.autoQueue,
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
+        desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
       })
     })
@@ -1308,20 +1317,26 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer } = c.req.valid('json')
+        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts } = c.req.valid('json')
         writeConfig(ws.root, {
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
-          ...(ntfyTopic === undefined && ntfyServer === undefined
+          ...(ntfyTopic === undefined &&
+          ntfyServer === undefined &&
+          desktopFailureAlerts === undefined
             ? {}
             : {
                 notify: {
                   ...(ntfyTopic === undefined ? {} : { ntfyTopic }),
                   ...(ntfyServer === undefined ? {} : { ntfyServer }),
+                  ...(desktopFailureAlerts === undefined ? {} : { desktopFailureAlerts }),
                 },
               }),
         })
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
+        if (desktopFailureAlerts !== undefined) {
+          ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
+        }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -1335,9 +1350,37 @@ export function createApp({
           autoQueue: ws.config.loop.autoQueue,
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
+          desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
         })
       },
     )
+
+    .post('/api/repos/:repo/settings/test-desktop', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      resolveWorkspace(workspaces, repo)
+      try {
+        await new LibnotifyNotifier().notify('Amagi desktop test', 'Desktop notifications work.')
+        return c.json({ ok: true })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
+
+    .post('/api/repos/:repo/settings/test-ntfy', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const { ntfyTopic, ntfyServer } = ws.config.notify
+      if (!ntfyTopic) return c.json({ error: 'Configure an ntfy topic first' }, 400)
+      try {
+        await new NtfyNotifier(ntfyTopic, ntfyServer).notify(
+          'Amagi ntfy test',
+          'ntfy notifications work.',
+        )
+        return c.json({ ok: true })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
 
     .patch(
       '/api/repos/:repo/participation',
@@ -1512,7 +1555,13 @@ export function createApp({
           from: task.state,
           to: 'awaiting_answer',
         })
-        void notifyChannels(notify, ws.store, `question from ${id}`, question)
+        void notifyChannels(
+          notify,
+          ws.store,
+          `question from ${id}`,
+          question,
+          ws.config.notify.desktopFailureAlerts,
+        )
         return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) }, 201)
       },
     )
