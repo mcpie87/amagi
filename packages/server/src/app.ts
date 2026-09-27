@@ -877,6 +877,15 @@ export function createApp({
       })
     })
 
+    .get('/api/repos/:repo/open-prs', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      return c.json({ prs: await ws.forge.listOpenPrs(ws.root) })
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)

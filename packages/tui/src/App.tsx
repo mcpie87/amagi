@@ -17,6 +17,7 @@ import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { RunnerStatus } from '@amagi/core/run-service'
 import { Box, Text, useApp, useInput } from 'ink'
 import { useEffect, useMemo, useState } from 'react'
+import { OpenPrs } from './OpenPrs.tsx'
 import { TaskDetail } from './TaskDetail.tsx'
 import { useDashboardStream } from './useDashboardStream.ts'
 import { useOverview } from './useOverview.ts'
@@ -29,6 +30,7 @@ type Screen =
   | { name: 'queue' }
   | { name: 'detail'; taskId: string }
   | { name: 'watcher'; watcherId: string }
+  | { name: 'prs' }
 
 export function App({ baseUrl, repo }: AppProps) {
   const { exit } = useApp()
@@ -79,12 +81,17 @@ export function App({ baseUrl, repo }: AppProps) {
     )
   }
 
+  if (screen.name === 'prs') {
+    return <OpenPrs prs={overview.prs} onBack={() => setScreen({ name: 'overview' })} />
+  }
+
   if (screen.name === 'overview') {
     return (
       <OverviewScreen
         state={state}
         runner={overview.runner}
         ready={overview.ready}
+        onOpenPrs={() => setScreen({ name: 'prs' })}
         onSelectWatcher={(watcherId) => setScreen({ name: 'watcher', watcherId })}
         onQueue={() => setScreen({ name: 'queue' })}
         onQuit={() => exit()}
@@ -182,6 +189,7 @@ function OverviewScreen({
   state,
   runner,
   ready,
+  onOpenPrs,
   onSelectWatcher,
   onQueue,
   onQuit,
@@ -189,6 +197,7 @@ function OverviewScreen({
   state: DashboardState
   runner: RunnerStatus | null
   ready: TrackerTask[]
+  onOpenPrs: () => void
   onSelectWatcher: (watcherId: string) => void
   onQueue: () => void
   onQuit: () => void
@@ -197,6 +206,7 @@ function OverviewScreen({
   const watchers = runner?.workers ?? []
   useInput((input, key) => {
     if (key.tab || input === 'o') onQueue()
+    else if (input === 'p') onOpenPrs()
     else if (input === 'q') onQuit()
     else if (watchers.length > 0 && (key.upArrow || input === 'k')) {
       setWatcherIndex((i) => Math.max(0, i - 1))
@@ -329,7 +339,7 @@ function OverviewScreen({
 
       <Box marginTop={1}>
         <Text dimColor>
-          {watchers.length > 0 ? '↑/↓ select watcher · enter log · ' : ''}tab queue · q quit
+          {watchers.length > 0 ? '↑/↓ select watcher · enter log · ' : ''}p PRs · tab queue · q quit
         </Text>
       </Box>
     </Box>
