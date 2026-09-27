@@ -30,6 +30,7 @@ import {
   type Tracker,
   type WorkerActivity,
 } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type PrConflictWatcherOptions = {
   /** Repo key, so activity can be attributed across registered repos. */
@@ -79,8 +80,6 @@ export function startPrConflictWatcher({
   exec,
   makeHarnessFn,
 }: PrConflictWatcherOptions): PrConflictWatcher {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let scanned = 0
   let conflicting = 0
@@ -443,15 +442,12 @@ export function startPrConflictWatcher({
     } catch (err) {
       console.warn(`pr conflict watcher history: ${errMsg(err)}`)
     }
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 
-  void tick()
+  const poller = startPoller(intervalMs, tick, true)
   return {
     stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
+      poller.stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,
