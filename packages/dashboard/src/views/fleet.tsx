@@ -4,6 +4,8 @@ import { useRunner } from '../store.tsx'
 
 const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
 type HarnessKind = (typeof HARNESS_KINDS)[number]
+const WORKER_ROLES = ['implement', 'review'] as const
+type WorkerRole = (typeof WORKER_ROLES)[number]
 
 const HARNESS_LABEL: Record<HarnessKind, string> = {
   claude: 'Claude',
@@ -20,6 +22,7 @@ type Worker = {
   model?: string
   effort?: string
   seat?: string
+  roles: WorkerRole[]
   count?: number
   seatCount?: number
   enabled: boolean
@@ -306,6 +309,7 @@ function WorkerFormModal({
   const [name, setName] = useState(initial?.name ?? defaultName(workers, 'claude'))
   const [nameTouched, setNameTouched] = useState(initial !== null)
   const [count, setCount] = useState(String(initial?.count ?? 1))
+  const [roles, setRoles] = useState<WorkerRole[]>(initial?.roles ?? ['implement'])
   const [harness, setHarness] = useState<HarnessValues>({
     kind: initial?.kind ?? 'claude',
     model: initial?.model ?? '',
@@ -334,6 +338,7 @@ function WorkerFormModal({
       effort: orNull(harness.effort),
       seat: orNull(harness.seat),
       count: workerCount,
+      roles,
     }
     const err =
       initial === null
@@ -391,6 +396,27 @@ function WorkerFormModal({
         <p className="text-sm text-red-ink">Worker count must be between 1 and 16.</p>
       )}
       <HarnessFields values={harness} onChange={changeHarness} seats={seats} />
+      <fieldset>
+        <legend className={label}>Applicable roles</legend>
+        <div className="flex flex-wrap gap-4">
+          {WORKER_ROLES.map((role) => (
+            <label key={role} className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={roles.includes(role)}
+                onChange={(event) =>
+                  setRoles((current) =>
+                    event.target.checked
+                      ? [...current, role]
+                      : current.filter((assigned) => assigned !== role),
+                  )
+                }
+              />
+              {role === 'implement' ? 'Implement' : 'Review'}
+            </label>
+          ))}
+        </div>
+      </fieldset>
       {initial?.taskId != null && (
         <p className="text-sm text-amber-ink">
           {initial.taskId} keeps its current settings; changes apply from the next run.

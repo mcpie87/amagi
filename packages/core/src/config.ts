@@ -73,6 +73,9 @@ const WatcherHarnessConfig = z.object({
  * A named lane in the fleet. `id` is the identity (locks and run history key
  * on it); `name` is a free-text label that may be renamed or duplicated.
  */
+export const WorkerRole = z.enum(['implement', 'review'])
+export type WorkerRole = z.infer<typeof WorkerRole>
+
 export const WorkerConfig = z
   .object({
     id: z.string().regex(/^[a-z0-9-]+$/),
@@ -81,6 +84,7 @@ export const WorkerConfig = z
     model: z.string().optional(),
     effort: z.string().optional(),
     seat: z.string().min(1).optional(),
+    roles: z.array(WorkerRole).default(['implement']),
     count: z.number().int().min(1).max(MAX_WORKERS).default(1),
     seatCount: z.number().int().min(1).max(MAX_WORKERS).default(1),
     enabled: z.boolean().default(false),
@@ -161,6 +165,14 @@ export function resolveWorkerHarness(
     effort: overrides.effort ?? worker.effort ?? base.effort,
     seat: worker.seat ?? worker.kind,
   }
+}
+
+/** Resolves the assigned reviewer profile, when an enabled reviewer is configured. */
+export function reviewerWorkerConfig(config: Config): Config['harness']['implement'] | undefined {
+  const worker = expandWorkers(config.worker, config.seats).find(
+    (candidate) => candidate.enabled && candidate.roles.includes('review'),
+  )
+  return worker === undefined ? undefined : resolveWorkerHarness(config, worker)
 }
 
 const AgentWatcherConfig = z.object({
@@ -579,6 +591,7 @@ export function migrateFleet(): WorkerConfig[] {
       id: newWorkerId([]),
       name: `${HARNESS_LABEL[kind]} 1`,
       kind,
+      roles: ['implement'],
       ...(model === undefined ? {} : { model }),
       ...(effort === undefined ? {} : { effort }),
       seat: seat ?? kind,

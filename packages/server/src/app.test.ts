@@ -2477,6 +2477,22 @@ describe('fleet endpoints', () => {
     expect(loadGlobalConfig().worker[0]).toMatchObject({ count: 3, seatCount: 3 })
   })
 
+  test('worker role assignments persist and reject roles outside the fleet', async () => {
+    const created = await send('POST', '/api/workers', {
+      name: 'Reviewer',
+      kind: 'codex',
+      roles: ['review'],
+    })
+    expect(created.status).toBe(201)
+    const { id } = (await created.json()) as { id: string }
+    expect(loadGlobalConfig().worker[0]?.roles).toEqual(['review'])
+
+    const updated = await send('PATCH', `/api/workers/${id}`, { roles: ['implement', 'review'] })
+    expect(updated.status).toBe(200)
+    expect(loadGlobalConfig().worker[0]?.roles).toEqual(['implement', 'review'])
+    expect((await send('PATCH', `/api/workers/${id}`, { roles: ['triage'] })).status).toBe(400)
+  })
+
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
     fleet = [
