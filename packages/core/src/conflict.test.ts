@@ -401,8 +401,8 @@ describe('resolveConflict', () => {
 
     const first = await run()
     expect(first.ok).toBe(false)
-    expect(first.message).toContain('parked the task at needs_human')
-    expect(store.task('am-1')?.state).toBe('needs_human')
+    expect(first.message).toContain('task marked pr_merge_conflict')
+    expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
 
     unmergedReported = false
     const again = await run()

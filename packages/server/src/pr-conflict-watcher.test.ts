@@ -265,6 +265,35 @@ test('does not re-attempt a conflicting PR until its head SHA changes', async ()
   expect(counter(w, 'resolved')).toBeGreaterThanOrEqual(1)
 })
 
+test('a queued PR bypasses the unchanged conflict cache and is recorded', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    store,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  w.queue(7)
+  await Bun.sleep(60)
+
+  expect(started).toBe(2)
+  expect(
+    store
+      .events()
+      .some(
+        (event) =>
+          event.type === 'watcher.action' &&
+          event.result === 'conflict resolution queued' &&
+          event.prNumber === 7,
+      ),
+  ).toBe(true)
+})
+
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
   let started = 0
   let head = 'deadbeef'

@@ -244,6 +244,12 @@ function startRepoPollers(
     ])
   return {
     workers,
+    queueConflictResolution(repo: string, prNumber: number): boolean {
+      const watcher = pollers.get(repo)?.conflict
+      if (watcher === null || watcher === undefined) return false
+      watcher.queue(prNumber)
+      return true
+    },
     stop() {
       clearInterval(supervisor)
       for (const p of pollers.values()) {
@@ -355,6 +361,7 @@ export function serve({
     runnerForRepo,
     syncRunners,
     workers: repoPollers.workers,
+    queueConflictResolution: repoPollers.queueConflictResolution,
     liveRuns: () => loadLiveRuns(),
   })
   const server = Bun.serve({

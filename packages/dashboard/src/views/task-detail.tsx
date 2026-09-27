@@ -51,6 +51,7 @@ import {
   RecheckPrButton,
   ReclaimButton,
   ResetButton,
+  ResolveConflictsButton,
   RetryNowButton,
   StopButton,
 } from './task-actions.tsx'
@@ -910,6 +911,9 @@ export function TaskDetailView() {
         )}
         {selected !== null && !past && (
           <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
+        )}
+        {selected !== null && !past && (
+          <ResolveConflictsButton repo={selected} taskId={task.id} state={task.state} />
         )}
         {selected !== null && !past && (
           <CloseButtons repo={selected} taskId={task.id} state={task.state} />

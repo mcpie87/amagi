@@ -109,6 +109,8 @@ export type ServerDeps = {
   syncRunners?: () => void
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
+  /** Queues one PR on the existing conflict watcher. */
+  queueConflictResolution?: (repo: string, prNumber: number) => boolean
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
@@ -269,6 +271,7 @@ export function createApp({
   runnerForRepo,
   syncRunners,
   workers,
+  queueConflictResolution,
   liveRuns,
   chatHarnessFor,
 }: ServerDeps) {
@@ -1056,6 +1059,23 @@ export function createApp({
       // caller's live state picks up a merge/close without a page reload.
       await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/resolve-conflicts', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (task.state !== 'pr_merge_conflict' || task.prMergeStatus !== 'conflicted') {
+        return c.json({ error: `task ${id} has no open conflicted PR` }, 409)
+      }
+      if (task.prNumber === null) {
+        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
+      }
+      if (queueConflictResolution?.(repo, task.prNumber) !== true) {
+        return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
+      }
+      return c.json({ taskId: id, queued: true })
     })
 
     .post(
