@@ -1656,31 +1656,6 @@ export function createApp({
       },
     )
 
-    .post(
-      '/api/repos/:repo/run',
-      valid('param', RepoParam),
-      (c, next) => {
-        resolveWorkspace(workspaces, c.req.valid('param').repo)
-        return next()
-      },
-      valid('json', RunBody),
-      async (c) => {
-        const { repo } = c.req.valid('param')
-        const service = runnerFor(repo)
-        if (service === undefined) {
-          return c.json({ error: 'runner service is unavailable for this repository' }, 501)
-        }
-        const { taskId, workerId, model, effort } = c.req.valid('json')
-        const result = await service.start(taskId, {
-          ...(workerId === undefined ? {} : { workerId }),
-          ...(model === undefined ? {} : { model }),
-          ...(effort === undefined ? {} : { effort }),
-        })
-        if (!result.ok) return c.json({ error: result.error }, result.status)
-        return c.json({ repo, taskId: result.taskId, started: true }, 202)
-      },
-    )
-
     .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)

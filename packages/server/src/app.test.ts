@@ -3050,61 +3050,6 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
   })
 })
 
-describe('POST /api/repos/:repo/run', () => {
-  test('dispatches the named worker through the runner service', async () => {
-    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
-    ws = testWorkspaces(['repo1'])
-    app = createApp({
-      workspaces: ws.workspaces,
-      runnerRepo: 'repo1',
-      runner: {
-        status: async () => ({
-          name: 'repo1',
-          available: true,
-          capacity: 1,
-          busySeats: 0,
-          totalSeats: 1,
-          running: [],
-          startedAt: {},
-          resources: {},
-          tasks: {},
-          autoQueue: false,
-        }),
-        start: async (taskId, opts) => {
-          received.push({ taskId, opts })
-          return { ok: true, taskId: 'bd-1' }
-        },
-        stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
-        fleetChanged: () => {},
-        setAutoQueue: () => {},
-      },
-    })
-    const res = await app.request('/api/repos/repo1/run', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{"workerId":"w-1"}',
-    })
-    expect(res.status).toBe(202)
-    expect(await res.json()).toEqual({ repo: 'repo1', taskId: 'bd-1', started: true })
-    expect(received).toEqual([{ taskId: undefined, opts: { workerId: 'w-1' } }])
-  })
-
-  test('404s for an unknown repo', async () => {
-    ws = testWorkspaces(['repo1'])
-    app = createApp({ workspaces: ws.workspaces })
-    expect(
-      (
-        await app.request('/api/repos/nope/run', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-        })
-      ).status,
-    ).toBe(404)
-  })
-})
-
 describe('POST /api/repos/:repo/triage', () => {
   test('starts a triage pass in the background for the repo', async () => {
     const tracker = new FakeGateTracker()
