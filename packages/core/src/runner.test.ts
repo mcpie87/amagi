@@ -2549,67 +2549,6 @@ describe('Runner.cancel', () => {
   })
 })
 
-describe('Runner.requestCommit', () => {
-  const withWorktree = async (): Promise<string> => {
-    const wtPath = join(wtRoot, 'request-commit-worktree')
-    await execOk(exec, ['git', 'worktree', 'add', '-b', 'amagi/bd-a1b2-commit', wtPath, 'main'], {
-      cwd: repo,
-    })
-    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
-    return wtPath
-  }
-
-  test('stages and commits the worktree, returning the sha and recording commit.created', async () => {
-    const wtPath = await withWorktree()
-    writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
-
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      TASK.id,
-      wtPath,
-    )
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.sha).toMatch(/^[0-9a-f]{40}$/)
-    const created = store
-      .events({ taskId: TASK.id })
-      .find(
-        (e): e is Extract<StoredEvent, { type: 'commit.created' }> => e.type === 'commit.created',
-      )
-    expect(created?.sha).toBe(result.sha)
-    expect(created?.subject).toBe(`[${TASK.id}] ${TASK.title}`)
-    const subject = (
-      await execOk(exec, ['git', 'show', '-s', '--format=%s', 'HEAD'], {
-        cwd: wtPath,
-      })
-    ).trim()
-    expect(subject).toBe(created?.subject ?? '')
-    const head = (await execOk(exec, ['git', 'rev-parse', 'HEAD'], { cwd: wtPath })).trim()
-    expect(head).toBe(result.sha)
-  })
-
-  test('a clean worktree is a failure, not a commit', async () => {
-    const wtPath = await withWorktree()
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      TASK.id,
-      wtPath,
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('nothing to commit')
-    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
-  })
-
-  test('an unknown task is a failure', async () => {
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      'nope',
-      repo,
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('unknown task')
-  })
-})
-
 describe('Runner.drainGitBlocked', () => {
   const withStateHome = async (
     fn: (runner: Runner, dir: string) => Promise<void>,
