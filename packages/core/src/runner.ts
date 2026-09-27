@@ -24,6 +24,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { MANDATORY_WORKER_CHECKS } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -1168,6 +1169,7 @@ export class Runner {
 
     let recoveryGiven = false
     let recoveryRetry = false
+    let finalChecks: CheckResult[] = []
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
       this.transition(task.id, 'checks')
@@ -1176,7 +1178,10 @@ export class Runner {
       const ok = results.every((r) => r.exitCode === 0)
       store.append(task.id, { type: 'checks.finished', ok, results })
 
-      if (ok) break
+      if (ok) {
+        finalChecks = results
+        break
+      }
       // The fix rounds are spent, or nothing is left to resume. Rather than
       // parking the task silently (a stale worktree makes checks fail that a
       // fresh base passes), ask the operator once how to proceed and apply it.
@@ -1301,6 +1306,7 @@ export class Runner {
         ? withVerdictLine(current.summary ?? '', 'needs-human')
         : current.summary,
       reviewSummary,
+      finalChecks,
     )
     this.throwIfCancelled(task.id)
   }
@@ -1374,6 +1380,7 @@ export class Runner {
     effort: string | null,
     fallbackSummary?: string | null,
     reviewSummary?: ReviewPrSummary | null,
+    verification?: readonly CheckResult[],
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
@@ -1447,6 +1454,7 @@ export class Runner {
               unresolvedFindings: reviewSummary.unresolvedFindings,
               history: reviewSummary.history,
             },
+        verification,
       ),
       labels: [
         ...amagiLabels(current.type),
@@ -1956,7 +1964,7 @@ export class Runner {
     // The mandatory gate always runs before the configured commands, so a PR
     // cannot be pushed until the worktree is formatted and lint-clean.
     const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
-    return [...gate, ...commands]
+    return [...new Set([...gate, ...commands, ...MANDATORY_WORKER_CHECKS])]
   }
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {

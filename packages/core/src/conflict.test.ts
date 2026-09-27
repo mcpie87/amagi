@@ -178,7 +178,33 @@ describe('resolveConflict', () => {
     ])
     const merge = calls.find((call) => call[1] === 'merge')
     expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
-    expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
+    const message = logs.find((line) => line.includes('base merges cleanly'))
+    expect(message).toContain('base merges cleanly; pushed the merge to update the PR')
+    expect(message).toContain('Verification: just check passed; just fresh-check passed')
+  })
+
+  test('does not push a clean merge when mandatory checks fail', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return ok('Already up to date')
+      if (c[0] === 'sh' && c[1] === '-c' && c[2] === 'just check') {
+        return { exitCode: 2, stdout: '', stderr: 'check failed' }
+      }
+      return undefined
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => fakeHarness(),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('$ just check\nexit 2\ncheck failed')
+    expect(calls.some((call) => call[1] === 'push')).toBe(false)
   })
 
   test('dispatches the agent, pushes the fix, and reports the merge status', async () => {

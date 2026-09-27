@@ -1,6 +1,7 @@
 import type { TrackerTask } from './drivers/types.ts'
 import type { CheckResult } from './events.ts'
 import { commitFooter } from './footer.ts'
+import { MANDATORY_WORKER_CHECKS } from './mandatory-checks.ts'
 import type { PrBodyMeta } from './pr-body.ts'
 import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from './verdict.ts'
 
@@ -21,7 +22,7 @@ export type PromptContext = {
 
 export function implementSystemPrompt(ctx: PromptContext): string {
   const base = ctx.baseBranch ?? '<base>'
-  const checks = ctx.checks ?? []
+  const checks = [...new Set([...(ctx.checks ?? []), ...MANDATORY_WORKER_CHECKS])]
   const lines = [
     'You are working inside a dedicated git worktree on a single tracked task.',
     `Worktree: ${ctx.worktree}`,
@@ -247,6 +248,7 @@ export type ConflictPromptContext = {
   checks: readonly string[]
   /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
   conflictFiles?: readonly string[]
+  checkResults?: readonly CheckResult[]
   outPath?: string
 }
 
@@ -300,13 +302,12 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
       '',
     )
   }
-  if (ctx.checks.length > 0) {
-    parts.push(
-      '',
-      'Run the project checks and make sure they pass before stopping:',
-      ...ctx.checks.map((c) => `- ${c}`),
-    )
-  }
+  parts.push(
+    '',
+    'Run the project checks and make sure they pass before stopping:',
+    ...[...new Set([...ctx.checks, ...MANDATORY_WORKER_CHECKS])].map((c) => `- ${c}`),
+  )
+  if (ctx.checkResults !== undefined) parts.push('', fixChecksPrompt(ctx.checkResults))
   parts.push(
     '',
     'The runner stages and commits the resolved merge. Stop when the conflicts are resolved.',
@@ -369,13 +370,11 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
       'Resolve the merge conflicts first, then address the feedback.',
     )
   }
-  if (ctx.checks.length > 0) {
-    parts.push(
-      '',
-      'Run the project checks and make sure they pass before stopping:',
-      ...ctx.checks.map((c) => `- ${c}`),
-    )
-  }
+  parts.push(
+    '',
+    'Run the project checks and make sure they pass before stopping:',
+    ...[...new Set([...ctx.checks, ...MANDATORY_WORKER_CHECKS])].map((c) => `- ${c}`),
+  )
   parts.push(
     '',
     'Address the feedback with the smallest change that satisfies it, then stop. The dispatcher will commit and push your changes.',

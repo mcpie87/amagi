@@ -326,7 +326,6 @@ let store: Store
 const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    // No formatter/lint tooling in the fake worktrees, so the mandatory gate is off.
     checks: { commands: [], format: null, lint: null, ...(checks as Record<string, unknown>) },
     ...rest,
   })
@@ -349,7 +348,12 @@ const makeRunner = (
     repoName: 'demo',
     forge,
     reviewerHarness,
-    exec: runExec,
+    exec: (cmd, opts) =>
+      cmd[0] === 'sh' &&
+      cmd[1] === '-c' &&
+      (cmd[2] === 'just check' || cmd[2] === 'just fresh-check')
+        ? Promise.resolve({ exitCode: 0, stdout: '', stderr: '' })
+        : runExec(cmd, opts),
     ...(leaseHeartbeatMs === undefined ? {} : { leaseHeartbeatMs }),
   })
 
@@ -752,12 +756,23 @@ describe('Runner.runOnce', () => {
   })
 
   test('drives claim to a pull request and records the whole story', async () => {
+    const pr = new FakePr()
     const result = await makeRunner(
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile]),
+      config(),
+      pr,
     ).runOnce()
 
     expect(result?.state).toBe('pr_open')
+    const checks = store
+      .events({ taskId: TASK.id })
+      .find((event) => event.type === 'checks.finished')
+    expect(
+      checks?.type === 'checks.finished' && checks.results.map((result) => result.command),
+    ).toEqual(['just check', 'just fresh-check'])
+    expect(pr.calls[0]?.body).toContain('- `just check`: passed')
+    expect(pr.calls[0]?.body).toContain('- `just fresh-check`: passed')
     expect(types(TASK.id)).toEqual([
       'task.claimed',
       'run.limits',
