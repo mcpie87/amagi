@@ -325,6 +325,49 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
   })
 })
 
+describe('GET /api/repos/:repo/open-prs', () => {
+  test('returns every open PR from the forge', async () => {
+    const forge = new FakeMergePrDriver()
+    forge.open = [
+      {
+        number: 1,
+        title: 'Mergeable',
+        body: '',
+        url: 'https://github.com/owner/repo/pull/1',
+        headRefName: 'feature/one',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        createdAt: '',
+        updatedAt: '',
+        labels: [],
+      },
+      {
+        number: 2,
+        title: 'Conflicted',
+        body: '',
+        url: 'https://github.com/owner/repo/pull/2',
+        headRefName: 'feature/two',
+        baseRefName: 'main',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+        headRefOid: null,
+        createdAt: '',
+        updatedAt: '',
+        labels: [],
+      },
+    ]
+    ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
+    app = createApp({ workspaces: ws.workspaces })
+
+    const res = await app.request('/api/repos/repo1/open-prs')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { prs: PrInfo[] }
+    expect(body.prs.map((pr) => pr.number)).toEqual([1, 2])
+  })
+})
+
 describe('identical issue ids across repos do not collide', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1', 'repo2'])
