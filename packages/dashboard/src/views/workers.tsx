@@ -1,5 +1,5 @@
 import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
-import { fmtTokens } from '@amagi/core/format'
+import { fmtBytes, fmtCpu, fmtTokens } from '@amagi/core/format'
 import type { FleetWorkerStatus, RunnerResource, RunnerTask } from '@amagi/core/run-service'
 import {
   currentAgentFor,
@@ -12,7 +12,7 @@ import { Link } from '@tanstack/react-router'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge, PILL } from '../badges.tsx'
-import { fmtBytes, fmtCpu, fmtElapsed, fmtLastRun } from '../format.ts'
+import { fmtElapsed, fmtLastRun } from '../format.ts'
 import { useDashboard, useRunner } from '../store.tsx'
 import { WatcherDetailDialog } from './watcher-detail-dialog.tsx'
 
