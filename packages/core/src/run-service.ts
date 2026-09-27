@@ -1,4 +1,10 @@
-import { type Config, expandWorkers, resolveWorkerHarness, type WorkerConfig } from './config.ts'
+import {
+  type Config,
+  type ExpandedWorkerConfig,
+  expandWorkers,
+  resolveWorkerHarness,
+  type WorkerConfig,
+} from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -63,6 +69,7 @@ export type FleetWorkerStatus = {
   model: string | null
   effort: string | null
   seat: string
+  displaySlot: number
   enabled: boolean
   busy: boolean
   /** The task this worker itself is running, as opposed to another worker on its seat. */
@@ -349,6 +356,7 @@ export class RunService implements RunServiceApi {
         model: worker.model ?? null,
         effort: worker.effort ?? null,
         seat: this.workerSeat(worker),
+        displaySlot: worker.displaySlot,
         enabled: worker.enabled,
         busy: this.runsBySeat().has(this.workerSeat(worker)),
         taskId: [...this.runs].find(([, run]) => run.workerId === worker.id)?.[0] ?? null,
@@ -377,7 +385,7 @@ export class RunService implements RunServiceApi {
     return worker.seat ?? worker.kind
   }
 
-  private workers(): WorkerConfig[] {
+  private workers(): ExpandedWorkerConfig[] {
     return expandWorkers(this.opts.config.worker, this.opts.config.seats)
   }
 
