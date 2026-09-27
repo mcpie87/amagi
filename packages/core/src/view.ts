@@ -1,7 +1,9 @@
 import {
   type AgentRole,
   currentAttemptEvents,
+  type Finding,
   isTerminal,
+  type ReviewStopReason,
   type StoredEvent,
   type TaskState,
 } from './events.ts'
@@ -141,6 +143,116 @@ export function currentAgentFor(
     }
   }
   return null
+}
+
+export type ReviewFindingOutcome = 'fixed' | 'disputed' | 'withdrawn' | 'unresolved'
+
+export type ReviewRound = {
+  round: number
+  finalPass: boolean
+  completed: boolean
+  findings: (Finding & {
+    outcome: ReviewFindingOutcome
+    outcomeReason: string | null
+    proposal: { issueId: string; title: string; url: string | null } | null
+  })[]
+  failed: string | null
+}
+
+export type ReviewHistory = { rounds: ReviewRound[]; stopReason: ReviewStopReason | null }
+
+/** Review details the compact task projection does not retain. */
+export function reviewHistoryFor(state: DashboardState, taskId: string): ReviewHistory {
+  const rounds = new Map<number, ReviewRound>()
+  const replies = new Map<number, Map<string, { outcome: 'fixed' | 'disputed'; reason: string }>>()
+  const proposals = new Map<string, { issueId: string; title: string; url: string | null }>()
+  let stopReason: ReviewStopReason | null = null
+  for (const event of currentAttemptEvents(taskEvents(state, taskId), taskId)) {
+    if (event.type === 'review.started') {
+      rounds.set(event.round, {
+        round: event.round,
+        finalPass: event.finalPass,
+        completed: false,
+        findings: [],
+        failed: null,
+      })
+      stopReason = null
+    } else if (event.type === 'review.finished') {
+      const round = rounds.get(event.round)
+      if (round) {
+        round.completed = true
+        round.findings = event.findings.map((finding) => ({
+          ...finding,
+          outcome: 'unresolved',
+          outcomeReason: null,
+          proposal: null,
+        }))
+      }
+    } else if (event.type === 'review.failed') {
+      const round = rounds.get(event.round)
+      if (round) {
+        round.failed = event.reason
+        round.completed = true
+      }
+    } else if (event.type === 'review.fixed') {
+      replies.set(
+        event.round,
+        new Map(
+          event.replies.map((reply) => [
+            reply.id,
+            { outcome: reply.outcome === 'fixed' ? 'fixed' : 'disputed', reason: reply.reason },
+          ]),
+        ),
+      )
+    } else if (event.type === 'review.stopped') {
+      stopReason = event.reason
+      const latest = [...rounds.values()].at(-1)
+      if (latest) {
+        for (const finding of latest.findings) {
+          if (event.unresolvedIds.includes(finding.id)) finding.outcome = 'unresolved'
+        }
+      }
+    } else if (event.type === 'review.proposal-filed') {
+      proposals.set(event.findingId, { issueId: event.issueId, title: event.title, url: event.url })
+    }
+  }
+  const ordered = [...rounds.values()].sort((a, b) => a.round - b.round)
+  for (let i = 0; i < ordered.length; i++) {
+    const round = ordered[i]
+    if (!round) continue
+    const nextIds = new Set(ordered[i + 1]?.findings.map((finding) => finding.id) ?? [])
+    const roundReplies = replies.get(round.round)
+    for (const finding of round.findings) {
+      finding.proposal = proposals.get(finding.id) ?? null
+      const reply = roundReplies?.get(finding.id)
+      if (reply !== undefined) {
+        finding.outcome = reply.outcome
+        finding.outcomeReason = reply.reason
+      } else if (ordered[i + 1]?.completed && !nextIds.has(finding.id))
+        finding.outcome = 'withdrawn'
+    }
+  }
+  return { rounds: ordered, stopReason }
+}
+
+/** Seat name when a review agent is queued for its credential. */
+export function reviewWaitingSeat(state: DashboardState, taskId: string): string | null {
+  return reviewWaitingSeatForEvents(taskEvents(state, taskId), taskId)
+}
+
+export function reviewWaitingSeatForEvents(events: StoredEvent[], taskId: string): string | null {
+  let waiting: string | null = null
+  for (const event of currentAttemptEvents(events, taskId)) {
+    if (event.type === 'agent.stream' && event.role === 'review' && event.event.kind === 'status') {
+      const match = /^waiting for seat (.+)$/.exec(event.event.message)
+      if (match) waiting = match[1] ?? null
+    } else if (event.type === 'agent.started' && event.role === 'review') {
+      waiting = null
+    } else if (event.type === 'agent.exited' && event.role === 'review') {
+      waiting = null
+    }
+  }
+  return waiting
 }
 
 /** Context size of the agent currently running on the task, if any usage has been reported. */

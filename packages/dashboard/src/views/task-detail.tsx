@@ -3,6 +3,7 @@ import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
   currentAttemptEvents,
+  FINDING_SEVERITIES,
   type StoredEvent,
   type TaskState,
 } from '@amagi/core/events'
@@ -11,8 +12,11 @@ import {
   chatInFlight,
   chatTurns,
   currentAgentFor,
+  type DashboardState,
   openQuestionsFor,
   type ProjectedTask,
+  reviewHistoryFor,
+  reviewWaitingSeat,
   runHealth,
   type StatusEntry,
   stateAtAttempt,
@@ -729,6 +733,72 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
   )
 }
 
+function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: string }) {
+  const history = reviewHistoryFor(state, taskId)
+  if (history.rounds.length === 0) return null
+  return (
+    <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-fg-muted">Review</h2>
+      <ol className="space-y-4">
+        {history.rounds.map((round) => (
+          <li key={round.round} className="border-t border-line pt-3 first:border-0 first:pt-0">
+            <h3 className="font-medium">
+              Round {round.round}
+              {round.finalPass ? ' · final pass' : ''}
+              {!round.completed ? ' · in progress' : ''}
+            </h3>
+            {round.failed !== null && (
+              <p className="mt-1 text-sm text-red-ink">Review failed: {round.failed}</p>
+            )}
+            {FINDING_SEVERITIES.map((severity) => {
+              const findings = round.findings.filter((finding) => finding.severity === severity)
+              if (findings.length === 0) return null
+              return (
+                <div key={severity} className="mt-2">
+                  <h4 className="text-xs font-semibold uppercase text-fg-muted">{severity}</h4>
+                  <ul className="mt-1 space-y-2">
+                    {findings.map((finding) => (
+                      <li key={finding.id} className="text-sm">
+                        <p>
+                          <span className="font-medium">{finding.title}</span>{' '}
+                          <span className="text-fg-faint">
+                            {finding.path}:{finding.line} · {finding.outcome}
+                          </span>
+                        </p>
+                        {finding.outcomeReason !== null && (
+                          <p className="text-fg-muted">{finding.outcomeReason}</p>
+                        )}
+                        {finding.proposal !== null &&
+                          (finding.proposal.url === null ? (
+                            <p className="text-fg-muted">
+                              Filed proposal: {finding.proposal.title} ({finding.proposal.issueId})
+                            </p>
+                          ) : (
+                            <a
+                              className="text-sky-ink hover:underline"
+                              href={finding.proposal.url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Filed proposal: {finding.proposal.title}
+                            </a>
+                          ))}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            })}
+          </li>
+        ))}
+      </ol>
+      {history.stopReason !== null && (
+        <p className="mt-4 text-sm text-fg-muted">Stopped: {history.stopReason}</p>
+      )}
+    </section>
+  )
+}
+
 type DetailTab = 'log' | 'status' | 'checks'
 
 export function TaskDetailView() {
@@ -749,6 +819,7 @@ export function TaskDetailView() {
   const questions = past ? [] : openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const runnerTask = past ? undefined : status?.tasks?.[id]
+  const waitingSeat = reviewWaitingSeat(state, id)
   const [tab, setTab] = useState<DetailTab>('log')
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -807,6 +878,9 @@ export function TaskDetailView() {
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
+        {waitingSeat !== null && (
+          <span className="text-sm text-fg-muted">waiting for seat {waitingSeat}</span>
+        )}
         {selected !== null && !past && (
           <ReclaimButton
             repo={selected}
@@ -864,6 +938,8 @@ export function TaskDetailView() {
       <SummaryPanel task={task} />
 
       <RetryPanel task={task} />
+
+      <ReviewHistoryView state={state} taskId={id} />
 
       {selected !== null && chatAvailable && <ChatPanel repo={selected} taskId={task.id} />}
 

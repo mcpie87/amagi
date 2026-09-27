@@ -1,4 +1,11 @@
-import { isTerminal, loadConfig, relTime, repoRoot, type TaskState } from '@amagi/core'
+import {
+  isTerminal,
+  loadConfig,
+  relTime,
+  repoRoot,
+  reviewWaitingSeatForEvents,
+  type TaskState,
+} from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, red, table, yellow } from '../format.ts'
 import { currentRepo } from '../repo.ts'
@@ -6,6 +13,8 @@ import { currentRepo } from '../repo.ts'
 const STATE_COLOR: Partial<Record<TaskState, (s: string) => string>> = {
   awaiting_answer: yellow,
   retrying: yellow,
+  reviewing: yellow,
+  fixing: yellow,
   needs_human: red,
   no_pr: red,
   done: green,
@@ -23,6 +32,14 @@ export const statusCommand = defineCommand({
     const { key, store } = currentRepo()
 
     const tasks = store.tasks().filter((t) => args.all || !isTerminal(t.state))
+    const waitingSeats = new Map(
+      tasks
+        .filter((task) => task.state === 'reviewing')
+        .map((task) => [
+          task.id,
+          reviewWaitingSeatForEvents(store.events({ taskId: task.id, limit: 1_000_000 }), task.id),
+        ]),
+    )
     const questions = store.openQuestions()
 
     if (args.json) {
@@ -35,11 +52,20 @@ export const statusCommand = defineCommand({
       console.log(dim(args.all ? 'no tasks recorded' : 'no active tasks'))
     } else {
       const header = ['TASK', 'STATE', 'BRANCH', 'UPDATED', 'TITLE']
-      const rows = tasks.map((t) => [t.id, t.state, t.branch ?? '', relTime(t.updatedAt), t.title])
+      const rows = tasks.map((t) => [
+        t.id,
+        waitingSeats.get(t.id) == null
+          ? t.state
+          : `${t.state} (waiting for seat ${waitingSeats.get(t.id)})`,
+        t.branch ?? '',
+        relTime(t.updatedAt),
+        t.title,
+      ])
       console.log(
         table([header, ...rows], (row, i) => {
           if (i === 0) return row.map(bold)
-          const paint = STATE_COLOR[row[1] as TaskState]
+          const state = row[1]?.split(' ', 1)[0] as TaskState | undefined
+          const paint = state === undefined ? undefined : STATE_COLOR[state]
           return paint ? row.map((c, j) => (j === 1 ? paint(c) : c)) : row
         }),
       )
