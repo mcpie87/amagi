@@ -37,6 +37,9 @@ _Avoid_: git command, agent commit
 **Orchestrator**:
 Amagi's own process, as distinct from the agents it spawns. Sole holder of forge credentials and sole author of every forge write.
 
+**Review round**:
+A reviewer pass, followed by a fix pass only when blocking findings remain and work is allowed to continue. A round can also end with blocking findings unresolved when work stops before a fix pass.
+
 ### Pull request lifecycle
 
 **Pointless pull request**:

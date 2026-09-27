@@ -41,6 +41,7 @@ import {
   loadGlobalConfig,
   writeGlobalConfig,
 } from '@amagi/core'
+import { PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -419,7 +420,9 @@ class FakeIssueTracker extends BeadsTracker {
   }
 
   override async ready(): Promise<TrackerTask[]> {
-    return [...this.issues.values()]
+    return [...this.issues.values()].filter(
+      (issue) => issue.status === 'open' && !issue.labels.includes(PROPOSED_LABEL),
+    )
   }
   override async claim(): Promise<TrackerTask | null> {
     return null
@@ -509,6 +512,23 @@ function issueApp(tracker: Tracker) {
 }
 
 describe('issue mutations', () => {
+  test('PATCH /api/repos/:repo/issues/:id accepts a proposal into the ready queue', async () => {
+    const tracker = new FakeIssueTracker()
+    tracker.seed({ id: 'bd-proposal', labels: [PROPOSED_LABEL], priority: 3 })
+    app = issueApp(tracker)
+
+    const res = await app.request('/api/repos/repo1/issues/bd-proposal', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ labels: [], priority: 2 }),
+    })
+
+    expect(res.status).toBe(200)
+    expect((await tracker.getIssue('bd-proposal'))?.labels).not.toContain(PROPOSED_LABEL)
+    expect((await tracker.getIssue('bd-proposal'))?.priority).toBe(2)
+    expect((await tracker.ready()).map((issue) => issue.id)).toContain('bd-proposal')
+  })
+
   test('POST /api/repos/:repo/issues/:id/close closes only the requested issue with its reason', async () => {
     const tracker = new FakeIssueTracker()
     tracker.seed({ id: 'bd-1', type: 'epic' })
@@ -2196,8 +2216,17 @@ describe('repo settings endpoints', () => {
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
     })
+    expect((await patch('repo1', '{"autoQueue":true}')).status).toBe(200)
+    expect(loadConfig(workspace.root).config.notify).toMatchObject({
+      ntfyTopic: 'queue-alerts',
+      ntfyServer: 'https://ntfy.example',
+    })
     expect((await patch('repo1', '{"ntfyTopic":""}')).status).toBe(200)
-    expect(loadConfig(workspace.root).config.notify.ntfyTopic).toBe('')
+    expect(loadConfig(workspace.root).config.notify).toMatchObject({
+      ntfyTopic: '',
+      ntfyServer: 'https://ntfy.example',
+    })
+    expect(loadConfig(workspace.root).config.loop.autoQueue).toBe(true)
     expect((await patch('repo1', '{"ntfyServer":""}')).status).toBe(400)
   })
 
@@ -2378,6 +2407,7 @@ describe('fleet endpoints', () => {
         model: null,
         effort: null,
         seat: 'claude',
+        displaySlot: 1,
         enabled: true,
         busy: true,
         taskId: 'bd-9',
@@ -2411,6 +2441,7 @@ describe('fleet endpoints', () => {
         model: null,
         effort: null,
         seat: 'claude',
+        displaySlot: 1,
         enabled: true,
         busy: true,
         taskId: 'bd-9',

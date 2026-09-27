@@ -16,3 +16,7 @@ commands = [ "just check", "just fresh-check" ]
 [loop]
 maxParallel = 1
 autoQueue = true
+
+[notify]
+ntfyServer = "https://ntfy.sh"
+ntfyTopic = "amagi-chise"

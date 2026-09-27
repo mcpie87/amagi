@@ -16,7 +16,7 @@ export function fmtTokens(n: number): string {
 
 export function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
   let value = n
   let i = 0
   while (value >= 1024 && i < units.length - 1) {

@@ -10,7 +10,7 @@
     "lint": "biome check . && bun run scripts/lint-commits.ts",
     "fmt": "biome check --write .",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test --parallel=8"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
