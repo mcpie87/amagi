@@ -240,6 +240,21 @@ function summaryHarness(
   }
 }
 
+function quickTaskHarness(result: unknown, prompts: string[] = []): Harness {
+  const base = fakeHarness({ summary: 'add-a-task' })
+  return {
+    ...base,
+    start: (opts: AgentStartOptions) => {
+      if (opts.cwd === tmpdir()) return base.start(opts)
+      prompts.push(opts.prompt)
+      const match = opts.prompt.match(/Output file: ([^\n]+)/)
+      if (match?.[1] === undefined) throw new Error('quick-task prompt has no output file')
+      writeFileSync(match[1], JSON.stringify(result))
+      return base.start(opts)
+    },
+  }
+}
+
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
@@ -635,9 +650,10 @@ describe('respondToMention', () => {
     })
   })
 
-  test('an add-a-task mention creates a tracker task and posts a confirmation', async () => {
+  test('an add-a-task mention dispatches the quick-task creator and posts its issue', async () => {
     const tracker = fakeTracker(true)
     const driver = new FakeDriver()
+    const prompts: string[] = []
     const kind = await respondToMention({
       root: '/repo',
       repoName: 'amagi',
@@ -646,14 +662,40 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker,
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () =>
+        quickTaskHarness({ status: 'issue', issue: 'https://example.test/am-123' }, prompts),
     })
 
     expect(kind).toBe('add-a-task')
-    expect(tracker.created).toHaveLength(1)
-    expect(tracker.created[0]?.title).toContain('PR #7:')
-    expect(tracker.created[0]?.description).toContain('@bob')
-    expect(driver.posted).toEqual(['@bob Logged this as task bd-new.'])
+    expect(tracker.created).toHaveLength(0)
+    expect(prompts[0]).toContain('.agents/skills/mpk-add-quick-task/SKILL.md')
+    expect(prompts[0]).toContain('please track adding tests for this')
+    expect(driver.posted).toEqual(['@bob Logged this as https://example.test/am-123.'])
+  })
+
+  test('a materially ambiguous task request asks one focused question without creating an issue', async () => {
+    const tracker = fakeTracker(true)
+    const driver = new FakeDriver()
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '4', user: 'bob', body: 'please track the migration' },
+      config: config(),
+      driver,
+      tracker,
+      makeHarnessFn: () =>
+        quickTaskHarness({
+          status: 'clarification',
+          question: 'Should this migrate the public API or the persisted data format?',
+        }),
+    })
+
+    expect(kind).toBe('add-a-task')
+    expect(tracker.created).toHaveLength(0)
+    expect(driver.posted).toEqual([
+      '@bob Should this migrate the public API or the persisted data format?',
+    ])
   })
 
   test('an add-a-task mention without a task-capable tracker explains it cannot', async () => {
@@ -666,7 +708,7 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker: fakeTracker(false),
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () => quickTaskHarness({ status: 'issue', issue: 'am-123' }),
     })
 
     expect(kind).toBe('add-a-task')

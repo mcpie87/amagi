@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
-import { classifyDifficulty } from './difficulty.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
@@ -118,7 +117,7 @@ export type RespondToMentionOptions = {
   mention: PrComment
   config: Config
   driver: PrDriver
-  /** Tracker used to post take-down reasons and log add-a-task responses; optional so callers without one still reply on the PR. */
+  /** Tracker used for take-down follow-up and to gate add-a-task dispatch; optional so callers without one still reply on the PR. */
   tracker?: Tracker
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
@@ -498,13 +497,62 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   return kind
 }
 
-function addTaskTitle(opts: RespondToMentionOptions): string {
-  const firstLine = opts.mention.body.trim().split('\n')[0] ?? 'New task'
-  return `PR #${opts.pr.number}: ${firstLine.slice(0, 80)}`
+type QuickTaskResult =
+  | { status: 'issue'; issue: string }
+  | { status: 'fixed'; explanation: string }
+  | { status: 'clarification'; question: string }
+
+function quickTaskPrompt(opts: RespondToMentionOptions, outPath: string): string {
+  return [
+    'Handle this PR mention using the repository skill at .agents/skills/mpk-add-quick-task/SKILL.md.',
+    'Read and follow the skill. Use the beads CLI to check for duplicates, already-fixed work, and in-flight work, then create or adjust at most one issue with every required section.',
+    'Record ordinary missing details as assumptions. Ask a focused question only when materially different interpretations would make a task useless or harmful.',
+    'If an issue already covers the request, return that issue. If it is already fixed, return the evidence. If materially ambiguous, do not create or adjust an issue.',
+    'Write exactly one JSON object to the output file, with one of these shapes:',
+    '{"status":"issue","issue":"issue URL or ID"}',
+    '{"status":"fixed","explanation":"brief reason"}',
+    '{"status":"clarification","question":"one focused question"}',
+    `Output file: ${outPath}`,
+    '',
+    `PR #${opts.pr.number}: ${opts.pr.title} (${opts.pr.url})`,
+    `Mention by @${opts.mention.user}:`,
+    opts.mention.body.trim(),
+  ].join('\n')
+}
+
+function parseQuickTaskResult(raw: string): QuickTaskResult {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    throw new Error('task creator returned invalid JSON')
+  }
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('task creator returned an invalid result')
+  }
+  const result = value as Record<string, unknown>
+  if (result.status === 'issue' && typeof result.issue === 'string' && result.issue.trim() !== '') {
+    return { status: 'issue', issue: result.issue.trim() }
+  }
+  if (
+    result.status === 'fixed' &&
+    typeof result.explanation === 'string' &&
+    result.explanation.trim() !== ''
+  ) {
+    return { status: 'fixed', explanation: result.explanation.trim() }
+  }
+  if (
+    result.status === 'clarification' &&
+    typeof result.question === 'string' &&
+    result.question.trim() !== ''
+  ) {
+    return { status: 'clarification', question: result.question.trim() }
+  }
+  throw new Error('task creator returned an unsupported result')
 }
 
 async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Promise<void> {
-  p.phase('logging a task')
+  p.phase('creating a task')
   const tracker = opts.tracker
   if (tracker === undefined || !tracker.capabilities.create) {
     await opts.driver.postComment(
@@ -514,33 +562,40 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     )
     return
   }
-  const description = [
-    `From @${opts.mention.user} on PR #${opts.pr.number} "${opts.pr.title}" (${opts.pr.url}):`,
-    '',
-    opts.mention.body.trim(),
-  ].join('\n')
-  const title = addTaskTitle(opts)
-  const difficulty = opts.config.difficulty.enabled
-    ? await classifyDifficulty(title, description, opts.config, opts.makeHarnessFn, {
-        ...(opts.store === undefined ? {} : { store: opts.store }),
-        source: `PR #${opts.pr.number} mention difficulty classification`,
-      })
-    : null
-  const task = await tracker.createTask({
-    title,
-    description,
-    acceptanceCriteria: null,
-    priority: null,
-    labels: [],
-    dependencies: [],
-    parent: null,
-    ...(difficulty === null ? {} : { difficulty }),
-  })
-  const where = task.url ?? `task ${task.id}`
+  const mk = opts.makeHarnessFn ?? makeHarness
+  const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
+  const outPath = join(tmpdir(), `amagi-quick-task-${opts.pr.number}-${opts.mention.id}.json`)
+  let result: QuickTaskResult
+  try {
+    const proc = startImplementHarness(
+      mk,
+      harnessConfig,
+      opts.root,
+      quickTaskPrompt(opts, outPath),
+      'Follow the requested repository skill exactly. Do not modify repository files.',
+      opts.repo,
+    )
+    const outcome = await p.agent(proc, 'creating a task', {
+      role: 'triage',
+      harness: harnessConfig.kind,
+      source: `PR #${opts.pr.number} quick-task creation`,
+      cwd: opts.root,
+    })
+    if (!outcome.ok) throw new Error(`task creator failed: ${agentFailure(outcome)}`)
+    result = parseQuickTaskResult(readFileSync(outPath, 'utf8'))
+  } finally {
+    rmSync(outPath, { force: true })
+  }
+  const response =
+    result.status === 'issue'
+      ? `@${opts.mention.user} Logged this as ${result.issue}.`
+      : result.status === 'fixed'
+        ? `@${opts.mention.user} This appears to be already fixed: ${result.explanation}`
+        : `@${opts.mention.user} ${result.question}`
   await opts.driver.postComment(
     opts.root,
     opts.pr.number,
-    `@${opts.mention.user} Logged this as ${where}.${configuredFooter(opts.config)}`,
+    `${response}${configuredFooter(opts.config)}`,
   )
 }
 
