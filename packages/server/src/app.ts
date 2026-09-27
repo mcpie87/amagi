@@ -11,12 +11,14 @@ import { resolve } from 'node:path'
 import {
   BeadsTracker,
   CAPABILITY_WORDS,
+  CHECKPOINT_COMMIT_SUMMARY,
   ChatService,
   Config,
   canReset,
   claimGate,
   classifyDifficulty,
   errMsg,
+  exec,
   expandTilde,
   expandWorkers,
   type GitIdentity,
@@ -37,13 +39,13 @@ import {
   pidAlive,
   type Question,
   type RegistryEntry,
-  Runner,
   type RunServiceApi,
   reconcilePr,
   removeWorktree,
   resolveWorkerHarness,
   type Store,
   type StoredEvent,
+  stageAndCommit,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
@@ -1692,18 +1694,30 @@ export function createApp({
         }
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
-        const runner = new Runner({
-          store: ws.store,
-          tracker: ws.tracker,
-          harness: makeHarness(ws.config.harness.implement),
-          config: ws.config,
-          repoRoot: ws.root,
-          repoName: ws.name,
-          ...(ws.forge === null ? {} : { forge: ws.forge }),
-        })
-        const result = await runner.requestCommit(id, task.worktree)
-        if (!result.ok) return c.json({ error: result.error }, 500)
-        return c.json({ verb, sha: result.sha })
+        try {
+          const staged = await stageAndCommit(
+            exec,
+            task,
+            task.worktree,
+            CHECKPOINT_COMMIT_SUMMARY,
+            {
+              harness: ws.config.harness.implement.kind,
+              model: ws.config.harness.implement.model ?? null,
+              effort: ws.config.harness.implement.effort ?? null,
+            },
+          )
+          if (!staged.committed) {
+            return c.json({ error: 'nothing to commit; the worktree is clean' }, 500)
+          }
+          ws.store.append(id, {
+            type: 'commit.created',
+            sha: staged.sha,
+            subject: `[${task.id}] ${task.title}`,
+          })
+          return c.json({ verb, sha: staged.sha })
+        } catch (err) {
+          return c.json({ error: errMsg(err) }, 500)
+        }
       },
     )
 
