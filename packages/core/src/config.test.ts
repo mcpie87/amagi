@@ -80,6 +80,7 @@ describe('loadConfig', () => {
       prConflict: { enabled: true },
       stall: { enabled: true },
       epicClose: { enabled: true },
+      beadsGc: { enabled: true },
     })
     expect(config.loop.questionTimeoutSec).toBe(540)
     expect(config.loop.questionParkTimeoutSec).toBe(3600)
@@ -88,6 +89,7 @@ describe('loadConfig', () => {
     expect(config.loop.mergeTreeCheck).toBe(false)
     expect(config.loop.stallWatchIntervalSec).toBe(300)
     expect(config.loop.epicCloseIntervalSec).toBe(300)
+    expect(config.loop.beadsGcIntervalSec).toBe(3600)
     expect(config.loop.stallTimeoutSec).toBe(3600)
     expect(config.loop.contextWarnTokens).toBe(160_000)
     expect(config.loop.contextMaxTokens).toBe(200_000)

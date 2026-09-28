@@ -2,9 +2,11 @@ import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
 import { BeadsTracker, errMsg, loadLiveRuns } from '@amagi/core'
 import { createApp } from './app.ts'
+import { startBeadsGcPoller } from './beads-gc-poller.ts'
 import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
+import type { Poller } from './poller.ts'
 import { type PrConflictWatcher, startPrConflictWatcher } from './pr-conflict-watcher.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
 import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
@@ -53,8 +55,8 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
 
 /**
  * Gate and PR pollers are per repo, plus agent-mention and PR-conflict
- * watchers where a forge driver exists, and stall and epic-close watchers as
- * configured. A supervisor checks the registry every few seconds so a repo
+ * watchers where a forge driver exists, and stall, epic-close and beads GC
+ * watchers as configured. A supervisor checks the registry every few seconds so a repo
  * added (or removed) after startup gets (or loses) its pollers without
  * restarting the server.
  */
@@ -91,6 +93,7 @@ function startRepoPollers(
       conflict: PrConflictWatcher | null
       stall: StallWatcher | null
       epicClose: EpicClosePoller | null
+      beadsGc: Poller | null
     }
   >()
   let autoQueueAllowed: boolean | undefined
@@ -117,6 +120,7 @@ function startRepoPollers(
       p?.conflict?.stop()
       p?.stall?.stop()
       p?.epicClose?.stop()
+      p?.beadsGc?.stop()
       pollers.delete(key)
     }
     for (const key of keys) {
@@ -134,6 +138,8 @@ function startRepoPollers(
       const stallEnabled = ws.config.watchers.stall.enabled
       const epicCloseEnabled =
         ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled
+      const beads = ws.beads
+      const beadsGcEnabled = beads !== null && ws.config.watchers.beadsGc.enabled
       const startMention = () =>
         forge === null
           ? null
@@ -184,6 +190,14 @@ function startRepoPollers(
           tracker: ws.tracker,
           intervalMs: epicCloseIntervalMs ?? ws.config.loop.epicCloseIntervalSec * 1000,
         })
+      const startBeadsGc = () =>
+        beads === null
+          ? null
+          : startBeadsGcPoller({
+              repo: ws.key,
+              beads,
+              intervalMs: ws.config.loop.beadsGcIntervalSec * 1000,
+            })
       const existing = pollers.get(key)
       if (existing === undefined) {
         pollers.set(key, {
@@ -207,6 +221,7 @@ function startRepoPollers(
           conflict: conflictEnabled ? startConflict() : null,
           stall: stallEnabled ? startStall() : null,
           epicClose: epicCloseEnabled ? startEpicClose() : null,
+          beadsGc: beadsGcEnabled ? startBeadsGc() : null,
         })
         continue
       }
@@ -230,6 +245,11 @@ function startRepoPollers(
       } else if (!epicCloseEnabled && existing.epicClose !== null) {
         existing.epicClose.stop()
         existing.epicClose = null
+      }
+      if (beadsGcEnabled && existing.beadsGc === null) existing.beadsGc = startBeadsGc()
+      else if (!beadsGcEnabled && existing.beadsGc !== null) {
+        existing.beadsGc.stop()
+        existing.beadsGc = null
       }
     }
   }
@@ -259,6 +279,7 @@ function startRepoPollers(
         p.conflict?.stop()
         p.stall?.stop()
         p.epicClose?.stop()
+        p.beadsGc?.stop()
       }
       pollers.clear()
     },

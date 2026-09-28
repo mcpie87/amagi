@@ -340,6 +340,19 @@ describe('BeadsTracker', () => {
     expect(calls[0]).toEqual(['bd', 'list', '--label', 'human', '--json', '--limit', '0'])
   })
 
+  test('gc collects Dolt garbage without deleting issues and reports the sizes', async () => {
+    const { exec, calls } = fake(() =>
+      ok(
+        JSON.stringify({
+          dolt_gc: { size_before_bytes: 154_600_000, size_after_bytes: 47_600_000 },
+        }),
+      ),
+    )
+    const result = await new BeadsTracker({ cwd: '/repo', exec }).gc()
+    expect(result).toEqual({ sizeBeforeBytes: 154_600_000, sizeAfterBytes: 47_600_000 })
+    expect(calls[0]).toEqual(['bd', 'gc', '--skip-decay', '--force', '--json'])
+  })
+
   test('gate id comes from a tagged lookup, not from parsing prose', async () => {
     const title = gateTitle('q-1')
     const { exec, calls } = fake((c) => {

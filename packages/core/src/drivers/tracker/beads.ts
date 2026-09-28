@@ -70,6 +70,12 @@ export type EpicCloseResult = {
   reason: string
 }
 
+/** What a Dolt garbage collection reclaimed from the store, in bytes. */
+export type BeadsGcResult = {
+  sizeBeforeBytes: number
+  sizeAfterBytes: number
+}
+
 /** bd grants a five minute lease on claim and expects heartbeats under that. */
 const LEASE_TTL_MS = 5 * 60_000
 
@@ -442,6 +448,22 @@ export class BeadsTracker implements Tracker {
     return {
       closed: Array.isArray(parsed.closed) ? parsed.closed.map(String) : [],
       reason: String(parsed.reason ?? ''),
+    }
+  }
+
+  /**
+   * Dolt GC only. Decay would delete closed issues, and compaction rewrites
+   * history that other clones sync against, so both stay operator decisions.
+   * Concurrent bd calls wait on the store lock for the ~1s it takes.
+   */
+  async gc(): Promise<BeadsGcResult> {
+    const out = await this.bd(['gc', '--skip-decay', '--force', '--json'])
+    const parsed = (JSON.parse(out) ?? {}) as {
+      dolt_gc?: { size_before_bytes?: unknown; size_after_bytes?: unknown }
+    }
+    return {
+      sizeBeforeBytes: Number(parsed.dolt_gc?.size_before_bytes ?? 0),
+      sizeAfterBytes: Number(parsed.dolt_gc?.size_after_bytes ?? 0),
     }
   }
 }

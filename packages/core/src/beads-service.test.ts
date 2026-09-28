@@ -56,6 +56,22 @@ describe('BeadsService', () => {
   })
 })
 
+describe('BeadsService.gc', () => {
+  test('skips bd when there is no embedded store', async () => {
+    const { tracker, calls } = counting()
+    expect(await new BeadsService(tracker, '/repo', () => null).gc()).toBeNull()
+    expect(calls).toHaveLength(0)
+  })
+
+  test('records a failed collection instead of throwing', async () => {
+    const exec: Exec = async () => ({ exitCode: 1, stdout: '', stderr: 'disk full' })
+    const service = new BeadsService(new BeadsTracker({ cwd: '/repo', exec }), '/repo', () => 'v1')
+    const run = await service.gc(() => 42)
+    expect(run).toMatchObject({ at: 42, ok: false })
+    expect(service.lastGc).toBe(run)
+  })
+})
+
 describe('embeddedDoltVersion', () => {
   function repo(meta: object): string {
     const root = mkdtempSync(join(tmpdir(), 'amagi-beads-'))

@@ -251,6 +251,7 @@ export const Config = z
         prConflict: AgentWatcherConfig.prefault({ enabled: true }),
         stall: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
         epicClose: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
+        beadsGc: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
       })
       .prefault({}),
     loop: z
@@ -295,6 +296,12 @@ export const Config = z
         stallWatchIntervalSec: z.number().int().min(1).default(300),
         /** How often the server closes beads epics whose children are all complete. */
         epicCloseIntervalSec: z.number().int().min(1).default(300),
+        /**
+         * How often the server garbage-collects a beads store. Every bd write
+         * grows Dolt's journal and every bd call replays it on start, so an
+         * uncollected store gets slower by the day.
+         */
+        beadsGcIntervalSec: z.number().int().min(60).default(3600),
         /**
          * How long a task may sit in an in-progress state with no worker
          * heartbeat before the stall watcher reclaims it (release the tracker

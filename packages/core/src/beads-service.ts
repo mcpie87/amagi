@@ -2,10 +2,17 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
   BeadsBlocker,
+  BeadsGcResult,
   BeadsIssue,
   BeadsTracker,
   EpicCloseEligible,
 } from './drivers/tracker/beads.ts'
+import { errMsg } from './errors.ts'
+
+export type BeadsGcRun = { at: number } & (
+  | ({ ok: true } & BeadsGcResult)
+  | { ok: false; error: string }
+)
 
 /**
  * Dolt rewrites its manifest on every commit, whether bd, amagi or a sync
@@ -39,6 +46,7 @@ export function embeddedDoltVersion(repoRoot: string): string | null {
 export class BeadsService {
   private version: string | null = null
   private readonly entries = new Map<string, Promise<unknown>>()
+  private lastGcRun: BeadsGcRun | null = null
 
   constructor(
     readonly tracker: BeadsTracker,
@@ -68,6 +76,26 @@ export class BeadsService {
 
   eligibleEpics(): Promise<EpicCloseEligible[]> {
     return this.read('eligible-epics', () => this.tracker.eligibleEpics())
+  }
+
+  get lastGc(): BeadsGcRun | null {
+    return this.lastGcRun
+  }
+
+  /**
+   * Collects the embedded store's garbage and records the outcome. Returns
+   * null, without running bd, when there is no embedded store to collect:
+   * a Dolt server manages its own storage.
+   */
+  async gc(now: () => number = Date.now): Promise<BeadsGcRun | null> {
+    if (this.versionOf(this.root) === null) return null
+    const at = now()
+    try {
+      this.lastGcRun = { at, ok: true, ...(await this.tracker.gc()) }
+    } catch (err) {
+      this.lastGcRun = { at, ok: false, error: errMsg(err) }
+    }
+    return this.lastGcRun
   }
 
   private read<T>(key: string, load: () => Promise<T>): Promise<T> {
