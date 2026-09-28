@@ -754,7 +754,7 @@ export function createApp({
     .get('/api/repos/:repo/issues/:id', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
+      const beads = ws.beads
       if (beads === null) {
         return c.json({ error: `issue detail is unavailable for ${repo}` }, 501)
       }
@@ -766,7 +766,7 @@ export function createApp({
     .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
+      const beads = ws.beads
       if (beads === null) {
         return c.json({ error: `issue details are unavailable for ${repo}` }, 501)
       }
@@ -806,7 +806,7 @@ export function createApp({
             }
           : body
         const created: TrackerTask = await ws.tracker.createTask(input)
-        const beads = beadsTracker(ws)
+        const beads = ws.beads
         const issue = beads === null ? null : await beads.getIssue(created.id)
         return c.json(issue ?? created, 201)
       },
@@ -843,7 +843,7 @@ export function createApp({
         if (body.dependencies !== undefined) {
           const depCap = capabilityError(ws.tracker, 'dependencies')
           if (depCap !== null) return c.json({ error: depCap }, 501)
-          const beads = beadsTracker(ws)
+          const beads = ws.beads
           if (beads === null) {
             return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
           }
@@ -854,7 +854,7 @@ export function createApp({
           }
         }
         const updated = await ws.tracker.updateTask(id, input)
-        const beads = beadsTracker(ws)
+        const beads = ws.beads
         const issue = beads === null ? null : await beads.getIssue(updated.id)
         return c.json(issue ?? updated)
       },
@@ -914,7 +914,7 @@ export function createApp({
         const { repo } = c.req.valid('param')
         const { label } = c.req.valid('query')
         const ws = resolveWorkspace(workspaces, repo)
-        const beads = beadsTracker(ws)
+        const beads = ws.beads
         if (beads === null) {
           return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
         }
@@ -925,7 +925,7 @@ export function createApp({
     .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
+      const beads = ws.beads
       if (beads === null) {
         return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
       }

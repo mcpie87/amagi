@@ -1,6 +1,8 @@
+import { BeadsService } from './beads-service.ts'
 import { type Config, loadConfig } from './config.ts'
 import { diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
+import { BeadsTracker } from './drivers/tracker/beads.ts'
 import type { Tracker } from './drivers/types.ts'
 import { makeTracker } from './factory.ts'
 import { dbPathForRepo, registryPath as defaultRegistryPath } from './paths.ts'
@@ -30,6 +32,8 @@ export type Workspace = {
   config: Config
   store: Store
   tracker: Tracker
+  /** Cached reads over `tracker` when it is beads; null for other trackers. */
+  beads: BeadsService | null
   /** Follows `config.forge.kind` live; null only when a test injects no forge. */
   forge: PrDriver | null
 }
@@ -95,6 +99,7 @@ export class Workspaces {
       config,
       store,
       tracker,
+      beads: tracker instanceof BeadsTracker ? new BeadsService(tracker, entry.path) : null,
       forge,
     }
   }
