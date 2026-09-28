@@ -3,6 +3,7 @@ import {
   type ExpandedWorkerConfig,
   expandWorkers,
   resolveWorkerHarness,
+  reviewerWorkerConfig,
   type WorkerConfig,
 } from './config.ts'
 import { claimEligible, claimGate, implementModel } from './difficulty.ts'
@@ -13,6 +14,7 @@ import { makeHarness } from './factory.ts'
 import { processTreeStats } from './process.ts'
 import { Runner, type RunOnceResult } from './runner.ts'
 import type { Store } from './store/store.ts'
+import { readUsageHold, usageHoldKey } from './usage-hold.ts'
 
 /** Summed over the agent's whole process tree (see process.ts). */
 export type RunnerResource = {
@@ -286,7 +288,7 @@ export class RunService implements RunServiceApi {
     const running = [...this.runs.keys()]
     const totalSeats = new Set(
       this.workers()
-        .filter((worker) => worker.enabled)
+        .filter((worker) => worker.enabled && worker.roles.includes('implement'))
         .map((worker) => this.workerSeat(worker)),
     ).size
     const capacity = this.availableCapacity()
@@ -395,7 +397,10 @@ export class RunService implements RunServiceApi {
 
   private availableWorkers(): WorkerConfig[] {
     const busy = this.runsBySeat()
-    return this.workers().filter((worker) => worker.enabled && !busy.has(this.workerSeat(worker)))
+    return this.workers().filter(
+      (worker) =>
+        worker.enabled && worker.roles.includes('implement') && !busy.has(this.workerSeat(worker)),
+    )
   }
 
   private availableCapacity(): number {
@@ -409,7 +414,9 @@ export class RunService implements RunServiceApi {
     const selected =
       opts?.workerId === undefined
         ? this.availableWorkers()[0]
-        : this.workers().find((worker) => worker.id === opts.workerId)
+        : this.workers().find(
+            (worker) => worker.id === opts.workerId && worker.roles.includes('implement'),
+          )
     if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
@@ -433,6 +440,16 @@ export class RunService implements RunServiceApi {
     opts: RunOptions | undefined,
   ): Promise<StartResult> {
     const implement = this.resolveHarness(selected, opts)
+    const holdKey = usageHoldKey(implement.kind, implement.model ?? null, implement.seat)
+    const activeHold = readUsageHold(holdKey)
+    if (activeHold) {
+      const expiry = new Date(activeHold.expiresAt).toLocaleString()
+      return {
+        ok: false,
+        status: 409,
+        error: `${activeHold.harness}+${activeHold.model} usage limit hold until ${expiry}`,
+      }
+    }
     // Difficulty gating reads the model the worker would actually run, so the
     // override config (not the stored default) is what gates the claim.
     const runConfig = { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }
@@ -497,11 +514,14 @@ export class RunService implements RunServiceApi {
       makeHarnessFn === makeHarness && implement.kind === config.harness.implement.kind
         ? this.opts.harness
         : makeHarnessFn(implement)
+    const reviewerConfig = reviewerWorkerConfig(config)
     const runner = new Runner({
       store,
       tracker,
       harness,
       config: { ...config, harness: { ...config.harness, implement } },
+      reviewerConfig,
+      ...(reviewerConfig === undefined ? {} : { reviewerHarness: makeHarnessFn(reviewerConfig) }),
       repoRoot,
       repoName,
       // A server-side run has the ask and git-request channels to POST to.

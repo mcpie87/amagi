@@ -13,6 +13,9 @@ export function streamClientCount(store: Store): number {
 
 type Tick = 'tick'
 
+const isTransientNotice = (event: StoredEvent): boolean =>
+  event.type === 'notify.idle' || event.type === 'notify.failed'
+
 export type EventStreamOptions = {
   taskId?: string
   sinceSeq: number
@@ -52,7 +55,7 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
       for (;;) {
         const page = store.events({ ...scope, sinceSeq: cursor, limit: BACKLOG_PAGE })
         for (const event of page) {
-          if (event.type !== 'notify.idle') await send(event)
+          if (!isTransientNotice(event)) await send(event)
           cursor = event.seq
         }
         if (page.length < BACKLOG_PAGE || stream.aborted) break
@@ -65,7 +68,7 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
           await stream.write(': ping\n\n')
           continue
         }
-        if (event.seq <= cursor && event.type !== 'notify.idle') continue
+        if (event.seq <= cursor && !isTransientNotice(event)) continue
         cursor = Math.max(cursor, event.seq)
         await send(event)
       }

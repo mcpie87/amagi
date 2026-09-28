@@ -21,14 +21,18 @@ export class LibnotifyNotifier implements Notifier {
   }
 
   async notify(title: string, body: string): Promise<void> {
+    let result: Awaited<ReturnType<Exec>>
     try {
-      const result = await this.run(['notify-send', title, body])
-      if (result.exitCode !== 0) {
-        console.warn(`libnotify: notify-send exited ${result.exitCode}: ${result.stderr.trim()}`)
-      }
+      result = await this.run(['notify-send', title, body])
     } catch (err) {
       const detail = errMsg(err)
       console.warn(`libnotify: notify-send unavailable: ${detail}`)
+      throw new Error(detail, { cause: err })
+    }
+    if (result.exitCode !== 0) {
+      const detail = result.stderr.trim() || `exit code ${result.exitCode}`
+      console.warn(`libnotify: notify-send exited ${result.exitCode}: ${detail}`)
+      throw new Error(detail)
     }
   }
 }

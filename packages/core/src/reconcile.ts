@@ -9,8 +9,8 @@ export type ReconcileResult = {
 }
 
 /**
- * Settles one task parked in pr_open or pr_flagged whose remote PR left the
- * live set: a merged PR finishes the task, a closed one marks it abandoned.
+ * Settles one task parked in pr_open, pr_flagged or pr_merge_conflict whose
+ * remote PR left the live set: a merged PR finishes the task, a closed one marks it abandoned.
  * The store is updated and the tracker issue is settled too (closed on merge,
  * closed-without-merge) so the bead does not sit in_progress forever, and the
  * PR's branch is deleted from `remote` so a requeued task can reuse it. Returns
@@ -38,6 +38,17 @@ export async function reconcilePr(
       const mergeStatus = await forge.getMergeStatus(cwd, task.prNumber)
       if (task.prMergeStatus !== mergeStatus) {
         store.append(task.id, { type: 'pr.status', mergeStatus })
+      }
+      if (
+        (task.state === 'pr_merge_conflict' || task.state === 'pr_conflict_fixing') &&
+        mergeStatus === 'mergeable'
+      ) {
+        store.append(task.id, {
+          type: 'task.state',
+          from: task.state,
+          to: 'pr_open',
+          reason: `PR #${task.prNumber} is no longer conflicted`,
+        })
       }
     } catch (err) {
       console.warn(
@@ -95,8 +106,8 @@ async function closeErrorTasks(store: Store, tracker: Tracker, taskId: string): 
 }
 
 /**
- * Settles every task parked in pr_open or pr_flagged whose remote PR left the
- * live set. Errors resolving a single PR are logged and skipped, so one flaky
+ * Settles every task parked on an open PR state whose remote PR left the live
+ * set. Errors resolving a single PR are logged and skipped, so one flaky
  * query never stalls the sweep.
  */
 export async function reconcilePrs(
@@ -107,7 +118,9 @@ export async function reconcilePrs(
   remote: string,
 ): Promise<ReconcileResult[]> {
   const moved: ReconcileResult[] = []
-  for (const task of store.tasks({ states: ['pr_open', 'pr_flagged'] })) {
+  for (const task of store.tasks({
+    states: ['pr_open', 'pr_flagged', 'pr_merge_conflict', 'pr_conflict_fixing'],
+  })) {
     const result = await reconcilePr(store, forge, tracker, cwd, remote, task)
     if (result !== null) moved.push(result)
   }

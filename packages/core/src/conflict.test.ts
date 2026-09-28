@@ -357,6 +357,40 @@ describe('resolveConflict', () => {
     expect(started.every((opts) => opts.env?.AMAGI_REPO_ROOT === '/repo')).toBe(true)
   })
 
+  test('a manual request keeps dispatching past the automatic limit until resolved', async () => {
+    let diffPass = 0
+    let launches = 0
+    const { exec } = fake((c) => {
+      if (c.includes('MERGE_HEAD')) return ok('merge-head')
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return fail('conflict')
+      if (c.includes('--diff-filter=U')) {
+        diffPass++
+        return ok(diffPass <= 2 ? 'src/a.txt\n' : '')
+      }
+      return undefined
+    })
+    const cfg = config()
+    cfg.loop.conflictMaxIterations = 1
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr({ labels: ['amagi/iterations:3'] }),
+      config: cfg,
+      driver: fakeDriver(),
+      exec,
+      manual: true,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness()
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(launches).toBe(2)
+    expect(result.iteration).toBe(5)
+  })
+
   test('reports a failed agent without pushing', async () => {
     const { exec, calls } = fake(conflicted)
     const result = await resolveConflict({
@@ -401,8 +435,8 @@ describe('resolveConflict', () => {
 
     const first = await run()
     expect(first.ok).toBe(false)
-    expect(first.message).toContain('parked the task at needs_human')
-    expect(store.task('am-1')?.state).toBe('needs_human')
+    expect(first.message).toContain('task marked pr_merge_conflict')
+    expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
 
     unmergedReported = false
     const again = await run()

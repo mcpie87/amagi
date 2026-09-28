@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as z from 'zod'
-import { lintCommitMessage } from './commit-lint.ts'
+import { stageAndCommit } from './commit.ts'
 import { type Config, reviewerHarnessConfig } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -35,8 +35,6 @@ import {
 } from './pr-body.ts'
 import {
   answerPrompt,
-  CHECKPOINT_COMMIT_SUMMARY,
-  commitMessage,
   commitSummary,
   fixChecksPrompt,
   implementAfterVerifyPrompt,
@@ -51,9 +49,22 @@ import {
   whyNoChangesPrompt,
   withRestartHandoff,
 } from './prompt.ts'
-import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
+import {
+  backoffDelayMs,
+  isSessionLimit,
+  isTransientFailure,
+  isUsageLimit,
+  usageLimitExpiry,
+} from './retry.ts'
 import { reviewPrompt } from './review-pack.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
+import {
+  acquireUsageProbe,
+  clearUsageHold,
+  readUsageHold,
+  recordUsageHold,
+  usageHoldKey,
+} from './usage-hold.ts'
 import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
 import { applyRepoIdentity, createWorktree, type WorktreeSpec } from './worktree.ts'
 
@@ -69,6 +80,8 @@ export type RunnerDeps = {
   forge?: PrDriver | undefined
   /** Override the configured reviewer harness in tests. */
   reviewerHarness?: Harness | undefined
+  /** Resolved reviewer worker profile, when the fleet assigns one. */
+  reviewerConfig?: Config['harness']['implement'] | undefined
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
   /**
@@ -354,6 +367,7 @@ export class Runner {
   private contextWarned = false
   /** Fresh-context restarts already spent on the current task run, across all phases. */
   private contextRestarts = 0
+  private claimSeq: number | null = null
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -417,7 +431,7 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig = reviewerHarnessConfig(config)
+    const reviewerConfig = this.deps.reviewerConfig ?? reviewerHarnessConfig(config)
     const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
@@ -599,7 +613,7 @@ export class Runner {
     this.peakContext = 0
     this.contextWarned = false
     this.contextRestarts = 0
-    store.append(task.id, {
+    const claimEvent = store.append(task.id, {
       type: 'task.claimed',
       title: task.title,
       tracker: this.deps.tracker.kind,
@@ -611,6 +625,7 @@ export class Runner {
         ? {}
         : { difficulty: task.difficulty }),
     })
+    this.claimSeq = claimEvent.seq
     const { warnTokens, maxTokens } = this.contextLimits()
     store.append(task.id, {
       type: 'run.limits',
@@ -626,12 +641,10 @@ export class Runner {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
       } else if (err instanceof LeaseLostError) {
-        // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
-        // or another worker took over). Stop before colliding with the new
-        // owner and leave the task where the reclaim parked it: either the new
-        // worker drives it, or the next one resumes its recorded worktree, so no
-        // human attention is needed.
-        store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
+        // A reclaim outside this process (for example, `bd reclaim`) has no
+        // event to clear the stale active state. Queue it only if no replacement
+        // runner has claimed the task since this run started.
+        store.recordLeaseLoss(task.id, claimEvent.seq, errMsg(err))
       } else {
         const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
@@ -673,6 +686,9 @@ export class Runner {
   }
 
   private transition(taskId: string, to: TaskState, reason?: string): void {
+    if (this.claimSeq !== null && this.deps.store.claimReplaced(taskId, this.claimSeq)) {
+      throw new LeaseLostError(taskId)
+    }
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
     // An external actor (the doom guard) may have parked the task in a
@@ -1891,10 +1907,31 @@ export class Runner {
     let model: string | null = null
     let effort: string | null = null
     let runOpts = opts
+    const implement = config.harness.implement
+    const holdKey = usageHoldKey(
+      harness.kind,
+      opts.model ?? implement.model ?? null,
+      opts.seat ?? implement.seat,
+    )
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
-      this.throwIfCancelled(taskId)
+      const waitingOnUsageHold = readUsageHold(holdKey) !== null
+      const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
+      if (waitingOnUsageHold && !this.isCancelled(taskId))
+        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+      let run: Awaited<ReturnType<Runner['runAgent']>>
+      try {
+        run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
+      } catch (err) {
+        releaseProbe?.()
+        throw err
+      }
+      try {
+        this.throwIfCancelled(taskId)
+      } catch (err) {
+        releaseProbe?.()
+        throw err
+      }
       sessionId = run.sessionId
       summary = run.summary
       model = run.model
@@ -1903,11 +1940,14 @@ export class Runner {
         // Checked before ok: a hard kill must stop the run even when the
         // process happens to report a clean exit.
         if (this.contextRestarts >= config.loop.contextMaxRestarts) {
-          this.transition(
-            taskId,
-            'needs_human',
-            `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
-          )
+          releaseProbe?.()
+          if (role !== 'review') {
+            this.transition(
+              taskId,
+              'needs_human',
+              `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+            )
+          }
           return { sessionId, stopped: true, summary, model, effort }
         }
         // Fresh-context restart: keep the worktree and claim, and hand the new
@@ -1927,14 +1967,51 @@ export class Runner {
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
         this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+        releaseProbe?.()
         continue
       }
-      if (run.ok) return { sessionId, stopped: false, summary, model, effort }
-      if (lease?.isLost) throw new LeaseLostError(taskId)
+      if (run.ok) {
+        clearUsageHold(holdKey)
+        releaseProbe?.()
+        return { sessionId, stopped: false, summary, model, effort }
+      }
+      if (lease?.isLost) {
+        releaseProbe?.()
+        throw new LeaseLostError(taskId)
+      }
 
-      if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
-        this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
+      const usageLimited = isUsageLimit(run.detail ?? '')
+      if (
+        !isTransientFailure(run.detail ?? '') ||
+        (!usageLimited && attempt > config.loop.maxRetries)
+      ) {
+        releaseProbe?.()
+        if (role !== 'review') this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
         return { sessionId, stopped: true, summary, model, effort }
+      }
+      if (usageLimited) {
+        const detail = run.detail ?? 'provider usage limit reached'
+        const expiresAt = usageLimitExpiry(detail)
+        const hold = recordUsageHold(
+          holdKey,
+          harness.kind,
+          opts.model ?? implement.model ?? run.model,
+          detail,
+          expiresAt,
+        )
+        const reason = `${harness.kind}+${hold.model} usage limit hold until ${new Date(expiresAt).toLocaleString()}`
+        store.append(taskId, {
+          type: 'retry.scheduled',
+          attempt,
+          delayMs: Math.max(0, expiresAt - Date.now()),
+          reason,
+          detail,
+        })
+        this.transition(taskId, 'retrying', reason)
+        if (isSessionLimit(detail)) sessionId = null
+        releaseProbe?.()
+        this.throwIfCancelled(taskId)
+        continue
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
       store.append(taskId, {
@@ -1947,6 +2024,7 @@ export class Runner {
       // A session that hit its own limit (turn/context window) is spent and
       // cannot be resumed; the retry starts a fresh session in the same worktree.
       if (isSessionLimit(run.detail ?? '')) sessionId = null
+      releaseProbe?.()
       if (role !== 'review') this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out,
       // and a retry-now request skips the wait for an immediate retry.
@@ -2162,7 +2240,7 @@ export class Runner {
     base: string,
     run: { summary: string; model: string | null; effort: string | null },
   ): Promise<boolean> {
-    await this.stageAndCommit(task, cwd, run.summary, this.commitMeta(run.model, run.effort))
+    await stageAndCommit(this.exec, task, cwd, run.summary, this.commitMeta(run.model, run.effort))
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
@@ -2186,63 +2264,6 @@ export class Runner {
       harness: this.deps.harness.kind,
       model: model ?? implement.model ?? null,
       effort: effort ?? implement.effort ?? null,
-    }
-  }
-
-  /**
-   * Stages and commits the worktree with a message commit-lint.ts accepts.
-   * `committed: false` means the worktree was already clean; a git failure or
-   * a malformed message throws, since the caller decides how to surface it.
-   */
-  private async stageAndCommit(
-    task: Pick<TrackerTask, 'id' | 'title'>,
-    cwd: string,
-    summary: string,
-    meta: PrBodyMeta,
-  ): Promise<{ committed: false } | { committed: true; sha: string }> {
-    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-    if (status.stdout.trim() === '') return { committed: false }
-    const message = commitMessage(task, summary, meta)
-    const lint = lintCommitMessage(message)
-    if (lint.length > 0) throw new Error(`malformed commit message: ${lint.join('; ')}`)
-    await this.exec(['git', 'add', '-A'], { cwd })
-    const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
-    if (commit.exitCode !== 0) {
-      throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
-    }
-    const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
-    return { committed: true, sha }
-  }
-
-  /**
-   * The one sanctioned git write an agent can cause, over the server channel:
-   * stages and commits the worktree, records `commit.created`, and returns
-   * the sha. A clean worktree or a git failure is returned as an error so the
-   * agent learns immediately. No state transition, so it is usable any number
-   * of times within a run.
-   */
-  async requestCommit(
-    taskId: string,
-    cwd: string,
-  ): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
-    const task = this.deps.store.task(taskId)
-    if (task === null) return { ok: false, error: `unknown task ${taskId}` }
-    try {
-      const staged = await this.stageAndCommit(
-        task,
-        cwd,
-        CHECKPOINT_COMMIT_SUMMARY,
-        this.commitMeta(null, null),
-      )
-      if (!staged.committed) return { ok: false, error: 'nothing to commit; the worktree is clean' }
-      this.deps.store.append(taskId, {
-        type: 'commit.created',
-        sha: staged.sha,
-        subject: `[${task.id}] ${task.title}`,
-      })
-      return { ok: true, sha: staged.sha }
-    } catch (err) {
-      return { ok: false, error: errMsg(err) }
     }
   }
 

@@ -37,11 +37,13 @@ export type ResolveConflictOptions = {
   config: Config
   /** Forge driver, so the post-push merge verdict is read from the real forge. */
   driver: PrDriver
-  /** Store used to park the linked task at needs_human once iterations run out. */
+  /** Store used to mark the linked PR as conflicted once iterations run out. */
   store?: Store
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness | undefined
+  /** An explicit queue request bypasses the automatic dispatch limit. */
+  manual?: boolean
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
   /** Called when the agent moves HEAD outside the expected commit operation. */
@@ -103,20 +105,20 @@ function watcherCommitMessage(
 }
 
 /**
- * Parks the linked task at needs_human, so a PR that keeps re-conflicting
- * stops being re-dispatched. Returns whether it parked: a task already done,
- * or already parked by an earlier dispatch, is left where it is.
+ * Marks the linked task as conflicted, so a PR that keeps re-conflicting
+ * stops being re-dispatched. Returns whether it changed the state; a task
+ * already settled or marked by an earlier dispatch is left where it is.
  */
-function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly string[]): boolean {
+function markPrMergeConflict(opts: ResolveConflictOptions, unmerged: readonly string[]): boolean {
   if (opts.store === undefined) return false
   const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
   if (taskId === null) return false
   const task = opts.store.task(taskId)
-  if (task === null || !canTransition(task.state, 'needs_human')) return false
+  if (task === null || !canTransition(task.state, 'pr_merge_conflict')) return false
   opts.store.append(taskId, {
     type: 'task.state',
     from: task.state,
-    to: 'needs_human',
+    to: 'pr_merge_conflict',
     reason: `PR #${opts.pr.number} still has unmerged paths after ${opts.config.loop.conflictMaxIterations} conflict-resolution dispatches: ${unmerged.join(', ')}`,
   })
   return true
@@ -129,7 +131,7 @@ function parkAtNeedsHuman(opts: ResolveConflictOptions, unmerged: readonly strin
  * runner commits. Unmerged paths left behind re-dispatch the agent with the
  * file list and bump the per-PR Iteration counter, so a PR that keeps
  * re-conflicting sinks in the dispatch order; once iterations run out the
- * linked task is parked at needs_human. Shared by the check-prs command and
+ * linked task is marked pr_merge_conflict. Shared by the check-prs command and
  * the periodic PR conflict watcher. Never throws: failures come back as
  * `ok: false` and are logged so one broken PR does not abort the caller's loop.
  */
@@ -193,9 +195,9 @@ export async function resolveConflict(
     for (;;) {
       const unmerged = await unmergedPaths(run, wt.path)
       if (unmerged.length === 0) break
-      if (iteration >= opts.config.loop.conflictMaxIterations) {
-        const parked = parkAtNeedsHuman(opts, unmerged)
-        const message = `unmerged paths remain after ${iteration} dispatches${parked ? '; parked the task at needs_human' : ''}: ${unmerged.join(', ')}`
+      if (iteration >= opts.config.loop.conflictMaxIterations && !opts.manual) {
+        const marked = markPrMergeConflict(opts, unmerged)
+        const message = `unmerged paths remain after ${iteration} dispatches${marked ? '; task marked pr_merge_conflict' : ''}: ${unmerged.join(', ')}`
         log('error', message)
         return { ok: false, message, iteration }
       }
