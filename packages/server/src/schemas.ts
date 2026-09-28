@@ -116,6 +116,7 @@ export const SettingsBody = z
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),
+    reviewMaxRounds: z.number().int().min(1).optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',

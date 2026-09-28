@@ -231,6 +231,26 @@ class ReviewHarness implements Harness {
   }
 }
 
+function failedReviewProcess(): AgentProcess {
+  const queue = new AsyncQueue<AgentEvent>()
+  queue.close()
+  return {
+    pid: -1,
+    events: () => queue,
+    done: Promise.resolve({
+      exitCode: 1,
+      ok: false,
+      sessionId: 'failed-review-session',
+      summary: null,
+      usage: null,
+      stderr: 'reviewer process failed',
+    }),
+    kill: async () => {},
+    model: null,
+    effort: null,
+  }
+}
+
 /** An agent process that stays running until killed, so a cancel can interrupt it. */
 class BlockingHarness implements Harness {
   readonly kind = 'fake'
@@ -763,6 +783,31 @@ describe('Runner.runOnce', () => {
     expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
     expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
+  })
+
+  test('records reviewer process failures and opens an unresolved PR without invalid state transitions', async () => {
+    const reviewer: Harness = {
+      kind: 'codex',
+      start: () => failedReviewProcess(),
+      resume: () => failedReviewProcess(),
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      reviewConfig(),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('review.failed')
+    expect(types(TASK.id)).toContain('review.stopped')
+    expect(forge.calls[0]?.labels).toContain('amagi/review-unresolved')
   })
 
   test('catches and fixes a seeded boundary defect before opening a clean PR', async () => {
