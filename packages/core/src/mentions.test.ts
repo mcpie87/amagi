@@ -167,6 +167,12 @@ function fakeTracker(create: boolean): Tracker & { created: CreateTrackerTask[] 
     kind: 'fake',
     capabilities,
     created: [] as CreateTrackerTask[],
+    async openIds(): Promise<string[]> {
+      return []
+    },
+    async get(): Promise<TrackerTask | null> {
+      return null
+    },
     async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
       tracker.created.push(input)
       return {
@@ -240,17 +246,20 @@ function summaryHarness(
   }
 }
 
-function quickTaskHarness(result: unknown, prompts: string[] = []): Harness {
+function quickTaskHarness(
+  result: unknown,
+  prompts: string[] = [],
+  options: AgentStartOptions[] = [],
+): Harness {
   const base = fakeHarness({ summary: 'add-a-task' })
+  const draft = fakeHarness({ summary: JSON.stringify(result) })
   return {
     ...base,
     start: (opts: AgentStartOptions) => {
-      if (opts.cwd === tmpdir()) return base.start(opts)
+      if (!opts.prompt.startsWith('Draft one issue')) return base.start(opts)
       prompts.push(opts.prompt)
-      const match = opts.prompt.match(/Output file: ([^\n]+)/)
-      if (match?.[1] === undefined) throw new Error('quick-task prompt has no output file')
-      writeFileSync(match[1], JSON.stringify(result))
-      return base.start(opts)
+      options.push(opts)
+      return draft.start(opts)
     },
   }
 }
@@ -684,10 +693,11 @@ describe('respondToMention', () => {
     })
   })
 
-  test('an add-a-task mention dispatches the quick-task creator and posts its issue', async () => {
+  test('an add-a-task mention creates an issue through the tracker and posts its URL', async () => {
     const tracker = fakeTracker(true)
     const driver = new FakeDriver()
     const prompts: string[] = []
+    const options: AgentStartOptions[] = []
     const kind = await respondToMention({
       root: '/repo',
       repoName: 'amagi',
@@ -697,14 +707,29 @@ describe('respondToMention', () => {
       driver,
       tracker,
       makeHarnessFn: () =>
-        quickTaskHarness({ status: 'issue', issue: 'https://example.test/am-123' }, prompts),
+        quickTaskHarness(
+          {
+            status: 'create',
+            title: 'Add tests',
+            context: 'Requested on PR #7',
+            goal: 'Cover the feature',
+            scope: 'Add tests',
+            assumptions: 'Use Bun',
+            acceptance: 'Tests pass',
+          },
+          prompts,
+          options,
+        ),
     })
 
     expect(kind).toBe('add-a-task')
-    expect(tracker.created).toHaveLength(0)
-    expect(prompts[0]).toContain('.agents/skills/mpk-add-quick-task/SKILL.md')
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]?.description).toContain('## Acceptance\nTests pass')
+    expect(prompts[0]).toContain('The service will create it through the configured tracker')
     expect(prompts[0]).toContain('please track adding tests for this')
-    expect(driver.posted).toEqual(['@bob Logged this as https://example.test/am-123.'])
+    expect(options[0]?.permissions).toBe('read-only')
+    expect(options[0]?.cwd).toBe(tmpdir())
+    expect(driver.posted).toEqual(['@bob Logged this as task bd-new.'])
   })
 
   test('a materially ambiguous task request asks one focused question without creating an issue', async () => {
@@ -742,7 +767,7 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker: fakeTracker(false),
-      makeHarnessFn: () => quickTaskHarness({ status: 'issue', issue: 'am-123' }),
+      makeHarnessFn: () => quickTaskHarness({ status: 'create', title: 'Something' }),
     })
 
     expect(kind).toBe('add-a-task')

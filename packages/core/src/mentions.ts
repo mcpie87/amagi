@@ -26,6 +26,7 @@ import {
   takeDownPrompt,
   takeDownSystemPrompt,
 } from './prompt.ts'
+import { parseQuickTaskDecision, quickTaskCandidates, resolveQuickTask } from './quick-task.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun, type WatcherAgentSession } from './watcher-agent.ts'
 import { taskIdFromBranch } from './worktree.ts'
@@ -123,7 +124,7 @@ export type RespondToMentionOptions = {
   mention: PrComment
   config: Config
   driver: PrDriver
-  /** Tracker used for take-down follow-up and to gate add-a-task dispatch; optional so callers without one still reply on the PR. */
+  /** Tracker used for take-down follow-up and add-a-task creation; optional so callers without one still reply on the PR. */
   tracker?: Tracker
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
@@ -503,58 +504,30 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   return kind
 }
 
-type QuickTaskResult =
-  | { status: 'issue'; issue: string }
-  | { status: 'fixed'; explanation: string }
-  | { status: 'clarification'; question: string }
-
-function quickTaskPrompt(opts: RespondToMentionOptions, outPath: string): string {
+function quickTaskPrompt(
+  opts: RespondToMentionOptions,
+  candidates: Awaited<ReturnType<typeof quickTaskCandidates>>,
+): string {
   return [
-    'Handle this PR mention using the repository skill at .agents/skills/mpk-add-quick-task/SKILL.md.',
-    'Read and follow the skill. Use the beads CLI to check for duplicates, already-fixed work, and in-flight work, then create or adjust at most one issue with every required section.',
+    'Draft one issue for this PR mention. The service will create it through the configured tracker.',
+    'Do not run commands or access the tracker directly. Existing open and in-progress issues are supplied below.',
     'Record ordinary missing details as assumptions. Ask a focused question only when materially different interpretations would make a task useless or harmful.',
-    'If an issue already covers the request, return that issue. If it is already fixed, return the evidence. If materially ambiguous, do not create or adjust an issue.',
-    'Write exactly one JSON object to the output file, with one of these shapes:',
-    '{"status":"issue","issue":"issue URL or ID"}',
+    'If a supplied issue already covers the request, return its ID. If the supplied context proves it is already fixed, return the evidence.',
+    'Reply with exactly one JSON object in one of these shapes:',
+    '{"status":"create","title":"short imperative title","context":"why","goal":"outcome","scope":"boundaries","assumptions":"filled-in details","acceptance":"observable completion criteria"}',
+    '{"status":"existing","id":"ID from supplied issues"}',
     '{"status":"fixed","explanation":"brief reason"}',
     '{"status":"clarification","question":"one focused question"}',
-    `Output file: ${outPath}`,
     '',
     `PR #${opts.pr.number}: ${opts.pr.title} (${opts.pr.url})`,
     `Mention by @${opts.mention.user}:`,
     opts.mention.body.trim(),
+    '',
+    'Existing issues:',
+    JSON.stringify(
+      candidates.map(({ id, title, description, status }) => ({ id, title, description, status })),
+    ),
   ].join('\n')
-}
-
-function parseQuickTaskResult(raw: string): QuickTaskResult {
-  let value: unknown
-  try {
-    value = JSON.parse(raw)
-  } catch {
-    throw new Error('task creator returned invalid JSON')
-  }
-  if (typeof value !== 'object' || value === null) {
-    throw new Error('task creator returned an invalid result')
-  }
-  const result = value as Record<string, unknown>
-  if (result.status === 'issue' && typeof result.issue === 'string' && result.issue.trim() !== '') {
-    return { status: 'issue', issue: result.issue.trim() }
-  }
-  if (
-    result.status === 'fixed' &&
-    typeof result.explanation === 'string' &&
-    result.explanation.trim() !== ''
-  ) {
-    return { status: 'fixed', explanation: result.explanation.trim() }
-  }
-  if (
-    result.status === 'clarification' &&
-    typeof result.question === 'string' &&
-    result.question.trim() !== ''
-  ) {
-    return { status: 'clarification', question: result.question.trim() }
-  }
-  throw new Error('task creator returned an unsupported result')
 }
 
 async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Promise<void> {
@@ -570,28 +543,32 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
   }
   const mk = opts.makeHarnessFn ?? makeHarness
   const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
-  const outPath = join(tmpdir(), `amagi-quick-task-${opts.pr.number}-${opts.mention.id}.json`)
-  let result: QuickTaskResult
-  try {
-    const proc = startImplementHarness(
-      mk,
-      harnessConfig,
-      opts.root,
-      quickTaskPrompt(opts, outPath),
-      'Follow the requested repository skill exactly. Do not modify repository files.',
-      opts.repo,
-    )
-    const outcome = await p.agent(proc, 'creating a task', {
-      role: 'triage',
-      harness: harnessConfig.kind,
-      source: `PR #${opts.pr.number} quick-task creation`,
-      cwd: opts.root,
-    })
-    if (!outcome.ok) throw new Error(`task creator failed: ${agentFailure(outcome)}`)
-    result = parseQuickTaskResult(readFileSync(outPath, 'utf8'))
-  } finally {
-    rmSync(outPath, { force: true })
-  }
+  const candidates = await quickTaskCandidates(tracker)
+  const proc = mk(harnessConfig).start({
+    cwd: tmpdir(),
+    prompt: quickTaskPrompt(opts, candidates),
+    systemPrompt: 'Return only the requested JSON. Do not use tools or run commands.',
+    model: harnessConfig.model,
+    effort: harnessConfig.effort,
+    ...(harnessConfig.seat === undefined ? {} : { seat: harnessConfig.seat }),
+    permissions: 'read-only',
+    allowedTools: [],
+    ...(opts.repo === undefined
+      ? {}
+      : { seatActivity: { repo: opts.repo, watcher: 'mention-watcher' } }),
+  })
+  const outcome = await p.agent(proc, 'drafting a task', {
+    role: 'triage',
+    harness: harnessConfig.kind,
+    source: `PR #${opts.pr.number} quick-task draft`,
+    cwd: tmpdir(),
+  })
+  if (!outcome.ok) throw new Error(`task drafter failed: ${agentFailure(outcome)}`)
+  const result = await resolveQuickTask(
+    tracker,
+    candidates,
+    parseQuickTaskDecision(outcome.summary ?? ''),
+  )
   const response =
     result.status === 'issue'
       ? `@${opts.mention.user} Logged this as ${result.issue}.`

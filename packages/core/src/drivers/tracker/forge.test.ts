@@ -166,20 +166,37 @@ describe('GithubTracker', () => {
     expect(await tracker.gateResolved({ id: '3#q-9', advisory: true })).toBe(false)
   })
 
-  test('writes are surfaced as unsupported, never silently dropped', async () => {
-    const tracker = new GithubTracker({ cwd: '/repo', exec: fake(() => ok('')).exec })
-    expect(tracker.capabilities).toEqual({ create: false, edit: false, dependencies: false })
-    await expect(
-      tracker.createTask({
-        title: 'x',
-        description: '',
-        acceptanceCriteria: null,
-        priority: null,
-        labels: [],
-        dependencies: [],
-        parent: null,
-      }),
-    ).rejects.toThrow(/does not support creating issues/)
+  test('creates an issue and rejects unsupported fields', async () => {
+    const { exec, calls } = fake((cmd) =>
+      cmd.includes('create') ? ok('https://github.com/acme/amagi/issues/3\n') : ok(GH_VIEW),
+    )
+    const tracker = new GithubTracker({ cwd: '/repo', exec })
+    expect(tracker.capabilities).toEqual({ create: true, edit: false, dependencies: false })
+    const input = {
+      title: 'x',
+      description: 'Why',
+      acceptanceCriteria: 'Done',
+      priority: null,
+      labels: ['task'],
+      dependencies: [],
+      parent: null,
+    }
+    expect((await tracker.createTask(input)).id).toBe('3')
+    expect(calls).toContainEqual([
+      'gh',
+      'issue',
+      'create',
+      '--title',
+      'x',
+      '--body-file',
+      '-',
+      '--label',
+      'task',
+    ])
+    expect(calls).toContainEqual(['<stdin>', 'Why\n\n## Acceptance\nDone'])
+    await expect(tracker.createTask({ ...input, priority: 1 })).rejects.toThrow(
+      /cannot create issues/,
+    )
     await expect(tracker.updateTask('3', { title: 'x' })).rejects.toThrow(
       /does not support editing issues/,
     )
@@ -187,6 +204,34 @@ describe('GithubTracker', () => {
 })
 
 describe('ForgejoTracker', () => {
+  test('creates an issue through tea', async () => {
+    const { exec, calls } = fake((cmd) =>
+      cmd.includes('create')
+        ? ok('https://gitea.local/acme/amagi/issues/7\n')
+        : ok(TEA_READY.slice(1, -1).trim()),
+    )
+    const tracker = new ForgejoTracker({ cwd: '/repo', exec })
+    const task = await tracker.createTask({
+      title: 'Follow up',
+      description: 'From the PR',
+      acceptanceCriteria: null,
+      priority: null,
+      labels: [],
+      dependencies: [],
+      parent: null,
+    })
+    expect(task.id).toBe('7')
+    expect(calls).toContainEqual([
+      'tea',
+      'issues',
+      'create',
+      '--title',
+      'Follow up',
+      '--description',
+      'From the PR',
+    ])
+  })
+
   test('parses open issues from tea', async () => {
     const { exec } = fake(() => ok(TEA_READY))
     const tasks = await new ForgejoTracker({ cwd: '/repo', exec }).ready()
