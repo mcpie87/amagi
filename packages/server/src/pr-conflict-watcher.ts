@@ -137,7 +137,7 @@ export function startPrConflictWatcher({
    */
   async function observeMergeTree(prs: PrInfo[], run: Exec, runId: string): Promise<void> {
     const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
-    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
+    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken(config.forge.kind, root))
     for (const base of baseRefs) {
       await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', base], { cwd: root })
     }
@@ -201,7 +201,7 @@ export function startPrConflictWatcher({
 
   /** The base branch's remote head, so a base move re-arms PRs already attempted. */
   async function baseHeadOid(run: Exec): Promise<string> {
-    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
+    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken(config.forge.kind, root))
     const ref = `refs/heads/${config.repo.baseBranch}`
     const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', ref], { cwd: root })
     return (

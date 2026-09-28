@@ -1018,7 +1018,7 @@ export class Runner {
         this.exec,
         this.deps.repoRoot,
         config.forge.remote,
-        forgeToken(config.forge.kind),
+        forgeToken(config.forge.kind, this.deps.repoRoot),
       )
       if (tokenCfg.length > 0) {
         await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
@@ -1486,7 +1486,7 @@ export class Runner {
     } catch (err) {
       const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
-        ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+        ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
         type: 'error',
@@ -1522,7 +1522,7 @@ export class Runner {
         this.throwIfCancelled(task.id)
         const retryMessage = errMsg(retryErr)
         const retryHint = /auth|login|token|not logged/i.test(retryMessage)
-          ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+          ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
           : ''
         store.append(task.id, {
           type: 'error',
@@ -2208,7 +2208,7 @@ export class Runner {
       this.exec,
       this.deps.repoRoot,
       config.forge.remote,
-      forgeToken(config.forge.kind),
+      forgeToken(config.forge.kind, this.deps.repoRoot),
     )
     const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
       cwd,

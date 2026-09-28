@@ -39,12 +39,14 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
 beforeEach(() => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
+  delete process.env.GITLAB_TOKEN
   delete process.env.FORGEJO_TOKEN
 })
 
 afterEach(() => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
+  delete process.env.GITLAB_TOKEN
   delete process.env.FORGEJO_TOKEN
 })
 
@@ -629,5 +631,147 @@ describe('forgejoPr', () => {
         await driver.removeLabel('/wt', 3, 'amagi/needs-closing')
       },
     )
+  })
+})
+
+describe('gitlabPr', () => {
+  const mr = (over: Record<string, unknown> = {}) => ({
+    iid: 7,
+    title: 'Do the thing',
+    description: 'Task: am-1',
+    web_url: 'https://gitlab.example.com/owner/repo/-/merge_requests/7',
+    source_branch: 'amagi/am-1-do-the-thing',
+    target_branch: 'main',
+    sha: 'deadbeef',
+    has_conflicts: false,
+    merge_status: 'can_be_merged',
+    created_at: '2026-09-20T10:00:00Z',
+    updated_at: '2026-09-21T10:00:00Z',
+    labels: ['amagi'],
+    ...over,
+  })
+
+  test('pushes over the token rewrite and creates the merge request through glab', async () => {
+    process.env.GITLAB_TOKEN = 'glpat-abc'
+    let created = false
+    const { exec, calls } = fake((c) => {
+      if (c.includes('get-url')) return ok('git@gitlab.example.com:owner/repo.git')
+      if (c[0] === 'glab' && c[1] === 'mr' && c[2] === 'create') {
+        created = true
+        return ok('')
+      }
+      if (c[0] === 'glab' && c[1] === 'api') return ok(JSON.stringify(created ? [mr()] : []))
+      return undefined
+    })
+    const pr = await makePrDriver('gitlab', exec).createPr({
+      cwd: '/wt',
+      branch: 'amagi/am-1-do-the-thing',
+      base: 'main',
+      remote: 'origin',
+      title: 'Do the thing',
+      body: 'Task: am-1',
+      labels: amagiLabels('bug'),
+    })
+
+    expect(calls.find((c) => c.includes('push'))?.[2]).toBe(
+      'url.https://x-access-token:glpat-abc@gitlab.example.com/.insteadOf=git@gitlab.example.com:',
+    )
+    expect(calls.find((c) => c[1] === 'mr' && c[2] === 'create')).toEqual([
+      'glab',
+      'mr',
+      'create',
+      '--source-branch',
+      'amagi/am-1-do-the-thing',
+      '--target-branch',
+      'main',
+      '--title',
+      'Do the thing',
+      '--description',
+      'Task: am-1',
+      '--label',
+      'amagi,amagi/bug',
+      '--yes',
+    ])
+    expect(pr).toEqual({ number: 7, url: mr().web_url })
+  })
+
+  test('lists open merge requests across pages in the shared shape', async () => {
+    const first = Array.from({ length: 100 }, (_, i) => mr({ iid: i + 1 }))
+    const { exec, calls } = fake((c) => {
+      const path = c[2] ?? ''
+      if (path.endsWith('&page=1')) return ok(JSON.stringify(first))
+      if (path.endsWith('&page=2'))
+        return ok(JSON.stringify([mr({ iid: 101, has_conflicts: true })]))
+      return undefined
+    })
+    const prs = await makePrDriver('gitlab', exec).listOpenPrs('/repo')
+    expect(prs).toHaveLength(101)
+    expect(prs[0]).toEqual(prInfo({ number: 1, url: mr().web_url }))
+    expect(prs[100]).toMatchObject({ number: 101, mergeable: 'CONFLICTING' })
+    expect(calls.map((c) => c[2])).toEqual([
+      'projects/:id/merge_requests?state=opened&per_page=100&page=1',
+      'projects/:id/merge_requests?state=opened&per_page=100&page=2',
+    ])
+  })
+
+  test('maps merge request state and merge status', async () => {
+    const reply = { state: 'merged', has_conflicts: false, merge_status: 'checking' }
+    const { exec } = fake((c) => (c[0] === 'glab' ? ok(JSON.stringify(reply)) : undefined))
+    const driver = makePrDriver('gitlab', exec)
+    expect(await driver.getPr('/repo', 7)).toBe('merged')
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('unknown')
+    reply.state = 'locked'
+    reply.has_conflicts = true
+    expect(await driver.getPr('/repo', 7)).toBe('closed')
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('conflicted')
+  })
+
+  test('collects notes as comments, skipping system notes', async () => {
+    const notes = [
+      { id: 1, body: '@chise-maru explain', author: { username: 'mcpie' }, system: false },
+      { id: 2, body: 'added 1 commit', author: { username: 'mcpie' }, system: true },
+    ]
+    const { exec } = fake((c) => (c[0] === 'glab' ? ok(JSON.stringify(notes)) : undefined))
+    expect(await makePrDriver('gitlab', exec).listComments('/repo', 7)).toEqual([
+      { id: '1', user: 'mcpie', body: '@chise-maru explain' },
+    ])
+  })
+
+  test('closes with the reason as a note, and edits labels in place', async () => {
+    const { exec, calls } = fake(() => ok('{}'))
+    const driver = makePrDriver('gitlab', exec)
+    await driver.closePr('/repo', 7, 'superseded')
+    await driver.addLabel('/repo', 7, 'amagi/needs-closing')
+    await driver.removeLabel('/repo', 7, 'P2')
+    expect(calls).toEqual([
+      [
+        'glab',
+        'api',
+        '--method',
+        'POST',
+        'projects/:id/merge_requests/7/notes',
+        '-f',
+        'body=superseded',
+      ],
+      [
+        'glab',
+        'api',
+        '--method',
+        'PUT',
+        'projects/:id/merge_requests/7',
+        '-f',
+        'state_event=close',
+      ],
+      [
+        'glab',
+        'api',
+        '--method',
+        'PUT',
+        'projects/:id/merge_requests/7',
+        '-f',
+        'add_labels=amagi/needs-closing',
+      ],
+      ['glab', 'api', '--method', 'PUT', 'projects/:id/merge_requests/7', '-f', 'remove_labels=P2'],
+    ])
   })
 })

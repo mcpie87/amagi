@@ -21,6 +21,8 @@ import {
   exec,
   expandTilde,
   expandWorkers,
+  ForgeKind,
+  forgeTokenSources,
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
@@ -45,6 +47,7 @@ import {
   resolveWorkerHarness,
   type Store,
   type StoredEvent,
+  setStoredForgeToken,
   stageAndCommit,
   type Tracker,
   type TrackerCapabilities,
@@ -1371,6 +1374,8 @@ export function createApp({
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
         reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
+        forgeKind: ws.config.forge.kind,
+        forgeTokens: forgeTokenSources(ws.root),
       })
     })
 
@@ -1381,9 +1386,21 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts, reviewMaxRounds } =
-          c.req.valid('json')
+        const {
+          autoQueue,
+          ntfyTopic,
+          ntfyServer,
+          desktopFailureAlerts,
+          reviewMaxRounds,
+          forgeKind,
+          forgeTokens,
+        } = c.req.valid('json')
+        for (const kind of ForgeKind.options) {
+          const token = forgeTokens?.[kind]
+          if (token !== undefined) setStoredForgeToken(ws.root, kind, token)
+        }
         writeConfig(ws.root, {
+          ...(forgeKind === undefined ? {} : { forge: { kind: forgeKind } }),
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
           ...(ntfyTopic === undefined &&
           ntfyServer === undefined &&
@@ -1404,6 +1421,7 @@ export function createApp({
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
         }
         if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
+        if (forgeKind !== undefined) ws.config.forge.kind = forgeKind
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -1419,6 +1437,8 @@ export function createApp({
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
           reviewMaxRounds: ws.config.review.maxRounds,
+          forgeKind: ws.config.forge.kind,
+          forgeTokens: forgeTokenSources(ws.root),
         })
       },
     )

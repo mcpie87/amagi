@@ -55,7 +55,7 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
   const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
     cwd: opts.cwd,
-    env: ghEnv(),
+    env: ghEnv(opts.cwd),
   })
   const raw = JSON.parse(out) as Array<
     Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
@@ -132,7 +132,7 @@ export async function addPrLabels(
       '--input',
       '-',
     ],
-    { cwd, stdin: JSON.stringify({ labels }), env: ghEnv() },
+    { cwd, stdin: JSON.stringify({ labels }), env: ghEnv(cwd) },
   )
 }
 
@@ -150,7 +150,7 @@ export async function removePrLabel(
     'DELETE',
     `repos/{owner}/{repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
   ]
-  const r = await run(cmd, { cwd, env: ghEnv() })
+  const r = await run(cmd, { cwd, env: ghEnv(cwd) })
   if (r.exitCode !== 0 && !/HTTP 404/.test(r.stderr)) throw new CommandError(cmd, r)
 }
 
@@ -250,7 +250,12 @@ export type FetchPullHeadsResult = {
  */
 export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<FetchPullHeadsResult> {
   const run = opts.exec ?? defaultExec
-  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
+  const tokenCfg = await gitTokenConfig(
+    run,
+    opts.repoRoot,
+    'origin',
+    forgeToken('github', opts.repoRoot),
+  )
 
   const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', 'refs/pull/*/head'], {
     cwd: opts.repoRoot,
@@ -316,7 +321,12 @@ export async function prepareConflictWorktree(
   opts: PrepareConflictWorktreeOptions,
 ): Promise<ConflictWorktree> {
   const run = opts.exec ?? defaultExec
-  const tokenCfg = await gitTokenConfig(run, opts.repoRoot, 'origin', forgeToken('github'))
+  const tokenCfg = await gitTokenConfig(
+    run,
+    opts.repoRoot,
+    'origin',
+    forgeToken('github', opts.repoRoot),
+  )
 
   await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', opts.baseBranch], {
     cwd: opts.repoRoot,
@@ -369,7 +379,7 @@ export type PushConflictFixOptions = {
 /** Pushes the resolved local branch back to the PR head ref, updating the PR. */
 export async function pushConflictFix(opts: PushConflictFixOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
-  const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github'))
+  const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github', opts.cwd))
   await execOk(
     run,
     ['git', ...tokenCfg, 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],

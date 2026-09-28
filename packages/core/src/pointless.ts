@@ -106,7 +106,7 @@ export async function prDiffEmpty(
   number: number,
   run: Exec = defaultExec,
 ): Promise<boolean> {
-  const r = await run(['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv() })
+  const r = await run(['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv(cwd) })
   if (r.exitCode !== 0) {
     throw new Error(r.stderr.trim() || `gh pr diff ${number} failed`)
   }

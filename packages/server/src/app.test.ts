@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -39,6 +39,7 @@ import {
   killTree,
   loadConfig,
   loadGlobalConfig,
+  repoConfigPath,
   writeGlobalConfig,
 } from '@amagi/core'
 import { PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
@@ -2202,6 +2203,8 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
+      forgeKind: 'github',
+      forgeTokens: expect.any(Object),
     })
   })
 
@@ -2214,6 +2217,8 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
+      forgeTokens: expect.any(Object),
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
@@ -2222,6 +2227,8 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
+      forgeKind: 'github',
+      forgeTokens: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
@@ -2262,6 +2269,8 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
+      forgeKind: 'github',
+      forgeTokens: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
@@ -2289,6 +2298,8 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
+      forgeTokens: expect.any(Object),
     })
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
@@ -2351,6 +2362,48 @@ describe('repo settings endpoints', () => {
       expect(requests).toEqual(['https://ntfy.sh/saved-topic'])
     } finally {
       globalThis.fetch = originalFetch
+    }
+  })
+
+  test('PATCH switches the PR forge and stores per-forge tokens without exposing them', async () => {
+    const savedState = process.env.XDG_STATE_HOME
+    const tokenVars = ['GH_TOKEN', 'GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN']
+    const savedEnv = Object.fromEntries(tokenVars.map((name) => [name, process.env[name]]))
+    const state = mkdtempSync(join(tmpdir(), 'amagi-forge-state-'))
+    process.env.XDG_STATE_HOME = state
+    for (const name of tokenVars) delete process.env[name]
+    try {
+      const res = await patch(
+        'repo1',
+        JSON.stringify({ forgeKind: 'gitlab', forgeTokens: { gitlab: 'glpat-secret' } }),
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body).toMatchObject({
+        forgeKind: 'gitlab',
+        forgeTokens: { github: null, gitlab: 'repository' },
+      })
+      expect(JSON.stringify(body)).not.toContain('glpat-secret')
+      const workspace = ws.workspaces.get('repo1')
+      if (workspace === null) throw new Error('repo1 missing')
+      expect(workspace.config.forge.kind).toBe('gitlab')
+      expect(loadConfig(workspace.root).config.forge.kind).toBe('gitlab')
+      expect(readFileSync(repoConfigPath(workspace.root), 'utf8')).not.toContain('glpat-secret')
+      expect(ws.workspaces.get('repo2')?.config.forge.kind).toBe('github')
+
+      expect((await patch('repo1', '{"forgeTokens":{"gitlab":null}}')).status).toBe(200)
+      expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
+        forgeTokens: { gitlab: null },
+      })
+      expect((await patch('repo1', '{"forgeKind":"bitbucket"}')).status).toBe(400)
+    } finally {
+      for (const [name, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      if (savedState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = savedState
+      rmSync(state, { recursive: true, force: true })
     }
   })
 

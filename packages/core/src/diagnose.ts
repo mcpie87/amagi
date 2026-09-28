@@ -9,10 +9,11 @@ import { isRepoRoot, type RegistryEntry } from './registry.ts'
 export type Diagnostic = { name: string; ok: boolean; detail?: string }
 
 const TRACKER_BIN: Record<string, string> = { beads: 'bd', github: 'gh', forgejo: 'tea' }
-const FORGE_BIN: Record<string, string> = { github: 'gh', forgejo: 'tea' }
+const FORGE_BIN: Record<string, string> = { github: 'gh', gitlab: 'glab', forgejo: 'tea' }
 /** Env var a forge token comes from, per kind, so the diagnostic names the fix. */
 const FORGE_TOKEN_VAR: Record<string, string> = {
   github: 'GH_TOKEN or GITHUB_TOKEN',
+  gitlab: 'GITLAB_TOKEN',
   forgejo: 'FORGEJO_TOKEN',
 }
 
@@ -75,9 +76,11 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     })
     checks.push({
       name: `forge ${config.forge.kind} token`,
-      ok: forgeToken(config.forge.kind) !== null,
-      ...(forgeToken(config.forge.kind) === null
-        ? { detail: `${FORGE_TOKEN_VAR[config.forge.kind] ?? 'a token'} not set` }
+      ok: forgeToken(config.forge.kind, entry.path) !== null,
+      ...(forgeToken(config.forge.kind, entry.path) === null
+        ? {
+            detail: `no token in the repository settings and ${FORGE_TOKEN_VAR[config.forge.kind] ?? 'no token env var'} not set`,
+          }
         : {}),
     })
   } catch (err) {

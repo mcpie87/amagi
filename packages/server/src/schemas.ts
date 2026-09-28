@@ -1,4 +1,4 @@
-import { HarnessKind, TaskState, WorkerRole } from '@amagi/core'
+import { ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -128,6 +128,15 @@ export const SettingsBody = z
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),
     reviewMaxRounds: z.number().int().min(1).optional(),
+    forgeKind: ForgeKind.optional(),
+    /** A string stores the forge's token for this repo; null clears it. */
+    forgeTokens: z
+      .object({
+        github: z.string().trim().min(1).nullable().optional(),
+        gitlab: z.string().trim().min(1).nullable().optional(),
+        forgejo: z.string().trim().min(1).nullable().optional(),
+      })
+      .optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',

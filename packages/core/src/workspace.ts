@@ -2,7 +2,6 @@ import { type Config, loadConfig } from './config.ts'
 import { diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
 import type { Tracker } from './drivers/types.ts'
-import { errMsg } from './errors.ts'
 import { makeTracker } from './factory.ts'
 import { dbPathForRepo, registryPath as defaultRegistryPath } from './paths.ts'
 import {
@@ -31,7 +30,7 @@ export type Workspace = {
   config: Config
   store: Store
   tracker: Tracker
-  /** Null when the configured forge driver could not be built (e.g. no forge binary). */
+  /** Follows `config.forge.kind` live; null only when a test injects no forge. */
   forge: PrDriver | null
 }
 
@@ -87,19 +86,8 @@ export class Workspaces {
     const { config } = loadConfig(entry.path)
     const store = (this.opts.storeFor ?? defaultStoreFor)(entry.key)
     const tracker = (this.opts.trackerFor ?? makeTracker)(config, entry.path)
-    let forge: PrDriver | null
-    if (this.opts.forgeFor !== undefined) {
-      forge = this.opts.forgeFor(config, entry.path)
-    } else {
-      try {
-        forge = makePrDriver(config.forge.kind)
-      } catch (err) {
-        console.warn(
-          `workspace ${entry.key}: forge driver ${config.forge.kind} unavailable: ${errMsg(err)}`,
-        )
-        forge = null
-      }
-    }
+    const forge =
+      this.opts.forgeFor !== undefined ? this.opts.forgeFor(config, entry.path) : liveForge(config)
     return {
       key: entry.key,
       name: entry.name,
@@ -139,6 +127,37 @@ export class Workspaces {
   close(): void {
     for (const ws of this.cache.values()) ws.store.close()
     this.cache.clear()
+  }
+}
+
+/**
+ * Forge driver that follows `config.forge.kind` on every call, so switching
+ * the forge in the repository settings reaches the pollers, watchers and
+ * runners already holding the workspace's driver.
+ */
+function liveForge(config: Config): PrDriver {
+  const drivers = new Map<string, PrDriver>()
+  const current = (): PrDriver => {
+    const kind = config.forge.kind
+    let driver = drivers.get(kind)
+    if (driver === undefined) {
+      driver = makePrDriver(kind)
+      drivers.set(kind, driver)
+    }
+    return driver
+  }
+  return {
+    createPr: (opts) => current().createPr(opts),
+    getPr: (cwd, number) => current().getPr(cwd, number),
+    listOpenPrs: (cwd) => current().listOpenPrs(cwd),
+    getMergeStatus: (cwd, number) => current().getMergeStatus(cwd, number),
+    getPrDiff: (cwd, number) => current().getPrDiff(cwd, number),
+    listComments: (cwd, number) => current().listComments(cwd, number),
+    postComment: (cwd, number, body) => current().postComment(cwd, number, body),
+    closePr: (cwd, number, reason) => current().closePr(cwd, number, reason),
+    addLabel: (cwd, number, label) => current().addLabel(cwd, number, label),
+    removeLabel: (cwd, number, label) => current().removeLabel(cwd, number, label),
+    deleteBranch: (cwd, remote, branch) => current().deleteBranch(cwd, remote, branch),
   }
 }
 

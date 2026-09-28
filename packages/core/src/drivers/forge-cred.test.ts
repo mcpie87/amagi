@@ -3,7 +3,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from '../exec.ts'
-import { forgeToken, ghEnv, gitRewrite, gitTokenConfig, parseRemote, teaEnv } from './forge-cred.ts'
+import {
+  forgeToken,
+  forgeTokenSources,
+  ghEnv,
+  gitRewrite,
+  gitTokenConfig,
+  parseRemote,
+  setStoredForgeToken,
+  teaEnv,
+  teaXdgHome,
+} from './forge-cred.ts'
 
 type Call = readonly string[]
 
@@ -57,6 +67,36 @@ describe('forgeToken', () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     expect(forgeToken('forgejo')).toBe('fj_tok')
     expect(forgeToken('github')).toBeNull()
+  })
+})
+
+describe('stored forge tokens', () => {
+  test('a token stored for the repo beats the env and covers its worktrees', () => {
+    process.env.GITLAB_TOKEN = 'env_tok'
+    const repo = join(home, 'repo')
+    const worktree = join(home, 'wt')
+    mkdirSync(repo)
+    const git = (...args: string[]) =>
+      Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: repo })
+    git('init', '-q')
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    git('worktree', 'add', '-q', worktree)
+    try {
+      setStoredForgeToken(repo, 'gitlab', 'repo_tok')
+      expect(forgeToken('gitlab', repo)).toBe('repo_tok')
+      expect(forgeToken('gitlab', worktree)).toBe('repo_tok')
+      expect(forgeToken('gitlab')).toBe('env_tok')
+      expect(forgeTokenSources(repo)).toEqual({
+        github: null,
+        gitlab: 'repository',
+        forgejo: null,
+      })
+      setStoredForgeToken(repo, 'gitlab', null)
+      expect(forgeToken('gitlab', repo)).toBe('env_tok')
+      expect(forgeTokenSources(repo).gitlab).toBe('environment')
+    } finally {
+      delete process.env.GITLAB_TOKEN
+    }
   })
 })
 
@@ -174,7 +214,7 @@ describe('teaEnv', () => {
 
   test('reuses an existing profile instead of re-provisioning', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
-    const dir = join(home, 'amagi', 'forge', 'tea', 'tea')
+    const dir = join(teaXdgHome('fj_tok'), 'tea')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'config.yml'), 'logins: []\n')
     const { exec, calls } = fake((c) =>

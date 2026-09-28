@@ -2,7 +2,7 @@ import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
 import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
-import { forgeToken, ghEnv, gitTokenConfig, parseRemote, teaEnv } from './forge-cred.ts'
+import { forgeToken, ghEnv, gitTokenConfig, glabEnv, parseRemote, teaEnv } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
 
@@ -130,7 +130,7 @@ function githubPr(exec: Exec): PrDriver {
         await execOk(
           exec,
           ['gh', 'repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-          { cwd, env: ghEnv() },
+          { cwd, env: ghEnv(cwd) },
         )
       ).trim()
     }
@@ -139,17 +139,22 @@ function githubPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote, title, body, labels }) {
-      await pushTaskBranch(exec, { cwd, remote, branch }, forgeToken('github'), async (head) => {
-        const out = await execOk(
-          exec,
-          ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
-          { cwd, env: ghEnv() },
-        )
-        return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
-      })
+      await pushTaskBranch(
+        exec,
+        { cwd, remote, branch },
+        forgeToken('github', cwd),
+        async (head) => {
+          const out = await execOk(
+            exec,
+            ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
+            { cwd, env: ghEnv(cwd) },
+          )
+          return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
+        },
+      )
       for (const label of labels) {
         // --force makes create idempotent; failure (e.g. no write perms) is best effort
-        await exec(['gh', 'label', 'create', label, '--force'], { cwd, env: ghEnv() })
+        await exec(['gh', 'label', 'create', label, '--force'], { cwd, env: ghEnv(cwd) })
       }
       const out = await execOk(
         exec,
@@ -167,7 +172,7 @@ function githubPr(exec: Exec): PrDriver {
           '-',
           ...labels.flatMap((label) => ['--label', label]),
         ],
-        { cwd, stdin: body, env: ghEnv() },
+        { cwd, stdin: body, env: ghEnv(cwd) },
       )
       const url = out.trim()
       return { url, number: Number(url.split('/').pop() ?? 0) }
@@ -176,7 +181,7 @@ function githubPr(exec: Exec): PrDriver {
       const out = await execOk(
         exec,
         ['gh', 'pr', 'view', String(number), '--json', 'state', '--jq', '.state'],
-        { cwd, env: ghEnv() },
+        { cwd, env: ghEnv(cwd) },
       )
       switch (out.trim().toUpperCase()) {
         case 'MERGED':
@@ -190,7 +195,7 @@ function githubPr(exec: Exec): PrDriver {
     async listOpenPrs(cwd) {
       const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
         cwd,
-        env: ghEnv(),
+        env: ghEnv(cwd),
       })
       const raw = JSON.parse(out) as Array<
         Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
@@ -205,7 +210,7 @@ function githubPr(exec: Exec): PrDriver {
         const out = await execOk(
           exec,
           ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-          { cwd, env: ghEnv() },
+          { cwd, env: ghEnv(cwd) },
         )
         const status = JSON.parse(out) as { mergeable: string; mergeStateStatus: string }
         if (status.mergeable === 'CONFLICTING' || status.mergeStateStatus === 'DIRTY') {
@@ -219,7 +224,7 @@ function githubPr(exec: Exec): PrDriver {
       return 'unknown'
     },
     async getPrDiff(cwd, number) {
-      return execOk(exec, ['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv() })
+      return execOk(exec, ['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv(cwd) })
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -239,7 +244,7 @@ function githubPr(exec: Exec): PrDriver {
             '--jq',
             '.[] | {id: (.id|tostring), user: .user.login, body}',
           ],
-          { cwd, env: ghEnv() },
+          { cwd, env: ghEnv(cwd) },
         )
         for (const line of raw.split('\n')) {
           if (line.trim() === '') continue
@@ -252,13 +257,13 @@ function githubPr(exec: Exec): PrDriver {
       await execOk(exec, ['gh', 'pr', 'comment', String(number), '--body-file', '-'], {
         cwd,
         stdin: body,
-        env: ghEnv(),
+        env: ghEnv(cwd),
       })
     },
     async closePr(cwd, number, reason) {
       await execOk(exec, ['gh', 'pr', 'close', String(number), '--comment', reason], {
         cwd,
-        env: ghEnv(),
+        env: ghEnv(cwd),
       })
     },
     async addLabel(cwd, number, label) {
@@ -268,7 +273,7 @@ function githubPr(exec: Exec): PrDriver {
       await removePrLabel(exec, cwd, number, label)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github'))
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github', cwd))
     },
   }
 }
@@ -288,10 +293,12 @@ function forgejoPr(exec: Exec): PrDriver {
     return remote
   }
 
-  async function forgeTokenOrThrow(): Promise<string> {
-    const t = forgeToken('forgejo')
+  async function forgeTokenOrThrow(cwd: string): Promise<string> {
+    const t = forgeToken('forgejo', cwd)
     if (t === null) {
-      throw new Error('forgejo token missing: set FORGEJO_TOKEN in the amagi process environment')
+      throw new Error(
+        'forgejo token missing: set it in the repository settings or FORGEJO_TOKEN in the amagi process environment',
+      )
     }
     return t
   }
@@ -306,7 +313,7 @@ function forgejoPr(exec: Exec): PrDriver {
     const res = await fetch(`${r.base}/api/v1/${path}`, {
       method,
       headers: {
-        authorization: `token ${await forgeTokenOrThrow()}`,
+        authorization: `token ${await forgeTokenOrThrow(cwd)}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -396,11 +403,11 @@ function forgejoPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote: remoteName, title, body, labels }) {
-      await forgeTokenOrThrow()
+      await forgeTokenOrThrow(cwd)
       await pushTaskBranch(
         exec,
         { cwd, remote: remoteName, branch },
-        forgeToken('forgejo'),
+        forgeToken('forgejo', cwd),
         async (head) => (await listOpenPrs(cwd)).find((pr) => pr.headRefName === head) ?? null,
       )
       for (const label of labels) {
@@ -475,7 +482,7 @@ function forgejoPr(exec: Exec): PrDriver {
       return out
     },
     async postComment(cwd, number, body) {
-      await forgeTokenOrThrow()
+      await forgeTokenOrThrow(cwd)
       await execOk(exec, ['tea', 'comment', String(number), body], {
         cwd,
         env: await teaEnv(exec, cwd),
@@ -504,7 +511,166 @@ function forgejoPr(exec: Exec): PrDriver {
       await api(cwd, 'DELETE', `repos/${r.ownerRepo}/issues/${number}/labels/${id}`)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('forgejo'))
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('forgejo', cwd))
+    },
+  }
+}
+
+const GITLAB_PAGE = 100
+
+/**
+ * GitLab merge requests through `glab`, with the repo's token and an
+ * Amagi-owned GLAB_CONFIG_DIR so glab never touches the operator's login.
+ * Everything but creation and the diff goes through `glab api`, whose `:id`
+ * placeholder resolves the project from the repo `cwd` is in.
+ */
+function gitlabPr(exec: Exec): PrDriver {
+  async function api(cwd: string, args: readonly string[]): Promise<unknown> {
+    const out = await execOk(exec, ['glab', 'api', ...args], { cwd, env: glabEnv(cwd) })
+    return out.trim() === '' ? null : (JSON.parse(out) as unknown)
+  }
+
+  // Explicit page walk: glab's --paginate concatenates raw JSON arrays.
+  async function pages(cwd: string, path: string): Promise<Array<Record<string, unknown>>> {
+    const all: Array<Record<string, unknown>> = []
+    const sep = path.includes('?') ? '&' : '?'
+    for (let page = 1; ; page++) {
+      const raw = await api(cwd, [`${path}${sep}per_page=${GITLAB_PAGE}&page=${page}`])
+      const items = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : []
+      all.push(...items)
+      if (items.length < GITLAB_PAGE) return all
+    }
+  }
+
+  async function mr(cwd: string, number: number): Promise<Record<string, unknown>> {
+    const raw = await api(cwd, [`projects/:id/merge_requests/${number}`])
+    return typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+  }
+
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+
+  /** Maps GitLab's has_conflicts + merge_status onto the shared shape. */
+  function mergeFields(item: Record<string, unknown>): PrMergeStatus {
+    if (item.has_conflicts === true) return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+    if (item.merge_status === 'can_be_merged') {
+      return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+    }
+    return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+  }
+
+  function toPrInfo(item: Record<string, unknown>): PrInfo {
+    return {
+      number: Number(item.iid ?? 0),
+      title: text(item.title),
+      body: text(item.description),
+      url: text(item.web_url),
+      headRefName: text(item.source_branch),
+      baseRefName: text(item.target_branch),
+      headRefOid: typeof item.sha === 'string' ? item.sha : null,
+      ...mergeFields(item),
+      createdAt: text(item.created_at),
+      updatedAt: text(item.updated_at),
+      labels: Array.isArray(item.labels) ? item.labels.map(text) : [],
+    }
+  }
+
+  async function openMrs(cwd: string, sourceBranch?: string): Promise<PrInfo[]> {
+    const filter =
+      sourceBranch === undefined ? '' : `&source_branch=${encodeURIComponent(sourceBranch)}`
+    return (await pages(cwd, `projects/:id/merge_requests?state=opened${filter}`)).map(toPrInfo)
+  }
+
+  async function postComment(cwd: string, number: number, body: string): Promise<void> {
+    await api(cwd, [
+      '--method',
+      'POST',
+      `projects/:id/merge_requests/${number}/notes`,
+      '-f',
+      `body=${body}`,
+    ])
+  }
+
+  async function update(cwd: string, number: number, field: string): Promise<void> {
+    await api(cwd, ['--method', 'PUT', `projects/:id/merge_requests/${number}`, '-f', field])
+  }
+
+  return {
+    async createPr({ cwd, branch, base, remote, title, body, labels }) {
+      await pushTaskBranch(
+        exec,
+        { cwd, remote, branch },
+        forgeToken('gitlab', cwd),
+        async (head) => (await openMrs(cwd, head))[0] ?? null,
+      )
+      // GitLab creates labels on first use, so there is no create-on-demand step.
+      await execOk(
+        exec,
+        [
+          'glab',
+          'mr',
+          'create',
+          '--source-branch',
+          branch,
+          '--target-branch',
+          base,
+          '--title',
+          title,
+          '--description',
+          body,
+          ...(labels.length === 0 ? [] : ['--label', labels.join(',')]),
+          '--yes',
+        ],
+        { cwd, env: glabEnv(cwd) },
+      )
+      const created = (await openMrs(cwd, branch))[0]
+      if (created === undefined) {
+        throw new Error(`glab created a merge request for ${branch}, but it could not be found`)
+      }
+      return { url: created.url, number: created.number }
+    },
+    async getPr(cwd, number) {
+      const state = (await mr(cwd, number)).state
+      if (state === 'merged') return 'merged'
+      if (state === 'closed' || state === 'locked') return 'closed'
+      return 'open'
+    },
+    listOpenPrs: (cwd) => openMrs(cwd),
+    async getMergeStatus(cwd, number) {
+      const { mergeable } = mergeFields(await mr(cwd, number))
+      if (mergeable === 'CONFLICTING') return 'conflicted'
+      if (mergeable === 'MERGEABLE') return 'mergeable'
+      return 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      return execOk(exec, ['glab', 'mr', 'diff', String(number), '--raw'], {
+        cwd,
+        env: glabEnv(cwd),
+      })
+    },
+    async listComments(cwd, number) {
+      // Notes cover conversation comments, review threads and inline diff comments.
+      const notes = await pages(cwd, `projects/:id/merge_requests/${number}/notes`)
+      return notes
+        .filter((note) => note.system !== true && typeof note.body === 'string')
+        .map((note) => ({
+          id: String(note.id ?? ''),
+          user: text((note.author as { username?: unknown } | null | undefined)?.username),
+          body: text(note.body),
+        }))
+    },
+    postComment,
+    async closePr(cwd, number, reason) {
+      await postComment(cwd, number, reason)
+      await update(cwd, number, 'state_event=close')
+    },
+    async addLabel(cwd, number, label) {
+      await update(cwd, number, `add_labels=${label}`)
+    },
+    async removeLabel(cwd, number, label) {
+      await update(cwd, number, `remove_labels=${label}`)
+    },
+    async deleteBranch(cwd, remote, branch) {
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('gitlab', cwd))
     },
   }
 }
@@ -513,6 +679,8 @@ export function makePrDriver(kind: string, exec: Exec = defaultExec): PrDriver {
   switch (kind) {
     case 'github':
       return githubPr(exec)
+    case 'gitlab':
+      return gitlabPr(exec)
     case 'forgejo':
       return forgejoPr(exec)
     default:
