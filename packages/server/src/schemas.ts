@@ -14,6 +14,9 @@ export const TaskListQuery = z.object({
 })
 export type TaskListQuery = z.infer<typeof TaskListQuery>
 
+/** With a label, the issue list holds only the open issues carrying it. */
+export const IssueListQuery = z.object({ label: z.string().min(1).optional() })
+
 /** Every repo-scoped route starts with the workspace key. */
 export const RepoParam = z.object({ repo: z.string().min(1) })
 

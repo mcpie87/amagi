@@ -333,6 +333,13 @@ describe('BeadsTracker', () => {
     expect(calls[0]).not.toContain('--all')
   })
 
+  test('openWithLabel asks bd for open issues with the label, uncapped', async () => {
+    const { exec, calls } = fake((c) => (c.includes('list') ? ok(READY_JSON) : undefined))
+    const issues = await new BeadsTracker({ cwd: '/repo', exec }).openWithLabel('human')
+    expect(issues.map((i) => i.id)).toEqual(['tst-lmc'])
+    expect(calls[0]).toEqual(['bd', 'list', '--label', 'human', '--json', '--limit', '0'])
+  })
+
   test('gate id comes from a tagged lookup, not from parsing prose', async () => {
     const title = gateTitle('q-1')
     const { exec, calls } = fake((c) => {

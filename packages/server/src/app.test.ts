@@ -42,7 +42,7 @@ import {
   repoConfigPath,
   writeGlobalConfig,
 } from '@amagi/core'
-import { PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -483,6 +483,12 @@ class FakeIssueTracker extends BeadsTracker {
     return [...this.issues.values()]
   }
 
+  override async openWithLabel(label: string): Promise<BeadsIssue[]> {
+    return [...this.issues.values()].filter(
+      (i) => i.status !== 'closed' && i.labels.includes(label),
+    )
+  }
+
   override async getIssue(id: string): Promise<BeadsIssue | null> {
     return this.issues.get(id) ?? null
   }
@@ -582,6 +588,19 @@ function issueApp(tracker: Tracker) {
   store = ws.store('repo1')
   return createApp({ workspaces: ws.workspaces })
 }
+
+test('GET /api/repos/:repo/issues?label= lists only open issues carrying the label', async () => {
+  const tracker = new FakeIssueTracker()
+  tracker.seed({ id: 'bd-human', labels: [HUMAN_ONLY_LABEL] })
+  tracker.seed({ id: 'bd-done', labels: [HUMAN_ONLY_LABEL], status: 'closed' })
+  tracker.seed({ id: 'bd-agent' })
+  app = issueApp(tracker)
+
+  const res = await app.request(`/api/repos/repo1/issues?label=${HUMAN_ONLY_LABEL}`)
+
+  expect(res.status).toBe(200)
+  expect(((await res.json()) as BeadsIssue[]).map((i) => i.id)).toEqual(['bd-human'])
+})
 
 describe('issue mutations', () => {
   test('PATCH /api/repos/:repo/issues/:id accepts a proposal into the ready queue', async () => {

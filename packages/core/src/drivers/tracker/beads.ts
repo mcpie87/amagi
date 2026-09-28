@@ -194,6 +194,13 @@ export class BeadsTracker implements Tracker {
     )
   }
 
+  /** Every open issue carrying `label`, uncapped so none fall outside a window. */
+  async openWithLabel(label: string): Promise<BeadsIssue[]> {
+    return parseIssues(await this.bd(['list', '--label', label, '--json', '--limit', '0'])).map(
+      toIssue,
+    )
+  }
+
   /** `bd list` without `--all` excludes closed issues, which is exactly "open" here. */
   async openIds(limit = 500): Promise<string[]> {
     const issues = parseIssues(

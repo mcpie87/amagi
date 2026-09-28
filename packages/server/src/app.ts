@@ -81,6 +81,7 @@ import {
   GitIdentityBody,
   GitRequestBody,
   IssueCreateBody,
+  IssueListQuery,
   IssueUpdateBody,
   ParticipationBody,
   QuestionQuery,
@@ -905,15 +906,21 @@ export function createApp({
       return c.json({ prs: await ws.forge.listOpenPrs(ws.root) })
     })
 
-    .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
-      if (beads === null) {
-        return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
-      }
-      return c.json(await beads.list())
-    })
+    .get(
+      '/api/repos/:repo/issues',
+      valid('param', RepoParam),
+      valid('query', IssueListQuery),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const { label } = c.req.valid('query')
+        const ws = resolveWorkspace(workspaces, repo)
+        const beads = beadsTracker(ws)
+        if (beads === null) {
+          return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
+        }
+        return c.json(await (label === undefined ? beads.list() : beads.openWithLabel(label)))
+      },
+    )
 
     .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
