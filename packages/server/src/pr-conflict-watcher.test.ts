@@ -67,6 +67,7 @@ function fakeExec(baseOid: () => string = () => 'base1'): Exec {
 
 class FakePr implements PrDriver {
   prs: PrInfo[] = []
+  diff = ''
   mergeStatus: MergeStatus = 'mergeable'
   readonly mergeStatusCalls: number[] = []
   readonly addedLabels: string[] = []
@@ -87,7 +88,7 @@ class FakePr implements PrDriver {
     return this.mergeStatus
   }
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
-    return ''
+    return this.diff
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -408,14 +409,12 @@ test('a PR whose work base already contains is flagged once and not re-dispatche
   const exec: Exec = async (cmd, opts) => {
     // The merge result equals the merged base; the PR's own three-dot diff is not empty.
     if (cmd[1] === 'diff' && cmd.includes('--quiet')) return { exitCode: 0, stdout: '', stderr: '' }
-    if (cmd[0] === 'gh' && cmd.includes('diff')) {
-      return { exitCode: 0, stdout: 'diff --git a/x b/x\n', stderr: '' }
-    }
     return git(cmd, opts)
   }
   const store = new Store(openDatabase(':memory:'))
   openPrTask(store)
   const driver = new FakePr()
+  driver.diff = 'diff --git a/x b/x\n'
   driver.prs = [pr({ labels: ['amagi'] })]
   start(
     exec,
@@ -628,12 +627,8 @@ const openPrTask = (store: Store): void => {
   }
 }
 
-/** Serves the pointless pass's `gh pr diff`; PRs come from the driver. */
-function fakeExecForPointless(diff: () => string): Exec {
-  return async (cmd) => {
-    if (cmd.includes('diff')) return { exitCode: 0, stdout: diff(), stderr: '' }
-    return { exitCode: 0, stdout: '', stderr: '' }
-  }
+function fakeExecForPointless(): Exec {
+  return async () => ({ exitCode: 0, stdout: '', stderr: '' })
 }
 
 const pointlessStateFile = (): Record<string, { headOid: string; flagged: boolean }> =>
@@ -645,11 +640,7 @@ test('an amagi PR with an empty diff gets labelled, commented on and parked in p
   const tracker = fakeTracker()
   const driver = new FakePr()
   driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
-  start(
-    fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
-    { store, tracker, driver },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), { store, tracker, driver })
 
   await Bun.sleep(60)
 
@@ -678,7 +669,7 @@ test('an agent verdict on a pointless PR carries reasoning on the PR and the pro
     '',
   ].join('\n')
   start(
-    fakeExecForPointless(() => ''),
+    fakeExecForPointless(),
     () =>
       fakeHarness(({ prompt }) => {
         const outPath = prompt.match(/^file: (.+)$/m)?.[1]
@@ -703,11 +694,7 @@ test('a PR without the amagi label is never flagged whatever its diff', async ()
   const tracker = fakeTracker()
   const driver = new FakePr()
   driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: [] }]
-  start(
-    fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
-    { store, tracker, driver },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), { store, tracker, driver })
 
   await Bun.sleep(60)
 
@@ -722,7 +709,6 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
-  let diff = ''
   let head = 'deadbeef'
   driver.prs = [
     {
@@ -730,20 +716,16 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
       labels: ['amagi'],
     },
   ]
-  start(
-    fakeExecForPointless(() => diff),
-    () => fakeHarness(() => {}),
-    {
-      store,
-      tracker,
-      driver,
-    },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), {
+    store,
+    tracker,
+    driver,
+  })
 
   await Bun.sleep(60)
   expect(store.task('bd-1')?.state).toBe('pr_flagged')
 
-  diff = 'a real diff\n'
+  driver.diff = 'a real diff\n'
   head = 'newsha'
   driver.prs = [
     {
@@ -767,11 +749,7 @@ test('an unchanged flagged PR is not re-commented on subsequent ticks', async ()
   const tracker = fakeTracker()
   const driver = new FakePr()
   driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
-  start(
-    fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
-    { store, tracker, driver },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), { store, tracker, driver })
 
   await Bun.sleep(60)
   expect(store.task('bd-1')?.state).toBe('pr_flagged')
