@@ -673,6 +673,29 @@ describe('Runner.runOnce', () => {
       loop,
     })
 
+  test('a replaced claim stops the old runner before its next state transition', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        effect: (cwd) => {
+          writesAFile.effect?.(cwd, '')
+          store.append(TASK.id, {
+            type: 'task.claimed',
+            title: TASK.title,
+            tracker: 'fake',
+          })
+        },
+      },
+    ])
+
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(
+      store.events({ taskId: TASK.id, limit: 999 }).some((event) => event.type === 'error'),
+    ).toBe(false)
+  })
+
   test('files uncovered follow-ups once and links both proposals and covered issues in the PR', async () => {
     class CreatingTracker extends FakeTracker {
       override readonly capabilities: TrackerCapabilities = {

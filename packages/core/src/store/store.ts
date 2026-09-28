@@ -223,6 +223,16 @@ export class Store {
     return true
   }
 
+  claimReplaced(taskId: string, sinceSeq: number): boolean {
+    return (
+      this.db
+        .query(
+          "select 1 from events where task_id = ? and seq > ? and type = 'task.claimed' limit 1",
+        )
+        .get(taskId, sinceSeq) !== null
+    )
+  }
+
   private apply(taskId: string | null, ts: number, body: EventBody): void {
     if (taskId === null) return
     // The same pure reducer the clients fold events through; the server just

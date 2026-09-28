@@ -367,6 +367,7 @@ export class Runner {
   private contextWarned = false
   /** Fresh-context restarts already spent on the current task run, across all phases. */
   private contextRestarts = 0
+  private claimSeq: number | null = null
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -624,6 +625,7 @@ export class Runner {
         ? {}
         : { difficulty: task.difficulty }),
     })
+    this.claimSeq = claimEvent.seq
     const { warnTokens, maxTokens } = this.contextLimits()
     store.append(task.id, {
       type: 'run.limits',
@@ -684,6 +686,9 @@ export class Runner {
   }
 
   private transition(taskId: string, to: TaskState, reason?: string): void {
+    if (this.claimSeq !== null && this.deps.store.claimReplaced(taskId, this.claimSeq)) {
+      throw new LeaseLostError(taskId)
+    }
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
     // An external actor (the doom guard) may have parked the task in a
