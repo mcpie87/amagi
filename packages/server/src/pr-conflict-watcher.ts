@@ -373,6 +373,7 @@ export function startPrConflictWatcher({
           store,
           exec,
           makeHarnessFn,
+          manual: queuedNow.has(pr.number),
           onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })

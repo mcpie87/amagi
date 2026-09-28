@@ -42,6 +42,8 @@ export type ResolveConflictOptions = {
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness | undefined
+  /** An explicit queue request may dispatch once after the automatic limit. */
+  manual?: boolean
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
   /** Called when the agent moves HEAD outside the expected commit operation. */
@@ -193,7 +195,7 @@ export async function resolveConflict(
     for (;;) {
       const unmerged = await unmergedPaths(run, wt.path)
       if (unmerged.length === 0) break
-      if (iteration >= opts.config.loop.conflictMaxIterations) {
+      if (iteration >= opts.config.loop.conflictMaxIterations && !opts.manual) {
         const marked = markPrMergeConflict(opts, unmerged)
         const message = `unmerged paths remain after ${iteration} dispatches${marked ? '; task marked pr_merge_conflict' : ''}: ${unmerged.join(', ')}`
         log('error', message)

@@ -294,6 +294,25 @@ test('a queued PR bypasses the unchanged conflict cache and is recorded', async 
   ).toBe(true)
 })
 
+test('a queued PR gets one dispatch after reaching the automatic iteration limit', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const driver = new FakePr()
+  driver.prs = [pr({ labels: ['amagi/iterations:3'] })]
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    store,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(0)
+
+  w.queue(7)
+  await Bun.sleep(60)
+
+  expect(started).toBe(1)
+})
+
 test('conflict resolution runs in its own task state and returns unresolved PRs to conflict', async () => {
   const store = new Store(openDatabase(':memory:'))
   store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
