@@ -423,6 +423,7 @@ describe('forgejoPr', () => {
   test('pushes and creates the pr through tea', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec, calls } = remote()
+    let createBody: unknown
     await withFetch(
       (path, method) => {
         if (path === 'repos/owner/repo/pulls?state=open' && method === 'GET') {
@@ -436,6 +437,9 @@ describe('forgejoPr', () => {
             ]),
             { status: 200 },
           )
+        }
+        if (path === 'repos/owner/repo/labels' && method === 'GET') {
+          return new Response(JSON.stringify([{ id: 42, name: 'amagi' }]), { status: 200 })
         }
         if (path.endsWith('/labels')) return new Response('{}', { status: 201 })
         return new Response('[]', { status: 200 })
@@ -451,6 +455,13 @@ describe('forgejoPr', () => {
           labels: ['amagi'],
         })
         expect(pr).toEqual({ url: 'https://git.example.com/owner/repo/pulls/3', number: 3 })
+        expect(createBody).toEqual({
+          title: 'Do the thing',
+          body: 'Task: am-1',
+          head: 'amagi/am-1',
+          base: 'main',
+          labels: [42],
+        })
       },
     )
     const push = calls.find((c) => c.includes('push'))
