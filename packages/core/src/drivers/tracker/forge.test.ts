@@ -73,6 +73,9 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
+    if (cmd[0] === 'git' && cmd[1] === 'remote') {
+      return ok(cmd[2] === 'get-url' ? 'https://codeberg.org/acme/amagi.git' : 'origin\n')
+    }
     const hit = routes(cmd)
     if (hit) return hit
     return { exitCode: 0, stdout: '', stderr: '' }

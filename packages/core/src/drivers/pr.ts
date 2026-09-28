@@ -2,7 +2,15 @@ import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
 import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
-import { forgeToken, ghEnv, gitTokenConfig, glabEnv, parseRemote, teaEnv } from './forge-cred.ts'
+import {
+  forgeToken,
+  ghEnv,
+  gitTokenConfig,
+  glabEnv,
+  parseRemote,
+  resolveForgeRemote,
+  teaEnv,
+} from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
 
@@ -281,12 +289,13 @@ function githubPr(exec: Exec): PrDriver {
 type ForgejoRemote = { base: string; ownerRepo: string }
 
 /** Forgejo PR writes use tea, with API reads for PR state and metadata. */
-function forgejoPr(exec: Exec): PrDriver {
+function forgejoPr(exec: Exec, configuredRemote: string | null): PrDriver {
   let remote: ForgejoRemote | null = null
 
   async function forge(cwd: string): Promise<ForgejoRemote> {
     if (remote !== null) return remote
-    const url = await execOk(exec, ['git', 'remote', 'get-url', 'origin'], { cwd })
+    const remoteName = await resolveForgeRemote(exec, cwd, 'forgejo', configuredRemote)
+    const url = await execOk(exec, ['git', 'remote', 'get-url', remoteName], { cwd })
     const parsed = parseRemote(url.trim())
     if (parsed === null) throw new Error(`cannot parse forge remote: ${url.trim()}`)
     remote = parsed
@@ -433,7 +442,7 @@ function forgejoPr(exec: Exec): PrDriver {
           body,
           ...(labels.length === 0 ? [] : ['--labels', labels.join(',')]),
         ],
-        { cwd, env: await teaEnv(exec, cwd) },
+        { cwd, env: await teaEnv(exec, cwd, configuredRemote) },
       )
       const created = (await listOpenPrs(cwd)).find((pr) => pr.headRefName === branch)
       if (created === undefined) {
@@ -485,7 +494,7 @@ function forgejoPr(exec: Exec): PrDriver {
       await forgeTokenOrThrow(cwd)
       await execOk(exec, ['tea', 'comment', String(number), body], {
         cwd,
-        env: await teaEnv(exec, cwd),
+        env: await teaEnv(exec, cwd, configuredRemote),
       })
     },
     async closePr(cwd, number, _reason) {
@@ -675,14 +684,18 @@ function gitlabPr(exec: Exec): PrDriver {
   }
 }
 
-export function makePrDriver(kind: string, exec: Exec = defaultExec): PrDriver {
+export function makePrDriver(
+  kind: string,
+  exec: Exec = defaultExec,
+  configuredRemote: string | null = null,
+): PrDriver {
   switch (kind) {
     case 'github':
       return githubPr(exec)
     case 'gitlab':
       return gitlabPr(exec)
     case 'forgejo':
-      return forgejoPr(exec)
+      return forgejoPr(exec, configuredRemote)
     default:
       throw new NotImplementedDriverError('forge', kind)
   }

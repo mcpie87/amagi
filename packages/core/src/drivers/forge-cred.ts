@@ -323,6 +323,56 @@ export function parseRemote(url: string): { base: string; ownerRepo: string } | 
   return { base: `${proto}://${host}${port}`, ownerRepo: path.replace(/\.git$/, '') }
 }
 
+const PUBLIC_FORGE_HOST: Record<ForgeKind, string> = {
+  github: 'github.com',
+  gitlab: 'gitlab.com',
+  forgejo: 'codeberg.org',
+}
+
+export function forgeHost(kind: ForgeKind): string {
+  const configured =
+    kind === 'forgejo'
+      ? process.env.GITEA_SERVER_URL
+      : kind === 'gitlab'
+        ? process.env.GITLAB_HOST
+        : undefined
+  if (configured !== undefined) {
+    try {
+      return new URL(
+        configured.includes('://') ? configured : `https://${configured}`,
+      ).host.toLowerCase()
+    } catch {
+      return PUBLIC_FORGE_HOST[kind]
+    }
+  }
+  return PUBLIC_FORGE_HOST[kind]
+}
+
+/** Selects the remote for a forge by host. A non-null configured remote wins. */
+export async function resolveForgeRemote(
+  exec: Exec,
+  cwd: string,
+  kind: ForgeKind,
+  configured: string | null = null,
+): Promise<string> {
+  if (configured !== null && configured !== '') return configured
+  const expected = forgeHost(kind)
+  const names = (await execOk(exec, ['git', 'remote'], { cwd })).trim().split(/\s+/).filter(Boolean)
+  let sawHost = false
+  for (const name of names) {
+    const url = await execOk(exec, ['git', 'remote', 'get-url', name], { cwd }).catch(() => '')
+    const parsed = parseRemote(url.trim())
+    if (parsed === null) continue
+    try {
+      const host = new URL(parsed.base).host.toLowerCase()
+      sawHost = true
+      if (host === expected) return name
+    } catch {}
+  }
+  if (!sawHost) return 'origin'
+  throw new Error(`no git remote matches ${kind} host ${expected}`)
+}
+
 /**
  * The insteadOf rewrite pair that makes a remote authenticate with the token:
  * `from` is the configured URL prefix, `to` the same prefix carrying the token
@@ -371,8 +421,13 @@ export async function gitTokenConfig(
 }
 
 /** Base URL of the configured origin remote, for provisioning a tea login. */
-async function remoteBaseUrl(exec: Exec, cwd: string): Promise<string | null> {
-  const url = await execOk(exec, ['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => '')
+async function remoteBaseUrl(
+  exec: Exec,
+  cwd: string,
+  configuredRemote: string | null,
+): Promise<string | null> {
+  const remote = await resolveForgeRemote(exec, cwd, 'forgejo', configuredRemote)
+  const url = await execOk(exec, ['git', 'remote', 'get-url', remote], { cwd }).catch(() => '')
   return parseRemote(url.trim())?.base ?? null
 }
 
@@ -387,11 +442,13 @@ async function ensureTeaLogin(
   cwd: string,
   token: string | null,
   env: Record<string, string>,
+  configuredRemote: string | null,
 ): Promise<void> {
   const cfg = join(teaXdgHome(token), 'tea', 'config.yml')
   if (existsSync(cfg)) return
-  const url = process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd))
-  if (token === null || url === null) return
+  if (token === null) return
+  const url = process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, configuredRemote))
+  if (url === null) return
   await execOk(
     exec,
     [
@@ -414,9 +471,10 @@ async function ensureTeaLogin(
 export async function teaEnv(
   exec: Exec = defaultExec,
   cwd: string,
+  configuredRemote: string | null = null,
 ): Promise<Record<string, string>> {
   const token = forgeToken('forgejo', cwd)
   const env: Record<string, string> = { XDG_CONFIG_HOME: teaXdgHome(token) }
-  await ensureTeaLogin(exec, cwd, token, env)
+  await ensureTeaLogin(exec, cwd, token, env, configuredRemote)
   return env
 }

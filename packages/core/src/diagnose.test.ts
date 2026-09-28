@@ -60,4 +60,20 @@ describe('diagnoseRepo', () => {
     expect(d('checks')?.ok).toBe(true)
     expect(d('worktree root')?.detail).toContain('amagi-wt')
   })
+
+  test('flags a remote whose host does not match the configured forge', async () => {
+    Bun.spawnSync(['git', 'remote', 'add', 'origin', 'git@github.com:owner/repo.git'], {
+      cwd: repo,
+    })
+    mkdirSync(join(repo, '.amagi'), { recursive: true })
+    writeFileSync(
+      join(repo, '.amagi', 'config.toml'),
+      '[forge]\nkind = "gitlab"\nremote = "origin"\n',
+    )
+    const checks = await diagnoseRepo(entry())
+    expect(checks.find((c) => c.name === 'forge remote')).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining('does not match gitlab.com'),
+    })
+  })
 })

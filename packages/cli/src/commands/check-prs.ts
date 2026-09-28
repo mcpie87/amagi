@@ -98,7 +98,7 @@ export const checkPrsCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const driver = makePrDriver(config.forge.kind)
+    const driver = makePrDriver(config.forge.kind, undefined, config.forge.remote)
 
     let prs: PrInfo[]
     try {
