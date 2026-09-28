@@ -30,38 +30,12 @@ export type PrInfo = {
 /** Priority labels stamped on amagi PRs, in dispatch order. */
 export const PRIORITY_LABELS = ['P0', 'P1', 'P2', 'P3', 'P4'] as const
 
-export type PrCheckOptions = {
-  cwd: string
-  exec?: Exec | undefined
-}
-
-const GH_FIELDS =
-  'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,createdAt,updatedAt,labels'
-
 /** GitHub marks a PR that cannot merge due to conflicts as CONFLICTING or DIRTY. */
 export function isConflicting(pr: PrInfo, baseBranch: string): boolean {
   return (
     pr.baseRefName === baseBranch &&
     (pr.mergeable === 'CONFLICTING' || pr.mergeStateStatus === 'DIRTY')
   )
-}
-
-/**
- * Lists open PRs through gh. GitHub-only by design: the pollers, the
- * pointlessness pass, and the priority-label sync that consume it share this
- * binding rather than each hammering a forge-specific endpoint.
- */
-export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
-  const run = opts.exec ?? defaultExec
-  const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
-    cwd: opts.cwd,
-    env: ghEnv(),
-  })
-  const raw = JSON.parse(out) as Array<
-    Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
-  >
-  // gh reports labels as objects; the passes only need the names.
-  return raw.map((pr) => ({ ...pr, labels: (pr.labels ?? []).map((l) => l.name ?? '') }))
 }
 
 /** The task id in an amagi-authored branch `amagi/<id>-<slug>`, or null when the branch is not amagi's. */
