@@ -201,6 +201,10 @@ describe('classifyMentionPrompt', () => {
     expect(prompt).toContain('explain: the human is asking anything about the PR')
     expect(prompt).toContain('still relevant')
     expect(prompt).toContain('never ambiguous')
+    expect(prompt).toContain(
+      'flag: the human explicitly wants this pull request closed or reverted',
+    )
+    expect(prompt).toContain('fix-pr, explain, add-a-task, flag, or ambiguous')
   })
 
   test('routes an already-resolved question to explain', () => {

@@ -417,7 +417,7 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('mention.classified'),
     /** Which response path the classifier chose for the mention. */
-    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
+    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'flag', 'ambiguous']),
     /** The raw classifier reply; when the parse is wrong this is all that explains why. */
     reply: z.string(),
     /** The PR the mention was on. */
