@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as z from 'zod'
-import { lintCommitMessage } from './commit-lint.ts'
+import { stageAndCommit } from './commit.ts'
 import { type Config, reviewerHarnessConfig } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
@@ -35,8 +35,6 @@ import {
 } from './pr-body.ts'
 import {
   answerPrompt,
-  CHECKPOINT_COMMIT_SUMMARY,
-  commitMessage,
   commitSummary,
   fixChecksPrompt,
   implementAfterVerifyPrompt,
@@ -82,6 +80,8 @@ export type RunnerDeps = {
   forge?: PrDriver | undefined
   /** Override the configured reviewer harness in tests. */
   reviewerHarness?: Harness | undefined
+  /** Resolved reviewer worker profile, when the fleet assigns one. */
+  reviewerConfig?: Config['harness']['implement'] | undefined
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
   /**
@@ -430,7 +430,7 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig = reviewerHarnessConfig(config)
+    const reviewerConfig = this.deps.reviewerConfig ?? reviewerHarnessConfig(config)
     const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
@@ -2235,7 +2235,7 @@ export class Runner {
     base: string,
     run: { summary: string; model: string | null; effort: string | null },
   ): Promise<boolean> {
-    await this.stageAndCommit(task, cwd, run.summary, this.commitMeta(run.model, run.effort))
+    await stageAndCommit(this.exec, task, cwd, run.summary, this.commitMeta(run.model, run.effort))
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
@@ -2259,63 +2259,6 @@ export class Runner {
       harness: this.deps.harness.kind,
       model: model ?? implement.model ?? null,
       effort: effort ?? implement.effort ?? null,
-    }
-  }
-
-  /**
-   * Stages and commits the worktree with a message commit-lint.ts accepts.
-   * `committed: false` means the worktree was already clean; a git failure or
-   * a malformed message throws, since the caller decides how to surface it.
-   */
-  private async stageAndCommit(
-    task: Pick<TrackerTask, 'id' | 'title'>,
-    cwd: string,
-    summary: string,
-    meta: PrBodyMeta,
-  ): Promise<{ committed: false } | { committed: true; sha: string }> {
-    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-    if (status.stdout.trim() === '') return { committed: false }
-    const message = commitMessage(task, summary, meta)
-    const lint = lintCommitMessage(message)
-    if (lint.length > 0) throw new Error(`malformed commit message: ${lint.join('; ')}`)
-    await this.exec(['git', 'add', '-A'], { cwd })
-    const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
-    if (commit.exitCode !== 0) {
-      throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
-    }
-    const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
-    return { committed: true, sha }
-  }
-
-  /**
-   * The one sanctioned git write an agent can cause, over the server channel:
-   * stages and commits the worktree, records `commit.created`, and returns
-   * the sha. A clean worktree or a git failure is returned as an error so the
-   * agent learns immediately. No state transition, so it is usable any number
-   * of times within a run.
-   */
-  async requestCommit(
-    taskId: string,
-    cwd: string,
-  ): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
-    const task = this.deps.store.task(taskId)
-    if (task === null) return { ok: false, error: `unknown task ${taskId}` }
-    try {
-      const staged = await this.stageAndCommit(
-        task,
-        cwd,
-        CHECKPOINT_COMMIT_SUMMARY,
-        this.commitMeta(null, null),
-      )
-      if (!staged.committed) return { ok: false, error: 'nothing to commit; the worktree is clean' }
-      this.deps.store.append(taskId, {
-        type: 'commit.created',
-        sha: staged.sha,
-        subject: `[${task.id}] ${task.title}`,
-      })
-      return { ok: true, sha: staged.sha }
-    } catch (err) {
-      return { ok: false, error: errMsg(err) }
     }
   }
 

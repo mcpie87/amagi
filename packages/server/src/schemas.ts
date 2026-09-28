@@ -1,4 +1,4 @@
-import { HarnessKind, TaskState } from '@amagi/core'
+import { HarnessKind, TaskState, WorkerRole } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -115,6 +115,7 @@ export const SettingsBody = z
     autoQueue: z.boolean().optional(),
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
+    desktopFailureAlerts: z.boolean().optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',
@@ -129,6 +130,7 @@ export const WorkerCreateBody = z.object({
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
   seat: z.string().trim().min(1).optional(),
+  roles: z.array(WorkerRole).default(['implement']),
   count: z.number().int().min(1).max(16).default(1),
   seatCount: z.number().int().min(1).max(16).default(1),
   enabled: z.boolean().default(false),
@@ -143,6 +145,7 @@ export const WorkerUpdateBody = z
     model: z.string().trim().min(1).nullable().optional(),
     effort: z.string().trim().min(1).nullable().optional(),
     seat: z.string().trim().min(1).nullable().optional(),
+    roles: z.array(WorkerRole).optional(),
     count: z.number().int().min(1).max(16).optional(),
     seatCount: z.number().int().min(1).max(16).optional(),
     enabled: z.boolean().optional(),

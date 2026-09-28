@@ -1,17 +1,19 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useRunner } from '../store.tsx'
+import { SeatsSettings } from './seats-settings.tsx'
+import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
 const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
 type HarnessKind = (typeof HARNESS_KINDS)[number]
+const WORKER_ROLES = ['implement', 'review'] as const
+type WorkerRole = (typeof WORKER_ROLES)[number]
 
 const HARNESS_LABEL: Record<HarnessKind, string> = {
   claude: 'Claude',
   codex: 'Codex',
   opencode: 'OpenCode',
 }
-
-const GIT_IDENTITY_TEMPLATE = '[user]\n\tname = Your Name\n\temail = you@example.com\n'
 
 type Worker = {
   id: string
@@ -20,6 +22,7 @@ type Worker = {
   model?: string
   effort?: string
   seat?: string
+  roles: WorkerRole[]
   count?: number
   seatCount?: number
   enabled: boolean
@@ -48,58 +51,8 @@ const WATCHER_NAMES: Record<keyof Watchers, string> = {
   stall: 'Stall watcher',
 }
 
-/** Sends a JSON request, resolving to the server's error message or null on success. */
-async function send(method: string, path: string, body?: unknown): Promise<string | null> {
-  try {
-    const res = await fetch(`${apiBase}${path}`, {
-      method,
-      headers: { 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-    if (res.ok) return null
-    const parsed = (await res.json().catch(() => null)) as { error?: string } | null
-    return parsed?.error ?? `HTTP ${res.status}`
-  } catch {
-    return 'could not reach the amagi server'
-  }
-}
-
 const input = 'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
 const label = 'mb-1 block text-sm text-fg-muted'
-const secondary =
-  'rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised disabled:opacity-50'
-const card = 'rounded-lg border border-line bg-surface p-4'
-
-function Toggle({
-  on,
-  label: text,
-  title,
-  disabled,
-  onClick,
-}: {
-  on: boolean
-  label: string
-  title: string
-  disabled?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={on}
-      disabled={disabled}
-      onClick={onClick}
-      title={title}
-      className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
-        on
-          ? 'bg-emerald-600 text-on-solid hover:bg-emerald-500'
-          : 'border border-line-strong bg-surface text-fg-muted hover:bg-raised'
-      }`}
-    >
-      {text}: {on ? 'on' : 'off'}
-    </button>
-  )
-}
 
 type HarnessValues = { kind: HarnessKind | ''; model: string; effort: string; seat: string }
 
@@ -306,6 +259,7 @@ function WorkerFormModal({
   const [name, setName] = useState(initial?.name ?? defaultName(workers, 'claude'))
   const [nameTouched, setNameTouched] = useState(initial !== null)
   const [count, setCount] = useState(String(initial?.count ?? 1))
+  const [roles, setRoles] = useState<WorkerRole[]>(initial?.roles ?? ['implement'])
   const [harness, setHarness] = useState<HarnessValues>({
     kind: initial?.kind ?? 'claude',
     model: initial?.model ?? '',
@@ -334,6 +288,7 @@ function WorkerFormModal({
       effort: orNull(harness.effort),
       seat: orNull(harness.seat),
       count: workerCount,
+      roles,
     }
     const err =
       initial === null
@@ -391,6 +346,27 @@ function WorkerFormModal({
         <p className="text-sm text-red-ink">Worker count must be between 1 and 16.</p>
       )}
       <HarnessFields values={harness} onChange={changeHarness} seats={seats} />
+      <fieldset>
+        <legend className={label}>Applicable roles</legend>
+        <div className="flex flex-wrap gap-4">
+          {WORKER_ROLES.map((role) => (
+            <label key={role} className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={roles.includes(role)}
+                onChange={(event) =>
+                  setRoles((current) =>
+                    event.target.checked
+                      ? [...current, role]
+                      : current.filter((assigned) => assigned !== role),
+                  )
+                }
+              />
+              {role === 'implement' ? 'Implement' : 'Review'}
+            </label>
+          ))}
+        </div>
+      </fieldset>
       {initial?.taskId != null && (
         <p className="text-sm text-amber-ink">
           {initial.taskId} keeps its current settings; changes apply from the next run.
@@ -597,172 +573,11 @@ function WatcherCard({
   )
 }
 
-function ParticipationRow({
-  repo,
-  onChanged,
-}: {
-  repo: { key: string; name: string; workers: boolean; watchers: boolean }
-  onChanged: () => void
-}) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const set = async (patch: { workers?: boolean; watchers?: boolean }) => {
-    setBusy(true)
-    setError(null)
-    const err = await send('PATCH', `/api/repos/${repo.key}/participation`, patch)
-    setBusy(false)
-    if (err !== null) setError(err)
-    onChanged()
-  }
-
-  return (
-    <li className="flex flex-wrap items-center justify-between gap-2 py-2">
-      <span className="text-sm text-fg-strong">{repo.name}</span>
-      <div className="flex flex-wrap items-center gap-2">
-        {error !== null && <span className="text-sm text-red-ink">{error}</span>}
-        <Toggle
-          on={repo.workers}
-          label="Workers"
-          title="Whether the auto-queue claims ready tasks from this repository."
-          disabled={busy}
-          onClick={() => void set({ workers: !repo.workers })}
-        />
-        <Toggle
-          on={repo.watchers}
-          label="Watchers"
-          title="Whether pollers and watchers run against this repository."
-          disabled={busy}
-          onClick={() => void set({ watchers: !repo.watchers })}
-        />
-      </div>
-    </li>
-  )
-}
-
-type SeatDraft = { original: string | null; name: string; count: number }
-
-function SeatsEditor({
-  entries,
-  setEntries,
-  onSaved,
-}: {
-  entries: SeatDraft[] | null
-  setEntries: (entries: SeatDraft[]) => void
-  onSaved: () => void
-}) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const names = entries?.map(({ name }) => name.trim()).filter(Boolean) ?? []
-  const valid =
-    entries?.every(
-      ({ name, count }) =>
-        name.trim() !== '' && Number.isInteger(count) && count >= 1 && count <= 16,
-    ) && new Set(names).size === names.length
-
-  const save = async () => {
-    if (entries === null || !valid) return
-    setBusy(true)
-    setError(null)
-    const seats = entries.map(({ name, count }) => ({ name: name.trim(), count }))
-    const renames = entries.flatMap(({ original, name }) =>
-      original !== null && original !== name.trim() ? [{ from: original, to: name.trim() }] : [],
-    )
-    const err = await send('PUT', '/api/seat-names', { seats, renames })
-    setBusy(false)
-    if (err !== null) setError(err)
-    else onSaved()
-  }
-
-  return (
-    <div className={`mt-6 ${card}`}>
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-sm text-fg-muted">Seats</h2>
-        <button
-          type="button"
-          onClick={() => setEntries([...(entries ?? []), { original: null, name: '', count: 1 }])}
-          disabled={entries === null || busy}
-          className={secondary}
-        >
-          Add seat
-        </button>
-      </div>
-      <p className="mb-3 text-sm text-fg-faint">
-        Rename a seat to update every worker, watcher, and harness that uses it. Removing a seat
-        resets its references to the default seat.
-      </p>
-      {entries === null ? (
-        <p className="text-sm text-fg-faint">Loading seats...</p>
-      ) : (
-        <div className="space-y-2">
-          {entries.map((entry, index) => (
-            <div key={entry.original ?? `new-${index}`} className="flex gap-2">
-              <input
-                aria-label={`Seat ${index + 1}`}
-                value={entry.name}
-                onChange={(event) =>
-                  setEntries(
-                    entries.map((seat, i) =>
-                      i === index ? { ...seat, name: event.target.value } : seat,
-                    ),
-                  )
-                }
-                className={input}
-              />
-              <label className="flex shrink-0 items-center gap-2 text-sm text-fg-muted">
-                Slots
-                <input
-                  aria-label={`Seat ${index + 1} slots`}
-                  type="number"
-                  min={1}
-                  max={16}
-                  value={entry.count}
-                  onChange={(event) =>
-                    setEntries(
-                      entries.map((seat, i) =>
-                        i === index ? { ...seat, count: Number(event.target.value) } : seat,
-                      ),
-                    )
-                  }
-                  className={`${input} w-20`}
-                />
-              </label>
-              <button
-                type="button"
-                onClick={() => setEntries(entries.filter((_, i) => i !== index))}
-                disabled={busy}
-                className={secondary}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-          {entries.length === 0 && <p className="text-sm text-fg-faint">No named seats.</p>}
-        </div>
-      )}
-      {error !== null && <p className="mt-2 text-sm text-red-ink">{error}</p>}
-      <div className="mt-3 flex items-center gap-3">
-        <button
-          type="button"
-          onClick={() => void save()}
-          disabled={!valid || busy}
-          className={secondary}
-        >
-          {busy ? 'Saving...' : 'Save seats'}
-        </button>
-        {entries !== null && !valid && (
-          <span className="text-sm text-amber-ink">Seat names must be unique and non-empty.</span>
-        )}
-      </div>
-    </div>
-  )
-}
-
 /** The global fleet editor: workers, seats and watchers. */
 export function FleetWorkersSettings() {
   const [workers, setWorkers] = useState<Worker[] | null>(null)
   const [watchers, setWatchers] = useState<Watchers | null>(null)
-  const [seatEntries, setSeatEntries] = useState<SeatDraft[] | null>(null)
+  const [seatNames, setSeatNames] = useState<string[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editing, setEditing] = useState<Worker | 'new' | null>(null)
   const [editingWatcher, setEditingWatcher] = useState<AgentWatcherKind | null>(null)
@@ -785,7 +600,7 @@ export function FleetWorkersSettings() {
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { seats: { name: string; count: number }[] }
-        setSeatEntries(body.seats.map(({ name, count }) => ({ original: name, name, count })))
+        setSeatNames(body.seats.map(({ name }) => name))
       })
       .catch((err: unknown) =>
         setLoadError(err instanceof Error ? err.message : 'could not reach the amagi server'),
@@ -805,9 +620,6 @@ export function FleetWorkersSettings() {
     setEditingWatcher(null)
     refresh()
   }
-
-  const seatsSaved = () => refreshSeats()
-  const seatNames = seatEntries?.map(({ name }) => name.trim()).filter(Boolean) ?? []
 
   return (
     <>
@@ -841,7 +653,7 @@ export function FleetWorkersSettings() {
         </div>
       </div>
 
-      <SeatsEditor entries={seatEntries} setEntries={setSeatEntries} onSaved={seatsSaved} />
+      <SeatsSettings onSaved={refreshSeats} />
 
       {watchers !== null && (
         <div className="mt-6">
@@ -884,193 +696,4 @@ export function FleetWorkersSettings() {
       )}
     </>
   )
-}
-
-export function RepositoryParticipationCard({
-  repo,
-  onChanged,
-}: {
-  repo: { key: string; name: string; workers: boolean; watchers: boolean }
-  onChanged: () => void
-}) {
-  const [identityMode, setIdentityMode] = useState<'path' | 'inline'>('path')
-  const [identityPath, setIdentityPath] = useState('')
-  const [identityInline, setIdentityInline] = useState(GIT_IDENTITY_TEMPLATE)
-  const [identityBusy, setIdentityBusy] = useState(false)
-  const [identityLoaded, setIdentityLoaded] = useState(false)
-  const [identityError, setIdentityError] = useState<string | null>(null)
-  const [identitySaved, setIdentitySaved] = useState(false)
-
-  useEffect(() => {
-    let active = true
-    setIdentityLoaded(false)
-    setIdentityError(null)
-    setIdentitySaved(false)
-    setIdentityPath('')
-    setIdentityInline(GIT_IDENTITY_TEMPLATE)
-    fetch(`${apiBase}/api/repos/${repo.key}/git-identity`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error(await responseError(response))
-        return (await response.json()) as {
-          gitIdentity: { mode: 'path' | 'inline'; value: string } | null
-        }
-      })
-      .then(({ gitIdentity }) => {
-        if (!active) return
-        const mode = gitIdentity?.mode ?? 'path'
-        setIdentityMode(mode)
-        if (mode === 'path') setIdentityPath(gitIdentity?.value ?? '')
-        else setIdentityInline(gitIdentity?.value ?? '')
-        setIdentityLoaded(true)
-      })
-      .catch((err: unknown) => {
-        if (!active) return
-        setIdentityError(err instanceof Error ? err.message : String(err))
-        setIdentityLoaded(true)
-      })
-    return () => {
-      active = false
-    }
-  }, [repo.key])
-
-  const saveIdentity = async (identity: { mode: 'path' | 'inline'; value: string } | null) => {
-    setIdentityBusy(true)
-    setIdentityError(null)
-    setIdentitySaved(false)
-    try {
-      const response = await fetch(`${apiBase}/api/repos/${repo.key}/git-identity`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(identity),
-      })
-      if (!response.ok) throw new Error(await responseError(response))
-      const body = (await response.json()) as {
-        gitIdentity: { mode: 'path' | 'inline'; value: string } | null
-      }
-      setIdentityMode(body.gitIdentity?.mode ?? 'path')
-      if (body.gitIdentity === null) {
-        setIdentityPath('')
-        setIdentityInline(GIT_IDENTITY_TEMPLATE)
-      } else if (body.gitIdentity.mode === 'path') {
-        setIdentityPath(body.gitIdentity.value)
-      } else {
-        setIdentityInline(body.gitIdentity.value)
-      }
-      setIdentitySaved(true)
-    } catch (err) {
-      setIdentityError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setIdentityBusy(false)
-    }
-  }
-
-  return (
-    <div className="mt-6 space-y-4">
-      <div className={card}>
-        <h2 className="mb-1 text-sm text-fg-muted">Repository participation</h2>
-        <ul className="divide-y divide-line">
-          <ParticipationRow repo={repo} onChanged={onChanged} />
-        </ul>
-      </div>
-      <div className={card}>
-        <h2 className="mb-1 text-sm text-fg-muted">Git identity for amagi commits</h2>
-        <p className="mb-3 text-sm text-fg-faint">
-          Applies only to amagi-created worktrees. Leave unset to use the repository persona or
-          ambient Git identity.
-        </p>
-        {!identityLoaded ? (
-          <p className="text-sm text-fg-faint">Loading…</p>
-        ) : (
-          <>
-            <fieldset disabled={identityBusy}>
-              <legend className="sr-only">Git identity source</legend>
-              <div className="flex flex-wrap gap-4 text-sm">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name={`git-identity-${repo.key}`}
-                    value="path"
-                    checked={identityMode === 'path'}
-                    onChange={() => setIdentityMode('path')}
-                  />
-                  Gitconfig file
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name={`git-identity-${repo.key}`}
-                    value="inline"
-                    checked={identityMode === 'inline'}
-                    onChange={() => setIdentityMode('inline')}
-                  />
-                  Inline text
-                </label>
-              </div>
-            </fieldset>
-            {identityMode === 'path' ? (
-              <label className="mt-3 block text-sm text-fg-muted">
-                Path to gitconfig
-                <input
-                  type="text"
-                  value={identityPath}
-                  onChange={(event) => setIdentityPath(event.currentTarget.value)}
-                  placeholder="~/.config/git/personas/work.gitconfig"
-                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
-                />
-              </label>
-            ) : (
-              <label className="mt-3 block text-sm text-fg-muted">
-                Gitconfig text
-                <textarea
-                  value={identityInline}
-                  onChange={(event) => setIdentityInline(event.currentTarget.value)}
-                  placeholder={GIT_IDENTITY_TEMPLATE}
-                  rows={7}
-                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
-                />
-              </label>
-            )}
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                type="button"
-                disabled={identityBusy || (identityMode === 'path' && identityPath.trim() === '')}
-                onClick={() =>
-                  void saveIdentity({
-                    mode: identityMode,
-                    value: identityMode === 'path' ? identityPath : identityInline,
-                  })
-                }
-                className={secondary}
-              >
-                {identityBusy ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                type="button"
-                disabled={identityBusy}
-                onClick={() => void saveIdentity(null)}
-                className={secondary}
-              >
-                Clear identity
-              </button>
-              {identitySaved && <span className="text-sm text-fg-faint">Saved</span>}
-            </div>
-            {identityError !== null && (
-              <p role="alert" className="mt-2 text-sm text-red-ink">
-                {identityError}
-              </p>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  )
-}
-
-async function responseError(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { error?: string }
-    return body.error ?? `Request failed (${response.status})`
-  } catch {
-    return `Request failed (${response.status})`
-  }
 }

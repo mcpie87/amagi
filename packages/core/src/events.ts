@@ -17,6 +17,7 @@ export const TASK_STATES = [
   'committed',
   'pr_open',
   'pr_flagged',
+  'pr_merge_conflict',
   'retrying',
   'done',
   'no_pr',
@@ -43,11 +44,17 @@ export function isTerminal(state: TaskState): boolean {
 /**
  * Whether the operator may start a task over from scratch: any parked task,
  * or an in-flight one stuck before it got a worktree. Never done/abandoned
- * (the tracker issue is closed) nor a task with a PR, which would dangle.
+ * (the tracker issue is closed) nor a task with a live PR, which would dangle.
  */
 export function canReset(state: TaskState, hasWorktree: boolean): boolean {
   if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr') return true
-  if (isTerminal(state) || state === 'pr_open' || state === 'pr_flagged') return false
+  if (
+    isTerminal(state) ||
+    state === 'pr_open' ||
+    state === 'pr_flagged' ||
+    state === 'pr_merge_conflict'
+  )
+    return false
   return !hasWorktree
 }
 
@@ -68,14 +75,17 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   fixing: ['reviewing', 'checks'],
   retrying: ['implementing', 'reviewing'],
   committed: ['pr_open'],
-  pr_open: ['pr_flagged'],
+  pr_open: ['pr_flagged', 'pr_merge_conflict'],
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
-  pr_flagged: ['pr_open'],
+  pr_flagged: ['pr_open', 'pr_merge_conflict'],
+  pr_merge_conflict: ['pr_open'],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   if (from === to) return false
+  // A PR watcher can reclassify legacy conflict parks once it sees the open PR.
+  if (from === 'needs_human' && to === 'pr_merge_conflict') return true
   // A parked or stopped task is retired by the operator's close action: a
   // stopped run parks as cancelled (worktree preserved), and instant close
   // then abandons it and deletes the worktree. A no_pr/needs_human task whose
@@ -368,6 +378,12 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('notify.failed'),
+    channel: z.string(),
+    title: z.string(),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal('notify.idle'), title: z.string(), body: z.string() }),
   z.object({
     type: z.literal('watcher.run.started'),

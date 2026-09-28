@@ -632,6 +632,58 @@ export function RecheckPrButton({
   )
 }
 
+/** Queues a conflicted PR for the existing conflict watcher to resolve. */
+export function ResolveConflictsButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (state !== 'pr_merge_conflict') return null
+
+  const queue = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/resolve-conflicts`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setResult({ kind: 'error', text: (await res.json())?.error ?? `HTTP ${res.status}` })
+      } else {
+        setResult({ kind: 'ok', text: 'queued on the PR conflict watcher' })
+      }
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void queue()}
+        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
+      >
+        {busy ? 'Queuing…' : 'Queue conflict resolution'}
+      </button>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function StopButton({ taskId }: { taskId: string }) {
   const { status, stop } = useRunner()
   const [busy, setBusy] = useState(false)

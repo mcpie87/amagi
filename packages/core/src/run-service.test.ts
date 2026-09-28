@@ -904,6 +904,62 @@ describe('RunService', () => {
     )
   })
 
+  test('review runs resolve their harness, model, and seat from an assigned reviewer', async () => {
+    const captured: Config['harness']['implement'][] = []
+    const service = new RunService({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
+      config: config({
+        worker: [
+          { id: 'implementer', name: 'Implementer', kind: 'claude', roles: ['implement'] },
+          {
+            id: 'reviewer',
+            name: 'Reviewer',
+            kind: 'codex',
+            model: 'review-model',
+            effort: 'high',
+            seat: 'review-seat',
+            roles: ['review'],
+          },
+        ],
+      }),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      makeHarness: (cfg) => {
+        captured.push(cfg)
+        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+      },
+    })
+    const result = await service.start()
+    expect(result).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual([
+      expect.objectContaining({ kind: 'claude' }),
+      expect.objectContaining({
+        kind: 'codex',
+        model: 'review-model',
+        effort: 'high',
+        seat: 'review-seat',
+      }),
+    ])
+  })
+
+  test('review-only workers are not eligible for implementation runs', async () => {
+    const tracker = new FakeTracker([TASK])
+    const service = makeService(
+      tracker,
+      new FakeHarness(() => {}),
+      1,
+      config({ worker: [{ id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'] }] }),
+    )
+    expect(await service.start()).toMatchObject({ ok: false, error: 'no available worker' })
+    expect(await tracker.ready()).toEqual([TASK])
+    expect((await service.status()).totalSeats).toBe(0)
+    service.dispose()
+  })
+
   test('start gates a claimed task on the override model, not the configured default', async () => {
     const hard = { ...TASK, difficulty: 'high' }
     let captured: Config['harness']['implement'] | null = null

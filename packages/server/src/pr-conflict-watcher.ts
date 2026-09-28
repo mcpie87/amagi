@@ -1,6 +1,7 @@
 import {
   type Config,
   type ConflictWatchState,
+  canTransition,
   conflictWatchPath,
   exec as defaultExec,
   type Exec,
@@ -28,6 +29,7 @@ import {
   saveConflictWatch,
   syncPrPriorityLabel,
   type Tracker,
+  taskIdFromPrBranch,
   type WorkerActivity,
 } from '@amagi/core'
 import { startPoller } from './poller.ts'
@@ -52,6 +54,7 @@ export type PrConflictWatcherOptions = {
 export type PrConflictWatcher = {
   stop(): void
   activity(): WorkerActivity
+  queue(prNumber: number): void
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
@@ -99,6 +102,7 @@ export function startPrConflictWatcher({
   }
   /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
   let unknownCursor = 0
+  const queuedPrs = new Set<number>()
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -307,11 +311,29 @@ export function startPrConflictWatcher({
           level,
         })
       }
+      const queuedNow = new Set(queuedPrs)
+      queuedPrs.clear()
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
+        const taskId = taskIdFromPrBranch(pr.headRefName)
+        const task = taskId === null ? null : store.task(taskId)
+        if (task !== null && task.prMergeStatus !== 'conflicted') {
+          store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
+        }
+        if (task !== null && task.state !== 'pr_merge_conflict') {
+          if (canTransition(task.state, 'pr_merge_conflict')) {
+            store.append(task.id, {
+              type: 'task.state',
+              from: task.state,
+              to: 'pr_merge_conflict',
+              reason: `PR #${pr.number} has merge conflicts`,
+            })
+          }
+        }
         if (
+          !queuedNow.has(pr.number) &&
           seen !== undefined &&
           seen.headOid === headOid &&
           (seen.baseOid === baseOid || seen.contained === true)
@@ -446,6 +468,22 @@ export function startPrConflictWatcher({
 
   const poller = startPoller(intervalMs, tick, true)
   return {
+    queue(prNumber) {
+      queuedPrs.add(prNumber)
+      const runId = `queued-${Date.now()}`
+      store.append(null, {
+        type: 'watcher.action',
+        repo,
+        name: 'pr-conflict-watcher',
+        runId,
+        targetType: 'pr',
+        targetId: String(prNumber),
+        prNumber,
+        result: 'conflict resolution queued',
+        level: 'info',
+      })
+      poller.trigger()
+    },
     stop() {
       poller.stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }

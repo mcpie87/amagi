@@ -325,6 +325,49 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
   })
 })
 
+describe('GET /api/repos/:repo/open-prs', () => {
+  test('returns every open PR from the forge', async () => {
+    const forge = new FakeMergePrDriver()
+    forge.open = [
+      {
+        number: 1,
+        title: 'Mergeable',
+        body: '',
+        url: 'https://github.com/owner/repo/pull/1',
+        headRefName: 'feature/one',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        createdAt: '',
+        updatedAt: '',
+        labels: [],
+      },
+      {
+        number: 2,
+        title: 'Conflicted',
+        body: '',
+        url: 'https://github.com/owner/repo/pull/2',
+        headRefName: 'feature/two',
+        baseRefName: 'main',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY',
+        headRefOid: null,
+        createdAt: '',
+        updatedAt: '',
+        labels: [],
+      },
+    ]
+    ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
+    app = createApp({ workspaces: ws.workspaces })
+
+    const res = await app.request('/api/repos/repo1/open-prs')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { prs: PrInfo[] }
+    expect(body.prs.map((pr) => pr.number)).toEqual([1, 2])
+  })
+})
+
 describe('identical issue ids across repos do not collide', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1', 'repo2'])
@@ -2128,6 +2171,7 @@ describe('repo settings endpoints', () => {
       autoQueue: false,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
+      desktopFailureAlerts: false,
       staleMaxParallel: false,
     })
   })
@@ -2139,11 +2183,13 @@ describe('repo settings endpoints', () => {
       autoQueue: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
+      desktopFailureAlerts: false,
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
+      desktopFailureAlerts: false,
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2182,6 +2228,7 @@ describe('repo settings endpoints', () => {
       autoQueue: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
+      desktopFailureAlerts: false,
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2208,6 +2255,7 @@ describe('repo settings endpoints', () => {
       autoQueue: false,
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
+      desktopFailureAlerts: false,
     })
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
@@ -2228,6 +2276,38 @@ describe('repo settings endpoints', () => {
     })
     expect(loadConfig(workspace.root).config.loop.autoQueue).toBe(true)
     expect((await patch('repo1', '{"ntfyServer":""}')).status).toBe(400)
+  })
+
+  test('PATCH persists the desktop failure alert setting for this repository', async () => {
+    const res = await patch('repo1', JSON.stringify({ desktopFailureAlerts: true }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ desktopFailureAlerts: true })
+    expect(ws.workspaces.get('repo1')?.config.notify.desktopFailureAlerts).toBe(true)
+    expect(ws.workspaces.get('repo2')?.config.notify.desktopFailureAlerts).toBe(false)
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
+      desktopFailureAlerts: true,
+    })
+  })
+
+  test('test-ntfy sends to the saved topic and rejects an unset topic', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: string[] = []
+    globalThis.fetch = (async (input: unknown) => {
+      requests.push(String(input))
+      return new Response('ok', { status: 200 })
+    }) as typeof fetch
+    try {
+      expect(
+        (await app.request('/api/repos/repo1/settings/test-ntfy', { method: 'POST' })).status,
+      ).toBe(400)
+      await patch('repo1', JSON.stringify({ ntfyTopic: 'saved-topic' }))
+      const response = await app.request('/api/repos/repo1/settings/test-ntfy', { method: 'POST' })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ ok: true })
+      expect(requests).toEqual(['https://ntfy.sh/saved-topic'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   test('PATCH rejects an empty body', async () => {
@@ -2397,6 +2477,22 @@ describe('fleet endpoints', () => {
     expect(loadGlobalConfig().worker[0]).toMatchObject({ count: 3, seatCount: 3 })
   })
 
+  test('worker role assignments persist and reject roles outside the fleet', async () => {
+    const created = await send('POST', '/api/workers', {
+      name: 'Reviewer',
+      kind: 'codex',
+      roles: ['review'],
+    })
+    expect(created.status).toBe(201)
+    const { id } = (await created.json()) as { id: string }
+    expect(loadGlobalConfig().worker[0]?.roles).toEqual(['review'])
+
+    const updated = await send('PATCH', `/api/workers/${id}`, { roles: ['implement', 'review'] })
+    expect(updated.status).toBe(200)
+    expect(loadGlobalConfig().worker[0]?.roles).toEqual(['implement', 'review'])
+    expect((await send('PATCH', `/api/workers/${id}`, { roles: ['triage'] })).status).toBe(400)
+  })
+
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
     fleet = [
@@ -2469,9 +2565,18 @@ describe('fleet endpoints', () => {
   test('watchers are updated in the global config and the stall watcher takes only enabled', async () => {
     const res = await send('PATCH', '/api/watchers/mention', { kind: 'codex', model: 'gpt-x' })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ enabled: true, kind: 'codex', model: 'gpt-x' })
+    expect(await res.json()).toEqual({
+      enabled: true,
+      allowedAuthors: [],
+      kind: 'codex',
+      model: 'gpt-x',
+    })
     await send('PATCH', '/api/watchers/mention', { model: null, enabled: false })
-    expect(loadGlobalConfig().watchers.mention).toEqual({ enabled: false, kind: 'codex' })
+    expect(loadGlobalConfig().watchers.mention).toEqual({
+      enabled: false,
+      allowedAuthors: [],
+      kind: 'codex',
+    })
     expect((await send('PATCH', '/api/watchers/stall', { model: 'x' })).status).toBe(400)
     expect((await send('PATCH', '/api/watchers/stall', { enabled: false })).status).toBe(200)
     expect(loadGlobalConfig().watchers.stall.enabled).toBe(false)
@@ -2925,6 +3030,36 @@ describe('question channel', () => {
     const sent = store.events().filter((e) => e.type === 'notify.sent')
     expect(sent).toHaveLength(2)
     expect(sent.map((e) => e.type === 'notify.sent' && e.channel).sort()).toEqual(['broken', 'spy'])
+  })
+
+  test('asking records desktop delivery failures when dashboard alerts are enabled', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    workspace.config.notify.desktopFailureAlerts = true
+    app = createApp({
+      workspaces: ws.workspaces,
+      notify: [
+        {
+          kind: 'libnotify',
+          notify: async () => {
+            throw new Error('notify-send unavailable')
+          },
+        },
+      ],
+    })
+    claim('bd-1')
+    implementing('bd-1')
+
+    const res = await ask('bd-1', 'which registry?')
+    expect(res.status).toBe(201)
+    await Bun.sleep(10)
+    expect(store.events().filter((event) => event.type === 'notify.failed')).toMatchObject([
+      {
+        type: 'notify.failed',
+        channel: 'libnotify',
+        detail: 'notify-send unavailable',
+      },
+    ])
   })
 
   test('asking opens a gate on the issue and records its ref', async () => {
