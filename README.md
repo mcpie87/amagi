@@ -299,7 +299,7 @@ Every key is optional; the table below gives the schema and defaults.
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
 | `repo.persona` | string \| null | `null` | Git persona for commits/PRs: the name of a gitconfig fragment under `~/.config/git/personas/<name>.gitconfig` (e.g. `"agent-chise"`), included in each fresh worktree's own config so its `user.name`/`user.email` apply there without touching the main repo. |
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
-| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. `github` goes through `gh`, `forgejo` through a direct token-authenticated Forgejo API client; both are token-only and never require an interactive login. |
+| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. `github` uses `gh`; `forgejo` uses `tea` to create pull requests and post comments, with API reads for PR state and metadata. Both are token-only and never require an interactive login. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Fallback harness configuration for runs not routed through a worker. |
@@ -379,7 +379,7 @@ commands = ["just check"]
 | Variable | Effect |
 | --- | --- |
 | `GH_TOKEN` / `GITHUB_TOKEN` | The bot's GitHub token, exported into the Amagi process environment. Used for the `github` tracker/forge: `gh` runs against an Amagi-owned `GH_CONFIG_DIR` with this token (no `gh auth` state) and the remote is rewritten to push/fetch over HTTPS so an unattended run never prompts for an SSH passphrase. |
-| `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step) and uses it for the direct Forgejo PR API client. `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
+| `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step). `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
 | `AMAGI_DB` | Overrides the SQLite store path (default: one per repo under `$XDG_STATE_HOME/amagi/repos/`). Mainly for tests and running multiple isolated instances. |
 | `AMAGI_TASK_TOKEN` | Set by the runner in the harness's environment; `amagi ask` uses it to authenticate its request to the server. Not meant to be set by hand. |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Standard XDG overrides that relocate the global config, the SQLite store, and the default worktree root, respectively. |

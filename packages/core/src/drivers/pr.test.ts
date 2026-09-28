@@ -420,15 +420,21 @@ describe('forgejoPr', () => {
     })
   }
 
-  test('pushes and creates the pr through the forgejo api', async () => {
+  test('pushes and creates the pr through tea', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec, calls } = remote()
     await withFetch(
       (path, method) => {
-        if (path.startsWith('repos/owner/repo/pulls') && method === 'POST') {
+        if (path === 'repos/owner/repo/pulls?state=open' && method === 'GET') {
           return new Response(
-            JSON.stringify({ index: 3, html_url: 'https://git.example.com/owner/repo/pulls/3' }),
-            { status: 201 },
+            JSON.stringify([
+              {
+                number: 3,
+                html_url: 'https://git.example.com/owner/repo/pulls/3',
+                head: { ref: 'amagi/am-1' },
+              },
+            ]),
+            { status: 200 },
           )
         }
         if (path.endsWith('/labels')) return new Response('{}', { status: 201 })
@@ -451,6 +457,29 @@ describe('forgejoPr', () => {
     // the push went out over the tokenized remote
     expect(push?.join(' ')).toContain('x-access-token:fj_tok@git.example.com/')
     expect(push?.join(' ')).toContain('insteadOf=git@git.example.com:')
+    expect(calls).toContainEqual([
+      'tea',
+      'pr',
+      'create',
+      '--base',
+      'main',
+      '--head',
+      'amagi/am-1',
+      '--title',
+      'Do the thing',
+      '--description',
+      'Task: am-1',
+      '--labels',
+      'amagi',
+    ])
+  })
+
+  test('posts a comment through tea', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec, calls } = remote()
+    await makePrDriver('forgejo', exec).postComment('/wt', 3, 'explanation')
+
+    expect(calls).toContainEqual(['tea', 'comment', '3', 'explanation'])
   })
 
   test('resolves merged state from the forgejo api', async () => {
