@@ -612,7 +612,7 @@ export class Runner {
     this.peakContext = 0
     this.contextWarned = false
     this.contextRestarts = 0
-    store.append(task.id, {
+    const claimEvent = store.append(task.id, {
       type: 'task.claimed',
       title: task.title,
       tracker: this.deps.tracker.kind,
@@ -639,12 +639,10 @@ export class Runner {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
       } else if (err instanceof LeaseLostError) {
-        // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
-        // or another worker took over). Stop before colliding with the new
-        // owner and leave the task where the reclaim parked it: either the new
-        // worker drives it, or the next one resumes its recorded worktree, so no
-        // human attention is needed.
-        store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
+        // A reclaim outside this process (for example, `bd reclaim`) has no
+        // event to clear the stale active state. Queue it only if no replacement
+        // runner has claimed the task since this run started.
+        store.recordLeaseLoss(task.id, claimEvent.seq, errMsg(err))
       } else {
         const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })

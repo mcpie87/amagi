@@ -8,6 +8,7 @@ import type {
   StoredEvent,
   TaskState,
 } from '../events.ts'
+import { isTerminal } from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -187,6 +188,39 @@ export class Store {
     const stored = { seq, ts, taskId, ...body } as StoredEvent
     for (const l of this.listeners) l(stored)
     return stored
+  }
+
+  recordLeaseLoss(taskId: string, sinceSeq: number, message: string): boolean {
+    const events: StoredEvent[] = []
+    this.db.exec('begin immediate')
+    try {
+      const task = this.task(taskId)
+      const replaced = this.db
+        .query(
+          "select 1 from events where task_id = ? and seq > ? and type = 'task.claimed' limit 1",
+        )
+        .get(taskId, sinceSeq)
+      if (task === null || isTerminal(task.state) || replaced !== null) {
+        this.db.exec('commit')
+        return false
+      }
+      const append = (body: EventBody) => {
+        const ts = Date.now()
+        const row = this.db
+          .query('insert into events (ts, task_id, type, body) values (?, ?, ?, ?) returning seq')
+          .get(ts, taskId, body.type, JSON.stringify(body)) as { seq: number }
+        this.apply(taskId, ts, body)
+        events.push({ seq: row.seq, ts, taskId, ...body } as StoredEvent)
+      }
+      if (task.state !== 'queued') append({ type: 'task.reclaimed', reason: message })
+      append({ type: 'error', message, fatal: false })
+      this.db.exec('commit')
+    } catch (err) {
+      this.db.exec('rollback')
+      throw err
+    }
+    for (const event of events) for (const listener of this.listeners) listener(event)
+    return true
   }
 
   private apply(taskId: string | null, ts: number, body: EventBody): void {

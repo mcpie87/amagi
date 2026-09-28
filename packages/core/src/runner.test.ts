@@ -1626,10 +1626,8 @@ describe('Runner.runOnce', () => {
   })
 
   test('a reclaimed lease stops the run without parking the task in needs_human', async () => {
-    // The stall watcher (or bd reclaim) takes the claim back mid-run: the
-    // tracker heartbeat goes dead and the runner must stop before colliding
-    // with the new owner, leaving the task in the claimed state the reclaim
-    // parked it in instead of escalating to needs_human.
+    // An external reclaim has no local task.reclaimed event, so the runner
+    // must queue the task after it stops, without escalating to needs_human.
     const tracker = new FakeTracker([TASK])
     tracker.leaseAlive = false
     const released: string[] = []
@@ -1654,8 +1652,6 @@ describe('Runner.runOnce', () => {
       kind: 'fake',
       start: () => {
         queue.push({ kind: 'text', text: 'working...' })
-        // The stall watcher reclaims the claim while the agent is still running.
-        setTimeout(() => store.append(TASK.id, { type: 'task.reclaimed' }), 100)
         setTimeout(() => {
           queue.close()
           resolveDone({
@@ -1682,9 +1678,63 @@ describe('Runner.runOnce', () => {
     expect(types(TASK.id)).not.toContain('needs_human')
     // The claim was already reclaimed, so the runner must not release it again.
     expect(released).toEqual([])
-    // Let the harness's reclaim/completion timers fire while this test's store
-    // is still live; otherwise the 100ms timer leaks into the next test's
-    // store and corrupts it with a spurious task.reclaimed event.
+    // Let the harness completion timer fire while this test's store is live.
+    await new Promise((resolve) => setTimeout(resolve, 350))
+  })
+
+  test('a reclaimed lease does not reset a replacement runner claim', async () => {
+    const task = { ...TASK, id: 'bd-replaced' }
+    const tracker = new FakeTracker([task])
+    tracker.leaseAlive = false
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    const agent: AgentProcess = {
+      pid: 9,
+      events: () => queue,
+      done,
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const harness: Harness = {
+      kind: 'fake',
+      start: () => {
+        queue.push({ kind: 'text', text: 'working...' })
+        setTimeout(
+          () =>
+            store.append(task.id, {
+              type: 'task.claimed',
+              title: task.title,
+              tracker: 'fake',
+            }),
+          100,
+        )
+        setTimeout(() => {
+          queue.close()
+          resolveDone({
+            exitCode: 0,
+            ok: true,
+            sessionId: 'sess-1',
+            summary: 'done',
+            usage: null,
+            stderr: '',
+          })
+        }, 300)
+        return agent
+      },
+      resume: () => agent,
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+
+    const result = await makeRunner(tracker, harness, config(), new FakePr(), exec, 50).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(store.task(task.id)?.state).toBe('claimed')
+    expect(store.task(task.id)?.lastError).toBeNull()
     await new Promise((resolve) => setTimeout(resolve, 350))
   })
 
