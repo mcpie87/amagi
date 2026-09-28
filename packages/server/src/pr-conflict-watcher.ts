@@ -1,6 +1,7 @@
 import {
   type Config,
   type ConflictWatchState,
+  canTransition,
   conflictWatchPath,
   exec as defaultExec,
   type Exec,
@@ -28,8 +29,10 @@ import {
   saveConflictWatch,
   syncPrPriorityLabel,
   type Tracker,
+  taskIdFromPrBranch,
   type WorkerActivity,
 } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type PrConflictWatcherOptions = {
   /** Repo key, so activity can be attributed across registered repos. */
@@ -51,6 +54,7 @@ export type PrConflictWatcherOptions = {
 export type PrConflictWatcher = {
   stop(): void
   activity(): WorkerActivity
+  queue(prNumber: number): void
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
@@ -79,8 +83,6 @@ export function startPrConflictWatcher({
   exec,
   makeHarnessFn,
 }: PrConflictWatcherOptions): PrConflictWatcher {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let scanned = 0
   let conflicting = 0
@@ -100,6 +102,7 @@ export function startPrConflictWatcher({
   }
   /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
   let unknownCursor = 0
+  const queuedPrs = new Set<number>()
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -308,11 +311,29 @@ export function startPrConflictWatcher({
           level,
         })
       }
+      const queuedNow = new Set(queuedPrs)
+      queuedPrs.clear()
       for (const pr of conflicts) {
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
+        const taskId = taskIdFromPrBranch(pr.headRefName)
+        const task = taskId === null ? null : store.task(taskId)
+        if (task !== null && task.prMergeStatus !== 'conflicted') {
+          store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
+        }
+        if (task !== null && task.state !== 'pr_merge_conflict') {
+          if (canTransition(task.state, 'pr_merge_conflict')) {
+            store.append(task.id, {
+              type: 'task.state',
+              from: task.state,
+              to: 'pr_merge_conflict',
+              reason: `PR #${pr.number} has merge conflicts`,
+            })
+          }
+        }
         if (
+          !queuedNow.has(pr.number) &&
           seen !== undefined &&
           seen.headOid === headOid &&
           (seen.baseOid === baseOid || seen.contained === true)
@@ -443,15 +464,28 @@ export function startPrConflictWatcher({
     } catch (err) {
       console.warn(`pr conflict watcher history: ${errMsg(err)}`)
     }
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 
-  void tick()
+  const poller = startPoller(intervalMs, tick, true)
   return {
+    queue(prNumber) {
+      queuedPrs.add(prNumber)
+      const runId = `queued-${Date.now()}`
+      store.append(null, {
+        type: 'watcher.action',
+        repo,
+        name: 'pr-conflict-watcher',
+        runId,
+        targetType: 'pr',
+        targetId: String(prNumber),
+        prNumber,
+        result: 'conflict resolution queued',
+        level: 'info',
+      })
+      poller.trigger()
+    },
     stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
+      poller.stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,

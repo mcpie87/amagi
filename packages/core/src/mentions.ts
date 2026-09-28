@@ -65,12 +65,17 @@ export function saveHandledMentions(path: string, ids: Set<string>): void {
 }
 
 /**
- * True when a comment mentions the agent handle and was written by a human.
- * Shared by the one-shot responder and the continuous watcher so both agree on
- * what counts as a mention.
+ * True when an allowlisted, non-agent author mentions the agent handle.
+ * Shared by the one-shot responder and the continuous watcher so both enforce
+ * the same author policy.
  */
-export function isAgentMention(comment: PrComment, handle: string): boolean {
-  if (comment.body === '' || comment.user === handle) return false
+export function isAgentMention(
+  comment: PrComment,
+  handle: string,
+  allowedAuthors: readonly string[] = [],
+): boolean {
+  if (comment.body === '' || comment.user === handle || !allowedAuthors.includes(comment.user))
+    return false
   const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const re = new RegExp(`@${escaped}\\b`, 'i')
   return re.test(comment.body)
@@ -81,12 +86,13 @@ export type ListPrMentionsOptions = {
   cwd: string
   pr: PrInfo
   handle: string
+  allowedAuthors: readonly string[]
 }
 
 /** Comments on a PR that mention the agent handle, from humans (never the agent itself). */
 export async function listPrMentions(opts: ListPrMentionsOptions): Promise<PrComment[]> {
   const comments = await opts.driver.listComments(opts.cwd, opts.pr.number)
-  return comments.filter((c) => isAgentMention(c, opts.handle))
+  return comments.filter((c) => isAgentMention(c, opts.handle, opts.allowedAuthors))
 }
 
 /** Live progress of one mention response, for a status line while it works. */

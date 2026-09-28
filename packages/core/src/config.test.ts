@@ -49,6 +49,17 @@ afterEach(() => {
 })
 
 describe('loadConfig', () => {
+  test('worker roles default to implementation and accept review assignments', () => {
+    const parsed = Config.shape.worker.parse([
+      { id: 'implementer', name: 'Implementer', kind: 'claude' },
+      { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'] },
+    ])
+    expect(parsed.map(({ roles }) => roles)).toEqual([['implement'], ['review']])
+    expect(() =>
+      Config.shape.worker.parse([{ id: 'bad', name: 'Bad', kind: 'claude', roles: ['triage'] }]),
+    ).toThrow()
+  })
+
   test('works with no files at all', () => {
     const { config, sources } = loadConfig(repo)
     expect(sources).toEqual([])
@@ -206,7 +217,7 @@ describe('loadConfig', () => {
   test('watcher settings default on and inherit implement harness fields', () => {
     writeRepo(
       '[harness.implement]\nkind = "claude"\nmodel = "base-model"\neffort = "medium"\nseat = "shared"\n\n' +
-        '[watchers.mention]\nenabled = false\nmodel = "mention-model"\nseat = "mention-seat"\n\n' +
+        '[watchers.mention]\nenabled = false\nmodel = "mention-model"\nseat = "mention-seat"\nallowedAuthors = ["alice", "bob"]\n\n' +
         '[watchers.prConflict]\neffort = "high"\n\n' +
         '[watchers.stall]\nenabled = false\n',
     )
@@ -216,6 +227,7 @@ describe('loadConfig', () => {
       enabled: false,
       model: 'mention-model',
       seat: 'mention-seat',
+      allowedAuthors: ['alice', 'bob'],
     })
     expect(config.watchers.prConflict.enabled).toBe(true)
     expect(config.watchers.stall.enabled).toBe(false)
@@ -377,10 +389,35 @@ describe('worker fleet', () => {
       { name: 'codex_alt', count: 1 },
     ])
     expect(
-      expandWorkers(config.worker, config.seats).map(({ id, name, seat }) => [id, name, seat]),
+      expandWorkers(config.worker, config.seats).map(({ id, name, seat, displaySlot }) => [
+        id,
+        name,
+        seat,
+        displaySlot,
+      ]),
     ).toEqual([
-      ['worker-a-1', 'Worker A 1', 'codex_main-1'],
-      ['worker-a-2', 'Worker A 2', 'codex_main-2'],
+      ['worker-a-1', 'Worker A 1', 'codex_main-1', 1],
+      ['worker-a-2', 'Worker A 2', 'codex_main-2', 2],
+    ])
+  })
+
+  test('assigns display slots across profiles sharing a counted named seat', () => {
+    const config = Config.parse({
+      seats: [{ name: 'codex_42', count: 2 }],
+      worker: [
+        { id: 'first', name: 'First', kind: 'codex', seat: 'codex_42' },
+        { id: 'second', name: 'Second', kind: 'codex', seat: 'codex_42' },
+      ],
+    })
+
+    expect(
+      expandWorkers(config.worker, config.seats).map(({ seat, displaySlot }) => [
+        seat,
+        displaySlot,
+      ]),
+    ).toEqual([
+      ['codex_42-1', 1],
+      ['codex_42-2', 2],
     ])
   })
 
@@ -399,19 +436,29 @@ describe('worker fleet', () => {
       kind: 'claude',
       model: 'claude-opus-5-5',
       seat: 'personal',
+      roles: ['implement'],
       enabled: true,
     },
-    { id: 'w-bbbbbb', name: 'Codex 1', kind: 'codex', effort: 'high', enabled: false },
+    {
+      id: 'w-bbbbbb',
+      name: 'Codex 1',
+      kind: 'codex',
+      effort: 'high',
+      roles: ['implement'],
+      enabled: false,
+    },
   ] as const
 
   test('round-trips through writeGlobalConfig', () => {
     writeGlobal('[server]\nport = 9000\n')
     writeGlobalConfig({ worker: fleet })
     const config = loadGlobalConfig()
-    expect(config.worker).toEqual(fleet.map((worker) => ({ ...worker, count: 1, seatCount: 1 })))
+    expect(config.worker).toEqual(
+      fleet.map((worker) => ({ ...worker, roles: [...worker.roles], count: 1, seatCount: 1 })),
+    )
     expect(config.server.port).toBe(9000)
     expect(loadConfig(repo).config.worker).toEqual(
-      fleet.map((worker) => ({ ...worker, count: 1, seatCount: 1 })),
+      fleet.map((worker) => ({ ...worker, roles: [...worker.roles], count: 1, seatCount: 1 })),
     )
   })
 

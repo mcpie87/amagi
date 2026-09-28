@@ -18,6 +18,7 @@ const stateBadge: Record<TaskState, string> = {
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
   pr_flagged: 'bg-amber-soft text-amber-ink ring-amber-edge',
+  pr_merge_conflict: 'bg-red-soft text-red-ink ring-red-edge',
   done: 'bg-emerald-soft text-emerald-ink ring-emerald-edge',
   no_pr: 'bg-neutral-soft text-fg-muted ring-neutral-edge',
   needs_human: 'bg-red-soft text-red-ink ring-red-edge',

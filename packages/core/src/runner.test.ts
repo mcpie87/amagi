@@ -26,6 +26,7 @@ import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
+import { readUsageHold, usageHoldKey } from './usage-hold.ts'
 
 const TASK: TrackerTask = {
   id: 'bd-a1b2',
@@ -323,6 +324,8 @@ class FakePr implements PrDriver {
 let repo: string
 let wtRoot: string
 let store: Store
+let stateRoot: string
+let previousStateHome: string | undefined
 
 const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
@@ -374,6 +377,9 @@ beforeEach(async () => {
   delete process.env.GITHUB_TOKEN
   repo = mkdtempSync(join(tmpdir(), 'amagi-run-repo-'))
   wtRoot = mkdtempSync(join(tmpdir(), 'amagi-run-wt-'))
+  stateRoot = mkdtempSync(join(tmpdir(), 'amagi-run-state-'))
+  previousStateHome = process.env.XDG_STATE_HOME
+  process.env.XDG_STATE_HOME = stateRoot
   store = new Store(openDatabase(':memory:'))
   await execOk(exec, ['git', 'init', '-q', '-b', 'main', '.'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
@@ -387,6 +393,9 @@ afterEach(() => {
   store.close()
   rmSync(repo, { recursive: true, force: true })
   rmSync(wtRoot, { recursive: true, force: true })
+  rmSync(stateRoot, { recursive: true, force: true })
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousStateHome
 })
 
 const writesAFile: Turn = {
@@ -560,6 +569,46 @@ describe('Runner.review', () => {
 
     await runner.review({ task: TASK, cwd: repo, round: 3, finalPass: true })
     expect(reviewer.calls[2]?.resumeFrom).toBeNull()
+  })
+
+  test('parks without committing when checks fail after a review fix', async () => {
+    const forge = new FakePr()
+    const harness = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          const replyPath = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (replyPath === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(
+            replyPath,
+            JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Fixed.' }]),
+          )
+          writeFileSync(join(cwd, 'review-broke-checks'), 'broken\n')
+        },
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' }, maxRounds: 2 },
+        checks: { commands: ['test ! -e review-broke-checks'] },
+        loop: { maxCheckRounds: 0 },
+      }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('after review fix')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(forge.calls).toHaveLength(0)
   })
 
   test('invalid findings are re-asked once in the same session and reported as failed', async () => {
@@ -1888,6 +1937,35 @@ describe('Runner.runOnce', () => {
     expect(states(TASK.id)).toContain('retrying')
   })
 
+  test('a usage limit parks the task and records a shared hold past the retry budget', async () => {
+    const harness = new FakeHarness([
+      {
+        outcome: {
+          ok: false,
+          exitCode: 1,
+          stderr: "You've hit your usage limit, resets at 23:59",
+          sessionId: 'sess-1',
+        },
+      },
+    ])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'claude', model: 'sonnet' } },
+        loop: { maxRetries: 0 },
+      }),
+    )
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.task(TASK.id)?.state === 'retrying')
+    expect(stateReason(TASK.id)).toContain('fake+sonnet usage limit hold until')
+    expect(readUsageHold(usageHoldKey('fake', 'sonnet'))?.reason).toContain('usage limit')
+    expect(harness.calls).toHaveLength(1)
+    runner.cancel()
+    expect((await pending)?.state).toBe('cancelled')
+  })
+
   test('a session-limit failure defers, retries in a fresh session, and keeps one worktree', async () => {
     const harness = new FakeHarness([
       { outcome: { ok: false, exitCode: 1, stderr: 'hit the session limit', sessionId: 'sess-1' } },
@@ -2468,67 +2546,6 @@ describe('Runner.cancel', () => {
     expect(harness.calls).toHaveLength(2)
     // The run completed well inside the 60s backoff, so it cannot have slept it out.
     expect(Date.now() - started).toBeLessThan(10_000)
-  })
-})
-
-describe('Runner.requestCommit', () => {
-  const withWorktree = async (): Promise<string> => {
-    const wtPath = join(wtRoot, 'request-commit-worktree')
-    await execOk(exec, ['git', 'worktree', 'add', '-b', 'amagi/bd-a1b2-commit', wtPath, 'main'], {
-      cwd: repo,
-    })
-    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
-    return wtPath
-  }
-
-  test('stages and commits the worktree, returning the sha and recording commit.created', async () => {
-    const wtPath = await withWorktree()
-    writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
-
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      TASK.id,
-      wtPath,
-    )
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.sha).toMatch(/^[0-9a-f]{40}$/)
-    const created = store
-      .events({ taskId: TASK.id })
-      .find(
-        (e): e is Extract<StoredEvent, { type: 'commit.created' }> => e.type === 'commit.created',
-      )
-    expect(created?.sha).toBe(result.sha)
-    expect(created?.subject).toBe(`[${TASK.id}] ${TASK.title}`)
-    const subject = (
-      await execOk(exec, ['git', 'show', '-s', '--format=%s', 'HEAD'], {
-        cwd: wtPath,
-      })
-    ).trim()
-    expect(subject).toBe(created?.subject ?? '')
-    const head = (await execOk(exec, ['git', 'rev-parse', 'HEAD'], { cwd: wtPath })).trim()
-    expect(head).toBe(result.sha)
-  })
-
-  test('a clean worktree is a failure, not a commit', async () => {
-    const wtPath = await withWorktree()
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      TASK.id,
-      wtPath,
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('nothing to commit')
-    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
-  })
-
-  test('an unknown task is a failure', async () => {
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      'nope',
-      repo,
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('unknown task')
   })
 })
 

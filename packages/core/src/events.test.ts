@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  canReset,
   canTransition,
   EventBody,
   findingSeverityAtOrAbove,
@@ -8,6 +9,10 @@ import {
 } from './events.ts'
 
 describe('state machine', () => {
+  test('a live conflicted PR cannot be reset', () => {
+    expect(canReset('pr_merge_conflict', false)).toBe(false)
+  })
+
   test('queued tasks are non-terminal and can start work', () => {
     expect(isTerminal('queued')).toBe(false)
     expect(canTransition('queued', 'worktree_ready')).toBe(true)
@@ -137,6 +142,15 @@ describe('state machine', () => {
     expect(canTransition('pr_flagged', 'abandoned')).toBe(true)
     // non-terminal: the watcher owns the label and clears it back to pr_open
     expect(isTerminal('pr_flagged')).toBe(false)
+  })
+
+  test('a conflicted PR can return to pr_open when its conflicts are resolved', () => {
+    expect(canTransition('pr_open', 'pr_merge_conflict')).toBe(true)
+    expect(canTransition('pr_flagged', 'pr_merge_conflict')).toBe(true)
+    expect(canTransition('needs_human', 'pr_merge_conflict')).toBe(true)
+    expect(canTransition('pr_merge_conflict', 'pr_open')).toBe(true)
+    expect(canTransition('pr_merge_conflict', 'done')).toBe(true)
+    expect(isTerminal('pr_merge_conflict')).toBe(false)
   })
 
   test('skipping stages is rejected', () => {
