@@ -167,6 +167,12 @@ function fakeTracker(create: boolean): Tracker & { created: CreateTrackerTask[] 
     kind: 'fake',
     capabilities,
     created: [] as CreateTrackerTask[],
+    async openIds(): Promise<string[]> {
+      return []
+    },
+    async get(): Promise<TrackerTask | null> {
+      return null
+    },
     async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
       tracker.created.push(input)
       return {
@@ -236,6 +242,24 @@ function summaryHarness(
     start: (opts: AgentStartOptions) => {
       if (opts.cwd !== tmpdir()) writeFileSync(outPath, summary)
       return base.start(opts)
+    },
+  }
+}
+
+function quickTaskHarness(
+  result: unknown,
+  prompts: string[] = [],
+  options: AgentStartOptions[] = [],
+): Harness {
+  const base = fakeHarness({ summary: 'add-a-task' })
+  const draft = fakeHarness({ summary: JSON.stringify(result) })
+  return {
+    ...base,
+    start: (opts: AgentStartOptions) => {
+      if (!opts.prompt.startsWith('Draft one issue')) return base.start(opts)
+      prompts.push(opts.prompt)
+      options.push(opts)
+      return draft.start(opts)
     },
   }
 }
@@ -669,9 +693,11 @@ describe('respondToMention', () => {
     })
   })
 
-  test('an add-a-task mention creates a tracker task and posts a confirmation', async () => {
+  test('an add-a-task mention creates an issue through the tracker and posts its URL', async () => {
     const tracker = fakeTracker(true)
     const driver = new FakeDriver()
+    const prompts: string[] = []
+    const options: AgentStartOptions[] = []
     const kind = await respondToMention({
       root: '/repo',
       repoName: 'amagi',
@@ -680,14 +706,55 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker,
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () =>
+        quickTaskHarness(
+          {
+            status: 'create',
+            title: 'Add tests',
+            context: 'Requested on PR #7',
+            goal: 'Cover the feature',
+            scope: 'Add tests',
+            assumptions: 'Use Bun',
+            acceptance: 'Tests pass',
+          },
+          prompts,
+          options,
+        ),
     })
 
     expect(kind).toBe('add-a-task')
     expect(tracker.created).toHaveLength(1)
-    expect(tracker.created[0]?.title).toContain('PR #7:')
-    expect(tracker.created[0]?.description).toContain('@bob')
+    expect(tracker.created[0]?.description).toContain('## Acceptance\nTests pass')
+    expect(prompts[0]).toContain('The service will create it through the configured tracker')
+    expect(prompts[0]).toContain('please track adding tests for this')
+    expect(options[0]?.permissions).toBe('read-only')
+    expect(options[0]?.cwd).toBe(tmpdir())
     expect(driver.posted).toEqual(['@bob Logged this as task bd-new.'])
+  })
+
+  test('a materially ambiguous task request asks one focused question without creating an issue', async () => {
+    const tracker = fakeTracker(true)
+    const driver = new FakeDriver()
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '4', user: 'bob', body: 'please track the migration' },
+      config: config(),
+      driver,
+      tracker,
+      makeHarnessFn: () =>
+        quickTaskHarness({
+          status: 'clarification',
+          question: 'Should this migrate the public API or the persisted data format?',
+        }),
+    })
+
+    expect(kind).toBe('add-a-task')
+    expect(tracker.created).toHaveLength(0)
+    expect(driver.posted).toEqual([
+      '@bob Should this migrate the public API or the persisted data format?',
+    ])
   })
 
   test('an add-a-task mention without a task-capable tracker explains it cannot', async () => {
@@ -700,7 +767,7 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker: fakeTracker(false),
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () => quickTaskHarness({ status: 'create', title: 'Something' }),
     })
 
     expect(kind).toBe('add-a-task')

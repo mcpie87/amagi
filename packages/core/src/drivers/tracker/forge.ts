@@ -69,10 +69,7 @@ function parseGate(ref: GateRef): { taskId: string; questionId: string } {
 export abstract class ForgeTracker implements Tracker {
   abstract readonly kind: string
   readonly leaseTtlMs = LEASE_TTL_MS
-  // gh/tea store title, body and labels only; the planned-work fields
-  // (acceptance criteria, priority, dependencies) have no forge equivalent,
-  // so writes are surfaced as unsupported instead of silently dropping data.
-  readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
+  readonly capabilities: TrackerCapabilities = { create: true, edit: false, dependencies: false }
   protected readonly cwd: string
   protected readonly exec: Exec
 
@@ -88,6 +85,7 @@ export abstract class ForgeTracker implements Tracker {
   protected abstract addClaimLabel(id: string): Promise<void>
   protected abstract removeClaimLabel(id: string): Promise<void>
   protected abstract setState(id: string, closed: boolean): Promise<void>
+  protected abstract createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue>
 
   async ready(limit = 20): Promise<TrackerTask[]> {
     return (await this.listOpen(limit))
@@ -110,8 +108,17 @@ export abstract class ForgeTracker implements Tracker {
     return issue === null ? null : toTask(issue)
   }
 
-  async createTask(_input: CreateTrackerTask): Promise<TrackerTask> {
-    throw new UnsupportedCapabilityError('create', this.kind)
+  async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+    if (input.priority !== null || input.dependencies.length > 0 || input.parent !== null) {
+      throw new Error(
+        `${this.kind} tracker cannot create issues with priority, dependencies or parent`,
+      )
+    }
+    const body =
+      input.acceptanceCriteria === null
+        ? input.description
+        : `${input.description}\n\n## Acceptance\n${input.acceptanceCriteria}`
+    return toTask(await this.createIssue(input, body))
   }
 
   async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
@@ -181,6 +188,30 @@ function ghIssue(raw: Record<string, unknown>): ForgeIssue {
 
 export class GithubTracker extends ForgeTracker {
   readonly kind = 'github'
+
+  protected async createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue> {
+    const url = (
+      await execOk(
+        this.exec,
+        [
+          'gh',
+          'issue',
+          'create',
+          '--title',
+          input.title,
+          '--body-file',
+          '-',
+          ...input.labels.flatMap((label) => ['--label', label]),
+        ],
+        { cwd: this.cwd, stdin: body, env: ghEnv() },
+      )
+    ).trim()
+    const id = url.match(/\/issues\/(\d+)\/?$/)?.[1]
+    if (id === undefined) throw new Error('gh issue create returned no issue URL')
+    const issue = await this.getIssue(id)
+    if (issue === null) throw new Error(`gh issue ${id} disappeared after creation`)
+    return issue
+  }
 
   protected async listOpen(limit: number): Promise<ForgeIssue[]> {
     const out = await execOk(
@@ -264,6 +295,28 @@ function teaIssue(raw: Record<string, unknown>): ForgeIssue {
 
 export class ForgejoTracker extends ForgeTracker {
   readonly kind = 'forgejo'
+
+  protected async createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue> {
+    const output = await execOk(
+      this.exec,
+      [
+        'tea',
+        'issues',
+        'create',
+        '--title',
+        input.title,
+        '--description',
+        body,
+        ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
+      ],
+      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd) },
+    )
+    const id = output.match(/\/issues\/(\d+)\b/)?.[1]
+    if (id === undefined) throw new Error('tea issues create returned no issue URL')
+    const issue = await this.getIssue(id)
+    if (issue === null) throw new Error(`tea issue ${id} disappeared after creation`)
+    return issue
+  }
 
   protected async listOpen(limit: number): Promise<ForgeIssue[]> {
     const out = await execOk(
