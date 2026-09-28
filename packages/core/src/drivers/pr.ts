@@ -2,7 +2,7 @@ import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
 import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
-import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
+import { forgeToken, ghEnv, gitTokenConfig, parseRemote, teaEnv } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
 
@@ -275,12 +275,7 @@ function githubPr(exec: Exec): PrDriver {
 
 type ForgejoRemote = { base: string; ownerRepo: string }
 
-/**
- * Forgejo PRs through a direct token-authenticated API client. tea's `pulls
- * create` crashes on its own output in current releases, so the PR lifecycle
- * skips tea and talks to the Forgejo API with the token from the environment;
- * the ForgejoTracker still uses tea for issues.
- */
+/** Forgejo PR writes use tea, with API reads for PR state and metadata. */
 function forgejoPr(exec: Exec): PrDriver {
   let remote: ForgejoRemote | null = null
 
@@ -401,6 +396,7 @@ function forgejoPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote: remoteName, title, body, labels }) {
+      await forgeTokenOrThrow()
       await pushTaskBranch(
         exec,
         { cwd, remote: remoteName, branch },
@@ -414,21 +410,29 @@ function forgejoPr(exec: Exec): PrDriver {
           color: 'A0A0A0',
         }).catch(() => {})
       }
-      const created = await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/pulls`, {
-        title,
-        body,
-        head: branch,
-        base,
-        labels,
-      })
-      const number = Number(created.index ?? created.number ?? 0)
-      return {
-        url:
-          typeof created.html_url === 'string'
-            ? created.html_url
-            : `${(await forge(cwd)).base}/${(await forge(cwd)).ownerRepo}/pulls/${number}`,
-        number,
+      await execOk(
+        exec,
+        [
+          'tea',
+          'pr',
+          'create',
+          '--base',
+          base,
+          '--head',
+          branch,
+          '--title',
+          title,
+          '--description',
+          body,
+          ...(labels.length === 0 ? [] : ['--labels', labels.join(',')]),
+        ],
+        { cwd, env: await teaEnv(exec, cwd) },
+      )
+      const created = (await listOpenPrs(cwd)).find((pr) => pr.headRefName === branch)
+      if (created === undefined) {
+        throw new Error(`tea created a pull request for ${branch}, but it could not be found`)
       }
+      return { url: created.url, number: created.number }
     },
     async getPr(cwd, number) {
       const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
@@ -471,8 +475,10 @@ function forgejoPr(exec: Exec): PrDriver {
       return out
     },
     async postComment(cwd, number, body) {
-      await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/issues/${number}/comments`, {
-        body,
+      await forgeTokenOrThrow()
+      await execOk(exec, ['tea', 'comment', String(number), body], {
+        cwd,
+        env: await teaEnv(exec, cwd),
       })
     },
     async closePr(cwd, number, _reason) {
