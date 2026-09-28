@@ -313,16 +313,24 @@ export function startPrConflictWatcher({
       }
       const queuedNow = new Set(queuedPrs)
       queuedPrs.clear()
-      for (const pr of conflicts) {
+      const resolutionPrs = [...conflicts]
+      for (const prNumber of queuedNow) {
+        const pr = prs.find((candidate) => candidate.number === prNumber)
+        if (pr !== undefined && !resolutionPrs.some((candidate) => candidate.number === prNumber)) {
+          resolutionPrs.push(pr)
+        }
+      }
+      for (const pr of resolutionPrs) {
+        const isConflict = conflicts.some((candidate) => candidate.number === pr.number)
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
         const taskId = taskIdFromPrBranch(pr.headRefName)
         const task = taskId === null ? null : store.task(taskId)
-        if (task !== null && task.prMergeStatus !== 'conflicted') {
+        if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
           store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
         }
-        if (task !== null && task.state !== 'pr_merge_conflict') {
+        if (isConflict && task !== null && task.state !== 'pr_merge_conflict') {
           if (canTransition(task.state, 'pr_merge_conflict')) {
             store.append(task.id, {
               type: 'task.state',
@@ -354,11 +362,13 @@ export function startPrConflictWatcher({
           onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
-        nextState[key] = {
-          headOid,
-          baseOid,
-          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
-          ...(result.contained ? { contained: true } : {}),
+        if (isConflict) {
+          nextState[key] = {
+            headOid,
+            baseOid,
+            ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+            ...(result.contained ? { contained: true } : {}),
+          }
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
           console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
