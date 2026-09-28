@@ -294,6 +294,25 @@ test('a queued PR bypasses the unchanged conflict cache and is recorded', async 
   ).toBe(true)
 })
 
+test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  w.queue(7)
+  await Bun.sleep(60)
+
+  expect(started).toBe(2)
+  expect(counter(w, 'conflicting')).toBe(0)
+})
+
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
   let started = 0
   let head = 'deadbeef'
