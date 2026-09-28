@@ -2172,6 +2172,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
       staleMaxParallel: false,
     })
   })
@@ -2184,12 +2185,14 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2229,6 +2232,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2256,6 +2260,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
     })
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
@@ -2287,6 +2292,17 @@ describe('repo settings endpoints', () => {
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
       desktopFailureAlerts: true,
     })
+  })
+
+  test('PATCH persists the maximum review rounds and updates the workspace config', async () => {
+    const res = await patch('repo1', JSON.stringify({ reviewMaxRounds: 5 }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ reviewMaxRounds: 5 })
+    expect(ws.workspaces.get('repo1')?.config.review.maxRounds).toBe(5)
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    expect(loadConfig(workspace.root).config.review.maxRounds).toBe(5)
+    expect((await patch('repo1', JSON.stringify({ reviewMaxRounds: 0 }))).status).toBe(400)
   })
 
   test('test-ntfy sends to the saved topic and rejects an unset topic', async () => {

@@ -1337,6 +1337,7 @@ export function createApp({
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+        reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
       })
     })
@@ -1348,7 +1349,8 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts } = c.req.valid('json')
+        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts, reviewMaxRounds } =
+          c.req.valid('json')
         writeConfig(ws.root, {
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
           ...(ntfyTopic === undefined &&
@@ -1362,12 +1364,14 @@ export function createApp({
                   ...(desktopFailureAlerts === undefined ? {} : { desktopFailureAlerts }),
                 },
               }),
+          ...(reviewMaxRounds === undefined ? {} : { review: { maxRounds: reviewMaxRounds } }),
         })
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
         if (desktopFailureAlerts !== undefined) {
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
         }
+        if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -1382,6 +1386,7 @@ export function createApp({
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+          reviewMaxRounds: ws.config.review.maxRounds,
         })
       },
     )
