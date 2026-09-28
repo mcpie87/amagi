@@ -1938,11 +1938,13 @@ export class Runner {
         // process happens to report a clean exit.
         if (this.contextRestarts >= config.loop.contextMaxRestarts) {
           releaseProbe?.()
-          this.transition(
-            taskId,
-            'needs_human',
-            `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
-          )
+          if (role !== 'review') {
+            this.transition(
+              taskId,
+              'needs_human',
+              `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+            )
+          }
           return { sessionId, stopped: true, summary, model, effort }
         }
         // Fresh-context restart: keep the worktree and claim, and hand the new
@@ -1981,7 +1983,7 @@ export class Runner {
         (!usageLimited && attempt > config.loop.maxRetries)
       ) {
         releaseProbe?.()
-        this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
+        if (role !== 'review') this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
         return { sessionId, stopped: true, summary, model, effort }
       }
       if (usageLimited) {

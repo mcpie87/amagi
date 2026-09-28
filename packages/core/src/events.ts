@@ -18,6 +18,7 @@ export const TASK_STATES = [
   'pr_open',
   'pr_flagged',
   'pr_merge_conflict',
+  'pr_conflict_fixing',
   'retrying',
   'done',
   'no_pr',
@@ -52,7 +53,8 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
     isTerminal(state) ||
     state === 'pr_open' ||
     state === 'pr_flagged' ||
-    state === 'pr_merge_conflict'
+    state === 'pr_merge_conflict' ||
+    state === 'pr_conflict_fixing'
   )
     return false
   return !hasWorktree
@@ -79,7 +81,8 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
   pr_flagged: ['pr_open', 'pr_merge_conflict'],
-  pr_merge_conflict: ['pr_open'],
+  pr_merge_conflict: ['pr_conflict_fixing', 'pr_open'],
+  pr_conflict_fixing: ['pr_merge_conflict', 'pr_open'],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {

@@ -313,16 +313,29 @@ export function startPrConflictWatcher({
       }
       const queuedNow = new Set(queuedPrs)
       queuedPrs.clear()
-      for (const pr of conflicts) {
+      const resolutionPrs = [...conflicts]
+      for (const prNumber of queuedNow) {
+        const pr = prs.find((candidate) => candidate.number === prNumber)
+        if (pr !== undefined && !resolutionPrs.some((candidate) => candidate.number === prNumber)) {
+          resolutionPrs.push(pr)
+        }
+      }
+      for (const pr of resolutionPrs) {
+        const isConflict = conflicts.some((candidate) => candidate.number === pr.number)
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
         const taskId = taskIdFromPrBranch(pr.headRefName)
         const task = taskId === null ? null : store.task(taskId)
-        if (task !== null && task.prMergeStatus !== 'conflicted') {
+        if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
           store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
         }
-        if (task !== null && task.state !== 'pr_merge_conflict') {
+        if (
+          isConflict &&
+          task !== null &&
+          task.state !== 'pr_merge_conflict' &&
+          task.state !== 'pr_conflict_fixing'
+        ) {
           if (canTransition(task.state, 'pr_merge_conflict')) {
             store.append(task.id, {
               type: 'task.state',
@@ -341,6 +354,15 @@ export function startPrConflictWatcher({
           nextState[key] = seen
           continue
         }
+        const currentTask = task === null ? null : store.task(task.id)
+        if (currentTask?.state === 'pr_merge_conflict') {
+          store.append(currentTask.id, {
+            type: 'task.state',
+            from: currentTask.state,
+            to: 'pr_conflict_fixing',
+            reason: `Conflict resolution running for PR #${pr.number}`,
+          })
+        }
         const result: ResolveConflictResult = await resolveConflict({
           repo,
           repoRoot: root,
@@ -354,11 +376,28 @@ export function startPrConflictWatcher({
           onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
-        nextState[key] = {
-          headOid,
-          baseOid,
-          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
-          ...(result.contained ? { contained: true } : {}),
+        const resolvedTask = task === null ? null : store.task(task.id)
+        const settledState = result.ok ? 'pr_open' : 'pr_merge_conflict'
+        if (
+          resolvedTask?.state === 'pr_conflict_fixing' &&
+          canTransition(resolvedTask.state, settledState)
+        ) {
+          store.append(resolvedTask.id, {
+            type: 'task.state',
+            from: resolvedTask.state,
+            to: settledState,
+            reason: result.ok
+              ? `Conflict resolution completed for PR #${pr.number}`
+              : `PR #${pr.number} remains conflicted after resolution attempt`,
+          })
+        }
+        if (isConflict) {
+          nextState[key] = {
+            headOid,
+            baseOid,
+            ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+            ...(result.contained ? { contained: true } : {}),
+          }
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
           console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
