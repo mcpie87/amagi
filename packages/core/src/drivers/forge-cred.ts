@@ -3,8 +3,8 @@ import { join } from 'node:path'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { stateHome } from '../paths.ts'
 
-/** The two forges Amagi can talk to; mirrors ForgeKind from config.ts. */
-type ForgeKind = 'github' | 'forgejo'
+/** The PR forges Amagi can talk to; mirrors ForgeKind from config.ts. */
+type ForgeKind = 'github' | 'gitlab' | 'forgejo'
 
 /** Tea login name in the Amagi-provisioned profile; a single login per isolated config. */
 export const TEA_LOGIN = 'amagi'
@@ -18,6 +18,7 @@ export function forgeToken(kind: ForgeKind): string | null {
   if (kind === 'github') {
     return process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? null
   }
+  if (kind === 'gitlab') return process.env.GITLAB_TOKEN ?? null
   return (
     process.env.FORGEJO_TOKEN ?? process.env.GITEA_SERVER_TOKEN ?? process.env.TEA_TOKEN ?? null
   )

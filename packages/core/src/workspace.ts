@@ -83,6 +83,28 @@ export class Workspaces {
     return workspace
   }
 
+  /** Refresh the configured PR forge after a repository settings change. */
+  refreshForgeConfig(key: string): Workspace | null {
+    const workspace = this.get(key)
+    if (workspace === null) return null
+    const entry = this.list().find((candidate) => candidate.key === key)
+    if (entry === undefined) return null
+    const { config } = loadConfig(entry.path)
+    workspace.config.forge = config.forge
+    try {
+      workspace.forge = (this.opts.forgeFor ?? ((next) => makePrDriver(next.forge.kind)))(
+        config,
+        entry.path,
+      )
+    } catch (err) {
+      console.warn(
+        `workspace ${entry.key}: forge driver ${config.forge.kind} unavailable: ${errMsg(err)}`,
+      )
+      workspace.forge = null
+    }
+    return workspace
+  }
+
   private build(entry: RegistryEntry): Workspace {
     const { config } = loadConfig(entry.path)
     const store = (this.opts.storeFor ?? defaultStoreFor)(entry.key)

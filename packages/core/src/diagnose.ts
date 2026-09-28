@@ -9,10 +9,11 @@ import { isRepoRoot, type RegistryEntry } from './registry.ts'
 export type Diagnostic = { name: string; ok: boolean; detail?: string }
 
 const TRACKER_BIN: Record<string, string> = { beads: 'bd', github: 'gh', forgejo: 'tea' }
-const FORGE_BIN: Record<string, string> = { github: 'gh', forgejo: 'tea' }
+const FORGE_BIN: Record<string, string | null> = { github: 'gh', gitlab: null, forgejo: 'tea' }
 /** Env var a forge token comes from, per kind, so the diagnostic names the fix. */
 const FORGE_TOKEN_VAR: Record<string, string> = {
   github: 'GH_TOKEN or GITHUB_TOKEN',
+  gitlab: 'GITLAB_TOKEN',
   forgejo: 'FORGEJO_TOKEN',
 }
 
@@ -66,12 +67,14 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     const forgeBin = FORGE_BIN[config.forge.kind]
     checks.push({
       name: `forge ${config.forge.kind}`,
-      ok: forgeBin !== undefined && binaryExists(forgeBin),
-      ...(forgeBin === undefined
-        ? { detail: 'driver not implemented' }
-        : binaryExists(forgeBin)
-          ? {}
-          : { detail: `${forgeBin} not on PATH` }),
+      ok: forgeBin === null || (forgeBin !== undefined && binaryExists(forgeBin)),
+      ...(forgeBin === null
+        ? {}
+        : forgeBin === undefined
+          ? { detail: 'driver not implemented' }
+          : binaryExists(forgeBin)
+            ? {}
+            : { detail: `${forgeBin} not on PATH` }),
     })
     checks.push({
       name: `forge ${config.forge.kind} token`,

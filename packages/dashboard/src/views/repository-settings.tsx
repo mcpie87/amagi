@@ -4,7 +4,89 @@ import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
 type Repo = { key: string; name: string; workers: boolean; watchers: boolean }
 type GitIdentity = { mode: 'path' | 'inline'; value: string }
+type ForgeKind = 'github' | 'gitlab' | 'forgejo'
 const GIT_IDENTITY_TEMPLATE = '[user]\n\tname = Your Name\n\temail = you@example.com\n'
+
+function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
+  const [kind, setKind] = useState<ForgeKind>('github')
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    setLoaded(false)
+    setError(null)
+    fetch(`${apiBase}/api/repos/${repo.key}/settings`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as { forgeKind: ForgeKind }
+      })
+      .then(({ forgeKind }) => {
+        if (active) {
+          setKind(forgeKind)
+          setLoaded(true)
+        }
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        setError(err instanceof Error ? err.message : String(err))
+        setLoaded(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const save = async (forgeKind: ForgeKind) => {
+    setBusy(true)
+    setError(null)
+    setSaved(false)
+    const err = await send('PATCH', `/api/repos/${repo.key}/settings`, { forgeKind })
+    setBusy(false)
+    if (err !== null) setError(err)
+    else {
+      setKind(forgeKind)
+      setSaved(true)
+    }
+  }
+
+  return (
+    <div className={card}>
+      <h2 className="mb-1 text-sm text-fg-muted">Pull request forge</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Select the forge where amagi creates and manages pull requests for this repository.
+      </p>
+      {!loaded ? (
+        <p className="text-sm text-fg-faint">Loading…</p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-sm text-fg-muted">
+            PR target
+            <select
+              value={kind}
+              disabled={busy}
+              onChange={(event) => void save(event.currentTarget.value as ForgeKind)}
+              className="ml-2 rounded border border-line-strong bg-app px-3 py-2 text-fg"
+            >
+              <option value="github">GitHub</option>
+              <option value="gitlab">GitLab</option>
+              <option value="forgejo">Forgejo</option>
+            </select>
+          </label>
+          {busy && <span className="text-sm text-fg-faint">Saving…</span>}
+          {saved && <span className="text-sm text-fg-faint">Saved</span>}
+          {error !== null && (
+            <span role="alert" className="text-sm text-red-ink">
+              {error}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function RepositoryParticipation({
   repo,
@@ -215,6 +297,7 @@ export function RepositorySettingsCard({ repo, onChanged }: { repo: Repo; onChan
   return (
     <div className="mt-6 space-y-4">
       <RepositoryParticipation repo={repo} onChanged={onChanged} />
+      <RepositoryForge repo={repo} />
       <RepositoryGitIdentity repo={repo} />
     </div>
   )

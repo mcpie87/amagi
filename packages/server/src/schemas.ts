@@ -128,6 +128,7 @@ export const SettingsBody = z
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),
     reviewMaxRounds: z.number().int().min(1).optional(),
+    forgeKind: z.enum(['github', 'gitlab', 'forgejo']).optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',

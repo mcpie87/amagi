@@ -1370,6 +1370,7 @@ export function createApp({
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
         reviewMaxRounds: ws.config.review.maxRounds,
+        forgeKind: ws.config.forge.kind,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
       })
     })
@@ -1381,8 +1382,14 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts, reviewMaxRounds } =
-          c.req.valid('json')
+        const {
+          autoQueue,
+          ntfyTopic,
+          ntfyServer,
+          desktopFailureAlerts,
+          reviewMaxRounds,
+          forgeKind,
+        } = c.req.valid('json')
         writeConfig(ws.root, {
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
           ...(ntfyTopic === undefined &&
@@ -1397,7 +1404,9 @@ export function createApp({
                 },
               }),
           ...(reviewMaxRounds === undefined ? {} : { review: { maxRounds: reviewMaxRounds } }),
+          ...(forgeKind === undefined ? {} : { forge: { kind: forgeKind } }),
         })
+        if (forgeKind !== undefined) workspaces.refreshForgeConfig(repo)
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
         if (desktopFailureAlerts !== undefined) {
@@ -1419,6 +1428,7 @@ export function createApp({
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
           reviewMaxRounds: ws.config.review.maxRounds,
+          forgeKind: ws.config.forge.kind,
         })
       },
     )

@@ -2201,6 +2201,7 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
       staleMaxParallel: false,
     })
   })
@@ -2214,6 +2215,7 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
@@ -2221,6 +2223,7 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2261,6 +2264,7 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
       staleMaxParallel: false,
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2289,6 +2293,7 @@ describe('repo settings endpoints', () => {
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
+      forgeKind: 'github',
     })
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
