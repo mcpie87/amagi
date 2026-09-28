@@ -273,6 +273,160 @@ function githubPr(exec: Exec): PrDriver {
   }
 }
 
+type GitlabRemote = { base: string; project: string }
+
+/** GitLab merge requests through the REST API, using the configured remote host. */
+function gitlabPr(exec: Exec): PrDriver {
+  async function remote(cwd: string, name = 'origin'): Promise<GitlabRemote> {
+    const url = await execOk(exec, ['git', 'remote', 'get-url', name], { cwd })
+    const parsed = parseRemote(url.trim())
+    if (parsed === null) throw new Error(`cannot parse GitLab remote: ${url.trim()}`)
+    return { base: parsed.base, project: encodeURIComponent(parsed.ownerRepo) }
+  }
+
+  async function api<T>(cwd: string, method: string, path: string, body?: unknown): Promise<T> {
+    const token = forgeToken('gitlab')
+    if (token === null)
+      throw new Error('GitLab token missing: set GITLAB_TOKEN in the amagi process environment')
+    const r = await remote(cwd)
+    const response = await fetch(`${r.base}/api/v4/projects/${r.project}/${path}`, {
+      method,
+      headers: {
+        'PRIVATE-TOKEN': token,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    if (!response.ok) {
+      throw new Error(
+        `GitLab API ${method} ${path}: ${response.status} ${(await response.text()).slice(0, 300)}`,
+      )
+    }
+    if (response.status === 204) return undefined as T
+    return (await response.json()) as T
+  }
+
+  const normalize = (mr: {
+    iid: number
+    title: string
+    description: string | null
+    web_url: string
+    source_branch: string
+    target_branch: string
+    detailed_merge_status?: string
+    merge_status?: string
+    sha?: string
+    created_at: string
+    updated_at: string
+    labels?: string[]
+  }): PrInfo => {
+    const status = mr.detailed_merge_status ?? mr.merge_status ?? 'unknown'
+    const mergeable = ['can_be_merged', 'mergeable'].includes(status)
+    const conflicted = ['cannot_be_merged', 'conflict'].includes(status)
+    return {
+      number: mr.iid,
+      title: mr.title,
+      body: mr.description ?? '',
+      url: mr.web_url,
+      headRefName: mr.source_branch,
+      baseRefName: mr.target_branch,
+      mergeable: conflicted ? 'CONFLICTING' : mergeable ? 'MERGEABLE' : 'UNKNOWN',
+      mergeStateStatus: conflicted ? 'DIRTY' : mergeable ? 'CLEAN' : status.toUpperCase(),
+      headRefOid: mr.sha ?? null,
+      createdAt: mr.created_at,
+      updatedAt: mr.updated_at,
+      labels: mr.labels ?? [],
+    }
+  }
+
+  return {
+    async createPr({ cwd, branch, base, remote: remoteName, title, body, labels }) {
+      await pushTaskBranch(
+        exec,
+        { cwd, remote: remoteName, branch },
+        forgeToken('gitlab'),
+        async (head) => {
+          const open = await api<Array<{ iid: number; web_url: string }>>(
+            cwd,
+            'GET',
+            `merge_requests?state=opened&source_branch=${encodeURIComponent(head)}`,
+          )
+          return open[0] === undefined ? null : { number: open[0].iid, url: open[0].web_url }
+        },
+      )
+      const mr = await api<{ iid: number; web_url: string }>(cwd, 'POST', 'merge_requests', {
+        source_branch: branch,
+        target_branch: base,
+        title,
+        description: body,
+        labels: labels.join(','),
+      })
+      return { number: mr.iid, url: mr.web_url }
+    },
+    async getPr(cwd, number) {
+      const mr = await api<{ state: string; merged_at: string | null }>(
+        cwd,
+        'GET',
+        `merge_requests/${number}`,
+      )
+      return mr.merged_at !== null ? 'merged' : mr.state === 'closed' ? 'closed' : 'open'
+    },
+    async listOpenPrs(cwd) {
+      const rows = await api<Parameters<typeof normalize>[0][]>(
+        cwd,
+        'GET',
+        'merge_requests?state=opened&per_page=100',
+      )
+      return rows.map(normalize)
+    },
+    async getMergeStatus(cwd, number) {
+      const mr = await api<Parameters<typeof normalize>[0]>(cwd, 'GET', `merge_requests/${number}`)
+      const status = mr.detailed_merge_status ?? mr.merge_status
+      return ['can_be_merged', 'mergeable'].includes(status ?? '')
+        ? 'mergeable'
+        : ['cannot_be_merged', 'conflict'].includes(status ?? '')
+          ? 'conflicted'
+          : 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      const result = await api<{ changes: Array<{ diff: string }> }>(
+        cwd,
+        'GET',
+        `merge_requests/${number}/changes`,
+      )
+      return result.changes.map((change) => change.diff).join('\n')
+    },
+    async listComments(cwd, number) {
+      const notes = await api<Array<{ id: number; body: string; author: { username: string } }>>(
+        cwd,
+        'GET',
+        `merge_requests/${number}/notes?per_page=100`,
+      )
+      return notes.map((note) => ({
+        id: String(note.id),
+        user: note.author.username,
+        body: note.body,
+      }))
+    },
+    async postComment(cwd, number, body) {
+      await api(cwd, 'POST', `merge_requests/${number}/notes`, { body })
+    },
+    async closePr(cwd, number, reason) {
+      await api(cwd, 'PUT', `merge_requests/${number}`, { state_event: 'close' })
+      await api(cwd, 'POST', `merge_requests/${number}/notes`, { body: reason })
+    },
+    async addLabel(cwd, number, label) {
+      await api(cwd, 'PUT', `merge_requests/${number}`, { add_labels: label })
+    },
+    async removeLabel(cwd, number, label) {
+      await api(cwd, 'PUT', `merge_requests/${number}`, { remove_labels: label })
+    },
+    async deleteBranch(cwd, remoteName, branch) {
+      await deleteRemoteBranch(exec, cwd, remoteName, branch, forgeToken('gitlab'))
+    },
+  }
+}
+
 type ForgejoRemote = { base: string; ownerRepo: string }
 
 /** Forgejo PR writes use tea, with API reads for PR state and metadata. */
@@ -515,6 +669,8 @@ export function makePrDriver(kind: string, exec: Exec = defaultExec): PrDriver {
       return githubPr(exec)
     case 'forgejo':
       return forgejoPr(exec)
+    case 'gitlab':
+      return gitlabPr(exec)
     default:
       throw new NotImplementedDriverError('forge', kind)
   }

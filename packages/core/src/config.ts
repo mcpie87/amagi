@@ -9,7 +9,7 @@ import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './path
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
-export const ForgeKind = z.enum(['github', 'forgejo'])
+export const ForgeKind = z.enum(['github', 'gitlab', 'forgejo'])
 
 export const DifficultyConfig = z.object({
   /**

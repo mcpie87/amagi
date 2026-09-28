@@ -5,7 +5,7 @@ import { stateHome } from '../../paths.ts'
 import { prepareShim } from './shim.ts'
 
 const FORGE_CREDENTIAL =
-  /^(GH_TOKEN|GITHUB_TOKEN|FORGEJO_TOKEN|GITEA_SERVER_(TOKEN|USER|PASSWORD|OTP)|TEA_TOKEN)$/
+  /^(GH_TOKEN|GITHUB_TOKEN|GITLAB_TOKEN|FORGEJO_TOKEN|GITEA_SERVER_(TOKEN|USER|PASSWORD|OTP)|TEA_TOKEN)$/
 
 /** gh/tea config dirs whose contents are forge credentials and must never reach an agent. */
 const FORGE_CONFIG_DIRS = ['gh', 'tea']
