@@ -24,23 +24,6 @@ export function fmtDateTime(value: Date | number, format = DEFAULT_DATE_FORMAT):
   return normalizeDateFormat(format).replace(DATE_TOKENS, (token) => tokens[token] ?? token)
 }
 
-export function fmtBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = n
-  let i = 0
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024
-    i++
-  }
-  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`
-}
-
-export function fmtCpu(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '0s'
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
-}
-
 /** Compact fixed-width elapsed time, e.g. 0:42, 12:07, 2:41:33. */
 export function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))

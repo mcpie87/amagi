@@ -75,7 +75,13 @@ export const respondToMentionsCommand = defineCommand({
     for (const pr of prs) {
       let mentions: PrComment[]
       try {
-        mentions = await listPrMentions({ driver, cwd: root, pr, handle })
+        mentions = await listPrMentions({
+          driver,
+          cwd: root,
+          pr,
+          handle,
+          allowedAuthors: config.watchers.mention.allowedAuthors,
+        })
       } catch (err) {
         console.log(red(`#${pr.number}: failed to read comments: ${errMsg(err)}`))
         continue

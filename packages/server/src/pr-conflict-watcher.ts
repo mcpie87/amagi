@@ -1,6 +1,7 @@
 import {
   type Config,
   type ConflictWatchState,
+  canTransition,
   conflictWatchPath,
   exec as defaultExec,
   type Exec,
@@ -28,8 +29,10 @@ import {
   saveConflictWatch,
   syncPrPriorityLabel,
   type Tracker,
+  taskIdFromPrBranch,
   type WorkerActivity,
 } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type PrConflictWatcherOptions = {
   /** Repo key, so activity can be attributed across registered repos. */
@@ -51,6 +54,7 @@ export type PrConflictWatcherOptions = {
 export type PrConflictWatcher = {
   stop(): void
   activity(): WorkerActivity
+  queue(prNumber: number): void
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
@@ -79,8 +83,6 @@ export function startPrConflictWatcher({
   exec,
   makeHarnessFn,
 }: PrConflictWatcherOptions): PrConflictWatcher {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let scanned = 0
   let conflicting = 0
@@ -100,6 +102,7 @@ export function startPrConflictWatcher({
   }
   /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
   let unknownCursor = 0
+  const queuedPrs = new Set<number>()
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -308,17 +311,57 @@ export function startPrConflictWatcher({
           level,
         })
       }
-      for (const pr of conflicts) {
+      const queuedNow = new Set(queuedPrs)
+      queuedPrs.clear()
+      const resolutionPrs = [...conflicts]
+      for (const prNumber of queuedNow) {
+        const pr = prs.find((candidate) => candidate.number === prNumber)
+        if (pr !== undefined && !resolutionPrs.some((candidate) => candidate.number === prNumber)) {
+          resolutionPrs.push(pr)
+        }
+      }
+      for (const pr of resolutionPrs) {
+        const isConflict = conflicts.some((candidate) => candidate.number === pr.number)
         const key = String(pr.number)
         const headOid = pr.headRefOid ?? ''
         const seen = state[key]
+        const taskId = taskIdFromPrBranch(pr.headRefName)
+        const task = taskId === null ? null : store.task(taskId)
+        if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
+          store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
+        }
         if (
+          isConflict &&
+          task !== null &&
+          task.state !== 'pr_merge_conflict' &&
+          task.state !== 'pr_conflict_fixing'
+        ) {
+          if (canTransition(task.state, 'pr_merge_conflict')) {
+            store.append(task.id, {
+              type: 'task.state',
+              from: task.state,
+              to: 'pr_merge_conflict',
+              reason: `PR #${pr.number} has merge conflicts`,
+            })
+          }
+        }
+        if (
+          !queuedNow.has(pr.number) &&
           seen !== undefined &&
           seen.headOid === headOid &&
           (seen.baseOid === baseOid || seen.contained === true)
         ) {
           nextState[key] = seen
           continue
+        }
+        const currentTask = task === null ? null : store.task(task.id)
+        if (currentTask?.state === 'pr_merge_conflict') {
+          store.append(currentTask.id, {
+            type: 'task.state',
+            from: currentTask.state,
+            to: 'pr_conflict_fixing',
+            reason: `Conflict resolution running for PR #${pr.number}`,
+          })
         }
         const result: ResolveConflictResult = await resolveConflict({
           repo,
@@ -333,11 +376,28 @@ export function startPrConflictWatcher({
           onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
-        nextState[key] = {
-          headOid,
-          baseOid,
-          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
-          ...(result.contained ? { contained: true } : {}),
+        const resolvedTask = task === null ? null : store.task(task.id)
+        const settledState = result.ok ? 'pr_open' : 'pr_merge_conflict'
+        if (
+          resolvedTask?.state === 'pr_conflict_fixing' &&
+          canTransition(resolvedTask.state, settledState)
+        ) {
+          store.append(resolvedTask.id, {
+            type: 'task.state',
+            from: resolvedTask.state,
+            to: settledState,
+            reason: result.ok
+              ? `Conflict resolution completed for PR #${pr.number}`
+              : `PR #${pr.number} remains conflicted after resolution attempt`,
+          })
+        }
+        if (isConflict) {
+          nextState[key] = {
+            headOid,
+            baseOid,
+            ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+            ...(result.contained ? { contained: true } : {}),
+          }
         }
         if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
           console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
@@ -443,15 +503,28 @@ export function startPrConflictWatcher({
     } catch (err) {
       console.warn(`pr conflict watcher history: ${errMsg(err)}`)
     }
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 
-  void tick()
+  const poller = startPoller(intervalMs, tick, true)
   return {
+    queue(prNumber) {
+      queuedPrs.add(prNumber)
+      const runId = `queued-${Date.now()}`
+      store.append(null, {
+        type: 'watcher.action',
+        repo,
+        name: 'pr-conflict-watcher',
+        runId,
+        targetType: 'pr',
+        targetId: String(prNumber),
+        prNumber,
+        result: 'conflict resolution queued',
+        level: 'info',
+      })
+      poller.trigger()
+    },
     stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
+      poller.stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },
     activity: () => activity,

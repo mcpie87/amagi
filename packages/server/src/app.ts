@@ -11,12 +11,14 @@ import { resolve } from 'node:path'
 import {
   BeadsTracker,
   CAPABILITY_WORDS,
+  CHECKPOINT_COMMIT_SUMMARY,
   ChatService,
   Config,
   canReset,
   claimGate,
   classifyDifficulty,
   errMsg,
+  exec,
   expandTilde,
   expandWorkers,
   type GitIdentity,
@@ -25,23 +27,25 @@ import {
   HUMAN_ONLY_LABEL,
   hasStaleMaxParallel,
   isTerminal,
+  LibnotifyNotifier,
   type LiveRun,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
   mergeLiveRuns,
   type Notifier,
+  NtfyNotifier,
   newWorkerId,
   pidAlive,
   type Question,
   type RegistryEntry,
-  Runner,
   type RunServiceApi,
   reconcilePr,
   removeWorktree,
   resolveWorkerHarness,
   type Store,
   type StoredEvent,
+  stageAndCommit,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
@@ -109,6 +113,8 @@ export type ServerDeps = {
   syncRunners?: () => void
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
+  /** Queues one PR on the existing conflict watcher. */
+  queueConflictResolution?: (repo: string, prNumber: number) => boolean
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
@@ -180,20 +186,26 @@ const authorized = (c: Context, store: Store, id: string): boolean =>
 
 /**
  * Best effort: a notifier (e.g. a missing notify-send) must never break the
- * ask request, so failures are logged and still recorded as notify.sent so
- * the dashboard shows what was attempted.
+ * ask request. Desktop failures are recorded separately when their dashboard
+ * alert is enabled; other failures remain best effort.
  */
 async function notifyChannels(
   notifiers: Notifier[],
   store: Store,
   title: string,
   body: string,
+  desktopFailureAlerts = false,
 ): Promise<void> {
   for (const notifier of notifiers) {
     try {
       await notifier.notify(title, body)
     } catch (err) {
-      console.warn(`notify ${notifier.kind}: ${errMsg(err)}`)
+      const detail = errMsg(err)
+      console.warn(`notify ${notifier.kind}: ${detail}`)
+      if (notifier.kind === 'libnotify' && desktopFailureAlerts) {
+        store.append(null, { type: 'notify.failed', channel: notifier.kind, title, detail })
+        continue
+      }
     }
     store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
   }
@@ -269,6 +281,7 @@ export function createApp({
   runnerForRepo,
   syncRunners,
   workers,
+  queueConflictResolution,
   liveRuns,
   chatHarnessFor,
 }: ServerDeps) {
@@ -866,6 +879,15 @@ export function createApp({
       })
     })
 
+    .get('/api/repos/:repo/open-prs', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.forge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      return c.json({ prs: await ws.forge.listOpenPrs(ws.root) })
+    })
+
     .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -1056,6 +1078,29 @@ export function createApp({
       // caller's live state picks up a merge/close without a page reload.
       await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/resolve-conflicts', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (task.state !== 'pr_merge_conflict' || task.prMergeStatus !== 'conflicted') {
+        return c.json({ error: `task ${id} has no open conflicted PR` }, 409)
+      }
+      if (task.prNumber === null) {
+        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
+      }
+      if (queueConflictResolution?.(repo, task.prNumber) !== true) {
+        return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
+      }
+      ws.store.append(task.id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'pr_conflict_fixing',
+        reason: `Conflict resolution queued for PR #${task.prNumber}`,
+      })
+      return c.json({ taskId: id, queued: true })
     })
 
     .post(
@@ -1297,6 +1342,8 @@ export function createApp({
         autoQueue: ws.config.loop.autoQueue,
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
+        desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+        reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
       })
     })
@@ -1308,13 +1355,29 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer } = c.req.valid('json')
+        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts, reviewMaxRounds } =
+          c.req.valid('json')
         writeConfig(ws.root, {
-          loop: { autoQueue },
-          notify: { ntfyTopic, ntfyServer },
+          ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
+          ...(ntfyTopic === undefined &&
+          ntfyServer === undefined &&
+          desktopFailureAlerts === undefined
+            ? {}
+            : {
+                notify: {
+                  ...(ntfyTopic === undefined ? {} : { ntfyTopic }),
+                  ...(ntfyServer === undefined ? {} : { ntfyServer }),
+                  ...(desktopFailureAlerts === undefined ? {} : { desktopFailureAlerts }),
+                },
+              }),
+          ...(reviewMaxRounds === undefined ? {} : { review: { maxRounds: reviewMaxRounds } }),
         })
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
+        if (desktopFailureAlerts !== undefined) {
+          ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
+        }
+        if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -1328,9 +1391,38 @@ export function createApp({
           autoQueue: ws.config.loop.autoQueue,
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
+          desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+          reviewMaxRounds: ws.config.review.maxRounds,
         })
       },
     )
+
+    .post('/api/repos/:repo/settings/test-desktop', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      resolveWorkspace(workspaces, repo)
+      try {
+        await new LibnotifyNotifier().notify('Amagi desktop test', 'Desktop notifications work.')
+        return c.json({ ok: true })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
+
+    .post('/api/repos/:repo/settings/test-ntfy', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const { ntfyTopic, ntfyServer } = ws.config.notify
+      if (!ntfyTopic) return c.json({ error: 'Configure an ntfy topic first' }, 400)
+      try {
+        await new NtfyNotifier(ntfyTopic, ntfyServer).notify(
+          'Amagi ntfy test',
+          'ntfy notifications work.',
+        )
+        return c.json({ ok: true })
+      } catch (err) {
+        return c.json({ error: errMsg(err) }, 500)
+      }
+    })
 
     .patch(
       '/api/repos/:repo/participation',
@@ -1505,7 +1597,13 @@ export function createApp({
           from: task.state,
           to: 'awaiting_answer',
         })
-        void notifyChannels(notify, ws.store, `question from ${id}`, question)
+        void notifyChannels(
+          notify,
+          ws.store,
+          `question from ${id}`,
+          question,
+          ws.config.notify.desktopFailureAlerts,
+        )
         return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) }, 201)
       },
     )
@@ -1607,18 +1705,30 @@ export function createApp({
         }
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
-        const runner = new Runner({
-          store: ws.store,
-          tracker: ws.tracker,
-          harness: makeHarness(ws.config.harness.implement),
-          config: ws.config,
-          repoRoot: ws.root,
-          repoName: ws.name,
-          ...(ws.forge === null ? {} : { forge: ws.forge }),
-        })
-        const result = await runner.requestCommit(id, task.worktree)
-        if (!result.ok) return c.json({ error: result.error }, 500)
-        return c.json({ verb, sha: result.sha })
+        try {
+          const staged = await stageAndCommit(
+            exec,
+            task,
+            task.worktree,
+            CHECKPOINT_COMMIT_SUMMARY,
+            {
+              harness: ws.config.harness.implement.kind,
+              model: ws.config.harness.implement.model ?? null,
+              effort: ws.config.harness.implement.effort ?? null,
+            },
+          )
+          if (!staged.committed) {
+            return c.json({ error: 'nothing to commit; the worktree is clean' }, 500)
+          }
+          ws.store.append(id, {
+            type: 'commit.created',
+            sha: staged.sha,
+            subject: `[${task.id}] ${task.title}`,
+          })
+          return c.json({ verb, sha: staged.sha })
+        } catch (err) {
+          return c.json({ error: errMsg(err) }, 500)
+        }
       },
     )
 

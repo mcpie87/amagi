@@ -20,13 +20,13 @@ const config = (over: Record<string, unknown> = {}): Config => {
   return parsed.data
 }
 
-test('libnotify degrades to a warning when notify-send is missing', async () => {
+test('libnotify reports a missing notify-send binary after warning', async () => {
   const notifier = new LibnotifyNotifier(missingBinary)
   const warnings: unknown[] = []
   const original = console.warn
   console.warn = (...args) => warnings.push(args)
   try {
-    await notifier.notify('title', 'body')
+    await expect(notifier.notify('title', 'body')).rejects.toThrow('spawn notify-send ENOENT')
   } finally {
     console.warn = original
   }
@@ -34,13 +34,13 @@ test('libnotify degrades to a warning when notify-send is missing', async () => 
   expect(String(warnings[0])).toContain('notify-send unavailable')
 })
 
-test('libnotify warns on a non-zero exit', async () => {
+test('libnotify reports a non-zero exit after warning', async () => {
   const notifier = new LibnotifyNotifier(exec({ exitCode: 1, stderr: 'bus' }))
   const warnings: unknown[] = []
   const original = console.warn
   console.warn = (...args) => warnings.push(args)
   try {
-    await notifier.notify('title', 'body')
+    await expect(notifier.notify('title', 'body')).rejects.toThrow('bus')
   } finally {
     console.warn = original
   }

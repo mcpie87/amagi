@@ -3,6 +3,7 @@ import {
   type CreatePrOptions,
   type CreateTrackerTask,
   type GateRef,
+  type MergeStatus,
   openDatabase,
   type PrComment,
   type PrDriver,
@@ -20,7 +21,7 @@ import { startPrPoller } from './pr-poller.ts'
 
 class FakePr implements PrDriver {
   state: PrState = 'open'
-  mergeStatus = 'conflicted' as const
+  mergeStatus: MergeStatus = 'conflicted'
   readonly calls: number[] = []
   readonly deleted: { remote: string; branch: string }[] = []
 
@@ -193,6 +194,33 @@ test('an open pr keeps the task in pr_open', async () => {
   expect(store.task('bd-1')?.state).toBe('pr_open')
   expect(tracker.closed).toEqual([])
   expect(tracker.statuses).toEqual([])
+})
+
+test('a resolved conflict returns the task to pr_open', async () => {
+  for (const from of ['pr_merge_conflict', 'pr_conflict_fixing'] as const) {
+    const store = new Store(openDatabase(':memory:'))
+    openPr(store)
+    store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
+    if (from === 'pr_conflict_fixing') {
+      store.append('bd-1', { type: 'task.state', from: 'pr_merge_conflict', to: from })
+    }
+    const forge = new FakePr()
+    forge.mergeStatus = 'mergeable'
+    pollers.push(
+      startPrPoller({
+        store,
+        forge,
+        tracker: new FakeTracker(),
+        cwd: '/repo',
+        remote: 'origin',
+        intervalMs: 10,
+      }),
+    )
+    await Bun.sleep(40)
+
+    expect(store.task('bd-1')?.state).toBe('pr_open')
+    expect(store.task('bd-1')?.prMergeStatus).toBe('mergeable')
+  }
 })
 
 test('an open pr records its merge status for the pr_open task', async () => {
