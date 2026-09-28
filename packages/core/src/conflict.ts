@@ -42,7 +42,7 @@ export type ResolveConflictOptions = {
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
   makeHarnessFn?: typeof makeHarness | undefined
-  /** An explicit queue request may dispatch once after the automatic limit. */
+  /** An explicit queue request bypasses the automatic dispatch limit. */
   manual?: boolean
   /** Live log of the resolution, one line per event; the caller decides how to render it. */
   onLog?: (level: ConflictLogLevel, text: string) => void
