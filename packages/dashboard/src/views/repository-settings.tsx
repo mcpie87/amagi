@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
 type Repo = { key: string; name: string; workers: boolean; watchers: boolean }
 type GitIdentity = { mode: 'path' | 'inline'; value: string }
 type ForgeKind = 'github' | 'gitlab' | 'forgejo'
-type ForgeTokenSource = 'repository' | 'environment' | null
-type ForgeSettings = { forgeKind: ForgeKind; forgeTokens: Record<ForgeKind, ForgeTokenSource> }
+type ForgeTokenSource = 'picked' | 'only' | 'environment' | null
+type ForgeTokenState = { credential: string | null; source: ForgeTokenSource }
+type ForgeSettings = { forgeKind: ForgeKind; forgeCredentials: Record<ForgeKind, ForgeTokenState> }
+export type ForgeCredential = { id: string; kind: ForgeKind; name: string }
 
 const FORGES: { kind: ForgeKind; label: string; cli: string; env: string }[] = [
   { kind: 'github', label: 'GitHub', cli: 'gh', env: 'GH_TOKEN' },
@@ -14,10 +16,7 @@ const FORGES: { kind: ForgeKind; label: string; cli: string; env: string }[] = [
   { kind: 'forgejo', label: 'Forgejo', cli: 'tea', env: 'FORGEJO_TOKEN' },
 ]
 
-const TOKEN_STATUS: Record<'repository' | 'environment', string> = {
-  repository: 'Token set',
-  environment: 'Token from environment',
-}
+const ADD_TOKEN = '+add'
 const GIT_IDENTITY_TEMPLATE = '[user]\n\tname = Your Name\n\temail = you@example.com\n'
 
 export function RepositoryParticipation({
@@ -225,28 +224,234 @@ export function RepositoryGitIdentity({ repo }: { repo: Pick<Repo, 'key'> }) {
   )
 }
 
-export function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
-  const [settings, setSettings] = useState<ForgeSettings | null>(null)
-  const [drafts, setDrafts] = useState<Record<ForgeKind, string>>({
-    github: '',
-    gitlab: '',
-    forgejo: '',
+/** Shared forge credentials; `reload` refetches after any card changes them. */
+export function useForgeCredentials(): { credentials: ForgeCredential[]; reload: () => void } {
+  const [credentials, setCredentials] = useState<ForgeCredential[]>([])
+  const reload = useCallback(() => {
+    fetch(`${apiBase}/api/forge-credentials`)
+      .then((response) =>
+        response.ok ? (response.json() as Promise<{ credentials: ForgeCredential[] }>) : null,
+      )
+      .then((body) => {
+        if (body !== null) setCredentials(body.credentials)
+      })
+      .catch(() => {})
+  }, [])
+  useEffect(reload, [reload])
+  return { credentials, reload }
+}
+
+async function createCredential(
+  kind: ForgeKind,
+  name: string,
+  token: string,
+): Promise<ForgeCredential> {
+  const response = await fetch(`${apiBase}/api/forge-credentials`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, name, token }),
   })
+  if (!response.ok) throw new Error(await responseError(response))
+  return (await response.json()) as ForgeCredential
+}
+
+function NewTokenForm({
+  kind,
+  onCreated,
+  onCancel,
+}: {
+  kind: ForgeKind
+  onCreated: (credential: ForgeCredential) => void
+  onCancel?: () => void
+}) {
+  const label = FORGES.find((forge) => forge.kind === kind)?.label ?? kind
+  const [name, setName] = useState('')
+  const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const submit = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      onCreated(await createCredential(kind, name.trim(), token.trim()))
+      setName('')
+      setToken('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input
+        type="text"
+        aria-label={`${label} token name`}
+        value={name}
+        onChange={(event) => setName(event.currentTarget.value)}
+        placeholder="Name"
+        className="w-36 rounded border border-line-strong bg-app px-3 py-1 text-sm text-fg"
+      />
+      <input
+        type="password"
+        autoComplete="off"
+        aria-label={`${label} token`}
+        value={token}
+        onChange={(event) => setToken(event.currentTarget.value)}
+        placeholder="Paste token"
+        className="min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg"
+      />
+      <button
+        type="button"
+        disabled={busy || name.trim() === '' || token.trim() === ''}
+        onClick={() => void submit()}
+        className={secondary}
+      >
+        Add
+      </button>
+      {onCancel !== undefined && (
+        <button type="button" disabled={busy} onClick={onCancel} className={secondary}>
+          Cancel
+        </button>
+      )}
+      {error !== null && <span className="text-sm text-red-ink">{error}</span>}
+    </div>
+  )
+}
+
+function CredentialRow({
+  credential,
+  onChanged,
+}: {
+  credential: ForgeCredential
+  onChanged: () => void
+}) {
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async (method: 'PATCH' | 'DELETE', body?: { token: string }) => {
+    setBusy(true)
+    setError(null)
+    const err = await send(method, `/api/forge-credentials/${credential.id}`, body)
+    setBusy(false)
+    if (err !== null) setError(err)
+    else setToken('')
+    onChanged()
+  }
+
+  return (
+    <li className="flex flex-wrap items-center gap-2 py-2">
+      <span className="w-40 truncate text-sm text-fg-strong">{credential.name}</span>
+      <input
+        type="password"
+        autoComplete="off"
+        aria-label={`New token for ${credential.name}`}
+        value={token}
+        onChange={(event) => setToken(event.currentTarget.value)}
+        placeholder="Replace token"
+        className="min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg"
+      />
+      <button
+        type="button"
+        disabled={busy || token.trim() === ''}
+        onClick={() => void run('PATCH', { token: token.trim() })}
+        className={secondary}
+      >
+        Rotate
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run('DELETE')}
+        className={secondary}
+      >
+        Delete
+      </button>
+      {error !== null && <span className="text-sm text-red-ink">{error}</span>}
+    </li>
+  )
+}
+
+export function ForgeCredentials({
+  credentials,
+  onChanged,
+}: {
+  credentials: ForgeCredential[]
+  onChanged: () => void
+}) {
+  return (
+    <div className={`${card} mt-4`}>
+      <h2 className="mb-1 text-sm text-fg-muted">Forge tokens</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Shared by every repository. A repository uses the token it picked, or the only token for its
+        forge. Stored in amagi's state directory, never in a repository.
+      </p>
+      {FORGES.map(({ kind, label }) => (
+        <div key={kind} className="mt-3">
+          <h3 className="text-sm text-fg-strong">{label}</h3>
+          <ul className="divide-y divide-line">
+            {credentials
+              .filter((credential) => credential.kind === kind)
+              .map((credential) => (
+                <CredentialRow key={credential.id} credential={credential} onChanged={onChanged} />
+              ))}
+          </ul>
+          <NewTokenForm kind={kind} onCreated={onChanged} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function tokenStatus(
+  state: ForgeTokenState,
+  credentials: ForgeCredential[],
+  cli: string,
+  env: string,
+): string {
+  const name = credentials.find((credential) => credential.id === state.credential)?.name
+  switch (state.source) {
+    case 'picked':
+      return `Using ${name}`
+    case 'only':
+      return `Using ${name} (only token)`
+    case 'environment':
+      return `Using ${env} from the environment`
+    case null:
+      return `No token (${cli}, ${env})`
+  }
+}
+
+export function RepositoryForge({
+  repo,
+  credentials,
+  onCredentialsChanged,
+}: {
+  repo: Pick<Repo, 'key'>
+  credentials: ForgeCredential[]
+  onCredentialsChanged: () => void
+}) {
+  const [settings, setSettings] = useState<ForgeSettings | null>(null)
+  const [adding, setAdding] = useState<ForgeKind | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: adding or deleting a shared token can change which one this repo resolves to.
   useEffect(() => {
     let active = true
-    setSettings(null)
     setError(null)
-    setDrafts({ github: '', gitlab: '', forgejo: '' })
     fetch(`${apiBase}/api/repos/${repo.key}/settings`)
       .then(async (response) => {
         if (!response.ok) throw new Error(await responseError(response))
         return (await response.json()) as ForgeSettings
       })
       .then((body) => {
-        if (active) setSettings({ forgeKind: body.forgeKind, forgeTokens: body.forgeTokens })
+        if (active) {
+          setSettings({ forgeKind: body.forgeKind, forgeCredentials: body.forgeCredentials })
+        }
       })
       .catch((err: unknown) => {
         if (active) setError(err instanceof Error ? err.message : String(err))
@@ -254,11 +459,11 @@ export function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
     return () => {
       active = false
     }
-  }, [repo.key])
+  }, [repo.key, credentials])
 
   const save = async (patch: {
     forgeKind?: ForgeKind
-    forgeTokens?: Partial<Record<ForgeKind, string | null>>
+    forgeCredentials?: Partial<Record<ForgeKind, string | null>>
   }) => {
     setBusy(true)
     setError(null)
@@ -270,10 +475,7 @@ export function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
       })
       if (!response.ok) throw new Error(await responseError(response))
       const body = (await response.json()) as ForgeSettings
-      setSettings({ forgeKind: body.forgeKind, forgeTokens: body.forgeTokens })
-      for (const kind of Object.keys(patch.forgeTokens ?? {}) as ForgeKind[]) {
-        setDrafts((current) => ({ ...current, [kind]: '' }))
-      }
+      setSettings({ forgeKind: body.forgeKind, forgeCredentials: body.forgeCredentials })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -285,8 +487,8 @@ export function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
     <div className={card}>
       <h2 className="mb-1 text-sm text-fg-muted">Forge for pull requests</h2>
       <p className="mb-3 text-sm text-fg-faint">
-        Amagi opens pull requests on the selected forge only. Tokens are stored in amagi's state
-        directory, never in the repository, and override the environment variable.
+        Amagi opens pull requests on the selected forge only. Leave the token on automatic to use
+        the only token for that forge, or the environment variable when there is none.
       </p>
       {settings === null ? (
         error === null ? (
@@ -297,51 +499,63 @@ export function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
           <legend className="sr-only">Pull request forge</legend>
           <ul className="divide-y divide-line">
             {FORGES.map(({ kind, label, cli, env }) => {
-              const source = settings.forgeTokens[kind]
-              const draft = drafts[kind]
+              const state = settings.forgeCredentials[kind]
+              const picked = state.source === 'picked' ? (state.credential ?? '') : ''
               return (
-                <li key={kind} className="flex flex-wrap items-center gap-3 py-2">
-                  <label className="flex w-32 items-center gap-2 text-sm text-fg-strong">
-                    <input
-                      type="radio"
-                      name={`forge-${repo.key}`}
-                      value={kind}
-                      checked={settings.forgeKind === kind}
-                      onChange={() => void save({ forgeKind: kind })}
-                    />
-                    {label}
-                  </label>
-                  <span className="w-44 text-xs text-fg-faint">
-                    {source === null ? `No token (${cli}, ${env})` : TOKEN_STATUS[source]}
-                  </span>
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    aria-label={`${label} token`}
-                    value={draft}
-                    onChange={(event) => {
-                      const value = event.currentTarget.value
-                      setDrafts((current) => ({ ...current, [kind]: value }))
-                    }}
-                    placeholder={source === 'repository' ? 'Replace token' : 'Paste token'}
-                    className="min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg"
-                  />
-                  <button
-                    type="button"
-                    disabled={draft.trim() === ''}
-                    onClick={() => void save({ forgeTokens: { [kind]: draft.trim() } })}
-                    className={secondary}
-                  >
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    disabled={source !== 'repository'}
-                    onClick={() => void save({ forgeTokens: { [kind]: null } })}
-                    className={secondary}
-                  >
-                    Clear
-                  </button>
+                <li key={kind} className="py-2">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="flex w-32 items-center gap-2 text-sm text-fg-strong">
+                      <input
+                        type="radio"
+                        name={`forge-${repo.key}`}
+                        value={kind}
+                        checked={settings.forgeKind === kind}
+                        onChange={() => void save({ forgeKind: kind })}
+                      />
+                      {label}
+                    </label>
+                    <select
+                      aria-label={`${label} token`}
+                      value={adding === kind ? ADD_TOKEN : picked}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value
+                        if (value === ADD_TOKEN) {
+                          setAdding(kind)
+                          return
+                        }
+                        setAdding(null)
+                        void save({ forgeCredentials: { [kind]: value === '' ? null : value } })
+                      }}
+                      className="rounded border border-line-strong bg-app px-2 py-1 text-sm text-fg"
+                    >
+                      <option value="">Automatic</option>
+                      {credentials
+                        .filter((credential) => credential.kind === kind)
+                        .map((credential) => (
+                          <option key={credential.id} value={credential.id}>
+                            {credential.name}
+                          </option>
+                        ))}
+                      <option value={ADD_TOKEN}>Add token…</option>
+                    </select>
+                    <span className="text-xs text-fg-faint">
+                      {tokenStatus(state, credentials, cli, env)}
+                    </span>
+                  </div>
+                  {adding === kind && (
+                    <div className="mt-2">
+                      <NewTokenForm
+                        kind={kind}
+                        onCancel={() => setAdding(null)}
+                        onCreated={(credential) => {
+                          setAdding(null)
+                          void save({ forgeCredentials: { [kind]: credential.id } }).then(
+                            onCredentialsChanged,
+                          )
+                        }}
+                      />
+                    </div>
+                  )}
                 </li>
               )
             })}
@@ -357,11 +571,26 @@ export function RepositoryForge({ repo }: { repo: Pick<Repo, 'key'> }) {
   )
 }
 
-export function RepositorySettingsCard({ repo, onChanged }: { repo: Repo; onChanged: () => void }) {
+export function RepositorySettingsCard({
+  repo,
+  credentials,
+  onChanged,
+  onCredentialsChanged,
+}: {
+  repo: Repo
+  credentials: ForgeCredential[]
+  onChanged: () => void
+  onCredentialsChanged: () => void
+}) {
   return (
     <div className="mt-6 space-y-4">
       <RepositoryParticipation repo={repo} onChanged={onChanged} />
-      <RepositoryForge repo={repo} />
+      <RepositoryForge
+        key={repo.key}
+        repo={repo}
+        credentials={credentials}
+        onCredentialsChanged={onCredentialsChanged}
+      />
       <RepositoryGitIdentity repo={repo} />
     </div>
   )

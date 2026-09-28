@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Exec, ExecResult } from '../exec.ts'
 import type { PrInfo } from '../pr-check.ts'
 import { gitTokenConfig } from './forge-cred.ts'
@@ -36,7 +39,13 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
+const savedState = process.env.XDG_STATE_HOME
+let state: string
+
 beforeEach(() => {
+  // Stored forge credentials would otherwise leak in from the operator's state dir.
+  state = mkdtempSync(join(tmpdir(), 'amagi-pr-state-'))
+  process.env.XDG_STATE_HOME = state
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
   delete process.env.GITLAB_TOKEN
@@ -48,6 +57,9 @@ afterEach(() => {
   delete process.env.GITHUB_TOKEN
   delete process.env.GITLAB_TOKEN
   delete process.env.FORGEJO_TOKEN
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = savedState
+  rmSync(state, { recursive: true, force: true })
 })
 
 describe('gitTokenConfig', () => {

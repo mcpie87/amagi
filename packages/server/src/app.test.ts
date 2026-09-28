@@ -2236,7 +2236,7 @@ describe('repo settings endpoints', () => {
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
-      forgeTokens: expect.any(Object),
+      forgeCredentials: expect.any(Object),
     })
   })
 
@@ -2250,7 +2250,7 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
-      forgeTokens: expect.any(Object),
+      forgeCredentials: expect.any(Object),
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
@@ -2260,7 +2260,7 @@ describe('repo settings endpoints', () => {
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
-      forgeTokens: expect.any(Object),
+      forgeCredentials: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
@@ -2302,7 +2302,7 @@ describe('repo settings endpoints', () => {
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
-      forgeTokens: expect.any(Object),
+      forgeCredentials: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
@@ -2331,7 +2331,7 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
-      forgeTokens: expect.any(Object),
+      forgeCredentials: expect.any(Object),
     })
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
@@ -2397,7 +2397,7 @@ describe('repo settings endpoints', () => {
     }
   })
 
-  test('PATCH switches the PR forge and stores per-forge tokens without exposing them', async () => {
+  test('PATCH switches the PR forge and picks shared credentials without exposing them', async () => {
     const savedState = process.env.XDG_STATE_HOME
     const tokenVars = ['GH_TOKEN', 'GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN']
     const savedEnv = Object.fromEntries(tokenVars.map((name) => [name, process.env[name]]))
@@ -2405,27 +2405,48 @@ describe('repo settings endpoints', () => {
     process.env.XDG_STATE_HOME = state
     for (const name of tokenVars) delete process.env[name]
     try {
+      const created = await app.request('/api/forge-credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'gitlab', name: 'bot', token: 'glpat-secret' }),
+      })
+      expect(created.status).toBe(200)
+      const bot = (await created.json()) as { id: string }
+      await app.request('/api/forge-credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'gitlab', name: 'other', token: 'glpat-other' }),
+      })
       const res = await patch(
         'repo1',
-        JSON.stringify({ forgeKind: 'gitlab', forgeTokens: { gitlab: 'glpat-secret' } }),
+        JSON.stringify({ forgeKind: 'gitlab', forgeCredentials: { gitlab: bot.id } }),
       )
       expect(res.status).toBe(200)
       const body = await res.json()
       expect(body).toMatchObject({
         forgeKind: 'gitlab',
-        forgeTokens: { github: null, gitlab: 'repository' },
+        forgeCredentials: {
+          github: { credential: null, source: null },
+          gitlab: { credential: bot.id, source: 'picked' },
+        },
       })
-      expect(JSON.stringify(body)).not.toContain('glpat-secret')
+      expect(JSON.stringify(body)).not.toContain('glpat-')
+      const listed = await (await app.request('/api/forge-credentials')).text()
+      expect(listed).toContain('bot')
+      expect(listed).not.toContain('glpat-')
       const workspace = ws.workspaces.get('repo1')
       if (workspace === null) throw new Error('repo1 missing')
       expect(workspace.config.forge.kind).toBe('gitlab')
       expect(loadConfig(workspace.root).config.forge.kind).toBe('gitlab')
-      expect(readFileSync(repoConfigPath(workspace.root), 'utf8')).not.toContain('glpat-secret')
+      expect(readFileSync(repoConfigPath(workspace.root), 'utf8')).not.toContain('glpat-')
       expect(ws.workspaces.get('repo2')?.config.forge.kind).toBe('github')
 
-      expect((await patch('repo1', '{"forgeTokens":{"gitlab":null}}')).status).toBe(200)
+      expect((await patch('repo1', `{"forgeCredentials":{"github":"${bot.id}"}}`)).status).toBe(400)
+      expect(
+        (await app.request(`/api/forge-credentials/${bot.id}`, { method: 'DELETE' })).status,
+      ).toBe(200)
       expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
-        forgeTokens: { gitlab: null },
+        forgeCredentials: { gitlab: { source: 'only' } },
       })
       expect((await patch('repo1', '{"forgeKind":"bitbucket"}')).status).toBe(400)
     } finally {

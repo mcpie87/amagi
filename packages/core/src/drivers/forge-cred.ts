@@ -1,59 +1,164 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import * as z from 'zod'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { stateHome } from '../paths.ts'
 
 /** The forges Amagi can talk to; mirrors ForgeKind from config.ts. */
-type ForgeKind = 'github' | 'gitlab' | 'forgejo'
+const FORGE_KINDS = ['github', 'gitlab', 'forgejo'] as const
+type ForgeKind = (typeof FORGE_KINDS)[number]
 
 /** Tea login name in the Amagi-provisioned profile; a single login per isolated config. */
 export const TEA_LOGIN = 'amagi'
 
-export type ForgeTokens = Partial<Record<ForgeKind, string>>
+const FORGE_LABELS: Record<ForgeKind, string> = {
+  github: 'GitHub',
+  gitlab: 'GitLab',
+  forgejo: 'Forgejo',
+}
+
+/** A named forge token as the dashboard sees it: the token itself never leaves the server. */
+export type ForgeCredential = { id: string; kind: ForgeKind; name: string }
+
+const StoredCredential = z.object({
+  id: z.string().min(1),
+  kind: z.enum(FORGE_KINDS),
+  name: z.string(),
+  token: z.string().min(1),
+})
+type StoredCredential = z.infer<typeof StoredCredential>
+
+const TokenStore = z.object({
+  credentials: z.array(StoredCredential),
+  /** Credential id each repo root picked, per forge kind. */
+  repos: z.record(z.string(), z.partialRecord(z.enum(FORGE_KINDS), z.string())),
+})
+type TokenStore = z.infer<typeof TokenStore>
+
+/** The pre-credentials layout: one raw token per forge kind, keyed by repo root. */
+const LegacyTokenStore = z.record(
+  z.string(),
+  z.partialRecord(z.enum(FORGE_KINDS), z.string().min(1)),
+)
 
 function forgeStateDir(): string {
   return join(stateHome(), 'amagi', 'forge')
 }
 
 /**
- * Per-repository forge tokens set from the dashboard, keyed by repo root.
- * Lives in Amagi's state dir, never in `.amagi/config.toml`, which is
- * committed with the repo.
+ * Named forge credentials and each repo's pick of them, set from the
+ * dashboard. Lives in Amagi's state dir, never in `.amagi/config.toml`,
+ * which is committed with the repo.
  */
 export function forgeTokensPath(): string {
   return join(forgeStateDir(), 'tokens.json')
 }
 
-function readTokenStore(): Record<string, ForgeTokens> {
-  try {
-    const parsed = JSON.parse(readFileSync(forgeTokensPath(), 'utf8')) as unknown
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, ForgeTokens>)
-      : {}
-  } catch {
-    return {}
+/**
+ * Folds legacy per-repo tokens into credentials, one per distinct token.
+ * Ids derive from the token so repeated reads of an unmigrated file agree.
+ */
+function migrateLegacy(legacy: z.infer<typeof LegacyTokenStore>): TokenStore {
+  const store: TokenStore = { credentials: [], repos: {} }
+  for (const [root, tokens] of Object.entries(legacy)) {
+    for (const kind of FORGE_KINDS) {
+      const token = tokens[kind]
+      if (token === undefined) continue
+      let credential = store.credentials.find((c) => c.kind === kind && c.token === token)
+      if (credential === undefined) {
+        const id = createHash('sha256').update(`${kind}:${token}`).digest('hex').slice(0, 12)
+        credential = { id, kind, name: `${FORGE_LABELS[kind]} (${basename(root)})`, token }
+        store.credentials.push(credential)
+      }
+      store.repos[root] = { ...store.repos[root], [kind]: credential.id }
+    }
   }
+  return store
 }
 
-/** Tokens stored for a repo root; empty when none were set. */
-export function storedForgeTokens(repoRoot: string): ForgeTokens {
-  return readTokenStore()[resolve(repoRoot)] ?? {}
+function readTokenStore(): TokenStore {
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(forgeTokensPath(), 'utf8'))
+  } catch {
+    return { credentials: [], repos: {} }
+  }
+  const current = TokenStore.safeParse(raw)
+  if (current.success) return current.data
+  const legacy = LegacyTokenStore.safeParse(raw)
+  return legacy.success ? migrateLegacy(legacy.data) : { credentials: [], repos: {} }
 }
 
-/** Stores (or with null, clears) one forge token for a repo root. */
-export function setStoredForgeToken(repoRoot: string, kind: ForgeKind, token: string | null): void {
-  const store = readTokenStore()
-  const root = resolve(repoRoot)
-  const { [kind]: _dropped, ...rest } = store[root] ?? {}
-  const next: ForgeTokens = token === null ? rest : { ...rest, [kind]: token }
-  if (Object.keys(next).length === 0) delete store[root]
-  else store[root] = next
+function writeTokenStore(store: TokenStore): void {
   const path = forgeTokensPath()
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 })
   // writeFileSync only applies mode on create; a pre-existing file keeps its own.
   chmodSync(path, 0o600)
+}
+
+const publicCredential = ({ id, kind, name }: StoredCredential): ForgeCredential => ({
+  id,
+  kind,
+  name,
+})
+
+export function listForgeCredentials(): ForgeCredential[] {
+  return readTokenStore().credentials.map(publicCredential)
+}
+
+export function addForgeCredential(kind: ForgeKind, name: string, token: string): ForgeCredential {
+  const store = readTokenStore()
+  const credential = { id: randomUUID(), kind, name, token }
+  store.credentials.push(credential)
+  writeTokenStore(store)
+  return publicCredential(credential)
+}
+
+/** Renames or rotates a credential; every repo using it picks up the change. Null when unknown. */
+export function updateForgeCredential(
+  id: string,
+  patch: { name?: string | undefined; token?: string | undefined },
+): ForgeCredential | null {
+  const store = readTokenStore()
+  const credential = store.credentials.find((c) => c.id === id)
+  if (credential === undefined) return null
+  if (patch.name !== undefined) credential.name = patch.name
+  if (patch.token !== undefined) credential.token = patch.token
+  writeTokenStore(store)
+  return publicCredential(credential)
+}
+
+/** Deletes a credential and every repo's pick of it. False when unknown. */
+export function removeForgeCredential(id: string): boolean {
+  const store = readTokenStore()
+  const before = store.credentials.length
+  store.credentials = store.credentials.filter((c) => c.id !== id)
+  if (store.credentials.length === before) return false
+  for (const [root, picks] of Object.entries(store.repos)) {
+    const kept = Object.fromEntries(Object.entries(picks).filter(([, pick]) => pick !== id))
+    if (Object.keys(kept).length === 0) delete store.repos[root]
+    else store.repos[root] = kept
+  }
+  writeTokenStore(store)
+  return true
+}
+
+/**
+ * Points a repo root at a credential for one forge kind, or with null drops
+ * the pick. False when the id is unknown or belongs to another forge.
+ */
+export function pickForgeCredential(repoRoot: string, kind: ForgeKind, id: string | null): boolean {
+  const store = readTokenStore()
+  if (id !== null && !store.credentials.some((c) => c.id === id && c.kind === kind)) return false
+  const root = resolve(repoRoot)
+  const { [kind]: _dropped, ...rest } = store.repos[root] ?? {}
+  const next = id === null ? rest : { ...rest, [kind]: id }
+  if (Object.keys(next).length === 0) delete store.repos[root]
+  else store.repos[root] = next
+  writeTokenStore(store)
+  return true
 }
 
 const repoRoots = new Map<string, string | null>()
@@ -96,25 +201,49 @@ function envForgeToken(kind: ForgeKind): string | null {
   }
 }
 
-export type ForgeTokenSource = 'repository' | 'environment' | null
+/**
+ * `picked`: the repo chose this credential. `only`: no pick, and it is the
+ * sole credential for the forge. `environment`: the process env var.
+ */
+export type ForgeTokenSource = 'picked' | 'only' | 'environment' | null
 
-/** Where each forge's token for a repo root comes from, without revealing any token. */
-export function forgeTokenSources(repoRoot: string): Record<ForgeKind, ForgeTokenSource> {
-  const stored = storedForgeTokens(repoRoot)
-  const source = (kind: ForgeKind): ForgeTokenSource =>
-    stored[kind] !== undefined ? 'repository' : envForgeToken(kind) !== null ? 'environment' : null
-  return { github: source('github'), gitlab: source('gitlab'), forgejo: source('forgejo') }
+export type ForgeTokenState = { credential: string | null; source: ForgeTokenSource }
+
+function resolveCredential(
+  store: TokenStore,
+  root: string | null,
+  kind: ForgeKind,
+): { credential: StoredCredential; source: 'picked' | 'only' } | null {
+  const pick = root === null ? undefined : store.repos[root]?.[kind]
+  const picked = store.credentials.find((c) => c.id === pick && c.kind === kind)
+  if (picked !== undefined) return { credential: picked, source: 'picked' }
+  const ofKind = store.credentials.filter((c) => c.kind === kind)
+  return ofKind.length === 1 && ofKind[0] !== undefined
+    ? { credential: ofKind[0], source: 'only' }
+    : null
+}
+
+/** Which credential each forge uses for a repo root, and why, without revealing any token. */
+export function forgeTokenStates(repoRoot: string): Record<ForgeKind, ForgeTokenState> {
+  const store = readTokenStore()
+  const root = resolve(repoRoot)
+  const state = (kind: ForgeKind): ForgeTokenState => {
+    const hit = resolveCredential(store, root, kind)
+    if (hit !== null) return { credential: hit.credential.id, source: hit.source }
+    return { credential: null, source: envForgeToken(kind) !== null ? 'environment' : null }
+  }
+  return { github: state('github'), gitlab: state('gitlab'), forgejo: state('forgejo') }
 }
 
 /**
- * Bot token for a forge. A token stored for the repo `cwd` belongs to (set in
- * the dashboard) wins; otherwise the Amagi process environment. Never a CLI
- * login: gh, glab and tea are used strictly non-interactively with it.
+ * Bot token for a forge: the credential the repo `cwd` belongs to picked,
+ * else the only credential for that forge, else the Amagi process
+ * environment. Never a CLI login: gh, glab and tea are used strictly
+ * non-interactively with it.
  */
 export function forgeToken(kind: ForgeKind, cwd?: string): string | null {
   const root = cwd === undefined ? null : repoRootOf(cwd)
-  const stored = root === null ? undefined : storedForgeTokens(root)[kind]
-  return stored ?? envForgeToken(kind)
+  return resolveCredential(readTokenStore(), root, kind)?.credential.token ?? envForgeToken(kind)
 }
 
 /** Where Amagi keeps gh's own config, so gh never reads the operator's ~/.config/gh. */

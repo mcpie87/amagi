@@ -132,12 +132,12 @@ export const SettingsBody = z
     desktopFailureAlerts: z.boolean().optional(),
     reviewMaxRounds: z.number().int().min(1).optional(),
     forgeKind: ForgeKind.optional(),
-    /** A string stores the forge's token for this repo; null clears it. */
-    forgeTokens: z
+    /** A credential id picks it for that forge in this repo; null drops the pick. */
+    forgeCredentials: z
       .object({
-        github: z.string().trim().min(1).nullable().optional(),
-        gitlab: z.string().trim().min(1).nullable().optional(),
-        forgejo: z.string().trim().min(1).nullable().optional(),
+        github: z.string().min(1).nullable().optional(),
+        gitlab: z.string().min(1).nullable().optional(),
+        forgejo: z.string().min(1).nullable().optional(),
       })
       .optional(),
   })
@@ -145,6 +145,24 @@ export const SettingsBody = z
     message: 'provide a setting',
   })
 export type SettingsBody = z.infer<typeof SettingsBody>
+
+export const ForgeCredentialParam = z.object({ id: z.string().min(1) })
+
+export const ForgeCredentialCreateBody = z.object({
+  kind: ForgeKind,
+  name: z.string().trim().min(1),
+  token: z.string().trim().min(1),
+})
+
+/** A new token rotates the credential for every repo using it. */
+export const ForgeCredentialUpdateBody = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    token: z.string().trim().min(1).optional(),
+  })
+  .refine((body) => body.name !== undefined || body.token !== undefined, {
+    message: 'provide a name or token',
+  })
 
 const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
 

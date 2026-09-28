@@ -4,15 +4,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from '../exec.ts'
 import {
+  addForgeCredential,
   forgeToken,
-  forgeTokenSources,
+  forgeTokenStates,
+  forgeTokensPath,
   ghEnv,
   gitRewrite,
   gitTokenConfig,
+  listForgeCredentials,
   parseRemote,
-  setStoredForgeToken,
+  pickForgeCredential,
+  removeForgeCredential,
   teaEnv,
   teaXdgHome,
+  updateForgeCredential,
 } from './forge-cred.ts'
 
 type Call = readonly string[]
@@ -70,9 +75,8 @@ describe('forgeToken', () => {
   })
 })
 
-describe('stored forge tokens', () => {
-  test('a token stored for the repo beats the env and covers its worktrees', () => {
-    process.env.GITLAB_TOKEN = 'env_tok'
+describe('forge credentials', () => {
+  function repoWithWorktree(): { repo: string; worktree: string } {
     const repo = join(home, 'repo')
     const worktree = join(home, 'wt')
     mkdirSync(repo)
@@ -81,22 +85,53 @@ describe('stored forge tokens', () => {
     git('init', '-q')
     git('commit', '-q', '--allow-empty', '-m', 'init')
     git('worktree', 'add', '-q', worktree)
+    return { repo, worktree }
+  }
+
+  test('the only credential for a forge beats the env and covers worktrees', () => {
+    process.env.GITLAB_TOKEN = 'env_tok'
     try {
-      setStoredForgeToken(repo, 'gitlab', 'repo_tok')
-      expect(forgeToken('gitlab', repo)).toBe('repo_tok')
-      expect(forgeToken('gitlab', worktree)).toBe('repo_tok')
-      expect(forgeToken('gitlab')).toBe('env_tok')
-      expect(forgeTokenSources(repo)).toEqual({
-        github: null,
-        gitlab: 'repository',
-        forgejo: null,
-      })
-      setStoredForgeToken(repo, 'gitlab', null)
+      const { repo, worktree } = repoWithWorktree()
+      expect(forgeTokenStates(repo).gitlab).toEqual({ credential: null, source: 'environment' })
+      const bot = addForgeCredential('gitlab', 'bot', 'bot_tok')
+      expect(forgeToken('gitlab', repo)).toBe('bot_tok')
+      expect(forgeToken('gitlab', worktree)).toBe('bot_tok')
+      expect(forgeTokenStates(repo).gitlab).toEqual({ credential: bot.id, source: 'only' })
+      expect(forgeToken('github', repo)).toBeNull()
+      removeForgeCredential(bot.id)
       expect(forgeToken('gitlab', repo)).toBe('env_tok')
-      expect(forgeTokenSources(repo).gitlab).toBe('environment')
     } finally {
       delete process.env.GITLAB_TOKEN
     }
+  })
+
+  test('with several credentials a repo uses its pick, and rotation reaches it', () => {
+    const { repo } = repoWithWorktree()
+    const personal = addForgeCredential('github', 'personal', 'tok_a')
+    const org = addForgeCredential('github', 'org', 'tok_b')
+    expect(forgeToken('github', repo)).toBeNull()
+    expect(pickForgeCredential(repo, 'github', org.id)).toBe(true)
+    expect(forgeTokenStates(repo).github).toEqual({ credential: org.id, source: 'picked' })
+    updateForgeCredential(org.id, { token: 'tok_b2' })
+    expect(forgeToken('github', repo)).toBe('tok_b2')
+    expect(pickForgeCredential(repo, 'gitlab', personal.id)).toBe(false)
+    removeForgeCredential(org.id)
+    expect(forgeTokenStates(repo).github).toEqual({ credential: personal.id, source: 'only' })
+    expect(JSON.stringify(listForgeCredentials())).not.toContain('tok_')
+  })
+
+  test('migrates per-repo tokens into shared credentials, one per distinct token', () => {
+    const { repo } = repoWithWorktree()
+    const other = join(home, 'other')
+    mkdirSync(join(home, 'amagi', 'forge'), { recursive: true })
+    writeFileSync(
+      forgeTokensPath(),
+      JSON.stringify({ [repo]: { github: 'same' }, [other]: { github: 'same', forgejo: 'fj' } }),
+    )
+    const credentials = listForgeCredentials()
+    expect(credentials.map(({ kind }) => kind).sort()).toEqual(['forgejo', 'github'])
+    expect(listForgeCredentials()).toEqual(credentials)
+    expect(forgeToken('github', repo)).toBe('same')
   })
 })
 

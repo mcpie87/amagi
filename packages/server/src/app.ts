@@ -9,6 +9,7 @@ import {
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
+  addForgeCredential,
   BeadsTracker,
   CAPABILITY_WORDS,
   CHECKPOINT_COMMIT_SUMMARY,
@@ -22,7 +23,7 @@ import {
   expandTilde,
   expandWorkers,
   ForgeKind,
-  forgeTokenSources,
+  forgeTokenStates,
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
@@ -31,6 +32,7 @@ import {
   isTerminal,
   LibnotifyNotifier,
   type LiveRun,
+  listForgeCredentials,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
@@ -38,22 +40,24 @@ import {
   type Notifier,
   NtfyNotifier,
   newWorkerId,
+  pickForgeCredential,
   pidAlive,
   type Question,
   type RegistryEntry,
   type RunServiceApi,
   reconcilePr,
+  removeForgeCredential,
   removeWorktree,
   resolveWorkerHarness,
   type Store,
   type StoredEvent,
-  setStoredForgeToken,
   stageAndCommit,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
   Triage,
   type UpdateTrackerTask,
+  updateForgeCredential,
   type WorkerActivity,
   WorkerConfig,
   type Workspace,
@@ -78,6 +82,9 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  ForgeCredentialCreateBody,
+  ForgeCredentialParam,
+  ForgeCredentialUpdateBody,
   GitIdentityBody,
   GitRequestBody,
   IssueCreateBody,
@@ -1389,7 +1396,7 @@ export function createApp({
         reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
         forgeKind: ws.config.forge.kind,
-        forgeTokens: forgeTokenSources(ws.root),
+        forgeCredentials: forgeTokenStates(ws.root),
       })
     })
 
@@ -1407,11 +1414,18 @@ export function createApp({
           desktopFailureAlerts,
           reviewMaxRounds,
           forgeKind,
-          forgeTokens,
+          forgeCredentials,
         } = c.req.valid('json')
+        const known = listForgeCredentials()
         for (const kind of ForgeKind.options) {
-          const token = forgeTokens?.[kind]
-          if (token !== undefined) setStoredForgeToken(ws.root, kind, token)
+          const id = forgeCredentials?.[kind]
+          if (id != null && !known.some((cred) => cred.id === id && cred.kind === kind)) {
+            return c.json({ error: `unknown ${kind} credential ${id}` }, 400)
+          }
+        }
+        for (const kind of ForgeKind.options) {
+          const id = forgeCredentials?.[kind]
+          if (id !== undefined) pickForgeCredential(ws.root, kind, id)
         }
         writeConfig(ws.root, {
           ...(forgeKind === undefined ? {} : { forge: { kind: forgeKind } }),
@@ -1452,9 +1466,34 @@ export function createApp({
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
           reviewMaxRounds: ws.config.review.maxRounds,
           forgeKind: ws.config.forge.kind,
-          forgeTokens: forgeTokenSources(ws.root),
+          forgeCredentials: forgeTokenStates(ws.root),
         })
       },
+    )
+
+    .get('/api/forge-credentials', (c) => c.json({ credentials: listForgeCredentials() }))
+
+    .post('/api/forge-credentials', valid('json', ForgeCredentialCreateBody), (c) => {
+      const { kind, name, token } = c.req.valid('json')
+      return c.json(addForgeCredential(kind, name, token))
+    })
+
+    .patch(
+      '/api/forge-credentials/:id',
+      valid('param', ForgeCredentialParam),
+      valid('json', ForgeCredentialUpdateBody),
+      (c) => {
+        const credential = updateForgeCredential(c.req.valid('param').id, c.req.valid('json'))
+        return credential === null
+          ? c.json({ error: 'unknown credential' }, 404)
+          : c.json(credential)
+      },
+    )
+
+    .delete('/api/forge-credentials/:id', valid('param', ForgeCredentialParam), (c) =>
+      removeForgeCredential(c.req.valid('param').id)
+        ? c.json({ ok: true })
+        : c.json({ error: 'unknown credential' }, 404),
     )
 
     .post('/api/repos/:repo/settings/test-desktop', valid('param', RepoParam), async (c) => {

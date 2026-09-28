@@ -79,7 +79,7 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
       ok: forgeToken(config.forge.kind, entry.path) !== null,
       ...(forgeToken(config.forge.kind, entry.path) === null
         ? {
-            detail: `no token in the repository settings and ${FORGE_TOKEN_VAR[config.forge.kind] ?? 'no token env var'} not set`,
+            detail: `no dashboard forge token for this repository and ${FORGE_TOKEN_VAR[config.forge.kind] ?? 'no token env var'} not set`,
           }
         : {}),
     })
