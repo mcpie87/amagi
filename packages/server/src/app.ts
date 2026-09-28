@@ -922,6 +922,13 @@ export function createApp({
       },
     )
 
+    .get('/api/repos/:repo/beads', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const beads = resolveWorkspace(workspaces, repo).beads
+      if (beads === null) return c.json({ error: `${repo} does not track issues in beads` }, 501)
+      return c.json(await beads.health())
+    })
+
     .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)

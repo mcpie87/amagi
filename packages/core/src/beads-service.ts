@@ -9,10 +9,22 @@ import type {
 } from './drivers/tracker/beads.ts'
 import { errMsg } from './errors.ts'
 
+/** How many recent bd reads the latency figure is the median of. */
+const LATENCY_SAMPLES = 20
+
 export type BeadsGcRun = { at: number } & (
   | ({ ok: true } & BeadsGcResult)
   | { ok: false; error: string }
 )
+
+export type BeadsHealth = {
+  /** False when the store is not embedded Dolt, so every read goes to bd. */
+  cached: boolean
+  /** Median wall time of recent bd reads, cache misses only. */
+  latencyMs: number | null
+  samples: number
+  lastGc: BeadsGcRun | null
+}
 
 /**
  * Dolt rewrites its manifest on every commit, whether bd, amagi or a sync
@@ -47,6 +59,7 @@ export class BeadsService {
   private version: string | null = null
   private readonly entries = new Map<string, Promise<unknown>>()
   private lastGcRun: BeadsGcRun | null = null
+  private readonly durations: number[] = []
 
   constructor(
     readonly tracker: BeadsTracker,
@@ -82,6 +95,18 @@ export class BeadsService {
     return this.lastGcRun
   }
 
+  /** Times one uncached bd read first when nothing has been measured yet. */
+  async health(): Promise<BeadsHealth> {
+    if (this.durations.length === 0) await this.timed(() => this.tracker.openIds(1))
+    const sorted = [...this.durations].sort((a, b) => a - b)
+    return {
+      cached: this.versionOf(this.root) !== null,
+      latencyMs: sorted[Math.floor(sorted.length / 2)] ?? null,
+      samples: sorted.length,
+      lastGc: this.lastGcRun,
+    }
+  }
+
   /**
    * Collects the embedded store's garbage and records the outcome. Returns
    * null, without running bd, when there is no embedded store to collect:
@@ -102,18 +127,28 @@ export class BeadsService {
     // Read the version before bd runs: a write landing mid-read then leaves
     // the entry filed under the older version, so the next read reloads.
     const version = this.versionOf(this.root)
-    if (version === null) return load()
+    if (version === null) return this.timed(load)
     if (version !== this.version) {
       this.entries.clear()
       this.version = version
     }
     const hit = this.entries.get(key)
     if (hit !== undefined) return hit as Promise<T>
-    const pending = load()
+    const pending = this.timed(load)
     this.entries.set(key, pending)
     pending.catch(() => {
       if (this.entries.get(key) === pending) this.entries.delete(key)
     })
     return pending
+  }
+
+  private async timed<T>(load: () => Promise<T>): Promise<T> {
+    const start = performance.now()
+    try {
+      return await load()
+    } finally {
+      this.durations.push(performance.now() - start)
+      if (this.durations.length > LATENCY_SAMPLES) this.durations.shift()
+    }
   }
 }

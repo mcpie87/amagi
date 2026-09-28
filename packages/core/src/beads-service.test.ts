@@ -56,6 +56,18 @@ describe('BeadsService', () => {
   })
 })
 
+describe('BeadsService.health', () => {
+  test('measures cache misses only, probing bd when nothing ran yet', async () => {
+    const { tracker, calls } = counting()
+    const service = new BeadsService(tracker, '/repo', () => 'v1')
+    expect(await service.health()).toMatchObject({ cached: true, samples: 1 })
+    await service.list()
+    await service.list()
+    expect((await service.health()).samples).toBe(2)
+    expect(calls).toHaveLength(2)
+  })
+})
+
 describe('BeadsService.gc', () => {
   test('skips bd when there is no embedded store', async () => {
     const { tracker, calls } = counting()

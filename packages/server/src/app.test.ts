@@ -483,6 +483,10 @@ class FakeIssueTracker extends BeadsTracker {
     return [...this.issues.values()]
   }
 
+  override async openIds(): Promise<string[]> {
+    return [...this.issues.values()].filter((i) => i.status !== 'closed').map((i) => i.id)
+  }
+
   override async openWithLabel(label: string): Promise<BeadsIssue[]> {
     return [...this.issues.values()].filter(
       (i) => i.status !== 'closed' && i.labels.includes(label),
@@ -600,6 +604,15 @@ test('GET /api/repos/:repo/issues?label= lists only open issues carrying the lab
 
   expect(res.status).toBe(200)
   expect(((await res.json()) as BeadsIssue[]).map((i) => i.id)).toEqual(['bd-human'])
+})
+
+test('GET /api/repos/:repo/beads measures bd before anything else has', async () => {
+  app = issueApp(new FakeIssueTracker())
+
+  const res = await app.request('/api/repos/repo1/beads')
+
+  expect(res.status).toBe(200)
+  expect(await res.json()).toMatchObject({ cached: false, samples: 1, lastGc: null })
 })
 
 describe('issue mutations', () => {
