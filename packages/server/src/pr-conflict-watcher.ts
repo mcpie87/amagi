@@ -271,6 +271,7 @@ export function startPrConflictWatcher({
       const run = exec ?? defaultExec
       const heads = await fetchPullHeads({
         repoRoot: root,
+        forgeKind: config.forge.kind,
         lastHeads: lastPullHeads,
         ...(exec === undefined ? {} : { exec }),
       })

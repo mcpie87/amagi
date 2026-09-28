@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
+import type { Config } from './config.ts'
 import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -230,7 +231,8 @@ export async function stampIterationLabel(opts: {
 
 export type FetchPullHeadsOptions = {
   repoRoot: string
-  /** Last seen PR head SHAs keyed by ref (refs/pull/N/head), so the fetch is skipped when none moved. */
+  forgeKind: Config['forge']['kind']
+  /** Last seen PR head SHAs keyed by remote ref, so the fetch is skipped when none moved. */
   lastHeads: Record<string, string>
   exec?: Exec
 }
@@ -238,26 +240,26 @@ export type FetchPullHeadsOptions = {
 export type FetchPullHeadsResult = {
   /** True when a fetch ran because at least one PR head moved since lastHeads. */
   fetched: boolean
-  /** Current PR head SHAs keyed by ref, e.g. refs/pull/7/head. */
+  /** Current PR head SHAs keyed by remote ref. */
   heads: Record<string, string>
 }
 
 /**
- * Mirrors every open PR head into refs/remotes/origin/pr/* with one fetch.
- * The pull/star/head namespace covers fork PRs, which a per-branch fetch of
- * headRefName does not. ls-remote is a zero-transfer zero-quota probe, so the
- * fetch is skipped on ticks where no head moved.
+ * Mirrors every open PR head into a `refs/remotes/origin/pr/<number>/head` ref.
+ * ls-remote is a zero-transfer zero-quota probe, so the fetch is skipped on
+ * ticks where no head moved.
  */
 export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<FetchPullHeadsResult> {
   const run = opts.exec ?? defaultExec
+  const remoteRef = opts.forgeKind === 'gitlab' ? 'refs/merge-requests/*/head' : 'refs/pull/*/head'
   const tokenCfg = await gitTokenConfig(
     run,
     opts.repoRoot,
     'origin',
-    forgeToken('github', opts.repoRoot),
+    forgeToken(opts.forgeKind, opts.repoRoot),
   )
 
-  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', 'refs/pull/*/head'], {
+  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', remoteRef], {
     cwd: opts.repoRoot,
   })
   const heads: Record<string, string> = {}
@@ -280,7 +282,7 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
       'fetch',
       '--prune',
       'origin',
-      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+      `+${remoteRef}:refs/remotes/origin/pr/*/head`,
     ],
     { cwd: opts.repoRoot },
   )

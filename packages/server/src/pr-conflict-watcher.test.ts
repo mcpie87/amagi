@@ -514,7 +514,7 @@ test('fetches every open PR head each tick when a head moved', async () => {
     'fetch',
     '--prune',
     'origin',
-    '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    '+refs/pull/*/head:refs/remotes/origin/pr/*/head',
   ])
   expect(started).toBeGreaterThanOrEqual(1)
 })
