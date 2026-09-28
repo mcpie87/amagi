@@ -490,8 +490,25 @@ export function createApp({
         waiters.set(seat, queue)
       }
 
-      for (const { repo, service } of servedRunners()) {
-        const status = await service.status()
+      const runners = servedRunners()
+      const [statuses, queues] = await Promise.all([
+        Promise.all(runners.map(({ service }) => service.status())),
+        Promise.all(
+          workspaces.list().map(async (entry) => {
+            const ws = workspaces.get(entry.key)
+            if (ws === null) return null
+            const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+              (worker) => worker.enabled,
+            )
+            const ready = workers.length === 0 ? [] : await ws.tracker.ready()
+            return { repo: entry.key, ws, workers, ready }
+          }),
+        ),
+      ])
+
+      for (const [index, { repo }] of runners.entries()) {
+        const status = statuses[index]
+        if (status === undefined) continue
         for (const taskId of status.running) {
           const task = status.tasks[taskId]
           const ws = workspaces.get(repo)
@@ -556,16 +573,16 @@ export function createApp({
           since: null,
         })
       }
-      for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
+      for (const queue of queues) {
+        if (queue === null) continue
+        const { repo, ws, workers, ready } = queue
         for (const chat of ws.store.activeChatAgents()) {
           const startedAt = ws.store
             .events({ taskId: chat.taskId, limit: 100_000 })
             .filter((event) => event.type === 'agent.started' && event.role === 'chat')
             .at(-1)?.ts
           setHolder(chat.seat, {
-            repo: entry.key,
+            repo,
             taskId: chat.taskId,
             title: ws.store.task(chat.taskId)?.title ?? chat.taskId,
             status: 'chat',
@@ -573,11 +590,7 @@ export function createApp({
           })
         }
 
-        const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
-          (worker) => worker.enabled,
-        )
         if (workers.length === 0) continue
-        const ready = await ws.tracker.ready()
         const workersBySeat = new Map<string, (typeof workers)[number][]>()
         for (const worker of workers) {
           const seat = worker.seat ?? worker.kind
@@ -598,11 +611,11 @@ export function createApp({
             })
             if (
               !canRun ||
-              tasks.some((queued) => queued.repo === entry.key && queued.taskId === task.id)
+              tasks.some((queued) => queued.repo === repo && queued.taskId === task.id)
             )
               continue
             tasks.push({
-              repo: entry.key,
+              repo,
               taskId: task.id,
               title: task.title,
               status: 'ready',
