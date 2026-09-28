@@ -338,20 +338,76 @@ export class Store {
     }))
   }
 
+  /**
+   * `withoutAgentLog` drops the agent.stream lines a dashboard keeps only in
+   * its log buffers, leaving usage and task chat, which it folds into state.
+   * Those lines are most of a long-lived store's bytes; `agentLog` serves them
+   * per task instead.
+   */
   events(
-    opts: { taskId?: string | undefined; sinceSeq?: number; limit?: number } = {},
+    opts: {
+      taskId?: string | undefined
+      sinceSeq?: number
+      limit?: number
+      withoutAgentLog?: boolean
+    } = {},
   ): StoredEvent[] {
     const since = opts.sinceSeq ?? 0
     const limit = opts.limit ?? 500
+    const logFilter = opts.withoutAgentLog
+      ? ` and (type != 'agent.stream' or json_extract(body, '$.event.kind') = 'usage'
+          or (task_id is not null and json_extract(body, '$.role') = 'chat'))`
+      : ''
     const rows = (
       opts.taskId
         ? this.db
-            .query('select * from events where task_id = ? and seq > ? order by seq limit ?')
+            .query(
+              `select * from events where task_id = ? and seq > ?${logFilter} order by seq limit ?`,
+            )
             .all(opts.taskId, since, limit)
-        : this.db.query('select * from events where seq > ? order by seq limit ?').all(since, limit)
+        : this.db
+            .query(`select * from events where seq > ?${logFilter} order by seq limit ?`)
+            .all(since, limit)
     ) as { seq: number; ts: number; task_id: string | null; body: string }[]
-
     return rows.map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
+  latestSeq(): number {
+    const row = this.db.query('select coalesce(max(seq), 0) as seq from events').get() as {
+      seq: number
+    }
+    return row.seq
+  }
+
+  /**
+   * The latest `limit` agent.stream events of one attempt of a task (attempts
+   * count up from 1 at each task.reset), in seq order, up to `untilSeq`.
+   */
+  agentLog(taskId: string, attempt: number, untilSeq: number, limit: number): StoredEvent[] {
+    const rows = this.db
+      .query(
+        `select * from events where task_id = ? and seq <= ?
+           and type in ('agent.stream', 'task.reset') order by seq`,
+      )
+      .all(taskId, untilSeq) as {
+      seq: number
+      ts: number
+      task_id: string | null
+      type: string
+      body: string
+    }[]
+    let seen = 1
+    const picked: typeof rows = []
+    for (const row of rows) {
+      if (row.type === 'task.reset') seen++
+      else if (seen === attempt) picked.push(row)
+    }
+    return picked.slice(-limit).map((r) => ({
       seq: r.seq,
       ts: r.ts,
       taskId: r.task_id,

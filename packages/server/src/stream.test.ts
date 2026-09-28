@@ -20,7 +20,7 @@ afterEach(() => {
   ws.cleanup()
 })
 
-type Frame = { id: string | undefined; event: StoredEvent }
+type Frame = { id: string | undefined; name: string | undefined; event: StoredEvent }
 
 /**
  * Pulls SSE frames off the response until `count` of them have arrived. The
@@ -47,6 +47,7 @@ function sse(res: Response) {
         if (data) {
           frames.push({
             id: lines.find((l) => l.startsWith('id: '))?.slice(4),
+            name: lines.find((l) => l.startsWith('event: '))?.slice(7),
             event: JSON.parse(data.slice(6)) as StoredEvent,
           })
         }
@@ -224,5 +225,29 @@ describe('GET /api/repos/repo1/stream', () => {
   test('rejects a malformed sinceSeq', async () => {
     const res = await app.request('/api/repos/repo1/stream?sinceSeq=-1')
     expect(res.status).toBe(400)
+  })
+
+  test('a compact replay leaves out agent log lines and marks where it ended', async () => {
+    claim('bd-1')
+    const line = (text: string) =>
+      store.append('bd-1', {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'text', text },
+      })
+    line('in the backlog')
+    const head = line('also in the backlog')
+    const stream = sse(await app.request('/api/repos/repo1/stream?compact=1'))
+
+    const [claimed, marker] = await stream.take(2)
+    expect(claimed?.event.type).toBe('task.claimed')
+    expect(marker?.name).toBe('replayed')
+    expect(marker?.event as unknown).toBe(head.seq)
+
+    const live = line('live')
+    const [pushed] = await stream.take(1)
+    expect(pushed?.event.seq).toBe(live.seq)
+
+    await stream.close()
   })
 })

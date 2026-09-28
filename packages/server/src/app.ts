@@ -67,6 +67,7 @@ import { Hono } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import * as z from 'zod'
 import {
+  AgentLogQuery,
   AnswerBody,
   AskBody,
   AwaitQuery,
@@ -981,6 +982,18 @@ export function createApp({
       return c.json({ task, token: ws.store.token(id), questions: ws.store.openQuestions(id) })
     })
 
+    .get(
+      '/api/repos/:repo/tasks/:id/agent-log',
+      valid('param', RepoTaskIdParam),
+      valid('query', AgentLogQuery),
+      (c) => {
+        const { repo, id } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const { attempt, untilSeq, limit } = c.req.valid('query')
+        return c.json(ws.store.agentLog(id, attempt, untilSeq, limit))
+      },
+    )
+
     .post('/api/repos/:repo/tasks/:id/reclaim', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
@@ -1755,16 +1768,16 @@ export function createApp({
     .get('/api/repos/:repo/stream', valid('param', RepoParam), valid('query', StreamQuery), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const { taskId, sinceSeq } = c.req.valid('query')
+      const { taskId, sinceSeq, compact } = c.req.valid('query')
       // A browser resends the last id it saw on reconnect; that beats whatever
       // sinceSeq was baked into the EventSource url when it first connected.
       const resumed = Number(c.req.header('Last-Event-ID'))
-      const from = Number.isInteger(resumed) && resumed >= 0 ? resumed : sinceSeq
-      return eventStream(
-        c,
-        ws.store,
-        taskId === undefined ? { sinceSeq: from } : { taskId, sinceSeq: from },
-      )
+      const isResume = Number.isInteger(resumed) && resumed >= 0
+      const from = isResume ? resumed : sinceSeq
+      // The url still asks for compact on a resume, but the client counts on
+      // the log lines it missed since the first replay.
+      const opts = { sinceSeq: from, compact: compact && !isResume }
+      return eventStream(c, ws.store, taskId === undefined ? opts : { taskId, ...opts })
     })
 
     .get(

@@ -293,6 +293,45 @@ describe('Store', () => {
     expect(tail[0]?.type).toBe('task.state')
   })
 
+  test('withoutAgentLog keeps usage and task chat but drops other agent lines', () => {
+    claim()
+    const line = (role: 'implement' | 'chat', text: string) =>
+      store.append('bd-1', { type: 'agent.stream', role, event: { kind: 'text', text } })
+    line('implement', 'working')
+    line('chat', 'hello')
+    store.append('bd-1', {
+      type: 'agent.stream',
+      role: 'implement',
+      event: { kind: 'usage', inputTokens: 1, outputTokens: 2 },
+    })
+    const kept = store
+      .events({ withoutAgentLog: true })
+      .map((e) => (e.type === 'agent.stream' ? `${e.role}:${e.event.kind}` : e.type))
+    expect(kept).toEqual(['task.claimed', 'chat:text', 'implement:usage'])
+  })
+
+  test('agentLog returns the latest lines of one attempt up to a seq', () => {
+    claim()
+    const line = (text: string) =>
+      store.append('bd-1', {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'text', text },
+      })
+    line('first attempt')
+    store.append('bd-1', { type: 'task.reset', reason: 'retry' })
+    line('a')
+    line('b')
+    const until = line('c').seq
+    line('after')
+    const texts = (attempt: number, limit: number) =>
+      store
+        .agentLog('bd-1', attempt, until, limit)
+        .map((e) => (e.type === 'agent.stream' && e.event.kind === 'text' ? e.event.text : e.type))
+    expect(texts(1, 10)).toEqual(['first attempt'])
+    expect(texts(2, 2)).toEqual(['b', 'c'])
+  })
+
   test('tasks can be filtered by state', () => {
     claim('bd-1')
     claim('bd-2')

@@ -45,8 +45,19 @@ export type EventQuery = z.infer<typeof EventQuery>
 export const StreamQuery = z.object({
   taskId: z.string().min(1).optional(),
   sinceSeq: z.coerce.number().int().min(0).default(0),
+  compact: z
+    .enum(['0', '1'])
+    .default('0')
+    .transform((value) => value === '1'),
 })
 export type StreamQuery = z.infer<typeof StreamQuery>
+
+export const AgentLogQuery = z.object({
+  attempt: z.coerce.number().int().min(1).default(1),
+  untilSeq: z.coerce.number().int().min(0),
+  limit: z.coerce.number().int().min(1).max(4000).default(4000),
+})
+export type AgentLogQuery = z.infer<typeof AgentLogQuery>
 
 export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
