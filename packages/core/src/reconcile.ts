@@ -39,7 +39,10 @@ export async function reconcilePr(
       if (task.prMergeStatus !== mergeStatus) {
         store.append(task.id, { type: 'pr.status', mergeStatus })
       }
-      if (task.state === 'pr_merge_conflict' && mergeStatus === 'mergeable') {
+      if (
+        (task.state === 'pr_merge_conflict' || task.state === 'pr_conflict_fixing') &&
+        mergeStatus === 'mergeable'
+      ) {
         store.append(task.id, {
           type: 'task.state',
           from: task.state,
@@ -115,7 +118,9 @@ export async function reconcilePrs(
   remote: string,
 ): Promise<ReconcileResult[]> {
   const moved: ReconcileResult[] = []
-  for (const task of store.tasks({ states: ['pr_open', 'pr_flagged', 'pr_merge_conflict'] })) {
+  for (const task of store.tasks({
+    states: ['pr_open', 'pr_flagged', 'pr_merge_conflict', 'pr_conflict_fixing'],
+  })) {
     const result = await reconcilePr(store, forge, tracker, cwd, remote, task)
     if (result !== null) moved.push(result)
   }

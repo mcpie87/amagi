@@ -47,6 +47,12 @@ const KANBAN_COLUMNS: KanbanColumn[] = [
     accent: 'bg-red-600',
     states: ['pr_merge_conflict'],
   },
+  {
+    key: 'pr_conflict_fixing',
+    title: 'Resolving PR conflicts',
+    accent: 'bg-violet-600',
+    states: ['pr_conflict_fixing'],
+  },
   { key: 'no_pr', title: 'No PR', accent: 'bg-amber-600', states: ['no_pr'] },
   { key: 'committed', title: 'Committed', accent: 'bg-cyan-600', states: ['committed'] },
   { key: 'pr_open', title: 'PR open', accent: 'bg-sky-600', states: ['pr_open'] },

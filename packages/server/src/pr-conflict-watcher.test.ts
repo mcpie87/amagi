@@ -294,6 +294,38 @@ test('a queued PR bypasses the unchanged conflict cache and is recorded', async 
   ).toBe(true)
 })
 
+test('conflict resolution runs in its own task state and returns unresolved PRs to conflict', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  store.append('am-1', { type: 'pr.status', mergeStatus: 'conflicted' })
+  store.append('am-1', {
+    type: 'task.state',
+    from: 'pr_open',
+    to: 'pr_merge_conflict',
+  })
+  const driver = new FakePr()
+  driver.mergeStatus = 'conflicted'
+  driver.prs = [pr()]
+  start(fakeExec(), () => fakeHarness(() => {}), { driver, store })
+
+  await Bun.sleep(100)
+
+  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+  expect(
+    store
+      .events()
+      .some((event) => event.type === 'task.state' && event.to === 'pr_conflict_fixing'),
+  ).toBe(true)
+})
+
 test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
   const driver = new FakePr()
   driver.prs = [pr()]

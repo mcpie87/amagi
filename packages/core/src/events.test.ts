@@ -11,6 +11,7 @@ import {
 describe('state machine', () => {
   test('a live conflicted PR cannot be reset', () => {
     expect(canReset('pr_merge_conflict', false)).toBe(false)
+    expect(canReset('pr_conflict_fixing', false)).toBe(false)
   })
 
   test('queued tasks are non-terminal and can start work', () => {
@@ -149,6 +150,9 @@ describe('state machine', () => {
     expect(canTransition('pr_flagged', 'pr_merge_conflict')).toBe(true)
     expect(canTransition('needs_human', 'pr_merge_conflict')).toBe(true)
     expect(canTransition('pr_merge_conflict', 'pr_open')).toBe(true)
+    expect(canTransition('pr_merge_conflict', 'pr_conflict_fixing')).toBe(true)
+    expect(canTransition('pr_conflict_fixing', 'pr_merge_conflict')).toBe(true)
+    expect(canTransition('pr_conflict_fixing', 'pr_open')).toBe(true)
     expect(canTransition('pr_merge_conflict', 'done')).toBe(true)
     expect(isTerminal('pr_merge_conflict')).toBe(false)
   })

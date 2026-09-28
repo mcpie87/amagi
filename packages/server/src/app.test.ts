@@ -210,6 +210,34 @@ describe('GET /api/repos/:repo/tasks', () => {
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/tasks')).status).toBe(404)
   })
+
+  test('queueing conflict resolution updates the task state', async () => {
+    claim('bd-1')
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('bd-1', { type: 'task.state', from: null, to })
+    }
+    store.append('bd-1', {
+      type: 'pr.created',
+      url: 'https://example.com/demo/pull/7',
+      number: 7,
+    })
+    store.append('bd-1', { type: 'pr.status', mergeStatus: 'conflicted' })
+    store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
+    app = createApp({ workspaces: ws.workspaces, queueConflictResolution: () => true })
+
+    const response = await app.request('/api/repos/repo1/tasks/bd-1/resolve-conflicts', {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(200)
+    expect(store.task('bd-1')?.state).toBe('pr_conflict_fixing')
+  })
 })
 
 class FakeMergePrDriver implements PrDriver {

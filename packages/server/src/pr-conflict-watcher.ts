@@ -330,7 +330,12 @@ export function startPrConflictWatcher({
         if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
           store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
         }
-        if (isConflict && task !== null && task.state !== 'pr_merge_conflict') {
+        if (
+          isConflict &&
+          task !== null &&
+          task.state !== 'pr_merge_conflict' &&
+          task.state !== 'pr_conflict_fixing'
+        ) {
           if (canTransition(task.state, 'pr_merge_conflict')) {
             store.append(task.id, {
               type: 'task.state',
@@ -349,6 +354,15 @@ export function startPrConflictWatcher({
           nextState[key] = seen
           continue
         }
+        const currentTask = task === null ? null : store.task(task.id)
+        if (currentTask?.state === 'pr_merge_conflict') {
+          store.append(currentTask.id, {
+            type: 'task.state',
+            from: currentTask.state,
+            to: 'pr_conflict_fixing',
+            reason: `Conflict resolution running for PR #${pr.number}`,
+          })
+        }
         const result: ResolveConflictResult = await resolveConflict({
           repo,
           repoRoot: root,
@@ -362,6 +376,21 @@ export function startPrConflictWatcher({
           onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
           onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
         })
+        const resolvedTask = task === null ? null : store.task(task.id)
+        const settledState = result.ok ? 'pr_open' : 'pr_merge_conflict'
+        if (
+          resolvedTask?.state === 'pr_conflict_fixing' &&
+          canTransition(resolvedTask.state, settledState)
+        ) {
+          store.append(resolvedTask.id, {
+            type: 'task.state',
+            from: resolvedTask.state,
+            to: settledState,
+            reason: result.ok
+              ? `Conflict resolution completed for PR #${pr.number}`
+              : `PR #${pr.number} remains conflicted after resolution attempt`,
+          })
+        }
         if (isConflict) {
           nextState[key] = {
             headOid,
