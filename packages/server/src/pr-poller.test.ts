@@ -197,25 +197,30 @@ test('an open pr keeps the task in pr_open', async () => {
 })
 
 test('a resolved conflict returns the task to pr_open', async () => {
-  const store = new Store(openDatabase(':memory:'))
-  openPr(store)
-  store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
-  const forge = new FakePr()
-  forge.mergeStatus = 'mergeable'
-  pollers.push(
-    startPrPoller({
-      store,
-      forge,
-      tracker: new FakeTracker(),
-      cwd: '/repo',
-      remote: 'origin',
-      intervalMs: 10,
-    }),
-  )
-  await Bun.sleep(40)
+  for (const from of ['pr_merge_conflict', 'pr_conflict_fixing'] as const) {
+    const store = new Store(openDatabase(':memory:'))
+    openPr(store)
+    store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
+    if (from === 'pr_conflict_fixing') {
+      store.append('bd-1', { type: 'task.state', from: 'pr_merge_conflict', to: from })
+    }
+    const forge = new FakePr()
+    forge.mergeStatus = 'mergeable'
+    pollers.push(
+      startPrPoller({
+        store,
+        forge,
+        tracker: new FakeTracker(),
+        cwd: '/repo',
+        remote: 'origin',
+        intervalMs: 10,
+      }),
+    )
+    await Bun.sleep(40)
 
-  expect(store.task('bd-1')?.state).toBe('pr_open')
-  expect(store.task('bd-1')?.prMergeStatus).toBe('mergeable')
+    expect(store.task('bd-1')?.state).toBe('pr_open')
+    expect(store.task('bd-1')?.prMergeStatus).toBe('mergeable')
+  }
 })
 
 test('an open pr records its merge status for the pr_open task', async () => {

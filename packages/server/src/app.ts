@@ -1094,6 +1094,12 @@ export function createApp({
       if (queueConflictResolution?.(repo, task.prNumber) !== true) {
         return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
       }
+      ws.store.append(task.id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'pr_conflict_fixing',
+        reason: `Conflict resolution queued for PR #${task.prNumber}`,
+      })
       return c.json({ taskId: id, queued: true })
     })
 
