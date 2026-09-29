@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { Config } from './config.ts'
-import { type ConflictLogLevel, resolveConflict } from './conflict.ts'
+import { type ConflictLogLevel, resolveConflict, stageResolved } from './conflict.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type { AgentOutcome, AgentStartOptions, Harness } from './drivers/types.ts'
-import type { Exec, ExecResult } from './exec.ts'
+import { type Exec, type ExecResult, exec as realExec } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
@@ -347,6 +349,7 @@ describe('resolveConflict', () => {
     expect(result.ok).toBe(true)
     expect(launches).toBe(2)
     expect(result.iteration).toBe(2)
+    expect(calls).toContainEqual(['git', 'add', '-A'])
     expect(calls).toContainEqual(['git', 'commit', '-F', '-'])
     expect(inputs).toHaveLength(1)
     expect(inputs[0]).toContain('[am-1] Do the thing')
@@ -462,5 +465,47 @@ describe('resolveConflict', () => {
 
     expect(result.ok).toBe(false)
     expect(result.message).toContain('remote gone')
+  })
+})
+
+describe('stageResolved', () => {
+  let dir: string
+  const git = async (...args: string[]) =>
+    realExec(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir })
+  const unmerged = async () =>
+    (await git('diff', '--name-only', '--diff-filter=U')).stdout.split('\n').filter(Boolean)
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'amagi-stage-'))
+    await git('init', '-q', '-b', 'main')
+    for (const f of ['a.txt', 'b.txt', 'c.txt']) writeFileSync(join(dir, f), 'base\n')
+    await git('add', '-A')
+    await git('commit', '-q', '--no-verify', '-m', 'base')
+    await git('checkout', '-q', '-b', 'pr')
+    for (const f of ['a.txt', 'b.txt']) writeFileSync(join(dir, f), 'pr\n')
+    await git('commit', '-q', '--no-verify', '-am', 'pr')
+    await git('checkout', '-q', 'main')
+    for (const f of ['a.txt', 'b.txt']) writeFileSync(join(dir, f), 'main\n')
+    await git('commit', '-q', '--no-verify', '-am', 'main')
+    await git('checkout', '-q', 'pr')
+    expect((await git('merge', 'main')).exitCode).not.toBe(0)
+  })
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  test('stages resolved paths and keeps a path with conflict markers unmerged', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'merged\n')
+    await stageResolved(realExec, dir, await unmerged())
+    expect(await unmerged()).toEqual(['b.txt'])
+  })
+
+  test('once every conflict is resolved, stages the whole tree so the merge commits', async () => {
+    writeFileSync(join(dir, 'a.txt'), 'merged\n')
+    writeFileSync(join(dir, 'b.txt'), 'merged\n')
+    writeFileSync(join(dir, 'c.txt'), 'touched outside the conflict\n')
+    await stageResolved(realExec, dir, await unmerged())
+    expect(await unmerged()).toEqual([])
+    expect((await git('commit', '-q', '--no-verify', '--no-edit')).exitCode).toBe(0)
+    expect((await git('status', '--porcelain')).stdout).toBe('')
   })
 })
