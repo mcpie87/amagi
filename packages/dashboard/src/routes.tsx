@@ -52,9 +52,11 @@ const settingsRoute = createRoute({
   path: '/settings',
   component: SettingsView,
 })
-const manualRoute = createRoute({
+export const manualRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/manual',
+  validateSearch: (search: Record<string, unknown>): { page?: string } =>
+    typeof search.page === 'string' ? { page: search.page } : {},
   component: ManualView,
 })
 const seatsRoute = createRoute({
