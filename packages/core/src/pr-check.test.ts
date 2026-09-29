@@ -145,6 +145,7 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef' },
       exec,
     })
@@ -161,6 +162,7 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef', 'refs/pull/8/head': 'cafe12' },
       exec,
     })
@@ -171,7 +173,31 @@ describe('fetchPullHeads', () => {
       'fetch',
       '--prune',
       'origin',
-      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*/head',
+    ])
+  })
+
+  test('mirrors GitLab merge request heads into the same local refs', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote') ? ok('newsha\trefs/merge-requests/7/head\n') : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      forgeKind: 'gitlab',
+      lastHeads: {},
+      exec,
+    })
+
+    expect(result).toEqual({
+      fetched: true,
+      heads: { 'refs/merge-requests/7/head': 'newsha' },
+    })
+    expect(calls).toContainEqual([
+      'git',
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/merge-requests/*/head:refs/remotes/origin/pr/*/head',
     ])
   })
 
@@ -179,6 +205,7 @@ describe('fetchPullHeads', () => {
     const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef' },
       exec,
     })
