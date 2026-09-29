@@ -144,10 +144,11 @@ function liveForge(config: Config): PrDriver {
   const drivers = new Map<string, PrDriver>()
   const current = (): PrDriver => {
     const kind = config.forge.kind
-    let driver = drivers.get(kind)
+    const key = `${kind}:${config.forge.remote ?? ''}`
+    let driver = drivers.get(key)
     if (driver === undefined) {
-      driver = makePrDriver(kind)
-      drivers.set(kind, driver)
+      driver = makePrDriver(kind, undefined, config.forge.remote)
+      drivers.set(key, driver)
     }
     return driver
   }

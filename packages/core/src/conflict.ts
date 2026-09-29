@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
+import { resolveForgeRemote } from './drivers/forge-cred.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import { canTransition } from './events.ts'
@@ -184,7 +185,12 @@ export async function resolveConflict(
         cwd: wt.path,
         branch: wt.branch,
         headRef: opts.pr.headRefName,
-        remote: opts.config.forge.remote,
+        remote: await resolveForgeRemote(
+          run,
+          opts.repoRoot,
+          opts.config.forge.kind,
+          opts.config.forge.remote,
+        ),
         exec: run,
       })
       const message = 'base merges cleanly; pushed the merge to update the PR'
@@ -299,7 +305,12 @@ export async function resolveConflict(
       cwd: wt.path,
       branch: wt.branch,
       headRef: opts.pr.headRefName,
-      remote: opts.config.forge.remote,
+      remote: await resolveForgeRemote(
+        run,
+        opts.repoRoot,
+        opts.config.forge.kind,
+        opts.config.forge.remote,
+      ),
       exec: run,
     })
     const status = await opts.driver.getMergeStatus(opts.repoRoot, opts.pr.number)

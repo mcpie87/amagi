@@ -15,6 +15,7 @@ import {
   parseRemote,
   pickForgeCredential,
   removeForgeCredential,
+  resolveForgeRemote,
   teaEnv,
   teaXdgHome,
   updateForgeCredential,
@@ -38,6 +39,7 @@ const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
 
 const savedToken = process.env.GH_TOKEN
 const savedForgejoToken = process.env.FORGEJO_TOKEN
+const savedForgejoUrl = process.env.GITEA_SERVER_URL
 const savedState = process.env.XDG_STATE_HOME
 let home: string
 
@@ -47,6 +49,7 @@ beforeEach(() => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
   delete process.env.FORGEJO_TOKEN
+  delete process.env.GITEA_SERVER_URL
   delete process.env.GITEA_SERVER_TOKEN
   delete process.env.TEA_TOKEN
 })
@@ -56,6 +59,8 @@ afterEach(() => {
   else process.env.GH_TOKEN = savedToken
   if (savedForgejoToken === undefined) delete process.env.FORGEJO_TOKEN
   else process.env.FORGEJO_TOKEN = savedForgejoToken
+  if (savedForgejoUrl === undefined) delete process.env.GITEA_SERVER_URL
+  else process.env.GITEA_SERVER_URL = savedForgejoUrl
   if (savedState === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = savedState
   rmSync(home, { recursive: true, force: true })
@@ -160,6 +165,26 @@ describe('parseRemote', () => {
   })
 })
 
+describe('resolveForgeRemote', () => {
+  test('matches the selected forge host and honors an explicit remote', async () => {
+    const { exec } = fake((cmd) => {
+      if (cmd[1] === 'remote' && cmd.length === 2) return ok('origin\nwork\n')
+      if (cmd[1] === 'remote' && cmd[2] === 'get-url' && cmd[3] === 'origin') {
+        return ok('git@github.com:owner/repo.git')
+      }
+      if (cmd[1] === 'remote' && cmd[2] === 'get-url' && cmd[3] === 'work') {
+        return ok('git@gitlab.com:owner/repo.git')
+      }
+      return undefined
+    })
+    expect(await resolveForgeRemote(exec, '/repo', 'gitlab')).toBe('work')
+    expect(await resolveForgeRemote(exec, '/repo', 'github', 'work')).toBe('work')
+    await expect(resolveForgeRemote(exec, '/repo', 'forgejo')).rejects.toThrow(
+      'no git remote matches forgejo host codeberg.org',
+    )
+  })
+})
+
 describe('gitRewrite', () => {
   test('embeds the token as basic auth on the https form, keeping the path', () => {
     expect(gitRewrite('git@github.com:mcpie87/amagi.git', 'tok')).toEqual({
@@ -219,6 +244,7 @@ describe('gitTokenConfig', () => {
 describe('teaEnv', () => {
   test('provisions a tea login from the token and points tea at the Amagi xdg', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
+    process.env.GITEA_SERVER_URL = 'https://git.example.com'
     const { exec, calls } = fake((c) => {
       if (c.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
       if (c[0] === 'tea' && c[1] === 'logins') return ok('')

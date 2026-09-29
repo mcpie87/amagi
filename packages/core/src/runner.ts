@@ -5,7 +5,7 @@ import * as z from 'zod'
 import { stageAndCommit } from './commit.ts'
 import { type Config, reviewerHarnessConfig } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
-import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { forgeToken, gitTokenConfig, resolveForgeRemote } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -1017,15 +1017,29 @@ export class Runner {
       const tokenCfg = await gitTokenConfig(
         this.exec,
         this.deps.repoRoot,
-        config.forge.remote,
+        await resolveForgeRemote(
+          this.exec,
+          this.deps.repoRoot,
+          config.forge.kind,
+          config.forge.remote,
+        ),
         forgeToken(config.forge.kind, this.deps.repoRoot),
       )
       if (tokenCfg.length > 0) {
-        await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+        const remote = await resolveForgeRemote(
+          this.exec,
+          this.deps.repoRoot,
+          config.forge.kind,
+          config.forge.remote,
+        )
+        await execOk(this.exec, ['git', ...tokenCfg, 'fetch', remote, config.repo.baseBranch], {
           cwd: this.deps.repoRoot,
         })
       }
-      const base = tokenCfg.length > 0 ? `origin/${config.repo.baseBranch}` : config.repo.baseBranch
+      const base =
+        tokenCfg.length > 0
+          ? `${await resolveForgeRemote(this.exec, this.deps.repoRoot, config.forge.kind, config.forge.remote)}/${config.repo.baseBranch}`
+          : config.repo.baseBranch
       worktree = await createWorktree({
         repoRoot: this.deps.repoRoot,
         repoName: this.deps.repoName,
@@ -1399,7 +1413,7 @@ export class Runner {
     reviewSummary?: ReviewPrSummary | null,
   ): Promise<void> {
     const { store, config } = this.deps
-    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
+    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec, config.forge.remote)
     const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
     if (changes.length === 0) {
       // The worktree was dirty and a commit was made, yet the three-dot diff
@@ -1448,7 +1462,7 @@ export class Runner {
       cwd,
       branch,
       base: config.repo.baseBranch,
-      remote: config.forge.remote,
+      remote: await resolveForgeRemote(this.exec, cwd, config.forge.kind, config.forge.remote),
       title: prTitle(current),
       body: formatPrBody(
         current,
@@ -2207,10 +2221,21 @@ export class Runner {
     const tokenCfg = await gitTokenConfig(
       this.exec,
       this.deps.repoRoot,
-      config.forge.remote,
+      await resolveForgeRemote(
+        this.exec,
+        this.deps.repoRoot,
+        config.forge.kind,
+        config.forge.remote,
+      ),
       forgeToken(config.forge.kind, this.deps.repoRoot),
     )
-    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+    const remote = await resolveForgeRemote(
+      this.exec,
+      this.deps.repoRoot,
+      config.forge.kind,
+      config.forge.remote,
+    )
+    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', remote, config.repo.baseBranch], {
       cwd,
     })
     if (fetch.exitCode !== 0) return false
@@ -2220,7 +2245,9 @@ export class Runner {
       dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
     if (dirty && !stashed) return false
 
-    const rebase = await this.exec(['git', 'rebase', `origin/${config.repo.baseBranch}`], { cwd })
+    const rebase = await this.exec(['git', 'rebase', `${remote}/${config.repo.baseBranch}`], {
+      cwd,
+    })
     if (rebase.exitCode !== 0) {
       await this.exec(['git', 'rebase', '--abort'], { cwd })
       if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })

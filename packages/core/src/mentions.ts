@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
+import { resolveForgeRemote } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
@@ -338,7 +339,12 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       cwd: wt.path,
       branch: wt.branch,
       headRef: opts.pr.headRefName,
-      remote: opts.config.forge.remote,
+      remote: await resolveForgeRemote(
+        run,
+        opts.root,
+        opts.config.forge.kind,
+        opts.config.forge.remote,
+      ),
       exec: run,
     })
     const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')

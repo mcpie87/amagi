@@ -48,6 +48,7 @@ import {
   reconcilePr,
   removeForgeCredential,
   removeWorktree,
+  resolveForgeRemote,
   resolveWorkerHarness,
   type Store,
   type StoredEvent,
@@ -1126,7 +1127,14 @@ export function createApp({
       }
       // The reconcile writes events the dashboard already streams, so the
       // caller's live state picks up a merge/close without a page reload.
-      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
+      await reconcilePr(
+        ws.store,
+        ws.forge,
+        ws.tracker,
+        ws.root,
+        await resolveForgeRemote(exec, ws.root, ws.config.forge.kind, ws.config.forge.remote),
+        task,
+      )
       return c.json({ task: ws.store.task(id) })
     })
 
@@ -1310,7 +1318,11 @@ export function createApp({
         }
         if (task.state === 'pr_flagged' && ws.forge !== null && task.branch !== null) {
           try {
-            await ws.forge.deleteBranch(ws.root, ws.config.forge.remote, task.branch)
+            await ws.forge.deleteBranch(
+              ws.root,
+              await resolveForgeRemote(exec, ws.root, ws.config.forge.kind, ws.config.forge.remote),
+              task.branch,
+            )
           } catch (err) {
             console.warn(`branch removal on close ${id}: ${errMsg(err)}`)
           }
