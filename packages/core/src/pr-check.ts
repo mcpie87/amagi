@@ -283,6 +283,23 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
     Object.keys(heads).some((ref) => opts.lastHeads[ref] !== heads[ref])
   if (!moved) return { fetched: false, heads }
 
+  // The mirror used to write flat `pr/<n>` refs; left in place they block
+  // creating `pr/<n>/head`, and --prune never reaches them outside the refspec.
+  const mirror = `refs/remotes/${opts.remote}/pr/`
+  const legacy = (
+    await execOk(run, ['git', 'for-each-ref', '--format=%(refname)', mirror], {
+      cwd: opts.repoRoot,
+    })
+  )
+    .split('\n')
+    .filter((ref) => ref.startsWith(mirror) && /^\d+$/.test(ref.slice(mirror.length)))
+  if (legacy.length > 0) {
+    await execOk(run, ['git', 'update-ref', '--stdin'], {
+      cwd: opts.repoRoot,
+      stdin: legacy.map((ref) => `delete ${ref}\n`).join(''),
+    })
+  }
+
   await execOk(
     run,
     [

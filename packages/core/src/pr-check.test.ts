@@ -204,6 +204,34 @@ describe('fetchPullHeads', () => {
     ])
   })
 
+  test('deletes legacy flat pr/<n> mirror refs before fetching into pr/<n>/head', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote')
+        ? ok('newsha\trefs/pull/7/head\n')
+        : c.includes('for-each-ref')
+          ? ok('refs/remotes/origin/pr/7\nrefs/remotes/origin/pr/8/head\n')
+          : undefined,
+    )
+    const stdins: unknown[] = []
+    const run: Exec = async (cmd, opts) => {
+      if (cmd.includes('update-ref')) stdins.push(opts?.stdin)
+      return exec(cmd, opts)
+    }
+    await fetchPullHeads({
+      repoRoot: '/repo',
+      remote: 'origin',
+      forgeKind: 'github',
+      lastHeads: {},
+      exec: run,
+    })
+
+    expect(stdins).toEqual(['delete refs/remotes/origin/pr/7\n'])
+    const updateAt = calls.findIndex((c) => c.includes('update-ref'))
+    const fetchAt = calls.findIndex((c) => c[1] === 'fetch')
+    expect(updateAt).toBeGreaterThan(-1)
+    expect(updateAt).toBeLessThan(fetchAt)
+  })
+
   test('fetches when a PR head disappears so the mirror is pruned', async () => {
     const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
     const result = await fetchPullHeads({
