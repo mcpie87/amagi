@@ -7,15 +7,19 @@ import type { RegistryEntry } from './registry.ts'
 
 let dir: string
 let repo: string
+const savedState = process.env.XDG_STATE_HOME
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'amagi-diag-'))
   repo = join(dir, 'repo')
   mkdirSync(repo, { recursive: true })
   Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
+  process.env.XDG_STATE_HOME = dir
 })
 
 afterEach(() => {
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = savedState
   rmSync(dir, { recursive: true, force: true })
 })
 

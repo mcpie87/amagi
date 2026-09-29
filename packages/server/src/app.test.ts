@@ -2294,24 +2294,32 @@ describe('repo settings endpoints', () => {
   test('PATCH switching the forge unpins the remote and matches it to the new forge', async () => {
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
-    mkdirSync(entry.path, { recursive: true })
-    Bun.spawnSync(['git', 'init', '-q'], { cwd: entry.path })
-    Bun.spawnSync(['git', 'remote', 'add', 'origin', 'git@github.com:me/app.git'], {
-      cwd: entry.path,
-    })
-    Bun.spawnSync(['git', 'remote', 'add', 'lab', 'git@gitlab.com:me/app.git'], {
-      cwd: entry.path,
-    })
-    expect(await (await patch('repo1', '{"forgeRemote":"origin"}')).json()).toMatchObject({
-      forgeRemote: 'origin',
-      forgeRemotePinned: true,
-    })
-    expect(await (await patch('repo1', '{"forgeKind":"gitlab"}')).json()).toMatchObject({
-      forgeKind: 'gitlab',
-      forgeRemote: 'lab',
-      forgeRemotePinned: false,
-    })
-    expect(ws.workspaces.get('repo1')?.config.forge.remote).toBe('lab')
+    const savedState = process.env.XDG_STATE_HOME
+    // Credential URLs decide the forge host, so the operator's token store must not leak in.
+    process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), 'amagi-state-'))
+    try {
+      mkdirSync(entry.path, { recursive: true })
+      Bun.spawnSync(['git', 'init', '-q'], { cwd: entry.path })
+      Bun.spawnSync(['git', 'remote', 'add', 'origin', 'git@github.com:me/app.git'], {
+        cwd: entry.path,
+      })
+      Bun.spawnSync(['git', 'remote', 'add', 'lab', 'git@gitlab.com:me/app.git'], {
+        cwd: entry.path,
+      })
+      expect(await (await patch('repo1', '{"forgeRemote":"origin"}')).json()).toMatchObject({
+        forgeRemote: 'origin',
+        forgeRemotePinned: true,
+      })
+      expect(await (await patch('repo1', '{"forgeKind":"gitlab"}')).json()).toMatchObject({
+        forgeKind: 'gitlab',
+        forgeRemote: 'lab',
+        forgeRemotePinned: false,
+      })
+      expect(ws.workspaces.get('repo1')?.config.forge.remote).toBe('lab')
+    } finally {
+      if (savedState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = savedState
+    }
   })
 
   test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {

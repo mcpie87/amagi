@@ -4,6 +4,7 @@ import { NotImplementedDriverError } from '../factory.ts'
 import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
 import {
   forgeToken,
+  forgeUrl,
   ghEnv,
   gitTokenConfig,
   glabEnv,
@@ -303,7 +304,7 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
     const url = await execOk(exec, ['git', 'remote', 'get-url', forgeRemote], { cwd })
     const parsed = parseRemote(url.trim())
     if (parsed === null) throw new Error(`cannot parse forge remote: ${url.trim()}`)
-    remote = parsed
+    remote = { ...parsed, base: forgeUrl('forgejo', cwd) ?? parsed.base }
     return remote
   }
 

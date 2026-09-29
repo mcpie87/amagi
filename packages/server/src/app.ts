@@ -1475,7 +1475,11 @@ export function createApp({
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
         }
         if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
-        if (forgeKind !== undefined || forgeRemote !== undefined) {
+        if (
+          forgeKind !== undefined ||
+          forgeRemote !== undefined ||
+          forgeCredentials !== undefined
+        ) {
           const { kind, remote } = loadConfig(ws.root).config.forge
           ws.config.forge.kind = kind
           ws.config.forge.remote = remote
@@ -1507,8 +1511,8 @@ export function createApp({
     .get('/api/forge-credentials', (c) => c.json({ credentials: listForgeCredentials() }))
 
     .post('/api/forge-credentials', valid('json', ForgeCredentialCreateBody), (c) => {
-      const { kind, name, token } = c.req.valid('json')
-      return c.json(addForgeCredential(kind, name, token))
+      const { kind, name, token, url } = c.req.valid('json')
+      return c.json(addForgeCredential(kind, name, token, url ?? null))
     })
 
     .patch(

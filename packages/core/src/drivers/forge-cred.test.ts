@@ -8,6 +8,7 @@ import {
   forgeToken,
   forgeTokenStates,
   forgeTokensPath,
+  forgeUrl,
   ghEnv,
   gitRewrite,
   gitTokenConfig,
@@ -120,6 +121,21 @@ describe('forge credentials', () => {
     removeForgeCredential(org.id)
     expect(forgeTokenStates(repo).github).toEqual({ credential: personal.id, source: 'only' })
     expect(JSON.stringify(listForgeCredentials())).not.toContain('tok_')
+  })
+
+  test('a credential carries its server URL until it is cleared', () => {
+    const { repo } = repoWithWorktree()
+    const bot = addForgeCredential('gitlab', 'bot', 'tok', 'https://example.com/gitlab/')
+    expect(bot.url).toBe('https://example.com/gitlab')
+    expect(forgeUrl('gitlab', repo)).toBe('https://example.com/gitlab')
+    expect(glabEnv(repo, 'origin')).toMatchObject({
+      GITLAB_TOKEN: 'tok',
+      GITLAB_API_HOST: 'example.com/gitlab',
+      GLAB_API_PROTOCOL: 'https',
+    })
+    updateForgeCredential(bot.id, { url: null })
+    expect(listForgeCredentials()[0]?.url).toBeNull()
+    expect(glabEnv(repo, 'origin').GITLAB_API_HOST).toBeUndefined()
   })
 
   test('migrates per-repo tokens into shared credentials, one per distinct token', () => {
@@ -255,6 +271,20 @@ describe('teaEnv', () => {
       'fj_tok',
       '--no-version-check',
     ])
+  })
+
+  test('logs tea into the credential URL instead of the origin host', async () => {
+    const repo = join(home, 'fj')
+    mkdirSync(repo)
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
+    addForgeCredential('forgejo', 'bot', 'fj_tok', 'http://forge.lan:3000')
+    const { exec, calls } = fake((c) =>
+      c.includes('get-url') ? ok('ssh://git@git.lan:2222/o/r.git') : undefined,
+    )
+    const env = await teaEnv(exec, repo, 'origin')
+    expect(env.XDG_CONFIG_HOME).toBe(teaXdgHome('fj_tok', 'http://forge.lan:3000'))
+    const login = calls.find((c) => c[0] === 'tea')
+    expect(login?.[login.indexOf('--url') + 1]).toBe('http://forge.lan:3000')
   })
 
   test('skips provisioning without a token', async () => {

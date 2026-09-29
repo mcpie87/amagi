@@ -23,6 +23,7 @@ let home: string
 let repo: string
 const savedXdg = process.env.XDG_CONFIG_HOME
 const savedPath = process.env.PATH
+const savedState = process.env.XDG_STATE_HOME
 
 const writeGlobal = (toml: string) => {
   mkdirSync(join(home, 'amagi'), { recursive: true })
@@ -38,6 +39,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'amagi-cfg-'))
   repo = mkdtempSync(join(tmpdir(), 'amagi-repo-'))
   process.env.XDG_CONFIG_HOME = home
+  process.env.XDG_STATE_HOME = home
 })
 
 afterEach(() => {
@@ -45,6 +47,8 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = savedXdg
   if (savedPath === undefined) delete process.env.PATH
   else process.env.PATH = savedPath
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = savedState
   rmSync(home, { recursive: true, force: true })
   rmSync(repo, { recursive: true, force: true })
 })

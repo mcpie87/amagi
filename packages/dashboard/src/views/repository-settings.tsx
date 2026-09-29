@@ -15,13 +15,35 @@ type ForgeSettings = {
   remotes: string[]
   forgeCredentials: Record<ForgeKind, ForgeTokenState>
 }
-export type ForgeCredential = { id: string; kind: ForgeKind; name: string }
+export type ForgeCredential = { id: string; kind: ForgeKind; name: string; url: string | null }
 
-const FORGES: { kind: ForgeKind; label: string; cli: string; env: string }[] = [
-  { kind: 'github', label: 'GitHub', cli: 'gh', env: 'GH_TOKEN' },
-  { kind: 'gitlab', label: 'GitLab', cli: 'glab', env: 'GITLAB_TOKEN' },
-  { kind: 'forgejo', label: 'Forgejo', cli: 'tea', env: 'FORGEJO_TOKEN' },
+/** `urlPlaceholder` is null for forges amagi only knows at their public address. */
+const FORGES: {
+  kind: ForgeKind
+  label: string
+  cli: string
+  env: string
+  urlPlaceholder: string | null
+}[] = [
+  { kind: 'github', label: 'GitHub', cli: 'gh', env: 'GH_TOKEN', urlPlaceholder: null },
+  {
+    kind: 'gitlab',
+    label: 'GitLab',
+    cli: 'glab',
+    env: 'GITLAB_TOKEN',
+    urlPlaceholder: 'https://gitlab.example.com',
+  },
+  {
+    kind: 'forgejo',
+    label: 'Forgejo',
+    cli: 'tea',
+    env: 'FORGEJO_TOKEN',
+    urlPlaceholder: 'https://git.example.com',
+  },
 ]
+
+const urlInput =
+  'min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg'
 
 const ADD_TOKEN = '+add'
 
@@ -260,11 +282,12 @@ async function createCredential(
   kind: ForgeKind,
   name: string,
   token: string,
+  url: string | null,
 ): Promise<ForgeCredential> {
   const response = await fetch(`${apiBase}/api/forge-credentials`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind, name, token }),
+    body: JSON.stringify({ kind, name, token, url }),
   })
   if (!response.ok) throw new Error(await responseError(response))
   return (await response.json()) as ForgeCredential
@@ -279,9 +302,12 @@ function NewTokenForm({
   onCreated: (credential: ForgeCredential) => void
   onCancel?: () => void
 }) {
-  const label = FORGES.find((forge) => forge.kind === kind)?.label ?? kind
+  const forge = FORGES.find((f) => f.kind === kind)
+  const label = forge?.label ?? kind
+  const urlPlaceholder = forge?.urlPlaceholder ?? null
   const [name, setName] = useState('')
   const [token, setToken] = useState('')
+  const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -289,9 +315,10 @@ function NewTokenForm({
     setBusy(true)
     setError(null)
     try {
-      onCreated(await createCredential(kind, name.trim(), token.trim()))
+      onCreated(await createCredential(kind, name.trim(), token.trim(), url.trim() || null))
       setName('')
       setToken('')
+      setUrl('')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -318,6 +345,16 @@ function NewTokenForm({
         placeholder="Paste token"
         className="min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg"
       />
+      {urlPlaceholder !== null && (
+        <input
+          type="url"
+          aria-label={`${label} server URL`}
+          value={url}
+          onChange={(event) => setUrl(event.currentTarget.value)}
+          placeholder={`${urlPlaceholder} (empty: from origin)`}
+          className={urlInput}
+        />
+      )}
       <button
         type="button"
         disabled={busy || name.trim() === '' || token.trim() === ''}
@@ -343,11 +380,18 @@ function CredentialRow({
   credential: ForgeCredential
   onChanged: () => void
 }) {
+  const urlPlaceholder = FORGES.find((f) => f.kind === credential.kind)?.urlPlaceholder ?? null
   const [token, setToken] = useState('')
+  const [url, setUrl] = useState(credential.url ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const run = async (method: 'PATCH' | 'DELETE', body?: { token: string }) => {
+  useEffect(() => setUrl(credential.url ?? ''), [credential.url])
+
+  const run = async (
+    method: 'PATCH' | 'DELETE',
+    body?: { token: string } | { url: string | null },
+  ) => {
     setBusy(true)
     setError(null)
     const err = await send(method, `/api/forge-credentials/${credential.id}`, body)
@@ -377,6 +421,26 @@ function CredentialRow({
       >
         Rotate
       </button>
+      {urlPlaceholder !== null && (
+        <>
+          <input
+            type="url"
+            aria-label={`Server URL for ${credential.name}`}
+            value={url}
+            onChange={(event) => setUrl(event.currentTarget.value)}
+            placeholder={`${urlPlaceholder} (empty: from origin)`}
+            className={urlInput}
+          />
+          <button
+            type="button"
+            disabled={busy || url.trim() === (credential.url ?? '')}
+            onClick={() => void run('PATCH', { url: url.trim() || null })}
+            className={secondary}
+          >
+            Save URL
+          </button>
+        </>
+      )}
       <button
         type="button"
         disabled={busy}

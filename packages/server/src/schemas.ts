@@ -155,19 +155,24 @@ const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefin
 
 export const ForgeCredentialParam = z.object({ id: z.string().min(1) })
 
+/** A forge's web base URL, e.g. https://git.example.com or https://example.com/gitlab. */
+const ForgeUrl = z.url({ protocol: /^https?$/ }).trim()
+
 export const ForgeCredentialCreateBody = z.object({
   kind: ForgeKind,
   name: z.string().trim().min(1),
   token: z.string().trim().min(1),
+  url: ForgeUrl.nullable().optional(),
 })
 
-/** A new token rotates the credential for every repo using it. */
+/** A new token rotates the credential for every repo using it; a null url goes back to origin. */
 export const ForgeCredentialUpdateBody = z
   .object({
     name: z.string().trim().min(1).optional(),
     token: z.string().trim().min(1).optional(),
+    url: ForgeUrl.nullable().optional(),
   })
-  .refine(nonEmpty, { message: 'provide a name or token' })
+  .refine(nonEmpty, { message: 'provide a name, token or url' })
 
 export const WorkerCreateBody = z.object({
   name: z.string().trim().min(1),

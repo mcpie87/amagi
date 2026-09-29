@@ -18,14 +18,19 @@ const FORGE_LABELS: Record<ForgeKind, string> = {
   forgejo: 'Forgejo',
 }
 
-/** A named forge token as the dashboard sees it: the token itself never leaves the server. */
-export type ForgeCredential = { id: string; kind: ForgeKind; name: string }
+/**
+ * A named forge token as the dashboard sees it: the token itself never leaves
+ * the server. `url` is the forge's web base URL; null means derive it from the
+ * repo's origin remote.
+ */
+export type ForgeCredential = { id: string; kind: ForgeKind; name: string; url: string | null }
 
 const StoredCredential = z.object({
   id: z.string().min(1),
   kind: z.enum(FORGE_KINDS),
   name: z.string(),
   token: z.string().min(1),
+  url: z.string().min(1).optional(),
 })
 type StoredCredential = z.infer<typeof StoredCredential>
 
@@ -98,34 +103,49 @@ function writeTokenStore(store: TokenStore): void {
   chmodSync(path, 0o600)
 }
 
-const publicCredential = ({ id, kind, name }: StoredCredential): ForgeCredential => ({
+const publicCredential = ({ id, kind, name, url }: StoredCredential): ForgeCredential => ({
   id,
   kind,
   name,
+  url: url ?? null,
 })
+
+/** Trailing slashes dropped, so `${url}/api/v1` and host comparisons stay clean. */
+const normalizeUrl = (url: string): string => url.trim().replace(/\/+$/, '')
 
 export function listForgeCredentials(): ForgeCredential[] {
   return readTokenStore().credentials.map(publicCredential)
 }
 
-export function addForgeCredential(kind: ForgeKind, name: string, token: string): ForgeCredential {
+export function addForgeCredential(
+  kind: ForgeKind,
+  name: string,
+  token: string,
+  url: string | null = null,
+): ForgeCredential {
   const store = readTokenStore()
-  const credential = { id: randomUUID(), kind, name, token }
+  const credential: StoredCredential = { id: randomUUID(), kind, name, token }
+  if (url !== null) credential.url = normalizeUrl(url)
   store.credentials.push(credential)
   writeTokenStore(store)
   return publicCredential(credential)
 }
 
-/** Renames or rotates a credential; every repo using it picks up the change. Null when unknown. */
+/**
+ * Renames, rotates or re-points a credential; every repo using it picks up the
+ * change. A null `url` goes back to deriving it from origin. Null when unknown.
+ */
 export function updateForgeCredential(
   id: string,
-  patch: { name?: string | undefined; token?: string | undefined },
+  patch: { name?: string | undefined; token?: string | undefined; url?: string | null | undefined },
 ): ForgeCredential | null {
   const store = readTokenStore()
   const credential = store.credentials.find((c) => c.id === id)
   if (credential === undefined) return null
   if (patch.name !== undefined) credential.name = patch.name
   if (patch.token !== undefined) credential.token = patch.token
+  if (patch.url === null) delete credential.url
+  else if (patch.url !== undefined) credential.url = normalizeUrl(patch.url)
   writeTokenStore(store)
   return publicCredential(credential)
 }
@@ -246,6 +266,16 @@ export function forgeToken(kind: ForgeKind, cwd?: string): string | null {
   return resolveCredential(readTokenStore(), root, kind)?.credential.token ?? envForgeToken(kind)
 }
 
+/**
+ * Web base URL the resolved credential for `cwd` names, e.g.
+ * `https://git.example.com`. Null when it names none or comes from the
+ * environment: callers then derive the URL from the origin remote.
+ */
+export function forgeUrl(kind: ForgeKind, cwd?: string): string | null {
+  const root = cwd === undefined ? null : repoRootOf(cwd)
+  return resolveCredential(readTokenStore(), root, kind)?.credential.url ?? null
+}
+
 /** Where Amagi keeps gh's own config, so gh never reads the operator's ~/.config/gh. */
 export function ghConfigDir(): string {
   return join(forgeStateDir(), 'github')
@@ -256,10 +286,12 @@ export function ghConfigDir(): string {
  * config. One profile per token: tea keeps a single login per config, and
  * repos may carry different tokens.
  */
-export function teaXdgHome(token: string | null): string {
+export function teaXdgHome(token: string | null, url: string | null = null): string {
   const base = join(forgeStateDir(), 'tea')
   if (token === null) return base
-  return join(base, createHash('sha256').update(token).digest('hex').slice(0, 16))
+  // Keyed on the URL too, so re-pointing a credential provisions a fresh login.
+  const key = url === null ? token : `${url}\n${token}`
+  return join(base, createHash('sha256').update(key).digest('hex').slice(0, 16))
 }
 
 /**
@@ -280,16 +312,20 @@ function remoteRepo(cwd: string, remote: string): { base: string; ownerRepo: str
   }
 }
 
-/** Where each forge lives; Forgejo has no public default. */
+/** Where each forge lives when its credential names no URL; Forgejo has no public default. */
 const PUBLIC_HOST: Record<ForgeKind, string | null> = {
   github: 'github.com',
   gitlab: 'gitlab.com',
   forgejo: null,
 }
 
-/** Hostname of the `kind` forge, or null when unknown. */
-export function forgeHostname(kind: ForgeKind): string | null {
-  return PUBLIC_HOST[kind]
+/**
+ * Hostname of the `kind` forge for the repo at `cwd`: the resolved
+ * credential's URL, else the forge's public host. Null when unknown.
+ */
+export function forgeHostname(kind: ForgeKind, cwd: string): string | null {
+  const url = forgeUrl(kind, cwd)
+  return url === null ? PUBLIC_HOST[kind] : new URL(url).hostname
 }
 
 /** Hostname a git remote URL points at, or null when unparseable. */
@@ -321,7 +357,7 @@ export function gitRemoteUrls(cwd: string): { name: string; url: string }[] {
  * (fork plus upstream) prefer origin, else the first; null when none match.
  */
 export function matchForgeRemote(cwd: string, kind: ForgeKind): string | null {
-  const host = forgeHostname(kind)
+  const host = forgeHostname(kind, cwd)
   if (host === null) return null
   const matches = gitRemoteUrls(cwd).filter((r) => remoteHostname(r.url) === host)
   return (matches.find((r) => r.name === 'origin') ?? matches[0])?.name ?? null
@@ -354,7 +390,8 @@ export function glabConfigDir(): string {
  * Env for a glab subprocess: the repo's GitLab token and an Amagi-owned
  * GLAB_CONFIG_DIR, set even without a token so glab fails closed.
  * GLAB_REMOTE_ALIAS pins glab to `remote` instead of its own remote-name
- * preference.
+ * preference. A credential URL sends API calls there instead of to the
+ * remote's host.
  */
 export function glabEnv(cwd: string, remote: string): Record<string, string> {
   const dir = glabConfigDir()
@@ -366,6 +403,12 @@ export function glabEnv(cwd: string, remote: string): Record<string, string> {
   }
   const token = forgeToken('gitlab', cwd)
   if (token !== null) env.GITLAB_TOKEN = token
+  const url = forgeUrl('gitlab', cwd)
+  if (url !== null) {
+    const { protocol, host, pathname } = new URL(url)
+    env.GITLAB_API_HOST = `${host}${pathname.replace(/\/+$/, '')}`
+    env.GLAB_API_PROTOCOL = protocol.replace(/:$/, '')
+  }
   return env
 }
 
@@ -462,11 +505,12 @@ async function ensureTeaLogin(
   cwd: string,
   remote: string,
   token: string | null,
+  configured: string | null,
   env: Record<string, string>,
 ): Promise<void> {
-  const cfg = join(teaXdgHome(token), 'tea', 'config.yml')
+  const cfg = join(teaXdgHome(token, configured), 'tea', 'config.yml')
   if (existsSync(cfg)) return
-  const url = process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, remote))
+  const url = configured ?? process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, remote))
   if (token === null || url === null) return
   await execOk(
     exec,
@@ -493,8 +537,9 @@ export async function teaEnv(
   remote: string,
 ): Promise<Record<string, string>> {
   const token = forgeToken('forgejo', cwd)
-  const env: Record<string, string> = { XDG_CONFIG_HOME: teaXdgHome(token) }
-  await ensureTeaLogin(exec, cwd, remote, token, env)
+  const url = forgeUrl('forgejo', cwd)
+  const env: Record<string, string> = { XDG_CONFIG_HOME: teaXdgHome(token, url) }
+  await ensureTeaLogin(exec, cwd, remote, token, url, env)
   return env
 }
 

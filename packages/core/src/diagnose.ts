@@ -30,7 +30,7 @@ function forgeRemoteCheck(root: string, kind: Config['forge']['kind'], remote: s
   const name = 'forge remote'
   const url = gitRemoteUrls(root).find((r) => r.name === remote)?.url
   if (url === undefined) return { name, ok: false, detail: `no git remote named ${remote}` }
-  const want = forgeHostname(kind)
+  const want = forgeHostname(kind, root)
   const got = remoteHostname(url)
   if (want !== null && got !== want) {
     return {
