@@ -133,6 +133,7 @@ function startRepoPollers(
       }
       if (!ws) continue
       const forge = ws.forge
+      const prForge = ws.prForge
       const mentionEnabled = forge !== null && ws.config.watchers.mention.enabled
       const conflictEnabled = forge !== null && ws.config.watchers.prConflict.enabled
       const stallEnabled = ws.config.watchers.stall.enabled
@@ -164,6 +165,7 @@ function startRepoPollers(
               store: ws.store,
               tracker: ws.tracker,
               driver: forge,
+              ...(prForge === null ? {} : { forgeFor: prForge }),
               intervalMs: prConflictIntervalMs ?? ws.config.loop.prCheckIntervalSec * 1000,
             })
       const startStall = () =>
@@ -207,14 +209,13 @@ function startRepoPollers(
             intervalMs: gateIntervalMs,
           }),
           pr:
-            forge === null
+            prForge === null
               ? null
               : startPrPoller({
                   store: ws.store,
-                  forge,
+                  forgeFor: prForge,
                   tracker: ws.tracker,
                   cwd: ws.root,
-                  remote: ws.config.forge.remote,
                   intervalMs: prIntervalMs,
                 }),
           mention: mentionEnabled ? startMention() : null,
@@ -264,10 +265,10 @@ function startRepoPollers(
     ])
   return {
     workers,
-    queueConflictResolution(repo: string, prNumber: number): boolean {
+    queueConflictResolution(repo: string, prNumber: number, prUrl: string | null): boolean {
       const watcher = pollers.get(repo)?.conflict
       if (watcher === null || watcher === undefined) return false
-      watcher.queue(prNumber)
+      watcher.queue(prNumber, prUrl)
       return true
     },
     stop() {

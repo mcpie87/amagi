@@ -39,6 +39,7 @@ import {
   killTree,
   loadConfig,
   loadGlobalConfig,
+  prForgeRouter,
   repoConfigPath,
   writeGlobalConfig,
 } from '@amagi/core'
@@ -1695,6 +1696,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('workspace missing')
     workspace.forge = forge
+    workspace.prForge = prForgeRouter(workspace.root, workspace.config, forge)
   }
 
   const flagged = (id: string, number: number) => {
@@ -1761,6 +1763,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('workspace missing')
     workspace.forge = null
+    workspace.prForge = null
     flagged('bd-1', 7)
     const res = await close('bd-1', 'close it')
     expect(res.status).toBe(501)

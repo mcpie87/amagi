@@ -128,7 +128,7 @@ export type ServerDeps = {
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
   /** Queues one PR on the existing conflict watcher. */
-  queueConflictResolution?: (repo: string, prNumber: number) => boolean
+  queueConflictResolution?: (repo: string, prNumber: number, prUrl: string | null) => boolean
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
@@ -1132,12 +1132,13 @@ export function createApp({
       if (task.prNumber === null) {
         return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
       }
-      if (ws.forge === null) {
+      if (ws.prForge === null) {
         return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
       }
+      const { driver, config } = ws.prForge(task.prUrl)
       // The reconcile writes events the dashboard already streams, so the
       // caller's live state picks up a merge/close without a page reload.
-      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
+      await reconcilePr(ws.store, driver, ws.tracker, ws.root, config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
     })
 
@@ -1152,7 +1153,7 @@ export function createApp({
       if (task.prNumber === null) {
         return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
       }
-      if (queueConflictResolution?.(repo, task.prNumber) !== true) {
+      if (queueConflictResolution?.(repo, task.prNumber, task.prUrl) !== true) {
         return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
       }
       ws.store.append(task.id, {
@@ -1264,7 +1265,7 @@ export function createApp({
         // one who closes it. This is the one step that must not be best effort,
         // else the task retires with the PR still open on the forge.
         if (task.state === 'pr_flagged') {
-          if (ws.forge === null) {
+          if (ws.prForge === null) {
             return c.json(
               {
                 error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
@@ -1276,7 +1277,7 @@ export function createApp({
             return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
           }
           try {
-            await ws.forge.closePr(ws.root, task.prNumber, reason)
+            await ws.prForge(task.prUrl).driver.closePr(ws.root, task.prNumber, reason)
           } catch (err) {
             return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
           }

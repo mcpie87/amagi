@@ -2,6 +2,7 @@ import { BeadsService } from './beads-service.ts'
 import { type Config, loadConfig } from './config.ts'
 import { diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
+import { type PrForge, prForgeRouter } from './drivers/pr-route.ts'
 import { BeadsTracker } from './drivers/tracker/beads.ts'
 import type { Tracker } from './drivers/types.ts'
 import { makeTracker } from './factory.ts'
@@ -36,6 +37,8 @@ export type Workspace = {
   beads: BeadsService | null
   /** Follows `config.forge.kind` live; null only when a test injects no forge. */
   forge: PrDriver | null
+  /** Routes a PR URL to the forge it lives on, falling back to `forge`; null when `forge` is. */
+  prForge: ((prUrl: string | null) => PrForge) | null
 }
 
 export type WorkspacesOptions = {
@@ -101,6 +104,7 @@ export class Workspaces {
       tracker,
       beads: tracker instanceof BeadsTracker ? new BeadsService(tracker, entry.path) : null,
       forge,
+      prForge: forge === null ? null : prForgeRouter(entry.path, config, forge),
     }
   }
 

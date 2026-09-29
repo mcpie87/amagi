@@ -1,7 +1,17 @@
 import type { PrDriver, PrState } from './drivers/pr.ts'
+import type { PrForge } from './drivers/pr-route.ts'
 import type { Tracker } from './drivers/types.ts'
 import { errMsg } from './errors.ts'
+import type { TaskState } from './events.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
+
+/** States a task sits in while its PR is open on the forge. */
+export const PR_TASK_STATES: readonly TaskState[] = [
+  'pr_open',
+  'pr_flagged',
+  'pr_merge_conflict',
+  'pr_conflict_fixing',
+]
 
 export type ReconcileResult = {
   taskId: string
@@ -107,21 +117,20 @@ async function closeErrorTasks(store: Store, tracker: Tracker, taskId: string): 
 
 /**
  * Settles every task parked on an open PR state whose remote PR left the live
- * set. Errors resolving a single PR are logged and skipped, so one flaky
- * query never stalls the sweep.
+ * set, asking the forge `forgeFor` routes each task's PR URL to. Errors
+ * resolving a single PR are logged and skipped, so one flaky query never
+ * stalls the sweep.
  */
 export async function reconcilePrs(
   store: Store,
-  forge: PrDriver,
+  forgeFor: (prUrl: string | null) => PrForge,
   tracker: Tracker,
   cwd: string,
-  remote: string,
 ): Promise<ReconcileResult[]> {
   const moved: ReconcileResult[] = []
-  for (const task of store.tasks({
-    states: ['pr_open', 'pr_flagged', 'pr_merge_conflict', 'pr_conflict_fixing'],
-  })) {
-    const result = await reconcilePr(store, forge, tracker, cwd, remote, task)
+  for (const task of store.tasks({ states: PR_TASK_STATES })) {
+    const { driver, config } = forgeFor(task.prUrl)
+    const result = await reconcilePr(store, driver, tracker, cwd, config.forge.remote, task)
     if (result !== null) moved.push(result)
   }
   return moved

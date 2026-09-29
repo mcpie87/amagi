@@ -9,6 +9,7 @@ import {
   type Harness,
   type MergeStatus,
   openDatabase,
+  PRIMARY_FORGE,
   type PrComment,
   type PrDriver,
   type PrInfo,
@@ -344,6 +345,39 @@ test('conflict resolution runs in its own task state and returns unresolved PRs 
       .events()
       .some((event) => event.type === 'task.state' && event.to === 'pr_conflict_fixing'),
   ).toBe(true)
+})
+
+test('a task PR left on the previously configured forge is scanned and resolved there', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  const primary = new FakePr()
+  const github = new FakePr()
+  github.prs = [pr()]
+  const cfg = config()
+  let started = 0
+  start(fakeExec(), () => fakeHarness(() => started++), {
+    driver: primary,
+    store,
+    config: cfg,
+    forgeFor: (prUrl) =>
+      prUrl === null
+        ? { key: PRIMARY_FORGE, config: cfg, driver: primary }
+        : { key: 'github:origin', config: cfg, driver: github },
+  })
+
+  await Bun.sleep(60)
+
+  expect(started).toBe(1)
+  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+  expect(Object.keys(stateFile())).toEqual(['github:origin#7'])
 })
 
 test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
