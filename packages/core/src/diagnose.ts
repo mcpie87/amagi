@@ -1,9 +1,8 @@
 import { mkdirSync } from 'node:fs'
-import { loadConfig } from './config.ts'
-import { forgeHost, forgeToken, parseRemote, resolveForgeRemote } from './drivers/forge-cred.ts'
+import { type Config, loadConfig } from './config.ts'
+import { forgeHostname, forgeToken, gitRemoteUrls, remoteHostname } from './drivers/forge-cred.ts'
 import { makePrDriver } from './drivers/pr.ts'
 import { errMsg } from './errors.ts'
-import { exec, execOk } from './exec.ts'
 import { expandTilde } from './paths.ts'
 import { isRepoRoot, type RegistryEntry } from './registry.ts'
 
@@ -24,18 +23,38 @@ function binaryExists(bin: string): boolean {
 }
 
 /**
+ * The forge remote exists and points at the selected forge, so a push never
+ * carries one forge's token to another. Passes when the forge host is unknown.
+ */
+function forgeRemoteCheck(root: string, kind: Config['forge']['kind'], remote: string): Diagnostic {
+  const name = 'forge remote'
+  const url = gitRemoteUrls(root).find((r) => r.name === remote)?.url
+  if (url === undefined) return { name, ok: false, detail: `no git remote named ${remote}` }
+  const want = forgeHostname(kind)
+  const got = remoteHostname(url)
+  if (want !== null && got !== want) {
+    return {
+      name,
+      ok: false,
+      detail: `${remote} points at ${got ?? url}, not the ${kind} forge at ${want}`,
+    }
+  }
+  return { name, ok: true, detail: `${remote} (${url})` }
+}
+
+/**
  * Static readiness checks for a registered repo: git root resolves, config
  * parses, tracker and forge drivers are implemented and their CLIs are on
  * PATH, and the worktree root can be created. Everything here runs without
  * constructing the workspace, so onboarding never needs a server restart.
  */
-export async function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
+export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
   const checks: Diagnostic[] = []
 
   if (!isRepoRoot(entry.path)) {
-    return [
+    return Promise.resolve([
       { name: 'git root', ok: false, detail: `${entry.path} is not inside a git working tree` },
-    ]
+    ])
   }
   checks.push({ name: 'git root', ok: true })
 
@@ -45,7 +64,7 @@ export async function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> 
     config = loaded.config
     checks.push({ name: 'config', ok: true, detail: loaded.sources.join(', ') || 'defaults' })
   } catch (err) {
-    return [...checks, { name: 'config', ok: false, detail: errMsg(err) }]
+    return Promise.resolve([...checks, { name: 'config', ok: false, detail: errMsg(err) }])
   }
 
   const trackerBin = TRACKER_BIN[config.tracker.kind]
@@ -64,31 +83,7 @@ export async function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> 
   }
 
   try {
-    const remote = await resolveForgeRemote(
-      exec,
-      entry.path,
-      config.forge.kind,
-      config.forge.remote,
-    )
-    const remoteUrl = await execOk(exec, ['git', 'remote', 'get-url', remote], {
-      cwd: entry.path,
-    }).catch(() => '')
-    const host = parseRemote(remoteUrl.trim())?.base
-    const matches =
-      host !== undefined && new URL(host).host.toLowerCase() === forgeHost(config.forge.kind)
-    checks.push({
-      name: 'forge remote',
-      ok: matches,
-      detail: matches
-        ? `${remote} (${new URL(host).host})`
-        : `${remote} does not match ${forgeHost(config.forge.kind)}`,
-    })
-  } catch (err) {
-    checks.push({ name: 'forge remote', ok: false, detail: errMsg(err) })
-  }
-
-  try {
-    makePrDriver(config.forge.kind, undefined, config.forge.remote)
+    makePrDriver(config.forge.kind, config.forge.remote)
     const forgeBin = FORGE_BIN[config.forge.kind]
     checks.push({
       name: `forge ${config.forge.kind}`,
@@ -108,6 +103,7 @@ export async function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> 
           }
         : {}),
     })
+    checks.push(forgeRemoteCheck(entry.path, config.forge.kind, config.forge.remote))
   } catch (err) {
     checks.push({
       name: `forge ${config.forge.kind}`,
@@ -137,5 +133,5 @@ export async function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> 
     detail: total === 0 ? 'none configured' : `${total} step(s)`,
   })
 
-  return checks
+  return Promise.resolve(checks)
 }

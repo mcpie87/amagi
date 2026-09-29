@@ -263,16 +263,85 @@ export function teaXdgHome(token: string | null): string {
 }
 
 /**
+ * `owner/repo` and web base URL of `remote` in the repo at `cwd`, or null when
+ * the remote is missing or unparseable. Synchronous so the env builders below
+ * stay usable from sync call sites; one local git call, no network.
+ */
+function remoteRepo(cwd: string, remote: string): { base: string; ownerRepo: string } | null {
+  try {
+    const r = Bun.spawnSync(['git', 'remote', 'get-url', remote], {
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    return r.exitCode === 0 ? parseRemote(r.stdout.toString()) : null
+  } catch {
+    return null
+  }
+}
+
+/** Where each forge lives; Forgejo has no public default. */
+const PUBLIC_HOST: Record<ForgeKind, string | null> = {
+  github: 'github.com',
+  gitlab: 'gitlab.com',
+  forgejo: null,
+}
+
+/** Hostname of the `kind` forge, or null when unknown. */
+export function forgeHostname(kind: ForgeKind): string | null {
+  return PUBLIC_HOST[kind]
+}
+
+/** Hostname a git remote URL points at, or null when unparseable. */
+export function remoteHostname(url: string): string | null {
+  const parsed = parseRemote(url)
+  return parsed === null ? null : new URL(parsed.base).hostname
+}
+
+/** Name and fetch URL of every remote of the repo at `cwd`; empty when git fails. */
+export function gitRemoteUrls(cwd: string): { name: string; url: string }[] {
+  try {
+    const r = Bun.spawnSync(['git', 'remote', '-v'], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    if (r.exitCode !== 0) return []
+    return r.stdout
+      .toString()
+      .split('\n')
+      .flatMap((line) => {
+        const m = line.match(/^(\S+)\s+(\S+)\s+\(fetch\)$/)
+        return m?.[1] === undefined || m[2] === undefined ? [] : [{ name: m[1], url: m[2] }]
+      })
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The remote of the repo at `cwd` that points at the `kind` forge, matched
+ * by hostname so ssh remotes on another port still match. Several matches
+ * (fork plus upstream) prefer origin, else the first; null when none match.
+ */
+export function matchForgeRemote(cwd: string, kind: ForgeKind): string | null {
+  const host = forgeHostname(kind)
+  if (host === null) return null
+  const matches = gitRemoteUrls(cwd).filter((r) => remoteHostname(r.url) === host)
+  return (matches.find((r) => r.name === 'origin') ?? matches[0])?.name ?? null
+}
+
+/**
  * Env for a gh subprocess: Chise's token and an Amagi-owned GH_CONFIG_DIR.
  * The config dir is set even without a token so gh fails closed instead of
  * silently falling back to whatever the operator has in ~/.config/gh.
+ * GH_REPO pins gh to `remote`: left alone, gh prefers a remote named
+ * upstream or github over origin.
  */
-export function ghEnv(cwd?: string): Record<string, string> {
+export function ghEnv(cwd: string, remote: string): Record<string, string> {
   const dir = ghConfigDir()
   mkdirSync(dir, { recursive: true })
   const env: Record<string, string> = { GH_CONFIG_DIR: dir }
   const token = forgeToken('github', cwd)
   if (token !== null) env.GH_TOKEN = token
+  const repo = remoteRepo(cwd, remote)
+  if (repo !== null) env.GH_REPO = `${new URL(repo.base).host}/${repo.ownerRepo}`
   return env
 }
 
@@ -284,11 +353,17 @@ export function glabConfigDir(): string {
 /**
  * Env for a glab subprocess: the repo's GitLab token and an Amagi-owned
  * GLAB_CONFIG_DIR, set even without a token so glab fails closed.
+ * GLAB_REMOTE_ALIAS pins glab to `remote` instead of its own remote-name
+ * preference.
  */
-export function glabEnv(cwd?: string): Record<string, string> {
+export function glabEnv(cwd: string, remote: string): Record<string, string> {
   const dir = glabConfigDir()
   mkdirSync(dir, { recursive: true })
-  const env: Record<string, string> = { GLAB_CONFIG_DIR: dir, GLAB_NO_PROMPT: 'true' }
+  const env: Record<string, string> = {
+    GLAB_CONFIG_DIR: dir,
+    GLAB_NO_PROMPT: 'true',
+    GLAB_REMOTE_ALIAS: remote,
+  }
   const token = forgeToken('gitlab', cwd)
   if (token !== null) env.GITLAB_TOKEN = token
   return env
@@ -321,56 +396,6 @@ export function parseRemote(url: string): { base: string; ownerRepo: string } | 
   if (host === '' || path === '') return null
   const proto = url.trim().startsWith('http://') ? 'http' : 'https'
   return { base: `${proto}://${host}${port}`, ownerRepo: path.replace(/\.git$/, '') }
-}
-
-const PUBLIC_FORGE_HOST: Record<ForgeKind, string> = {
-  github: 'github.com',
-  gitlab: 'gitlab.com',
-  forgejo: 'codeberg.org',
-}
-
-export function forgeHost(kind: ForgeKind): string {
-  const configured =
-    kind === 'forgejo'
-      ? process.env.GITEA_SERVER_URL
-      : kind === 'gitlab'
-        ? process.env.GITLAB_HOST
-        : undefined
-  if (configured !== undefined) {
-    try {
-      return new URL(
-        configured.includes('://') ? configured : `https://${configured}`,
-      ).host.toLowerCase()
-    } catch {
-      return PUBLIC_FORGE_HOST[kind]
-    }
-  }
-  return PUBLIC_FORGE_HOST[kind]
-}
-
-/** Selects the remote for a forge by host. A non-null configured remote wins. */
-export async function resolveForgeRemote(
-  exec: Exec,
-  cwd: string,
-  kind: ForgeKind,
-  configured: string | null = null,
-): Promise<string> {
-  if (configured !== null && configured !== '') return configured
-  const expected = forgeHost(kind)
-  const names = (await execOk(exec, ['git', 'remote'], { cwd })).trim().split(/\s+/).filter(Boolean)
-  let sawHost = false
-  for (const name of names) {
-    const url = await execOk(exec, ['git', 'remote', 'get-url', name], { cwd }).catch(() => '')
-    const parsed = parseRemote(url.trim())
-    if (parsed === null) continue
-    try {
-      const host = new URL(parsed.base).host.toLowerCase()
-      sawHost = true
-      if (host === expected) return name
-    } catch {}
-  }
-  if (!sawHost) return 'origin'
-  throw new Error(`no git remote matches ${kind} host ${expected}`)
 }
 
 /**
@@ -420,13 +445,8 @@ export async function gitTokenConfig(
   return ['-c', `url.${rewrite.to}.insteadOf=${rewrite.from}`]
 }
 
-/** Base URL of the configured origin remote, for provisioning a tea login. */
-async function remoteBaseUrl(
-  exec: Exec,
-  cwd: string,
-  configuredRemote: string | null,
-): Promise<string | null> {
-  const remote = await resolveForgeRemote(exec, cwd, 'forgejo', configuredRemote)
+/** Base URL of `remote`, for provisioning a tea login. */
+async function remoteBaseUrl(exec: Exec, cwd: string, remote: string): Promise<string | null> {
   const url = await execOk(exec, ['git', 'remote', 'get-url', remote], { cwd }).catch(() => '')
   return parseRemote(url.trim())?.base ?? null
 }
@@ -440,15 +460,14 @@ async function remoteBaseUrl(
 async function ensureTeaLogin(
   exec: Exec,
   cwd: string,
+  remote: string,
   token: string | null,
   env: Record<string, string>,
-  configuredRemote: string | null,
 ): Promise<void> {
   const cfg = join(teaXdgHome(token), 'tea', 'config.yml')
   if (existsSync(cfg)) return
-  if (token === null) return
-  const url = process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, configuredRemote))
-  if (url === null) return
+  const url = process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, remote))
+  if (token === null || url === null) return
   await execOk(
     exec,
     [
@@ -471,10 +490,20 @@ async function ensureTeaLogin(
 export async function teaEnv(
   exec: Exec = defaultExec,
   cwd: string,
-  configuredRemote: string | null = null,
+  remote: string,
 ): Promise<Record<string, string>> {
   const token = forgeToken('forgejo', cwd)
   const env: Record<string, string> = { XDG_CONFIG_HOME: teaXdgHome(token) }
-  await ensureTeaLogin(exec, cwd, token, env, configuredRemote)
+  await ensureTeaLogin(exec, cwd, remote, token, env)
   return env
+}
+
+/**
+ * tea flags that pin a command to `remote`'s repository through Amagi's
+ * login. Without them tea picks the repo from whichever remote matches a
+ * login's host, which is not necessarily `remote`.
+ */
+export function teaRepoArgs(cwd: string, remote: string): string[] {
+  const repo = remoteRepo(cwd, remote)
+  return repo === null ? [] : ['--login', TEA_LOGIN, '--repo', repo.ownerRepo]
 }

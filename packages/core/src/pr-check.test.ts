@@ -119,7 +119,7 @@ describe('listOpenPrs', () => {
           )
         : undefined,
     )
-    const prs = await listOpenPrs({ cwd: '/repo', exec })
+    const prs = await listOpenPrs({ cwd: '/repo', remote: 'origin', exec })
 
     expect(calls[0]).toEqual([
       'gh',
@@ -145,6 +145,7 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
       forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef' },
       exec,
@@ -162,6 +163,7 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
       forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef', 'refs/pull/8/head': 'cafe12' },
       exec,
@@ -183,6 +185,7 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
       forgeKind: 'gitlab',
       lastHeads: {},
       exec,
@@ -205,6 +208,7 @@ describe('fetchPullHeads', () => {
     const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
       forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef' },
       exec,
@@ -224,7 +228,7 @@ describe('fetchPullHeads', () => {
           )
         : undefined,
     )
-    const prs = await listOpenPrs({ cwd: '/repo', exec })
+    const prs = await listOpenPrs({ cwd: '/repo', remote: 'origin', exec })
     expect(prs[0]?.labels).toEqual(['amagi', 'amagi/iterations:2'])
   })
 })
@@ -252,6 +256,7 @@ describe('iterations', () => {
     const { exec, calls, inputs } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
+      remote: 'origin',
       pr: pr({ labels: ['amagi'] }),
       exec,
     })
@@ -265,6 +270,7 @@ describe('iterations', () => {
     const { exec, calls, inputs } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
+      remote: 'origin',
       pr: pr({ labels: ['amagi/iterations:2'] }),
       exec,
     })
@@ -276,7 +282,13 @@ describe('iterations', () => {
 
   test('drops the previous count even when the PR snapshot predates it', async () => {
     const { exec, calls } = fake(() => undefined)
-    await stampIterationLabel({ cwd: '/repo', pr: pr({ labels: ['amagi'] }), iteration: 3, exec })
+    await stampIterationLabel({
+      cwd: '/repo',
+      remote: 'origin',
+      pr: pr({ labels: ['amagi'] }),
+      iteration: 3,
+      exec,
+    })
 
     expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
     expect(calls).not.toContainEqual(removeLabelCall(7, 'amagi/iterations:3'))
@@ -286,6 +298,7 @@ describe('iterations', () => {
     const { exec, calls } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
+      remote: 'origin',
       pr: pr({ headRefName: 'feature/foo' }),
       exec,
     })
@@ -413,6 +426,7 @@ describe('syncPrPriorityLabel', () => {
     const { exec, calls, inputs } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
+      remote: 'origin',
       number: 7,
       labels: ['amagi', 'P1', 'P3'],
       priority: 2,
@@ -428,6 +442,7 @@ describe('syncPrPriorityLabel', () => {
     const { exec, calls } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
+      remote: 'origin',
       number: 7,
       labels: ['amagi', 'P4'],
       priority: 4,
@@ -441,6 +456,7 @@ describe('syncPrPriorityLabel', () => {
     const { exec, calls } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
+      remote: 'origin',
       number: 7,
       labels: ['amagi', 'P2'],
       priority: null,
@@ -454,9 +470,9 @@ describe('syncPrPriorityLabel', () => {
 describe('removePrLabel', () => {
   test('a label already gone from the PR is not an error, any other failure is', async () => {
     const gone = fake(() => fail('gh: Label does not exist (HTTP 404)'))
-    await removePrLabel(gone.exec, '/repo', 7, 'P2')
+    await removePrLabel(gone.exec, '/repo', 'origin', 7, 'P2')
     const denied = fake(() => fail('gh: Resource not accessible (HTTP 403)'))
-    await expect(removePrLabel(denied.exec, '/repo', 7, 'P2')).rejects.toThrow(/HTTP 403/)
+    await expect(removePrLabel(denied.exec, '/repo', 'origin', 7, 'P2')).rejects.toThrow(/HTTP 403/)
   })
 })
 
@@ -469,6 +485,7 @@ describe('prepareConflictWorktree', () => {
     })
     const wt = await prepareConflictWorktree({
       repoRoot: '/repo',
+      remote: 'origin',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -512,6 +529,7 @@ describe('prepareConflictWorktree', () => {
     })
     const wt = await prepareConflictWorktree({
       repoRoot: '/repo',
+      remote: 'origin',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -535,6 +553,7 @@ describe('prepareConflictWorktree', () => {
     )
     await prepareConflictWorktree({
       repoRoot: '/repo',
+      remote: 'origin',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -561,6 +580,7 @@ describe('prepareConflictWorktree', () => {
       })
       const wt = await prepareConflictWorktree({
         repoRoot: '/repo',
+        remote: 'origin',
         repoName: 'amagi',
         worktreeRoot: root,
         baseBranch: 'main',
@@ -600,6 +620,7 @@ describe('prepareConflictWorktree', () => {
 
       await prepareConflictWorktree({
         repoRoot: '/repo',
+        remote: 'origin',
         repoName: 'amagi',
         worktreeRoot: '/wt',
         baseBranch: 'main',

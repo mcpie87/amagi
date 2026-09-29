@@ -33,6 +33,8 @@ export const PRIORITY_LABELS = ['P0', 'P1', 'P2', 'P3', 'P4'] as const
 
 export type PrCheckOptions = {
   cwd: string
+  /** The configured forge remote (`[forge] remote`); gh is pinned to its repository. */
+  remote: string
   exec?: Exec | undefined
 }
 
@@ -56,7 +58,7 @@ export async function listOpenPrs(opts: PrCheckOptions): Promise<PrInfo[]> {
   const run = opts.exec ?? defaultExec
   const out = await execOk(run, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
     cwd: opts.cwd,
-    env: ghEnv(opts.cwd),
+    env: ghEnv(opts.cwd, opts.remote),
   })
   const raw = JSON.parse(out) as Array<
     Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
@@ -103,6 +105,7 @@ export async function resolvePrPriorities(
 
 export type SyncPrPriorityLabelOptions = {
   cwd: string
+  remote: string
   number: number
   /** Labels already on the PR, from the list call. */
   labels: string[]
@@ -119,6 +122,7 @@ export type SyncPrPriorityLabelOptions = {
 export async function addPrLabels(
   run: Exec,
   cwd: string,
+  remote: string,
   number: number,
   labels: readonly string[],
 ): Promise<void> {
@@ -133,7 +137,7 @@ export async function addPrLabels(
       '--input',
       '-',
     ],
-    { cwd, stdin: JSON.stringify({ labels }), env: ghEnv(cwd) },
+    { cwd, stdin: JSON.stringify({ labels }), env: ghEnv(cwd, remote) },
   )
 }
 
@@ -141,6 +145,7 @@ export async function addPrLabels(
 export async function removePrLabel(
   run: Exec,
   cwd: string,
+  remote: string,
   number: number,
   label: string,
 ): Promise<void> {
@@ -151,7 +156,7 @@ export async function removePrLabel(
     'DELETE',
     `repos/{owner}/{repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
   ]
-  const r = await run(cmd, { cwd, env: ghEnv(cwd) })
+  const r = await run(cmd, { cwd, env: ghEnv(cwd, remote) })
   if (r.exitCode !== 0 && !/HTTP 404/.test(r.stderr)) throw new CommandError(cmd, r)
 }
 
@@ -165,11 +170,11 @@ export async function syncPrPriorityLabel(opts: SyncPrPriorityLabelOptions): Pro
   const want = opts.priority === null ? null : `P${opts.priority}`
   for (const label of PRIORITY_LABELS) {
     if (label !== want && opts.labels.includes(label)) {
-      await removePrLabel(run, opts.cwd, opts.number, label)
+      await removePrLabel(run, opts.cwd, opts.remote, opts.number, label)
     }
   }
   if (want !== null && !opts.labels.includes(want)) {
-    await addPrLabels(run, opts.cwd, opts.number, [want])
+    await addPrLabels(run, opts.cwd, opts.remote, opts.number, [want])
   }
 }
 
@@ -209,6 +214,7 @@ export type StampedIteration = {
  */
 export async function stampIterationLabel(opts: {
   cwd: string
+  remote: string
   pr: PrInfo
   /** Explicit count when multiple dispatches share a stale PR snapshot. */
   iteration?: number
@@ -219,18 +225,21 @@ export async function stampIterationLabel(opts: {
   if (taskId === null) return null
   const current = iterationsFromLabels(opts.pr.labels)
   const iteration = opts.iteration ?? current + 1
-  await addPrLabels(run, opts.cwd, opts.pr.number, [iterationLabel(iteration)])
+  await addPrLabels(run, opts.cwd, opts.remote, opts.pr.number, [iterationLabel(iteration)])
   // The snapshot's labels go stale across dispatches in one call, so the
   // previous count is dropped even when the snapshot does not show it.
   const stale = new Set(opts.pr.labels.filter((l) => l.startsWith(ITERATION_LABEL_PREFIX)))
   if (iteration > 1) stale.add(iterationLabel(iteration - 1))
   stale.delete(iterationLabel(iteration))
-  for (const label of stale) await removePrLabel(run, opts.cwd, opts.pr.number, label)
+  for (const label of stale) {
+    await removePrLabel(run, opts.cwd, opts.remote, opts.pr.number, label)
+  }
   return { taskId, iteration }
 }
 
 export type FetchPullHeadsOptions = {
   repoRoot: string
+  remote: string
   forgeKind: Config['forge']['kind']
   /** Last seen PR head SHAs keyed by remote ref, so the fetch is skipped when none moved. */
   lastHeads: Record<string, string>
@@ -245,9 +254,9 @@ export type FetchPullHeadsResult = {
 }
 
 /**
- * Mirrors every open PR head into a `refs/remotes/origin/pr/<number>/head` ref.
- * ls-remote is a zero-transfer zero-quota probe, so the fetch is skipped on
- * ticks where no head moved.
+ * Mirrors every open PR head into a `refs/remotes/<remote>/pr/<number>/head`
+ * ref with one fetch. ls-remote is a zero-transfer zero-quota probe, so the
+ * fetch is skipped on ticks where no head moved.
  */
 export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<FetchPullHeadsResult> {
   const run = opts.exec ?? defaultExec
@@ -255,11 +264,11 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
   const tokenCfg = await gitTokenConfig(
     run,
     opts.repoRoot,
-    'origin',
+    opts.remote,
     forgeToken(opts.forgeKind, opts.repoRoot),
   )
 
-  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', remoteRef], {
+  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', opts.remote, remoteRef], {
     cwd: opts.repoRoot,
   })
   const heads: Record<string, string> = {}
@@ -281,8 +290,8 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
       ...tokenCfg,
       'fetch',
       '--prune',
-      'origin',
-      `+${remoteRef}:refs/remotes/origin/pr/*/head`,
+      opts.remote,
+      `+${remoteRef}:refs/remotes/${opts.remote}/pr/*/head`,
     ],
     { cwd: opts.repoRoot },
   )
@@ -291,6 +300,7 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
 
 export type PrepareConflictWorktreeOptions = {
   repoRoot: string
+  remote: string
   repoName: string
   worktreeRoot: string
   baseBranch: string
@@ -308,7 +318,7 @@ export type ConflictWorktree = {
   /** False when baseBranch merges cleanly, so the agent has nothing to resolve. */
   conflicted: boolean
   /**
-   * The base commit that was merged. Compare against this, not origin/<base>:
+   * The base commit that was merged. Compare against this, not <remote>/<base>:
    * the ref is shared with the operator's checkout and moves under a long run.
    */
   baseOid: string
@@ -326,14 +336,14 @@ export async function prepareConflictWorktree(
   const tokenCfg = await gitTokenConfig(
     run,
     opts.repoRoot,
-    'origin',
+    opts.remote,
     forgeToken('github', opts.repoRoot),
   )
 
-  await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', opts.baseBranch], {
+  await execOk(run, ['git', ...tokenCfg, 'fetch', opts.remote, opts.baseBranch], {
     cwd: opts.repoRoot,
   })
-  await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', opts.pr.headRefName], {
+  await execOk(run, ['git', ...tokenCfg, 'fetch', opts.remote, opts.pr.headRefName], {
     cwd: opts.repoRoot,
   })
 
@@ -344,23 +354,29 @@ export async function prepareConflictWorktree(
     const exists = await branchExists(run, opts.repoRoot, branch)
     const args = exists
       ? ['git', 'worktree', 'add', path, branch]
-      : ['git', 'worktree', 'add', '-b', branch, path, `origin/${opts.pr.headRefName}`]
+      : ['git', 'worktree', 'add', '-b', branch, path, `${opts.remote}/${opts.pr.headRefName}`]
     await execOk(run, args, { cwd: opts.repoRoot })
   } else {
     // A reused worktree can hold a stale in-progress merge or committed resolution
     // from an earlier run; abort and reset so the merge below starts from the PR head.
     await run(['git', 'merge', '--abort'], { cwd: path })
-    await execOk(run, ['git', 'reset', '--hard', `origin/${opts.pr.headRefName}`], { cwd: path })
+    await execOk(run, ['git', 'reset', '--hard', `${opts.remote}/${opts.pr.headRefName}`], {
+      cwd: path,
+    })
   }
 
   await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
   const baseOid = (
-    await execOk(run, ['git', 'rev-parse', '--verify', `origin/${opts.baseBranch}^{commit}`], {
-      cwd: opts.repoRoot,
-    })
+    await execOk(
+      run,
+      ['git', 'rev-parse', '--verify', `${opts.remote}/${opts.baseBranch}^{commit}`],
+      {
+        cwd: opts.repoRoot,
+      },
+    )
   ).trim()
-  const legacyMessage = `Merge remote-tracking branch 'origin/${opts.baseBranch}'`
+  const legacyMessage = `Merge remote-tracking branch '${opts.remote}/${opts.baseBranch}'`
   const message = opts.mergeMessage ?? legacyMessage
   if (opts.mergeMessage !== undefined) {
     const errors = lintCommitMessage(opts.mergeMessage)

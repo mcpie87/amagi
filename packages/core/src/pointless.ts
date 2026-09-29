@@ -175,6 +175,7 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
   try {
     const wt = await prepareConflictWorktree({
       repoRoot: opts.root,
+      remote: opts.config.forge.remote,
       repoName: opts.repoName,
       worktreeRoot: opts.config.repo.worktreeRoot,
       baseBranch: opts.config.repo.baseBranch,

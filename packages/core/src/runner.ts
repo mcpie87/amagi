@@ -5,7 +5,7 @@ import * as z from 'zod'
 import { stageAndCommit } from './commit.ts'
 import { type Config, reviewerHarnessConfig } from './config.ts'
 import { claimEligible, implementModel } from './difficulty.ts'
-import { forgeToken, gitTokenConfig, resolveForgeRemote } from './drivers/forge-cred.ts'
+import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -389,7 +389,7 @@ export class Runner {
     if (options.previousSnapshot) {
       fromTree = options.previousSnapshot
     } else {
-      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
       fromTree = (await execOk(this.exec, ['git', 'merge-base', base, 'HEAD'], { cwd })).trim()
     }
     const diff = await execOk(this.exec, ['git', 'diff', '--binary', fromTree, beforeTree], { cwd })
@@ -1017,28 +1017,19 @@ export class Runner {
       const tokenCfg = await gitTokenConfig(
         this.exec,
         this.deps.repoRoot,
-        await resolveForgeRemote(
-          this.exec,
-          this.deps.repoRoot,
-          config.forge.kind,
-          config.forge.remote,
-        ),
+        config.forge.remote,
         forgeToken(config.forge.kind, this.deps.repoRoot),
       )
       if (tokenCfg.length > 0) {
-        const remote = await resolveForgeRemote(
+        await execOk(
           this.exec,
-          this.deps.repoRoot,
-          config.forge.kind,
-          config.forge.remote,
+          ['git', ...tokenCfg, 'fetch', config.forge.remote, config.repo.baseBranch],
+          { cwd: this.deps.repoRoot },
         )
-        await execOk(this.exec, ['git', ...tokenCfg, 'fetch', remote, config.repo.baseBranch], {
-          cwd: this.deps.repoRoot,
-        })
       }
       const base =
         tokenCfg.length > 0
-          ? `${await resolveForgeRemote(this.exec, this.deps.repoRoot, config.forge.kind, config.forge.remote)}/${config.repo.baseBranch}`
+          ? `${config.forge.remote}/${config.repo.baseBranch}`
           : config.repo.baseBranch
       worktree = await createWorktree({
         repoRoot: this.deps.repoRoot,
@@ -1151,7 +1142,7 @@ export class Runner {
 
     if (current.summary !== null && parseViabilityDecision(current.summary) !== null) {
       const status = await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })
-      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
       const commits = await execOk(this.exec, ['git', 'rev-list', '--count', `${base}..HEAD`], {
         cwd,
       })
@@ -1413,8 +1404,13 @@ export class Runner {
     reviewSummary?: ReviewPrSummary | null,
   ): Promise<void> {
     const { store, config } = this.deps
-    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec, config.forge.remote)
-    const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, config.forge.remote, this.exec)
+    const changes = await changesSinceBase(
+      this.exec,
+      cwd,
+      config.forge.remote,
+      config.repo.baseBranch,
+    )
     if (changes.length === 0) {
       // The worktree was dirty and a commit was made, yet the three-dot diff
       // against the base is empty: the agent re-applied change already on the
@@ -1462,7 +1458,7 @@ export class Runner {
       cwd,
       branch,
       base: config.repo.baseBranch,
-      remote: await resolveForgeRemote(this.exec, cwd, config.forge.kind, config.forge.remote),
+      remote: config.forge.remote,
       title: prTitle(current),
       body: formatPrBody(
         current,
@@ -2221,23 +2217,13 @@ export class Runner {
     const tokenCfg = await gitTokenConfig(
       this.exec,
       this.deps.repoRoot,
-      await resolveForgeRemote(
-        this.exec,
-        this.deps.repoRoot,
-        config.forge.kind,
-        config.forge.remote,
-      ),
+      config.forge.remote,
       forgeToken(config.forge.kind, this.deps.repoRoot),
     )
-    const remote = await resolveForgeRemote(
-      this.exec,
-      this.deps.repoRoot,
-      config.forge.kind,
-      config.forge.remote,
+    const fetch = await this.exec(
+      ['git', ...tokenCfg, 'fetch', config.forge.remote, config.repo.baseBranch],
+      { cwd },
     )
-    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', remote, config.repo.baseBranch], {
-      cwd,
-    })
     if (fetch.exitCode !== 0) return false
 
     const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
@@ -2245,9 +2231,10 @@ export class Runner {
       dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
     if (dirty && !stashed) return false
 
-    const rebase = await this.exec(['git', 'rebase', `${remote}/${config.repo.baseBranch}`], {
-      cwd,
-    })
+    const rebase = await this.exec(
+      ['git', 'rebase', `${config.forge.remote}/${config.repo.baseBranch}`],
+      { cwd },
+    )
     if (rebase.exitCode !== 0) {
       await this.exec(['git', 'rebase', '--abort'], { cwd })
       if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
@@ -2271,7 +2258,7 @@ export class Runner {
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
-    const ref = await diffBase(this.exec, cwd, base)
+    const ref = await diffBase(this.exec, cwd, this.deps.config.forge.remote, base)
     const ahead = await this.exec(['git', 'rev-list', '--count', `${ref}..HEAD`], { cwd })
     if (ahead.exitCode !== 0 || Number(ahead.stdout.trim()) === 0) return false
 

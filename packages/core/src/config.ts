@@ -3,6 +3,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { delimiter, dirname, join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
+import { matchForgeRemote } from './drivers/forge-cred.ts'
 import { FindingSeverity, findingSeverityAtOrAbove } from './events.ts'
 import { MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
@@ -226,7 +227,11 @@ export const Config = z
     forge: z
       .object({
         kind: ForgeKind.default('github'),
-        remote: z.string().nullable().default(null),
+        /**
+         * Git remote pushes and forge CLI calls go through. Left unset, loadConfig
+         * fills in the remote whose host matches `kind`, falling back to origin.
+         */
+        remote: z.string().default('origin'),
         /** Forge handle (without the @) the agent is pinged under on PRs; mentions of it trigger responses. */
         agentHandle: z.string().default('chise-maru'),
       })
@@ -546,6 +551,15 @@ export function hasStaleMaxParallel(repoRoot: string): boolean {
   })
 }
 
+/** Whether either config names `forge.remote`, instead of leaving loadConfig to match it to the forge. */
+export function hasPinnedForgeRemote(repoRoot: string): boolean {
+  const paths = [globalConfigPath(), repoConfigPath(repoRoot)]
+  return paths.some((path) => {
+    const raw = readToml(path)
+    return isPlainObject(raw.forge) && 'remote' in raw.forge
+  })
+}
+
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
@@ -565,6 +579,9 @@ export function loadConfig(repoRoot: string): LoadedConfig {
 
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
+  if (!(isPlainObject(merged.forge) && 'remote' in merged.forge)) {
+    config.forge.remote = matchForgeRemote(repoRoot, config.forge.kind) ?? 'origin'
+  }
   return { config, sources }
 }
 

@@ -55,10 +55,7 @@ export function testWorkspaces(keys: string[], opts: TestWorkspacesOptions = {})
     trackerFor: opts.trackerFor,
     ...(opts.forgeFor === undefined ? {} : { forgeFor: opts.forgeFor }),
   })
-  for (const key of keys) {
-    const workspace = workspaces.get(key)
-    if (workspace !== null) workspace.config.forge.remote = 'origin'
-  }
+  for (const key of keys) workspaces.get(key)
   return {
     workspaces,
     stores,

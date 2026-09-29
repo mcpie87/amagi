@@ -28,11 +28,13 @@ import {
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
+  hasPinnedForgeRemote,
   hasStaleMaxParallel,
   isTerminal,
   LibnotifyNotifier,
   type LiveRun,
   listForgeCredentials,
+  loadConfig,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
@@ -48,7 +50,6 @@ import {
   reconcilePr,
   removeForgeCredential,
   removeWorktree,
-  resolveForgeRemote,
   resolveWorkerHarness,
   type Store,
   type StoredEvent,
@@ -284,6 +285,15 @@ function gitOutput(root: string, args: string[]): string {
     throw new Error(result.stderr.toString().trim() || 'git command failed')
   }
   return result.stdout.toString()
+}
+
+/** Remote names of the repo at `root`; empty when git fails. */
+function gitRemotes(root: string): string[] {
+  try {
+    return gitOutput(root, ['remote']).split('\n').filter(Boolean)
+  } catch {
+    return []
+  }
 }
 
 export function createApp({
@@ -1127,14 +1137,7 @@ export function createApp({
       }
       // The reconcile writes events the dashboard already streams, so the
       // caller's live state picks up a merge/close without a page reload.
-      await reconcilePr(
-        ws.store,
-        ws.forge,
-        ws.tracker,
-        ws.root,
-        await resolveForgeRemote(exec, ws.root, ws.config.forge.kind, ws.config.forge.remote),
-        task,
-      )
+      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
     })
 
@@ -1318,11 +1321,7 @@ export function createApp({
         }
         if (task.state === 'pr_flagged' && ws.forge !== null && task.branch !== null) {
           try {
-            await ws.forge.deleteBranch(
-              ws.root,
-              await resolveForgeRemote(exec, ws.root, ws.config.forge.kind, ws.config.forge.remote),
-              task.branch,
-            )
+            await ws.forge.deleteBranch(ws.root, ws.config.forge.remote, task.branch)
           } catch (err) {
             console.warn(`branch removal on close ${id}: ${errMsg(err)}`)
           }
@@ -1408,6 +1407,9 @@ export function createApp({
         reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
         forgeKind: ws.config.forge.kind,
+        forgeRemote: ws.config.forge.remote,
+        forgeRemotePinned: hasPinnedForgeRemote(ws.root),
+        remotes: gitRemotes(ws.root),
         forgeCredentials: forgeTokenStates(ws.root),
       })
     })
@@ -1426,8 +1428,13 @@ export function createApp({
           desktopFailureAlerts,
           reviewMaxRounds,
           forgeKind,
+          forgeRemote,
           forgeCredentials,
         } = c.req.valid('json')
+        const remotes = gitRemotes(ws.root)
+        if (forgeRemote != null && !remotes.includes(forgeRemote)) {
+          return c.json({ error: `no git remote named ${forgeRemote}` }, 400)
+        }
         const known = listForgeCredentials()
         for (const kind of ForgeKind.options) {
           const id = forgeCredentials?.[kind]
@@ -1440,7 +1447,14 @@ export function createApp({
           if (id !== undefined) pickForgeCredential(ws.root, kind, id)
         }
         writeConfig(ws.root, {
-          ...(forgeKind === undefined ? {} : { forge: { kind: forgeKind } }),
+          ...(forgeKind === undefined && forgeRemote === undefined
+            ? {}
+            : {
+                forge: {
+                  ...(forgeKind === undefined ? {} : { kind: forgeKind }),
+                  remote: forgeRemote ?? null,
+                },
+              }),
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
           ...(ntfyTopic === undefined &&
           ntfyServer === undefined &&
@@ -1461,7 +1475,11 @@ export function createApp({
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
         }
         if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
-        if (forgeKind !== undefined) ws.config.forge.kind = forgeKind
+        if (forgeKind !== undefined || forgeRemote !== undefined) {
+          const { kind, remote } = loadConfig(ws.root).config.forge
+          ws.config.forge.kind = kind
+          ws.config.forge.remote = remote
+        }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -1478,6 +1496,9 @@ export function createApp({
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
           reviewMaxRounds: ws.config.review.maxRounds,
           forgeKind: ws.config.forge.kind,
+          forgeRemote: ws.config.forge.remote,
+          forgeRemotePinned: hasPinnedForgeRemote(ws.root),
+          remotes,
           forgeCredentials: forgeTokenStates(ws.root),
         })
       },

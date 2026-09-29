@@ -1,12 +1,4 @@
-import {
-  errMsg,
-  exec,
-  type PrDriver,
-  reconcilePrs,
-  resolveForgeRemote,
-  type Store,
-  type Tracker,
-} from '@amagi/core'
+import { errMsg, type PrDriver, reconcilePrs, type Store, type Tracker } from '@amagi/core'
 import { startPoller } from './poller.ts'
 
 export type PrPollerOptions = {
@@ -18,8 +10,6 @@ export type PrPollerOptions = {
   cwd: string
   /** Remote the settled PRs' branches are deleted from. */
   remote: string
-  forgeKind?: 'github' | 'gitlab' | 'forgejo'
-  configuredRemote?: string | null
   intervalMs?: number | undefined
 }
 
@@ -40,17 +30,11 @@ export function startPrPoller({
   tracker,
   cwd,
   remote,
-  forgeKind,
-  configuredRemote,
   intervalMs = DEFAULT_INTERVAL_MS,
 }: PrPollerOptions): PrPoller {
   return startPoller(intervalMs, async () => {
     try {
-      const selected =
-        forgeKind === undefined
-          ? remote
-          : await resolveForgeRemote(exec, cwd, forgeKind, configuredRemote ?? null)
-      await reconcilePrs(store, forge, tracker, cwd, selected)
+      await reconcilePrs(store, forge, tracker, cwd, remote)
     } catch (err) {
       console.warn(`pr reconcile: ${errMsg(err)}`)
     }

@@ -10,7 +10,7 @@ export const mergeablePrsCommand = defineCommand({
   async run() {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const forge = makePrDriver(config.forge.kind, undefined, config.forge.remote)
+    const forge = makePrDriver(config.forge.kind, config.forge.remote)
 
     let prs: Awaited<ReturnType<typeof forge.listOpenPrs>>
     try {

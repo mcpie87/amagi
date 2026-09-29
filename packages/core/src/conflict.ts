@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
-import { resolveForgeRemote } from './drivers/forge-cred.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import { canTransition } from './events.ts'
@@ -163,6 +162,7 @@ export async function resolveConflict(
     )
     const wt = await prepareConflictWorktree({
       repoRoot: opts.repoRoot,
+      remote: opts.config.forge.remote,
       repoName: opts.repoName,
       worktreeRoot: opts.config.repo.worktreeRoot,
       baseBranch: opts.config.repo.baseBranch,
@@ -185,12 +185,7 @@ export async function resolveConflict(
         cwd: wt.path,
         branch: wt.branch,
         headRef: opts.pr.headRefName,
-        remote: await resolveForgeRemote(
-          run,
-          opts.repoRoot,
-          opts.config.forge.kind,
-          opts.config.forge.remote,
-        ),
+        remote: opts.config.forge.remote,
         exec: run,
       })
       const message = 'base merges cleanly; pushed the merge to update the PR'
@@ -209,7 +204,13 @@ export async function resolveConflict(
       }
       iteration++
       try {
-        await stampIterationLabel({ cwd: wt.path, pr: opts.pr, iteration, exec: run })
+        await stampIterationLabel({
+          cwd: wt.path,
+          remote: opts.config.forge.remote,
+          pr: opts.pr,
+          iteration,
+          exec: run,
+        })
       } catch (err) {
         log('warn', `iteration bump failed: ${errMsg(err)}`)
       }
@@ -305,12 +306,7 @@ export async function resolveConflict(
       cwd: wt.path,
       branch: wt.branch,
       headRef: opts.pr.headRefName,
-      remote: await resolveForgeRemote(
-        run,
-        opts.repoRoot,
-        opts.config.forge.kind,
-        opts.config.forge.remote,
-      ),
+      remote: opts.config.forge.remote,
       exec: run,
     })
     const status = await opts.driver.getMergeStatus(opts.repoRoot, opts.pr.number)

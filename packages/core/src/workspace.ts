@@ -143,11 +143,11 @@ export class Workspaces {
 function liveForge(config: Config): PrDriver {
   const drivers = new Map<string, PrDriver>()
   const current = (): PrDriver => {
-    const kind = config.forge.kind
-    const key = `${kind}:${config.forge.remote ?? ''}`
+    const { kind, remote } = config.forge
+    const key = `${kind}\n${remote}`
     let driver = drivers.get(key)
     if (driver === undefined) {
-      driver = makePrDriver(kind, undefined, config.forge.remote)
+      driver = makePrDriver(kind, remote)
       drivers.set(key, driver)
     }
     return driver

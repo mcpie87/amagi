@@ -2236,6 +2236,9 @@ describe('repo settings endpoints', () => {
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
       forgeCredentials: expect.any(Object),
     })
   })
@@ -2250,6 +2253,9 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
       forgeCredentials: expect.any(Object),
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
@@ -2260,11 +2266,52 @@ describe('repo settings endpoints', () => {
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
       forgeCredentials: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+  })
+
+  test('PATCH picks the forge remote only among the repo remotes', async () => {
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    mkdirSync(entry.path, { recursive: true })
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: entry.path })
+    Bun.spawnSync(['git', 'remote', 'add', 'gitlab', 'git@gitlab.com:me/app.git'], {
+      cwd: entry.path,
+    })
+    expect((await patch('repo1', '{"forgeRemote":"nope"}')).status).toBe(400)
+    const res = await patch('repo1', '{"forgeRemote":"gitlab"}')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ forgeRemote: 'gitlab', remotes: ['gitlab'] })
+    expect(loadConfig(entry.path).config.forge.remote).toBe('gitlab')
+  })
+
+  test('PATCH switching the forge unpins the remote and matches it to the new forge', async () => {
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    mkdirSync(entry.path, { recursive: true })
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: entry.path })
+    Bun.spawnSync(['git', 'remote', 'add', 'origin', 'git@github.com:me/app.git'], {
+      cwd: entry.path,
+    })
+    Bun.spawnSync(['git', 'remote', 'add', 'lab', 'git@gitlab.com:me/app.git'], {
+      cwd: entry.path,
+    })
+    expect(await (await patch('repo1', '{"forgeRemote":"origin"}')).json()).toMatchObject({
+      forgeRemote: 'origin',
+      forgeRemotePinned: true,
+    })
+    expect(await (await patch('repo1', '{"forgeKind":"gitlab"}')).json()).toMatchObject({
+      forgeKind: 'gitlab',
+      forgeRemote: 'lab',
+      forgeRemotePinned: false,
+    })
+    expect(ws.workspaces.get('repo1')?.config.forge.remote).toBe('lab')
   })
 
   test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
@@ -2302,6 +2349,9 @@ describe('repo settings endpoints', () => {
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
       forgeCredentials: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
@@ -2331,6 +2381,9 @@ describe('repo settings endpoints', () => {
       desktopFailureAlerts: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
       forgeCredentials: expect.any(Object),
     })
     const workspace = ws.workspaces.get('repo1')
@@ -2425,6 +2478,9 @@ describe('repo settings endpoints', () => {
       const body = await res.json()
       expect(body).toMatchObject({
         forgeKind: 'gitlab',
+        forgeRemote: 'origin',
+        forgeRemotePinned: false,
+        remotes: expect.any(Array),
         forgeCredentials: {
           github: { credential: null, source: null },
           gitlab: { credential: bot.id, source: 'picked' },

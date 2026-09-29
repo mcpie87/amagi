@@ -12,16 +12,26 @@ export type PrChange = {
 
 /**
  * Resolves the ref the worktree branched from so the PR diff excludes base
- * changes: `origin/<base>` when a token fetch happened, else `<base>`.
+ * changes: `<remote>/<base>` when a token fetch happened, else `<base>`.
  */
-export async function diffBase(run: Exec, cwd: string, base: string): Promise<string> {
-  const remote = `origin/${base}`
-  const r = await run(['git', 'rev-parse', '--verify', '--quiet', remote], { cwd })
-  return r.exitCode === 0 ? remote : base
+export async function diffBase(
+  run: Exec,
+  cwd: string,
+  remote: string,
+  base: string,
+): Promise<string> {
+  const tracking = `${remote}/${base}`
+  const r = await run(['git', 'rev-parse', '--verify', '--quiet', tracking], { cwd })
+  return r.exitCode === 0 ? tracking : base
 }
 
-export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
-  const ref = await diffBase(run, cwd, base)
+export async function changesSinceBase(
+  run: Exec,
+  cwd: string,
+  remote: string,
+  base: string,
+): Promise<PrChange[]> {
+  const ref = await diffBase(run, cwd, remote, base)
   const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
   return r.stdout
     .split('\n')

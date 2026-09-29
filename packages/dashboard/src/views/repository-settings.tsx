@@ -7,7 +7,14 @@ type GitIdentity = { mode: 'path' | 'inline'; value: string }
 type ForgeKind = 'github' | 'gitlab' | 'forgejo'
 type ForgeTokenSource = 'picked' | 'only' | 'environment' | null
 type ForgeTokenState = { credential: string | null; source: ForgeTokenSource }
-type ForgeSettings = { forgeKind: ForgeKind; forgeCredentials: Record<ForgeKind, ForgeTokenState> }
+type ForgeSettings = {
+  forgeKind: ForgeKind
+  forgeRemote: string
+  /** False while the remote is matched to the forge's host instead of named in the config. */
+  forgeRemotePinned: boolean
+  remotes: string[]
+  forgeCredentials: Record<ForgeKind, ForgeTokenState>
+}
 export type ForgeCredential = { id: string; kind: ForgeKind; name: string }
 
 const FORGES: { kind: ForgeKind; label: string; cli: string; env: string }[] = [
@@ -17,6 +24,14 @@ const FORGES: { kind: ForgeKind; label: string; cli: string; env: string }[] = [
 ]
 
 const ADD_TOKEN = '+add'
+
+const forgeSettings = (body: ForgeSettings): ForgeSettings => ({
+  forgeKind: body.forgeKind,
+  forgeRemote: body.forgeRemote,
+  forgeRemotePinned: body.forgeRemotePinned,
+  remotes: body.remotes,
+  forgeCredentials: body.forgeCredentials,
+})
 const GIT_IDENTITY_TEMPLATE = '[user]\n\tname = Your Name\n\temail = you@example.com\n'
 
 export function RepositoryParticipation({
@@ -450,7 +465,7 @@ export function RepositoryForge({
       })
       .then((body) => {
         if (active) {
-          setSettings({ forgeKind: body.forgeKind, forgeCredentials: body.forgeCredentials })
+          setSettings(forgeSettings(body))
         }
       })
       .catch((err: unknown) => {
@@ -463,6 +478,7 @@ export function RepositoryForge({
 
   const save = async (patch: {
     forgeKind?: ForgeKind
+    forgeRemote?: string | null
     forgeCredentials?: Partial<Record<ForgeKind, string | null>>
   }) => {
     setBusy(true)
@@ -475,7 +491,7 @@ export function RepositoryForge({
       })
       if (!response.ok) throw new Error(await responseError(response))
       const body = (await response.json()) as ForgeSettings
-      setSettings({ forgeKind: body.forgeKind, forgeCredentials: body.forgeCredentials })
+      setSettings(forgeSettings(body))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -487,8 +503,9 @@ export function RepositoryForge({
     <div className={card}>
       <h2 className="mb-1 text-sm text-fg-muted">Forge for pull requests</h2>
       <p className="mb-3 text-sm text-fg-faint">
-        Amagi opens pull requests on the selected forge only. Leave the token on automatic to use
-        the only token for that forge, or the environment variable when there is none.
+        Amagi opens pull requests on the selected forge only. Leave the remote on automatic to use
+        the one pointing at that forge, and the token on automatic to use the only token for that
+        forge, or the environment variable when there is none.
       </p>
       {settings === null ? (
         error === null ? (
@@ -497,6 +514,33 @@ export function RepositoryForge({
       ) : (
         <fieldset disabled={busy}>
           <legend className="sr-only">Pull request forge</legend>
+          <label className="mb-2 flex flex-wrap items-center gap-3 text-sm text-fg-strong">
+            <span className="w-32">Git remote</span>
+            <select
+              aria-label="Git remote"
+              value={settings.forgeRemotePinned ? settings.forgeRemote : ''}
+              onChange={(event) => {
+                const value = event.currentTarget.value
+                void save({ forgeRemote: value === '' ? null : value })
+              }}
+              className="rounded border border-line-strong bg-app px-2 py-1 text-sm text-fg"
+            >
+              <option value="">Automatic ({settings.forgeRemote})</option>
+              {(settings.remotes.includes(settings.forgeRemote)
+                ? settings.remotes
+                : [settings.forgeRemote, ...settings.remotes]
+              ).map((remote) => (
+                <option key={remote} value={remote}>
+                  {remote}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs text-fg-faint">
+              {settings.remotes.includes(settings.forgeRemote)
+                ? 'Branches are pushed here and the forge CLI works on its repository.'
+                : `No remote named ${settings.forgeRemote} in this repository.`}
+            </span>
+          </label>
           <ul className="divide-y divide-line">
             {FORGES.map(({ kind, label, cli, env }) => {
               const state = settings.forgeCredentials[kind]

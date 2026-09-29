@@ -8,8 +8,8 @@ import {
   gitTokenConfig,
   glabEnv,
   parseRemote,
-  resolveForgeRemote,
   teaEnv,
+  teaRepoArgs,
 } from './forge-cred.ts'
 
 export type PullRequest = { url: string; number: number }
@@ -129,7 +129,7 @@ async function deleteRemoteBranch(
  * so gh never touches the operator's auth state. Token-only: without
  * GH_TOKEN/GITHUB_TOKEN in the process environment gh fails closed.
  */
-function githubPr(exec: Exec): PrDriver {
+function githubPr(exec: Exec, forgeRemote: string): PrDriver {
   let ownerRepo: string | null = null
 
   async function repoSlug(cwd: string): Promise<string> {
@@ -138,7 +138,7 @@ function githubPr(exec: Exec): PrDriver {
         await execOk(
           exec,
           ['gh', 'repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-          { cwd, env: ghEnv(cwd) },
+          { cwd, env: ghEnv(cwd, forgeRemote) },
         )
       ).trim()
     }
@@ -155,14 +155,17 @@ function githubPr(exec: Exec): PrDriver {
           const out = await execOk(
             exec,
             ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
-            { cwd, env: ghEnv(cwd) },
+            { cwd, env: ghEnv(cwd, forgeRemote) },
           )
           return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
         },
       )
       for (const label of labels) {
         // --force makes create idempotent; failure (e.g. no write perms) is best effort
-        await exec(['gh', 'label', 'create', label, '--force'], { cwd, env: ghEnv(cwd) })
+        await exec(['gh', 'label', 'create', label, '--force'], {
+          cwd,
+          env: ghEnv(cwd, forgeRemote),
+        })
       }
       const out = await execOk(
         exec,
@@ -180,7 +183,7 @@ function githubPr(exec: Exec): PrDriver {
           '-',
           ...labels.flatMap((label) => ['--label', label]),
         ],
-        { cwd, stdin: body, env: ghEnv(cwd) },
+        { cwd, stdin: body, env: ghEnv(cwd, forgeRemote) },
       )
       const url = out.trim()
       return { url, number: Number(url.split('/').pop() ?? 0) }
@@ -189,7 +192,7 @@ function githubPr(exec: Exec): PrDriver {
       const out = await execOk(
         exec,
         ['gh', 'pr', 'view', String(number), '--json', 'state', '--jq', '.state'],
-        { cwd, env: ghEnv(cwd) },
+        { cwd, env: ghEnv(cwd, forgeRemote) },
       )
       switch (out.trim().toUpperCase()) {
         case 'MERGED':
@@ -203,7 +206,7 @@ function githubPr(exec: Exec): PrDriver {
     async listOpenPrs(cwd) {
       const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
         cwd,
-        env: ghEnv(cwd),
+        env: ghEnv(cwd, forgeRemote),
       })
       const raw = JSON.parse(out) as Array<
         Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
@@ -218,7 +221,7 @@ function githubPr(exec: Exec): PrDriver {
         const out = await execOk(
           exec,
           ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-          { cwd, env: ghEnv(cwd) },
+          { cwd, env: ghEnv(cwd, forgeRemote) },
         )
         const status = JSON.parse(out) as { mergeable: string; mergeStateStatus: string }
         if (status.mergeable === 'CONFLICTING' || status.mergeStateStatus === 'DIRTY') {
@@ -232,7 +235,10 @@ function githubPr(exec: Exec): PrDriver {
       return 'unknown'
     },
     async getPrDiff(cwd, number) {
-      return execOk(exec, ['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv(cwd) })
+      return execOk(exec, ['gh', 'pr', 'diff', String(number)], {
+        cwd,
+        env: ghEnv(cwd, forgeRemote),
+      })
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -252,7 +258,7 @@ function githubPr(exec: Exec): PrDriver {
             '--jq',
             '.[] | {id: (.id|tostring), user: .user.login, body}',
           ],
-          { cwd, env: ghEnv(cwd) },
+          { cwd, env: ghEnv(cwd, forgeRemote) },
         )
         for (const line of raw.split('\n')) {
           if (line.trim() === '') continue
@@ -265,20 +271,20 @@ function githubPr(exec: Exec): PrDriver {
       await execOk(exec, ['gh', 'pr', 'comment', String(number), '--body-file', '-'], {
         cwd,
         stdin: body,
-        env: ghEnv(cwd),
+        env: ghEnv(cwd, forgeRemote),
       })
     },
     async closePr(cwd, number, reason) {
       await execOk(exec, ['gh', 'pr', 'close', String(number), '--comment', reason], {
         cwd,
-        env: ghEnv(cwd),
+        env: ghEnv(cwd, forgeRemote),
       })
     },
     async addLabel(cwd, number, label) {
-      await addPrLabels(exec, cwd, number, [label])
+      await addPrLabels(exec, cwd, forgeRemote, number, [label])
     },
     async removeLabel(cwd, number, label) {
-      await removePrLabel(exec, cwd, number, label)
+      await removePrLabel(exec, cwd, forgeRemote, number, label)
     },
     async deleteBranch(cwd, remote, branch) {
       await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github', cwd))
@@ -289,13 +295,12 @@ function githubPr(exec: Exec): PrDriver {
 type ForgejoRemote = { base: string; ownerRepo: string }
 
 /** Forgejo PR writes use tea, with API reads for PR state and metadata. */
-function forgejoPr(exec: Exec, configuredRemote: string | null): PrDriver {
+function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
   let remote: ForgejoRemote | null = null
 
   async function forge(cwd: string): Promise<ForgejoRemote> {
     if (remote !== null) return remote
-    const remoteName = await resolveForgeRemote(exec, cwd, 'forgejo', configuredRemote)
-    const url = await execOk(exec, ['git', 'remote', 'get-url', remoteName], { cwd })
+    const url = await execOk(exec, ['git', 'remote', 'get-url', forgeRemote], { cwd })
     const parsed = parseRemote(url.trim())
     if (parsed === null) throw new Error(`cannot parse forge remote: ${url.trim()}`)
     remote = parsed
@@ -432,6 +437,7 @@ function forgejoPr(exec: Exec, configuredRemote: string | null): PrDriver {
           'tea',
           'pr',
           'create',
+          ...teaRepoArgs(cwd, forgeRemote),
           '--base',
           base,
           '--head',
@@ -442,7 +448,7 @@ function forgejoPr(exec: Exec, configuredRemote: string | null): PrDriver {
           body,
           ...(labels.length === 0 ? [] : ['--labels', labels.join(',')]),
         ],
-        { cwd, env: await teaEnv(exec, cwd, configuredRemote) },
+        { cwd, env: await teaEnv(exec, cwd, forgeRemote) },
       )
       const created = (await listOpenPrs(cwd)).find((pr) => pr.headRefName === branch)
       if (created === undefined) {
@@ -492,10 +498,14 @@ function forgejoPr(exec: Exec, configuredRemote: string | null): PrDriver {
     },
     async postComment(cwd, number, body) {
       await forgeTokenOrThrow(cwd)
-      await execOk(exec, ['tea', 'comment', String(number), body], {
-        cwd,
-        env: await teaEnv(exec, cwd, configuredRemote),
-      })
+      await execOk(
+        exec,
+        ['tea', 'comment', ...teaRepoArgs(cwd, forgeRemote), String(number), body],
+        {
+          cwd,
+          env: await teaEnv(exec, cwd, forgeRemote),
+        },
+      )
     },
     async closePr(cwd, number, _reason) {
       await api(cwd, 'PATCH', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`, {
@@ -533,9 +543,12 @@ const GITLAB_PAGE = 100
  * Everything but creation and the diff goes through `glab api`, whose `:id`
  * placeholder resolves the project from the repo `cwd` is in.
  */
-function gitlabPr(exec: Exec): PrDriver {
+function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
   async function api(cwd: string, args: readonly string[]): Promise<unknown> {
-    const out = await execOk(exec, ['glab', 'api', ...args], { cwd, env: glabEnv(cwd) })
+    const out = await execOk(exec, ['glab', 'api', ...args], {
+      cwd,
+      env: glabEnv(cwd, forgeRemote),
+    })
     return out.trim() === '' ? null : (JSON.parse(out) as unknown)
   }
 
@@ -629,7 +642,7 @@ function gitlabPr(exec: Exec): PrDriver {
           ...(labels.length === 0 ? [] : ['--label', labels.join(',')]),
           '--yes',
         ],
-        { cwd, env: glabEnv(cwd) },
+        { cwd, env: glabEnv(cwd, forgeRemote) },
       )
       const created = (await openMrs(cwd, branch))[0]
       if (created === undefined) {
@@ -653,7 +666,7 @@ function gitlabPr(exec: Exec): PrDriver {
     async getPrDiff(cwd, number) {
       return execOk(exec, ['glab', 'mr', 'diff', String(number), '--raw'], {
         cwd,
-        env: glabEnv(cwd),
+        env: glabEnv(cwd, forgeRemote),
       })
     },
     async listComments(cwd, number) {
@@ -684,18 +697,15 @@ function gitlabPr(exec: Exec): PrDriver {
   }
 }
 
-export function makePrDriver(
-  kind: string,
-  exec: Exec = defaultExec,
-  configuredRemote: string | null = null,
-): PrDriver {
+/** A driver bound to `remote`: every forge CLI call and API URL targets that remote's repository. */
+export function makePrDriver(kind: string, remote: string, exec: Exec = defaultExec): PrDriver {
   switch (kind) {
     case 'github':
-      return githubPr(exec)
+      return githubPr(exec, remote)
     case 'gitlab':
-      return gitlabPr(exec)
+      return gitlabPr(exec, remote)
     case 'forgejo':
-      return forgejoPr(exec, configuredRemote)
+      return forgejoPr(exec, remote)
     default:
       throw new NotImplementedDriverError('forge', kind)
   }

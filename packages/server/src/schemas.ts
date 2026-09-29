@@ -132,6 +132,11 @@ export const SettingsBody = z
     desktopFailureAlerts: z.boolean().optional(),
     reviewMaxRounds: z.number().int().min(1).optional(),
     forgeKind: ForgeKind.optional(),
+    /**
+     * Git remote every forge call targets; must name an existing remote of the
+     * repo. Null matches it to the forge's host. Changing forgeKind alone also unpins it.
+     */
+    forgeRemote: z.string().trim().min(1).nullable().optional(),
     /** A credential id picks it for that forge in this repo; null drops the pick. */
     forgeCredentials: z
       .object({
@@ -145,6 +150,8 @@ export const SettingsBody = z
     message: 'provide a setting',
   })
 export type SettingsBody = z.infer<typeof SettingsBody>
+
+const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
 
 export const ForgeCredentialParam = z.object({ id: z.string().min(1) })
 
@@ -160,11 +167,7 @@ export const ForgeCredentialUpdateBody = z
     name: z.string().trim().min(1).optional(),
     token: z.string().trim().min(1).optional(),
   })
-  .refine((body) => body.name !== undefined || body.token !== undefined, {
-    message: 'provide a name or token',
-  })
-
-const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
+  .refine(nonEmpty, { message: 'provide a name or token' })
 
 export const WorkerCreateBody = z.object({
   name: z.string().trim().min(1),

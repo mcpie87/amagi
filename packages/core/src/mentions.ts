@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
-import { resolveForgeRemote } from './drivers/forge-cred.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
@@ -261,6 +260,7 @@ function configuredFooter(config: Config): string {
 async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage?: string) {
   return prepareConflictWorktree({
     repoRoot: opts.root,
+    remote: opts.config.forge.remote,
     repoName: opts.repoName,
     worktreeRoot: opts.config.repo.worktreeRoot,
     baseBranch: opts.config.repo.baseBranch,
@@ -339,12 +339,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       cwd: wt.path,
       branch: wt.branch,
       headRef: opts.pr.headRefName,
-      remote: await resolveForgeRemote(
-        run,
-        opts.root,
-        opts.config.forge.kind,
-        opts.config.forge.remote,
-      ),
+      remote: opts.config.forge.remote,
       exec: run,
     })
     const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')

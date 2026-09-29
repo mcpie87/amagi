@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   Config,
   expandWorkers,
+  hasPinnedForgeRemote,
   hasStaleMaxParallel,
   loadConfig,
   loadGlobalConfig,
@@ -142,6 +143,24 @@ describe('loadConfig', () => {
   test('accepts a repo persona', () => {
     writeRepo('[repo]\npersona = "agent-chise"\n')
     expect(loadConfig(repo).config.repo.persona).toBe('agent-chise')
+  })
+
+  test('an unset forge remote is the one pointing at the selected forge', () => {
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
+    Bun.spawnSync(['git', 'remote', 'add', 'origin', 'git@github.com:me/app.git'], { cwd: repo })
+    Bun.spawnSync(['git', 'remote', 'add', 'lab', 'ssh://git@gitlab.com:2222/me/app.git'], {
+      cwd: repo,
+    })
+    writeRepo('[forge]\nkind = "gitlab"\n')
+    expect(loadConfig(repo).config.forge.remote).toBe('lab')
+    expect(hasPinnedForgeRemote(repo)).toBe(false)
+    writeRepo('[forge]\nkind = "github"\n')
+    expect(loadConfig(repo).config.forge.remote).toBe('origin')
+    writeRepo('[forge]\nkind = "forgejo"\n')
+    expect(loadConfig(repo).config.forge.remote).toBe('origin')
+    writeRepo('[forge]\nkind = "gitlab"\nremote = "origin"\n')
+    expect(loadConfig(repo).config.forge.remote).toBe('origin')
+    expect(hasPinnedForgeRemote(repo)).toBe(true)
   })
 
   test('forge agent handle defaults to the agent account and is overridable', () => {

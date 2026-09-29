@@ -137,9 +137,10 @@ export function startPrConflictWatcher({
    */
   async function observeMergeTree(prs: PrInfo[], run: Exec, runId: string): Promise<void> {
     const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
-    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken(config.forge.kind, root))
+    const { remote } = config.forge
+    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(config.forge.kind, root))
     for (const base of baseRefs) {
-      await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', base], { cwd: root })
+      await execOk(run, ['git', ...tokenCfg, 'fetch', remote, base], { cwd: root })
     }
     const forced = new Map<number, string>()
     const unknown = prs.filter((p) => p.mergeable === 'UNKNOWN')
@@ -166,8 +167,8 @@ export function startPrConflictWatcher({
       try {
         local = await mergeTreeVerdict({
           repoRoot: root,
-          base: `origin/${p.baseRefName}`,
-          head: `refs/remotes/origin/pr/${p.number}/head`,
+          base: `${config.forge.remote}/${p.baseRefName}`,
+          head: `refs/remotes/${config.forge.remote}/pr/${p.number}/head`,
           exec: run,
         })
       } catch (err) {
@@ -201,9 +202,10 @@ export function startPrConflictWatcher({
 
   /** The base branch's remote head, so a base move re-arms PRs already attempted. */
   async function baseHeadOid(run: Exec): Promise<string> {
-    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken(config.forge.kind, root))
+    const { remote } = config.forge
+    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(config.forge.kind, root))
     const ref = `refs/heads/${config.repo.baseBranch}`
-    const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', ref], { cwd: root })
+    const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', remote, ref], { cwd: root })
     return (
       out
         .split('\n')
@@ -227,6 +229,7 @@ export function startPrConflictWatcher({
       try {
         await syncPrPriorityLabel({
           cwd: root,
+          remote: config.forge.remote,
           number: pr.number,
           labels: pr.labels,
           priority: pri.linked ? pri.priority : null,
@@ -271,6 +274,7 @@ export function startPrConflictWatcher({
       const run = exec ?? defaultExec
       const heads = await fetchPullHeads({
         repoRoot: root,
+        remote: config.forge.remote,
         forgeKind: config.forge.kind,
         lastHeads: lastPullHeads,
         ...(exec === undefined ? {} : { exec }),

@@ -1,5 +1,5 @@
 import { exec as defaultExec, type Exec, execOk } from '../../exec.ts'
-import { ghEnv, teaEnv } from '../forge-cred.ts'
+import { ghEnv, teaEnv, teaRepoArgs } from '../forge-cred.ts'
 import {
   type CreateTrackerTask,
   type GateRef,
@@ -14,6 +14,8 @@ import {
 
 export type ForgeOptions = {
   cwd: string
+  /** The configured forge remote (`[forge] remote`); every gh/tea call targets its repository. */
+  remote: string
   exec?: Exec
 }
 
@@ -71,10 +73,12 @@ export abstract class ForgeTracker implements Tracker {
   readonly leaseTtlMs = LEASE_TTL_MS
   readonly capabilities: TrackerCapabilities = { create: true, edit: false, dependencies: false }
   protected readonly cwd: string
+  protected readonly remote: string
   protected readonly exec: Exec
 
   constructor(opts: ForgeOptions) {
     this.cwd = opts.cwd
+    this.remote = opts.remote
     this.exec = opts.exec ?? defaultExec
   }
 
@@ -203,7 +207,7 @@ export class GithubTracker extends ForgeTracker {
           '-',
           ...input.labels.flatMap((label) => ['--label', label]),
         ],
-        { cwd: this.cwd, stdin: body, env: ghEnv() },
+        { cwd: this.cwd, stdin: body, env: ghEnv(this.cwd, this.remote) },
       )
     ).trim()
     const id = url.match(/\/issues\/(\d+)\/?$/)?.[1]
@@ -217,7 +221,7 @@ export class GithubTracker extends ForgeTracker {
     const out = await execOk(
       this.exec,
       ['gh', 'issue', 'list', '--state', 'open', '--limit', String(limit), '--json', GH_FIELDS],
-      { cwd: this.cwd, env: ghEnv() },
+      { cwd: this.cwd, env: ghEnv(this.cwd, this.remote) },
     )
     return (JSON.parse(out) as Array<Record<string, unknown>>).map(ghIssue)
   }
@@ -225,7 +229,7 @@ export class GithubTracker extends ForgeTracker {
   protected async getIssue(id: string): Promise<ForgeIssue | null> {
     const out = await execOk(this.exec, ['gh', 'issue', 'view', id, '--json', GH_FIELDS], {
       cwd: this.cwd,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
     return ghIssue(JSON.parse(out) as Record<string, unknown>)
   }
@@ -234,14 +238,14 @@ export class GithubTracker extends ForgeTracker {
     await execOk(this.exec, ['gh', 'issue', 'comment', id, '--body-file', '-'], {
       cwd: this.cwd,
       stdin: body,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
   }
 
   protected async commentBodies(id: string): Promise<string[]> {
     const out = await execOk(this.exec, ['gh', 'issue', 'view', id, '--json', 'comments'], {
       cwd: this.cwd,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
     const parsed = JSON.parse(out) as { comments?: Array<{ body?: string }> }
     return (parsed.comments ?? []).map((c) => c.body ?? '')
@@ -251,21 +255,21 @@ export class GithubTracker extends ForgeTracker {
     await this.ensureClaimLabel()
     await execOk(this.exec, ['gh', 'issue', 'edit', id, '--add-label', CLAIM_LABEL], {
       cwd: this.cwd,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
   }
 
   protected async removeClaimLabel(id: string): Promise<void> {
     await execOk(this.exec, ['gh', 'issue', 'edit', id, '--remove-label', CLAIM_LABEL], {
       cwd: this.cwd,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
   }
 
   protected async setState(id: string, closed: boolean): Promise<void> {
     await execOk(this.exec, closed ? ['gh', 'issue', 'close', id] : ['gh', 'issue', 'reopen', id], {
       cwd: this.cwd,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
   }
 
@@ -273,7 +277,7 @@ export class GithubTracker extends ForgeTracker {
     // --force makes create idempotent; failure (e.g. no write perms) is best effort
     await this.exec(['gh', 'label', 'create', CLAIM_LABEL, '--force'], {
       cwd: this.cwd,
-      env: ghEnv(),
+      env: ghEnv(this.cwd, this.remote),
     })
   }
 }
@@ -303,13 +307,14 @@ export class ForgejoTracker extends ForgeTracker {
         'tea',
         'issues',
         'create',
+        ...teaRepoArgs(this.cwd, this.remote),
         '--title',
         input.title,
         '--description',
         body,
         ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
       ],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd) },
+      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
     )
     const id = output.match(/\/issues\/(\d+)\b/)?.[1]
     if (id === undefined) throw new Error('tea issues create returned no issue URL')
@@ -325,6 +330,7 @@ export class ForgejoTracker extends ForgeTracker {
         'tea',
         'issues',
         'list',
+        ...teaRepoArgs(this.cwd, this.remote),
         '--state',
         'open',
         '--limit',
@@ -334,7 +340,7 @@ export class ForgejoTracker extends ForgeTracker {
         '--output',
         'json',
       ],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd) },
+      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
     )
     const parsed = JSON.parse(out)
     return (Array.isArray(parsed) ? parsed : []).map(teaIssue)
@@ -343,56 +349,111 @@ export class ForgejoTracker extends ForgeTracker {
   protected async getIssue(id: string): Promise<ForgeIssue | null> {
     const out = await execOk(
       this.exec,
-      ['tea', 'issues', id, '--fields', TEA_FIELDS, '--output', 'json'],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd) },
+      [
+        'tea',
+        'issues',
+        ...teaRepoArgs(this.cwd, this.remote),
+        id,
+        '--fields',
+        TEA_FIELDS,
+        '--output',
+        'json',
+      ],
+      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
     )
     return teaIssue(JSON.parse(out) as Record<string, unknown>)
   }
 
   protected async postComment(id: string, body: string): Promise<void> {
-    await execOk(this.exec, ['tea', 'comments', 'add', id, '--description', body], {
-      cwd: this.cwd,
-      env: await teaEnv(this.exec, this.cwd),
-    })
+    await execOk(
+      this.exec,
+      ['tea', 'comments', 'add', ...teaRepoArgs(this.cwd, this.remote), id, '--description', body],
+      {
+        cwd: this.cwd,
+        env: await teaEnv(this.exec, this.cwd, this.remote),
+      },
+    )
   }
 
   protected async commentBodies(id: string): Promise<string[]> {
-    const out = await execOk(this.exec, ['tea', 'comments', 'list', id, '--output', 'json'], {
-      cwd: this.cwd,
-      env: await teaEnv(this.exec, this.cwd),
-    })
+    const out = await execOk(
+      this.exec,
+      ['tea', 'comments', 'list', ...teaRepoArgs(this.cwd, this.remote), id, '--output', 'json'],
+      {
+        cwd: this.cwd,
+        env: await teaEnv(this.exec, this.cwd, this.remote),
+      },
+    )
     const parsed = JSON.parse(out) as Array<{ content?: string; body?: string }>
     return parsed.map((c) => c.content ?? c.body ?? '')
   }
 
   protected async addClaimLabel(id: string): Promise<void> {
     await this.ensureClaimLabel()
-    await execOk(this.exec, ['tea', 'issues', 'edit', id, '--add-labels', CLAIM_LABEL], {
-      cwd: this.cwd,
-      env: await teaEnv(this.exec, this.cwd),
-    })
+    await execOk(
+      this.exec,
+      [
+        'tea',
+        'issues',
+        'edit',
+        ...teaRepoArgs(this.cwd, this.remote),
+        id,
+        '--add-labels',
+        CLAIM_LABEL,
+      ],
+      {
+        cwd: this.cwd,
+        env: await teaEnv(this.exec, this.cwd, this.remote),
+      },
+    )
   }
 
   protected async removeClaimLabel(id: string): Promise<void> {
-    await execOk(this.exec, ['tea', 'issues', 'edit', id, '--remove-labels', CLAIM_LABEL], {
-      cwd: this.cwd,
-      env: await teaEnv(this.exec, this.cwd),
-    })
+    await execOk(
+      this.exec,
+      [
+        'tea',
+        'issues',
+        'edit',
+        ...teaRepoArgs(this.cwd, this.remote),
+        id,
+        '--remove-labels',
+        CLAIM_LABEL,
+      ],
+      {
+        cwd: this.cwd,
+        env: await teaEnv(this.exec, this.cwd, this.remote),
+      },
+    )
   }
 
   protected async setState(id: string, closed: boolean): Promise<void> {
     await execOk(
       this.exec,
-      closed ? ['tea', 'issues', 'close', id] : ['tea', 'issues', 'reopen', id],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd) },
+      closed
+        ? ['tea', 'issues', 'close', ...teaRepoArgs(this.cwd, this.remote), id]
+        : ['tea', 'issues', 'reopen', ...teaRepoArgs(this.cwd, this.remote), id],
+      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
     )
   }
 
   private async ensureClaimLabel(): Promise<void> {
     // best effort: creating an existing label fails, which is fine
-    await this.exec(['tea', 'labels', 'create', '--name', CLAIM_LABEL, '--color', 'A0A0A0'], {
-      cwd: this.cwd,
-      env: await teaEnv(this.exec, this.cwd),
-    })
+    await this.exec(
+      [
+        'tea',
+        'labels',
+        'create',
+        ...teaRepoArgs(this.cwd, this.remote),
+        '--name',
+        CLAIM_LABEL,
+        '--color',
+        'A0A0A0',
+      ],
+      {
+        cwd: this.cwd,
+        env: await teaEnv(this.exec, this.cwd, this.remote),
+      },
+    )
   }
 }

@@ -11,12 +11,13 @@ import {
   ghEnv,
   gitRewrite,
   gitTokenConfig,
+  glabEnv,
   listForgeCredentials,
   parseRemote,
   pickForgeCredential,
   removeForgeCredential,
-  resolveForgeRemote,
   teaEnv,
+  teaRepoArgs,
   teaXdgHome,
   updateForgeCredential,
 } from './forge-cred.ts'
@@ -39,7 +40,6 @@ const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
 
 const savedToken = process.env.GH_TOKEN
 const savedForgejoToken = process.env.FORGEJO_TOKEN
-const savedForgejoUrl = process.env.GITEA_SERVER_URL
 const savedState = process.env.XDG_STATE_HOME
 let home: string
 
@@ -49,7 +49,6 @@ beforeEach(() => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
   delete process.env.FORGEJO_TOKEN
-  delete process.env.GITEA_SERVER_URL
   delete process.env.GITEA_SERVER_TOKEN
   delete process.env.TEA_TOKEN
 })
@@ -59,8 +58,6 @@ afterEach(() => {
   else process.env.GH_TOKEN = savedToken
   if (savedForgejoToken === undefined) delete process.env.FORGEJO_TOKEN
   else process.env.FORGEJO_TOKEN = savedForgejoToken
-  if (savedForgejoUrl === undefined) delete process.env.GITEA_SERVER_URL
-  else process.env.GITEA_SERVER_URL = savedForgejoUrl
   if (savedState === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = savedState
   rmSync(home, { recursive: true, force: true })
@@ -140,6 +137,21 @@ describe('forge credentials', () => {
   })
 })
 
+describe('remote pinning', () => {
+  test('gh, glab and tea target the configured remote, not whichever they prefer', () => {
+    const repo = join(home, 'multi')
+    mkdirSync(repo)
+    const git = (...args: string[]) => Bun.spawnSync(['git', ...args], { cwd: repo })
+    git('init', '-q')
+    git('remote', 'add', 'origin', 'git@github.com:me/app.git')
+    git('remote', 'add', 'gitlab', 'git@gitlab.example.com:group/app.git')
+    expect(ghEnv(repo, 'origin').GH_REPO).toBe('github.com/me/app')
+    expect(glabEnv(repo, 'gitlab').GLAB_REMOTE_ALIAS).toBe('gitlab')
+    expect(teaRepoArgs(repo, 'gitlab')).toEqual(['--login', 'amagi', '--repo', 'group/app'])
+    expect(teaRepoArgs(repo, 'missing')).toEqual([])
+  })
+})
+
 describe('parseRemote', () => {
   test('splits ssh scp-form remotes into base and slug', () => {
     expect(parseRemote('git@git.example.com:owner/repo.git')).toEqual({
@@ -162,26 +174,6 @@ describe('parseRemote', () => {
   test('rejects a remote with no host or path', () => {
     expect(parseRemote('not a remote')).toBeNull()
     expect(parseRemote('')).toBeNull()
-  })
-})
-
-describe('resolveForgeRemote', () => {
-  test('matches the selected forge host and honors an explicit remote', async () => {
-    const { exec } = fake((cmd) => {
-      if (cmd[1] === 'remote' && cmd.length === 2) return ok('origin\nwork\n')
-      if (cmd[1] === 'remote' && cmd[2] === 'get-url' && cmd[3] === 'origin') {
-        return ok('git@github.com:owner/repo.git')
-      }
-      if (cmd[1] === 'remote' && cmd[2] === 'get-url' && cmd[3] === 'work') {
-        return ok('git@gitlab.com:owner/repo.git')
-      }
-      return undefined
-    })
-    expect(await resolveForgeRemote(exec, '/repo', 'gitlab')).toBe('work')
-    expect(await resolveForgeRemote(exec, '/repo', 'github', 'work')).toBe('work')
-    await expect(resolveForgeRemote(exec, '/repo', 'forgejo')).rejects.toThrow(
-      'no git remote matches forgejo host codeberg.org',
-    )
   })
 })
 
@@ -212,13 +204,13 @@ describe('gitRewrite', () => {
 describe('ghEnv', () => {
   test('isolates gh config from the operator while carrying the token', () => {
     process.env.GH_TOKEN = 'ghp_abc'
-    const env = ghEnv()
+    const env = ghEnv(home, 'origin')
     expect(env.GH_TOKEN).toBe('ghp_abc')
     expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi', 'forge', 'github'))
   })
 
   test('still isolates gh config without a token so it fails closed', () => {
-    const env = ghEnv()
+    const env = ghEnv(home, 'origin')
     expect(env.GH_TOKEN).toBeUndefined()
     expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi', 'forge', 'github'))
   })
@@ -244,13 +236,12 @@ describe('gitTokenConfig', () => {
 describe('teaEnv', () => {
   test('provisions a tea login from the token and points tea at the Amagi xdg', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
-    process.env.GITEA_SERVER_URL = 'https://git.example.com'
     const { exec, calls } = fake((c) => {
       if (c.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
       if (c[0] === 'tea' && c[1] === 'logins') return ok('')
       return undefined
     })
-    const env = await teaEnv(exec, '/repo')
+    const env = await teaEnv(exec, '/repo', 'origin')
     expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'tea'))
     expect(calls).toContainEqual([
       'tea',
@@ -268,7 +259,7 @@ describe('teaEnv', () => {
 
   test('skips provisioning without a token', async () => {
     const { exec, calls } = fake(() => undefined)
-    const env = await teaEnv(exec, '/repo')
+    const env = await teaEnv(exec, '/repo', 'origin')
     expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'tea'))
     expect(calls.some((c) => c[0] === 'tea')).toBe(false)
   })
@@ -281,7 +272,7 @@ describe('teaEnv', () => {
     const { exec, calls } = fake((c) =>
       c.includes('get-url') ? ok('git@git.example.com:o/r.git') : undefined,
     )
-    await teaEnv(exec, '/repo')
+    await teaEnv(exec, '/repo', 'origin')
     expect(calls.some((c) => c[0] === 'tea')).toBe(false)
   })
 })
