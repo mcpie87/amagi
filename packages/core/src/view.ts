@@ -360,7 +360,17 @@ export type StatusEntry = {
   reason: string | null
   /** Time spent in `to`: until the next entry, else until `now` while in flight, else null. */
   durationMs: number | null
+  /** The repo's setupCmd, run while the task was in this state. */
+  setup: StatusSetup | null
   runs: StatusRun[]
+}
+
+export type StatusSetup = {
+  command: string
+  startedAt: number
+  /** Until it finished, else until `now` while in flight, else null. */
+  durationMs: number | null
+  exitCode: number | null
 }
 
 export type StatusRun = {
@@ -405,12 +415,14 @@ export function statusLog(
       to,
       reason: reason ?? null,
       durationMs: null,
+      setup: null,
       runs: [],
     })
     current = to
   }
   const events = currentAttemptEvents(taskEvents(state, taskId), taskId)
   let activeRun: StatusRun | null = null
+  let activeSetup: StatusSetup | null = null
   let pendingRestart: number | null = null
   let checksSinceImplement = false
   for (const event of events) {
@@ -429,6 +441,24 @@ export function statusLog(
         break
       case 'run.restarted':
         pendingRestart = event.restart
+        break
+      case 'setup.started': {
+        activeSetup = {
+          command: event.command,
+          startedAt: event.ts,
+          durationMs: null,
+          exitCode: null,
+        }
+        const entry = entries.at(-1)
+        if (entry !== undefined) entry.setup = activeSetup
+        break
+      }
+      case 'setup.finished':
+        if (activeSetup !== null) {
+          activeSetup.durationMs = event.durationMs
+          activeSetup.exitCode = event.exitCode
+          activeSetup = null
+        }
         break
       case 'agent.started': {
         const label = [
@@ -485,6 +515,9 @@ export function statusLog(
   }
   if (activeRun !== null) {
     activeRun.durationMs = now === null ? null : now - activeRun.startedAt
+  }
+  if (activeSetup !== null) {
+    activeSetup.durationMs = now === null ? null : now - activeSetup.startedAt
   }
   return entries
 }

@@ -1,6 +1,7 @@
 import {
   type Config,
   dropLiveRun,
+  fmtDuration,
   isTerminal,
   listModelsCached,
   loadConfig,
@@ -142,6 +143,19 @@ export async function workOneTask(opts: {
         break
       case 'worktree.created':
         console.log(dim(`  worktree: ${event.path} (${event.branch})`))
+        break
+      case 'setup.started':
+        console.log(dim(`  setup: ${event.command}`))
+        break
+      case 'setup.finished':
+        if (event.exitCode === 0) {
+          console.log(dim(`  setup done in ${fmtDuration(event.durationMs)}`))
+        } else {
+          console.log(
+            red(`  setup failed (exit ${event.exitCode}) after ${fmtDuration(event.durationMs)}`),
+          )
+          if (event.output.trim()) printBlock(event.output)
+        }
         break
       case 'agent.started':
         if (liveTaskId !== null) updateLiveRun(key, liveTaskId, { waitingOnSeat: false })

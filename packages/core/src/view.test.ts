@@ -900,6 +900,34 @@ describe('status log', () => {
     expect(statusLog(state, 'am-1', null).at(-1)?.durationMs).toBeNull()
   })
 
+  test('attaches the setup command to the state it ran in, counting up while it runs', () => {
+    const claimed = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'setup.started', command: 'bun install' }),
+    ]
+    const running = claimed.reduce(reduceState, initialDashboardState())
+    expect(statusLog(running, 'am-1', 1400)[0]?.setup).toEqual({
+      command: 'bun install',
+      startedAt: 1100,
+      durationMs: 300,
+      exitCode: null,
+    })
+    const finished = [
+      ...claimed,
+      ev(3, 'am-1', 1900, {
+        type: 'setup.finished',
+        command: 'bun install',
+        exitCode: 0,
+        durationMs: 800,
+        output: '',
+      }),
+      ev(4, 'am-1', 1950, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+    ].reduce(reduceState, initialDashboardState())
+    const log = statusLog(finished, 'am-1', 5000)
+    expect(log[0]?.setup).toMatchObject({ durationMs: 800, exitCode: 0 })
+    expect(log[1]?.setup).toBeNull()
+  })
+
   test('starts at the last reset and records reclaims with their reason', () => {
     const state = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),

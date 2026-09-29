@@ -1041,6 +1041,8 @@ export class Runner {
         setupCmd: config.repo.setupCmd,
         persona: config.repo.persona,
         exec: this.exec,
+        onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
+        onSetupFinished: (report) => store.append(task.id, { type: 'setup.finished', ...report }),
       })
     }
     await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)

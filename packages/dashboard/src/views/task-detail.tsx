@@ -410,6 +410,25 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                 </span>
               )}
             </div>
+            {entry.setup !== null && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pb-2 pl-12 pr-4 text-xs text-fg-muted">
+                <span className="text-fg-faint">{entry.runs.length > 0 ? '├' : '└'}</span>
+                <span className="font-medium text-fg">setup</span>
+                <code className="min-w-0 truncate" title={entry.setup.command}>
+                  {entry.setup.command}
+                </code>
+                <span
+                  className={entry.setup.exitCode ? 'tabular-nums text-red-ink' : 'tabular-nums'}
+                >
+                  {[
+                    entry.setup.durationMs === null ? null : fmtDuration(entry.setup.durationMs),
+                    entry.setup.exitCode === null ? 'running' : `exit ${entry.setup.exitCode}`,
+                  ]
+                    .filter((part): part is string => part !== null)
+                    .join(' · ')}
+                </span>
+              </div>
+            )}
             {entry.runs.length > 0 && (
               <ol className="space-y-1 pb-2 pl-12 pr-4">
                 {entry.runs.map((run, index) => {

@@ -1,4 +1,4 @@
-import { fmtTokens } from '@amagi/core/format'
+import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import type { DashboardState } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useMemo } from 'react'
@@ -68,6 +68,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           text: `worktree created (${event.branch})`,
           icon: 'branch',
           tone: 'normal',
+        })
+        break
+      case 'setup.finished':
+        items.push({
+          key: `su${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `setup ${event.exitCode === 0 ? 'finished' : `failed (exit ${event.exitCode})`} in ${fmtDuration(event.durationMs)}`,
+          icon: 'clock',
+          tone: event.exitCode === 0 ? 'normal' : 'red',
         })
         break
       case 'worktree.removed':

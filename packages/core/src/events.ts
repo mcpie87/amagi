@@ -219,6 +219,16 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
+  /** The repo's setupCmd began in a fresh worktree; the task stays claimed until it ends. */
+  z.object({ type: z.literal('setup.started'), command: z.string() }),
+  /** `output` is the tail of stdout and stderr, kept so a slow or failed setup can be diagnosed. */
+  z.object({
+    type: z.literal('setup.finished'),
+    command: z.string(),
+    exitCode: z.number().int(),
+    durationMs: z.number().int().nonnegative(),
+    output: z.string(),
+  }),
   z.object({
     type: z.literal('chat.message'),
     /** The operator's message to the worker; a chat run's answer streams as agent.stream. */
