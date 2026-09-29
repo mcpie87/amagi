@@ -90,6 +90,8 @@ export type RunnerDeps = {
    * to, so its agent is not told about either.
    */
   channel?: boolean
+  /** Fleet worker this runner belongs to, recorded on agent.started for the scorecard. */
+  workerName?: string | undefined
 }
 
 export type RunOnceResult = {
@@ -1708,6 +1710,7 @@ export class Runner {
             seat: spawn.seat ?? harness.kind,
             model,
             effort,
+            ...(this.deps.workerName === undefined ? {} : { worker: this.deps.workerName }),
             cwd: opts.cwd,
             resumed: resumeFrom !== null,
           })

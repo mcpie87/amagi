@@ -632,3 +632,124 @@ export function runHealthNearLimit(health: RunHealth): boolean {
   }
   return false
 }
+
+/** One harness + model + effort configuration's track record over finished tasks. */
+export type ScorecardRow = {
+  harness: string
+  model: string | null
+  effort: string | null
+  /** Fleet workers that ran this configuration, sorted; ad-hoc runs add none. */
+  workers: string[]
+  finished: number
+  /** Tasks whose PR merged. */
+  merged: number
+  /** PR closed unmerged, or the task was closed by hand. */
+  abandoned: number
+  /** Finished with no PR: no changes, or marked done because the work was already there. */
+  noPr: number
+  needsHuman: number
+  /** Agent cost of every finished task in the row, all roles but chat. */
+  costUsd: number
+  /** Whether any of that usage carried a dollar figure. */
+  costSeen: boolean
+  /** Median wall-clock from attempt start to merge; null when nothing merged. */
+  medianMergeMs: number | null
+  /** Mean review rounds per finished task. */
+  avgReviewRounds: number
+}
+
+/**
+ * Outcome per harness + model + effort, from each finished task's current
+ * attempt, attributed to the attempt's first implement agent. Cancelled tasks
+ * are left out: stopping a run is the operator's call, not the agent's
+ * failure. `since` keeps tasks that finished at or after that epoch ms.
+ */
+export function scorecard(state: DashboardState, since = 0): ScorecardRow[] {
+  const rows = new Map<string, ScorecardRow & { mergeMs: number[]; reviewRounds: number }>()
+  for (const task of Object.values(state.tasks)) {
+    if (
+      task.state !== 'done' &&
+      task.state !== 'abandoned' &&
+      task.state !== 'no_pr' &&
+      task.state !== 'needs_human'
+    ) {
+      continue
+    }
+    let agent: Extract<StoredEvent, { type: 'agent.started' }> | null = null
+    let finishedAt = task.updatedAt
+    let costUsd = 0
+    let costSeen = false
+    for (const event of currentAttemptEvents(taskEvents(state, task.id), task.id)) {
+      if (event.type === 'agent.started' && event.role === 'implement' && agent === null) {
+        agent = event
+      } else if (event.type === 'task.state' && event.to === task.state) {
+        finishedAt = event.ts
+      } else if (
+        event.type === 'agent.stream' &&
+        event.role !== 'chat' &&
+        event.event.kind === 'usage' &&
+        event.event.costUsd !== undefined
+      ) {
+        costUsd += event.event.costUsd
+        costSeen = true
+      }
+    }
+    if (agent === null || finishedAt < since) continue
+    const key = JSON.stringify([agent.harness, agent.model, agent.effort])
+    let row = rows.get(key)
+    if (row === undefined) {
+      row = {
+        harness: agent.harness,
+        model: agent.model,
+        effort: agent.effort,
+        workers: [],
+        finished: 0,
+        merged: 0,
+        abandoned: 0,
+        noPr: 0,
+        needsHuman: 0,
+        costUsd: 0,
+        costSeen: false,
+        medianMergeMs: null,
+        avgReviewRounds: 0,
+        mergeMs: [],
+        reviewRounds: 0,
+      }
+      rows.set(key, row)
+    }
+    if (agent.worker !== undefined && !row.workers.includes(agent.worker)) {
+      row.workers.push(agent.worker)
+    }
+    row.finished++
+    row.costUsd += costUsd
+    row.costSeen ||= costSeen
+    row.reviewRounds += task.reviewRound
+    if (task.state === 'done' && task.prNumber !== null) {
+      row.merged++
+      row.mergeMs.push(finishedAt - task.createdAt)
+    } else if (task.state === 'done' || task.state === 'no_pr') {
+      row.noPr++
+    } else if (task.state === 'abandoned') {
+      row.abandoned++
+    } else {
+      row.needsHuman++
+    }
+  }
+  return [...rows.values()]
+    .map(({ mergeMs, reviewRounds, ...row }) => ({
+      ...row,
+      workers: row.workers.sort(),
+      medianMergeMs: median(mergeMs),
+      avgReviewRounds: reviewRounds / row.finished,
+    }))
+    .sort((a, b) => b.finished - a.finished)
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1
+    ? (sorted[mid] ?? 0)
+    : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+}

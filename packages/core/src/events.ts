@@ -243,6 +243,8 @@ export const EventBody = z.discriminatedUnion('type', [
     model: z.string().nullable(),
     /** The reasoning effort the harness resolved at spawn, if known. */
     effort: z.string().nullable(),
+    /** Name of the fleet worker whose runner spawned the agent; unset for ad-hoc runs. */
+    worker: z.string().optional(),
     cwd: z.string(),
     resumed: z.boolean(),
     /** Unique watcher invocation key; task runs leave this unset. */

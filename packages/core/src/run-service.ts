@@ -528,6 +528,7 @@ export class RunService implements RunServiceApi {
       channel: true,
       exec,
       forge,
+      workerName: worker.name,
     })
     const seat = this.workerSeat(worker)
     const holder = `${repoName}/${task.id}`

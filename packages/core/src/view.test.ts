@@ -14,6 +14,7 @@ import {
   reviewWaitingSeat,
   runHealth,
   runHealthNearLimit,
+  scorecard,
   stateAtAttempt,
   statusLog,
   taskEvents,
@@ -1117,5 +1118,91 @@ describe('status log', () => {
       durationMs: null,
       exitCode: null,
     })
+  })
+})
+
+describe('scorecard', () => {
+  let seq = 0
+  /** A task claimed at `start` whose implement agent ran on `model`, ending in `to` at `end`. */
+  const finished = (
+    id: string,
+    model: string,
+    to: 'done' | 'abandoned' | 'no_pr' | 'needs_human' | 'cancelled',
+    start: number,
+    end: number,
+    extra: { pr?: boolean; costUsd?: number; worker?: string } = {},
+  ): StoredEvent[] => [
+    ev(++seq, id, start, { type: 'task.claimed', title: id, tracker: 'bd' }),
+    ev(++seq, id, start + 1, {
+      type: 'agent.started',
+      role: 'implement',
+      harness: 'claude',
+      model,
+      effort: 'high',
+      ...(extra.worker === undefined ? {} : { worker: extra.worker }),
+      cwd: `/tmp/${id}`,
+      resumed: false,
+    }),
+    ev(++seq, id, start + 2, {
+      type: 'agent.stream',
+      role: 'implement',
+      event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: extra.costUsd ?? 1 },
+    }),
+    ...(extra.pr === true
+      ? [ev(++seq, id, start + 3, { type: 'pr.created', url: `https://x/${id}`, number: seq })]
+      : []),
+    ev(++seq, id, end, { type: 'task.state', from: 'claimed', to }),
+  ]
+
+  test('counts outcomes, cost and merge time per harness, model and effort', () => {
+    const state = reduceBatch(initialDashboardState(), [
+      ...finished('a', 'opus', 'done', 0, 1000, { pr: true, worker: 'Opus 1' }),
+      ...finished('b', 'opus', 'done', 0, 3000, { pr: true, worker: 'Opus 2' }),
+      ...finished('c', 'opus', 'abandoned', 0, 500, { costUsd: 4, worker: 'Opus 1' }),
+      ...finished('d', 'sonnet', 'no_pr', 0, 500),
+      ...finished('e', 'sonnet', 'done', 0, 500),
+      ...finished('f', 'sonnet', 'needs_human', 0, 500),
+      ...finished('g', 'sonnet', 'cancelled', 0, 500),
+    ])
+    expect(scorecard(state)).toEqual([
+      {
+        harness: 'claude',
+        model: 'opus',
+        effort: 'high',
+        workers: ['Opus 1', 'Opus 2'],
+        finished: 3,
+        merged: 2,
+        abandoned: 1,
+        noPr: 0,
+        needsHuman: 0,
+        costUsd: 6,
+        costSeen: true,
+        medianMergeMs: 2000,
+        avgReviewRounds: 0,
+      },
+      {
+        harness: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        workers: [],
+        finished: 3,
+        merged: 0,
+        abandoned: 0,
+        noPr: 2,
+        needsHuman: 1,
+        costUsd: 3,
+        costSeen: true,
+        medianMergeMs: null,
+        avgReviewRounds: 0,
+      },
+    ])
+  })
+
+  test('drops tasks that finished before the window', () => {
+    const state = reduceBatch(initialDashboardState(), [
+      ...finished('old', 'opus', 'done', 0, 1000, { pr: true }),
+      ...finished('new', 'opus', 'abandoned', 0, 5000),
+    ])
+    expect(scorecard(state, 2000)).toMatchObject([{ finished: 1, merged: 0, abandoned: 1 }])
   })
 })
