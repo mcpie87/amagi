@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { stateHome } from './paths.ts'
+import { hostStateHome } from './paths.ts'
 import { pidAlive } from './process.ts'
 
 export type UsageHold = {
@@ -16,7 +16,8 @@ export function usageHoldKey(harness: string, model: string | null, seat?: strin
 }
 
 function paths(key: string): { hold: string; probe: string } {
-  const dir = join(stateHome(), 'amagi', 'usage-holds')
+  // Usage limits belong to the real subscription, shared with a dev amagi.
+  const dir = join(hostStateHome(), 'amagi', 'usage-holds')
   const id = Buffer.from(key).toString('hex')
   return { hold: join(dir, `${id}.json`), probe: join(dir, `${id}.probe`) }
 }
