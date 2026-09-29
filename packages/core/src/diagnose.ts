@@ -1,5 +1,11 @@
 import { mkdirSync } from 'node:fs'
-import { type Config, loadConfig } from './config.ts'
+import {
+  type Config,
+  loadConfig,
+  resolveWorkerHarness,
+  reviewerHarnessConfig,
+  watcherHarnessConfig,
+} from './config.ts'
 import { forgeHostname, forgeToken, gitRemoteUrls, remoteHostname } from './drivers/forge-cred.ts'
 import { makePrDriver } from './drivers/pr.ts'
 import { errMsg } from './errors.ts'
@@ -43,9 +49,56 @@ function forgeRemoteCheck(root: string, kind: Config['forge']['kind'], remote: s
 }
 
 /**
+ * One check per distinct harness binary this repo can spawn: harness.implement,
+ * every enabled fleet worker, the enabled agent watchers and the reviewer.
+ * Resolution mirrors the spawn: Bun.spawn with no shell, so an alias or shell
+ * function the operator's shell knows about is not a harness amagi can run.
+ */
+function harnessChecks(config: Config): Diagnostic[] {
+  const uses: { user: string; harness: Config['harness']['implement'] }[] = [
+    { user: 'harness.implement', harness: config.harness.implement },
+    ...config.worker
+      .filter((worker) => worker.enabled)
+      .map((worker) => ({
+        user: `worker ${worker.name}`,
+        harness: resolveWorkerHarness(config, worker),
+      })),
+    ...(['mention', 'prConflict'] as const)
+      .filter((watcher) => config.watchers[watcher].enabled)
+      .map((watcher) => ({
+        user: `${watcher} watcher`,
+        harness: watcherHarnessConfig(config, watcher),
+      })),
+  ]
+  if (config.review.enabled) {
+    try {
+      uses.push({ user: 'review', harness: reviewerHarnessConfig(config) })
+    } catch {
+      // the config schema already rejects review.enabled with no reviewer harness
+    }
+  }
+
+  const usersByBin = new Map<string, string[]>()
+  for (const { user, harness } of uses) {
+    const bin = harness.bin ?? harness.kind
+    usersByBin.set(bin, [...(usersByBin.get(bin) ?? []), user])
+  }
+  return [...usersByBin].map(([bin, users]) => {
+    const name = `harness ${bin}`
+    const found = Bun.which(bin)
+    if (found !== null) return { name, ok: true, detail: found }
+    return {
+      name,
+      ok: false,
+      detail: `${bin} not on PATH (used by ${users.join(', ')}); shell aliases and functions are not visible, point bin at an executable`,
+    }
+  })
+}
+
+/**
  * Static readiness checks for a registered repo: git root resolves, config
  * parses, tracker and forge drivers are implemented and their CLIs are on
- * PATH, and the worktree root can be created. Everything here runs without
+ * PATH, every harness binary resolves, and the worktree root can be created. Everything here runs without
  * constructing the workspace, so onboarding never needs a server restart.
  */
 export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
@@ -111,6 +164,8 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
       detail: errMsg(err),
     })
   }
+
+  checks.push(...harnessChecks(config))
 
   const worktreeRoot = expandTilde(config.repo.worktreeRoot)
   try {
