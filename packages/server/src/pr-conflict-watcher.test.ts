@@ -346,6 +346,83 @@ test('conflict resolution runs in its own task state and returns unresolved PRs 
   ).toBe(true)
 })
 
+test('a manually queued conflict stays fixing until the resolution attempt finishes', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  store.append('am-1', { type: 'pr.status', mergeStatus: 'conflicted' })
+  store.append('am-1', {
+    type: 'task.state',
+    from: 'pr_open',
+    to: 'pr_merge_conflict',
+  })
+  const driver = new FakePr()
+  let releaseResolution: (() => void) | undefined
+  let signalResolutionStarted: (() => void) | undefined
+  const resolutionStarted = new Promise<void>((resolve) => {
+    signalResolutionStarted = resolve
+  })
+  const resolutionGate = new Promise<void>((resolve) => {
+    releaseResolution = resolve
+  })
+  let harness: Harness = fakeHarness(() => {})
+  const watcher = start(fakeExec(), () => harness, {
+    driver,
+    store,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(50)
+
+  harness = {
+    kind: 'fake',
+    start: () => {
+      signalResolutionStarted?.()
+      return {
+        pid: -1,
+        events: async function* () {},
+        done: resolutionGate.then(() => ({
+          exitCode: 0,
+          ok: true,
+          sessionId: null,
+          summary: 'done',
+          usage: null,
+          stderr: '',
+        })),
+        kill: async () => {},
+        model: null,
+        effort: null,
+      }
+    },
+    resume: () => {
+      throw new Error('unused')
+    },
+    listModels: async () => [],
+    listEfforts: async () => [],
+  }
+  driver.prs = [pr()]
+  store.append('am-1', {
+    type: 'task.state',
+    from: 'pr_merge_conflict',
+    to: 'pr_conflict_fixing',
+    reason: 'Conflict resolution queued for PR #7',
+  })
+  watcher.queue(7)
+  await resolutionStarted
+
+  expect(store.task('am-1')?.state).toBe('pr_conflict_fixing')
+  releaseResolution?.()
+  await Bun.sleep(100)
+
+  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+})
+
 test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
   const driver = new FakePr()
   driver.prs = [pr()]
