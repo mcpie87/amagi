@@ -473,6 +473,18 @@ export function reviewerHarnessConfig(config: Config): Config['harness']['implem
   return HarnessConfig.parse({ kind })
 }
 
+/**
+ * The reviewer for a run, or undefined when review is off. An enabled fleet
+ * worker with the review role turns review on and wins over [review.harness];
+ * without one, review.enabled decides.
+ */
+export function activeReviewerConfig(config: Config): Config['harness']['implement'] | undefined {
+  return (
+    reviewerWorkerConfig(config) ??
+    (config.review.enabled ? reviewerHarnessConfig(config) : undefined)
+  )
+}
+
 export type AgentWatcherKind = 'mention' | 'prConflict'
 
 export function watcherHarnessConfig(

@@ -4,6 +4,7 @@ import {
   loadConfig,
   resolveWorkerHarness,
   reviewerHarnessConfig,
+  reviewerWorkerConfig,
   watcherHarnessConfig,
 } from './config.ts'
 import { forgeHostname, forgeToken, gitRemoteUrls, remoteHostname } from './drivers/forge-cred.ts'
@@ -70,7 +71,7 @@ function harnessChecks(config: Config): Diagnostic[] {
         harness: watcherHarnessConfig(config, watcher),
       })),
   ]
-  if (config.review.enabled) {
+  if (config.review.enabled && reviewerWorkerConfig(config) === undefined) {
     try {
       uses.push({ user: 'review', harness: reviewerHarnessConfig(config) })
     } catch {

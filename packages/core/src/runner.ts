@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as z from 'zod'
 import { stageAndCommit } from './commit.ts'
-import { type Config, reviewerHarnessConfig } from './config.ts'
+import { activeReviewerConfig, type Config, reviewerHarnessConfig } from './config.ts'
 import { type ClaimWorker, claimEligible } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
@@ -435,7 +435,8 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig = this.deps.reviewerConfig ?? reviewerHarnessConfig(config)
+    const reviewerConfig =
+      this.deps.reviewerConfig ?? activeReviewerConfig(config) ?? reviewerHarnessConfig(config)
     const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
@@ -1185,7 +1186,7 @@ export class Runner {
     current = checked
 
     let reviewSummary: ReviewPrSummary | null = null
-    if (config.review.enabled) {
+    if ((this.deps.reviewerConfig ?? activeReviewerConfig(config)) !== undefined) {
       reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
       if (reviewSummary === null) return
       current = reviewSummary.run

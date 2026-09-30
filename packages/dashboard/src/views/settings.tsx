@@ -271,7 +271,7 @@ export function SettingsView() {
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">Review</h2>
             <p className="mb-3 text-sm text-fg-faint">
-              Maximum review rounds for tasks with review enabled.
+              Tasks are reviewed when an enabled fleet worker has the Review role.
             </p>
             <label htmlFor="review-max-rounds" className="mb-1 block text-sm text-fg-muted">
               Maximum review rounds

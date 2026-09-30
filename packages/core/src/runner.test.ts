@@ -808,6 +808,48 @@ describe('Runner.runOnce', () => {
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
   })
 
+  test('an enabled fleet reviewer turns review on without review.enabled', async () => {
+    const reviewer = new ReviewHarness(['[]'])
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        worker: [
+          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
+        ],
+      }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(reviewer.calls).toHaveLength(1)
+    expect(types(TASK.id)).toContain('review.finished')
+  })
+
+  test('skips review with no fleet reviewer and review.enabled unset', async () => {
+    const reviewer = new ReviewHarness(['[]'])
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        worker: [
+          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: false },
+        ],
+      }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(reviewer.calls).toHaveLength(0)
+    expect(types(TASK.id)).not.toContain('review.started')
+  })
+
   test('records reviewer process failures and opens an unresolved PR without invalid state transitions', async () => {
     const reviewer: Harness = {
       kind: 'codex',
