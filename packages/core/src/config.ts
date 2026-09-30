@@ -26,13 +26,6 @@ export const DifficultyConfig = z.object({
   requiredTier: z.record(z.string(), z.string()).default({ high: 'smart' }),
   /** Explicit model id -> tier mapping; an unlisted model counts as the weakest tier. */
   modelTiers: z.record(z.string(), z.string()).default({}),
-  /**
-   * Once a model has this many merged or failed PRs at a difficulty level, its
-   * merge rate there decides the claim instead of the tiers. 0 keeps tiers only.
-   */
-  minSamples: z.number().int().min(0).default(5),
-  /** Merge rate (0 to 1) a model must hold at a level once it has minSamples outcomes. */
-  minMergeRate: z.number().min(0).max(1).default(0.5),
 })
 
 export const HarnessConfig = z.object({
