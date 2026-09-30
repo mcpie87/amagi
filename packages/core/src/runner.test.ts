@@ -591,7 +591,7 @@ describe('Runner.review', () => {
     expect(reviewer.calls[2]?.resumeFrom).toBeNull()
   })
 
-  test('codex gets a strict-mode findings schema and its nulls are dropped', async () => {
+  test('the reviewer gets a strict-mode findings schema and its nulls are dropped', async () => {
     registerTask()
     writeFileSync(join(repo, 'README.md'), '# first change\n')
     let schema: {

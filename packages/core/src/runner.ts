@@ -191,11 +191,11 @@ function reviewTokens(events: StoredEvent[]): number {
 }
 
 /**
- * The findings shape codex is held to with --output-schema. OpenAI strict
- * structured output rejects an array root and any property missing from
- * `required`, so the list is wrapped and optional fields become nullable.
+ * The reviewer's output schema, enforced by harnesses with constrained output.
+ * OpenAI strict mode (codex) rejects an array root and any property missing
+ * from `required`, so the list is wrapped and optional fields become nullable.
  */
-const CodexFindings = z.object({
+const ReviewOutput = z.object({
   findings: z.array(
     Finding.extend({
       covers: z.string().min(1).nullable(),
@@ -204,10 +204,10 @@ const CodexFindings = z.object({
   ),
 })
 
-/** Accepts a bare findings array or the codex `{ findings }` wrapper with its nulls. */
+/** Accepts the `{ findings }` wrapper with its nulls, or a bare findings array. */
 function parseFindings(raw: unknown): ReviewFinding[] {
   if (Array.isArray(raw)) return z.array(Finding).parse(raw)
-  return CodexFindings.parse(raw).findings.map(({ covers, suggestedPriority, ...finding }) => ({
+  return ReviewOutput.parse(raw).findings.map(({ covers, suggestedPriority, ...finding }) => ({
     ...finding,
     ...(covers === null ? {} : { covers }),
     ...(suggestedPriority === null ? {} : { suggestedPriority }),
@@ -435,9 +435,7 @@ export class Runner {
     const reviewerConfig =
       this.deps.reviewerConfig ?? activeReviewerConfig(config) ?? reviewerHarnessConfig(config)
     const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
-    const codex = harness.kind === 'codex'
-    const outputShape = codex ? 'findings JSON object' : 'findings JSON array'
-    if (codex) writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(CodexFindings), null, 2))
+    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(ReviewOutput), null, 2))
     const instructions = [
       `Task: ${task.id} ${task.title}`,
       `Description:\n${task.description}`,
@@ -456,7 +454,7 @@ export class Runner {
         : '',
       `Open issue ids and titles for covers:\n${openIssues.map((issue) => `${issue.id}: ${issue.title}`).join('\n') || '(none)'}`,
       `Change under review:\n${diff || '(no diff)'}`,
-      `Return only the ${outputShape}. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
+      `Return only a JSON object {"findings": [...]} holding the findings array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
     ]
       .filter(Boolean)
       .join('\n\n')
@@ -487,7 +485,7 @@ export class Runner {
       ...(reviewerConfig.seat === undefined ? {} : { seat: reviewerConfig.seat }),
       ...(reviewerConfig.model === undefined ? {} : { model: reviewerConfig.model }),
       ...(reviewerConfig.effort === undefined ? {} : { effort: reviewerConfig.effort }),
-      ...(codex ? { outputSchema: schemaPath } : {}),
+      outputSchema: schemaPath,
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) {
@@ -505,7 +503,7 @@ export class Runner {
           prompt:
             attempt === 0
               ? prompt
-              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid ${outputShape}.`,
+              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON object.`,
         },
         'review',
         null,
