@@ -74,3 +74,7 @@ A comment on a pull request naming the agent handle, written by anyone but the a
 **Mention kind**:
 The single label a mention is routed to, drawn from a closed vocabulary that is the same list the classifier is shown and the same list the responder can act on. A mention the vocabulary cannot name is not routed at all, so the vocabulary is the limit of what a human can ask for on a pull request.
 _Avoid_: intent, category, mention type
+
+### Project checks
+
+Every repository declares non-empty `checks.format`, `checks.lint`, and `checks.test` commands in its own `.amagi/config.toml`. A global `[checks]` table is rejected. The runner executes the repo commands in that order before any additional `checks.commands`; a failure enters the normal check recovery path.

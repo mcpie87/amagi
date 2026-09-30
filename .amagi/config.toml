@@ -11,6 +11,9 @@ kind = "github"
 remote = "origin"
 
 [checks]
+format = "just fmt"
+lint = "just lint"
+test = "just test"
 commands = [ "just check", "just fresh-check" ]
 
 [loop]

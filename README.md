@@ -267,7 +267,8 @@ can override their harness kind, model, effort, and seat. The
 registered-repository registry separately controls whether the server starts
 watchers for each repo.
 
-Every key is optional; the table below gives the schema and defaults.
+Every key except the repository's three project checks is optional; the table
+below gives the schema and defaults.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -333,13 +334,19 @@ Every key is optional; the table below gives the schema and defaults.
 | `loop.contextOverrides.<harness>.maxTokens` | integer >= 0 | *(falls back to `loop.contextMaxTokens`)* | Per-harness hard limit, keyed by harness kind, for harnesses whose context window differs. |
 | `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
 | `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
-| `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
+| `checks.format` | string | required per repo | Formatter command run first against the worktree. |
+| `checks.lint` | string | required per repo | Lint command run after formatting. |
+| `checks.test` | string | required per repo | Test command run after lint. |
+| `checks.commands` | string[] | `[]` | Additional shell commands run after format, lint, and test; the first non-zero exit stops the run and triggers a fix round. |
 | `notify.idle` | boolean | `true` | Send one notification when automatic dispatch drains the queue and no run is active. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |
 | `notify.ntfyServer` | string | `"https://ntfy.sh"` | ntfy server base URL, for self-hosted instances. |
 | `server.host` | string | `"127.0.0.1"` | Bind address for `amagi serve` and the address the CLI (`amagi ask`) talks to. |
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
+
+Declare `[checks]` in each repository's `.amagi/config.toml`. A global
+`[checks]` table is rejected.
 
 The server's registered-repository list is stored in
 `$XDG_STATE_HOME/amagi/registry.json` (or `~/.local/state/amagi/registry.json`).
@@ -373,6 +380,9 @@ kind = "github"
 remote = "origin"
 
 [checks]
+format = "just fmt"
+lint = "just lint"
+test = "just test"
 commands = ["just check"]
 ```
 

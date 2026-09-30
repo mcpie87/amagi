@@ -2088,10 +2088,8 @@ export class Runner {
   }
 
   private checkCommands(): string[] {
-    const { format, lint, commands } = this.deps.config.checks
-    // The mandatory gate always runs before the configured commands, so a PR
-    // cannot be pushed until the worktree is formatted and lint-clean.
-    const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+    const { format, lint, test, commands } = this.deps.config.checks
+    const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
     return [...gate, ...commands]
   }
 

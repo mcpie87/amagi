@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -32,7 +40,23 @@ const writeGlobal = (toml: string) => {
 
 const writeRepo = (toml: string) => {
   mkdirSync(join(repo, '.amagi'), { recursive: true })
+  writeFileSync(
+    join(repo, '.amagi', 'config.toml'),
+    toml.includes('[checks]')
+      ? toml
+      : `${toml}\n[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n`,
+  )
+}
+
+const rawWriteRepo = (toml: string) => {
+  mkdirSync(join(repo, '.amagi'), { recursive: true })
   writeFileSync(join(repo, '.amagi', 'config.toml'), toml)
+}
+
+const loadRepoConfig = () => {
+  if (!existsSync(join(repo, '.amagi', 'config.toml')))
+    writeRepo('[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n')
+  return loadConfig(repo)
 }
 
 beforeEach(() => {
@@ -66,8 +90,11 @@ describe('loadConfig', () => {
   })
 
   test('works with no files at all', () => {
-    const { config, sources } = loadConfig(repo)
-    expect(sources).toEqual([])
+    rawWriteRepo('')
+    expect(() => loadConfig(repo)).toThrow(/must declare non-empty format, lint, test/)
+    writeRepo('[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n')
+    const { config, sources } = loadRepoConfig()
+    expect(sources).toHaveLength(1)
     expect(config.tracker.kind).toBe('beads')
     expect(config.forge.kind).toBe('github')
     expect(config.harness.implement.kind).toBe('claude')
@@ -109,14 +136,21 @@ describe('loadConfig', () => {
     expect(config.loop.maxCostUsd).toBe(0)
   })
 
+  test('global checks are rejected even when the repo declares its own', () => {
+    writeGlobal('[checks]\nformat = "just fmt"\nlint = "just lint"\ntest = "just test"\n')
+    writeRepo('[checks]\nformat = "bun fmt"\nlint = "bun lint"\ntest = "bun test"\n')
+    expect(() => loadConfig(repo)).toThrow(/\[checks\] belongs in the repo config/)
+    expect(() => loadGlobalConfig()).toThrow(/\[checks\] belongs in the repo config/)
+  })
+
   test('the question timeout stays under the 600s harness Bash cap', () => {
-    expect(loadConfig(repo).config.loop.questionTimeoutSec).toBeLessThan(600)
+    expect(loadRepoConfig().config.loop.questionTimeoutSec).toBeLessThan(600)
   })
 
   test('stale maxParallel is ignored while other config resolves', () => {
     writeGlobal('[forge]\nkind = "github"\n\n[loop]\nmaxParallel = 4\n')
     writeRepo('[forge]\nkind = "forgejo"\n')
-    const { config, sources } = loadConfig(repo)
+    const { config, sources } = loadRepoConfig()
     expect(config.forge.kind).toBe('forgejo')
     expect(config.loop.autoQueue).toBe(false)
     expect(hasStaleMaxParallel(repo)).toBe(true)
@@ -124,29 +158,29 @@ describe('loadConfig', () => {
   })
 
   test('arrays are replaced wholesale, not merged', () => {
-    writeGlobal('[checks]\ncommands = ["bun test", "bun run lint"]\n')
-    writeRepo('[checks]\ncommands = ["just check"]\n')
-    expect(loadConfig(repo).config.checks.commands).toEqual(['just check'])
+    writeGlobal('[review]\nlenses = ["bun test", "bun lint"]\n')
+    writeRepo('[review]\nlenses = ["just check"]\n')
+    expect(loadRepoConfig().config.review.lenses).toEqual(['just check'])
   })
 
   test('worktreeRoot is tilde expanded', () => {
     writeRepo('[repo]\nworktreeRoot = "~/wt"\n')
-    const root = loadConfig(repo).config.repo.worktreeRoot
+    const root = loadRepoConfig().config.repo.worktreeRoot
     expect(root.startsWith('~')).toBe(false)
     expect(root.endsWith('/wt')).toBe(true)
   })
 
   test('harness permissions default to the narrow setting', () => {
-    expect(loadConfig(repo).config.harness.implement.permissions).toBe('workspace-write')
+    expect(loadRepoConfig().config.harness.implement.permissions).toBe('workspace-write')
   })
 
   test('repo persona defaults to none', () => {
-    expect(loadConfig(repo).config.repo.persona).toBeNull()
+    expect(loadRepoConfig().config.repo.persona).toBeNull()
   })
 
   test('accepts a repo persona', () => {
     writeRepo('[repo]\npersona = "agent-chise"\n')
-    expect(loadConfig(repo).config.repo.persona).toBe('agent-chise')
+    expect(loadRepoConfig().config.repo.persona).toBe('agent-chise')
   })
 
   test('an unset forge remote is the one pointing at the selected forge', () => {
@@ -156,32 +190,32 @@ describe('loadConfig', () => {
       cwd: repo,
     })
     writeRepo('[forge]\nkind = "gitlab"\n')
-    expect(loadConfig(repo).config.forge.remote).toBe('lab')
+    expect(loadRepoConfig().config.forge.remote).toBe('lab')
     expect(hasPinnedForgeRemote(repo)).toBe(false)
     writeRepo('[forge]\nkind = "github"\n')
-    expect(loadConfig(repo).config.forge.remote).toBe('origin')
+    expect(loadRepoConfig().config.forge.remote).toBe('origin')
     writeRepo('[forge]\nkind = "forgejo"\n')
-    expect(loadConfig(repo).config.forge.remote).toBe('origin')
+    expect(loadRepoConfig().config.forge.remote).toBe('origin')
     writeRepo('[forge]\nkind = "gitlab"\nremote = "origin"\n')
-    expect(loadConfig(repo).config.forge.remote).toBe('origin')
+    expect(loadRepoConfig().config.forge.remote).toBe('origin')
     expect(hasPinnedForgeRemote(repo)).toBe(true)
   })
 
   test('forge agent handle defaults to the agent account and is overridable', () => {
-    expect(loadConfig(repo).config.forge.agentHandle).toBe('chise-maru')
+    expect(loadRepoConfig().config.forge.agentHandle).toBe('chise-maru')
     writeRepo('[forge]\nagentHandle = "chise"\n')
-    expect(loadConfig(repo).config.forge.agentHandle).toBe('chise')
+    expect(loadRepoConfig().config.forge.agentHandle).toBe('chise')
   })
 
   test('accepts a per-harness binary override', () => {
     writeRepo('[harness.implement]\nkind = "opencode"\nbin = "opencode-unconfined"\n')
-    expect(loadConfig(repo).config.harness.implement.bin).toBe('opencode-unconfined')
+    expect(loadRepoConfig().config.harness.implement.bin).toBe('opencode-unconfined')
   })
 
   test('repo review harness settings override the fleet settings', () => {
     writeGlobal('[review.harness]\nkind = "codex"\nmodel = "global-review"\n')
     writeRepo('[review.harness]\nkind = "opencode"\nmodel = "repo-review"\n')
-    expect(loadConfig(repo).config.review.harness).toMatchObject({
+    expect(loadRepoConfig().config.review.harness).toMatchObject({
       kind: 'opencode',
       model: 'repo-review',
     })
@@ -193,16 +227,16 @@ describe('loadConfig', () => {
     writeFileSync(join(binDir, 'codex'), '')
     chmodSync(join(binDir, 'codex'), 0o755)
     process.env.PATH = binDir
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(reviewerHarnessConfig(config)).toMatchObject({ kind: 'codex' })
     writeRepo('[review]\nenabled = true\n')
-    expect(loadConfig(repo).config.review.enabled).toBe(true)
+    expect(loadRepoConfig().config.review.enabled).toBe(true)
   })
 
   test('enabled review requires an explicit or installed reviewer harness', () => {
     process.env.PATH = home
     writeRepo('[review]\nenabled = true\n')
-    expect(() => loadConfig(repo)).toThrow(/no reviewer harness is configured or installed/)
+    expect(() => loadRepoConfig()).toThrow(/no reviewer harness is configured or installed/)
   })
 
   test('severity threshold comparison follows the schema ordering', () => {
@@ -216,7 +250,7 @@ describe('loadConfig', () => {
     writeRepo(
       '[harness.definitions.fast]\nkind = "opencode"\npermissions = "bypass"\nmodel = "local/x"\n',
     )
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(config.harness.definitions.fast).toMatchObject({
       kind: 'opencode',
       permissions: 'bypass',
@@ -227,7 +261,7 @@ describe('loadConfig', () => {
 
   test('loads workers with stable identity and defaults them disabled', () => {
     writeGlobal('[[worker]]\nid = "w-fast"\nname = "Fast"\nkind = "opencode"\n')
-    expect(loadConfig(repo).config.worker[0]).toMatchObject({
+    expect(loadRepoConfig().config.worker[0]).toMatchObject({
       id: 'w-fast',
       name: 'Fast',
       enabled: false,
@@ -236,7 +270,7 @@ describe('loadConfig', () => {
 
   test('accepts a per-harness tool allowlist', () => {
     writeRepo('[harness.implement]\nkind = "claude"\nallowedTools = ["Read", "Bash"]\n')
-    expect(loadConfig(repo).config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
+    expect(loadRepoConfig().config.harness.implement.allowedTools).toEqual(['Read', 'Bash'])
   })
 
   test('watcher settings default on and inherit implement harness fields', () => {
@@ -246,7 +280,7 @@ describe('loadConfig', () => {
         '[watchers.prConflict]\neffort = "high"\n\n' +
         '[watchers.stall]\nenabled = false\n',
     )
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(config.watchers.mention.enabled).toBe(false)
     expect(config.watchers.mention).toMatchObject({
       enabled: false,
@@ -275,7 +309,7 @@ describe('loadConfig', () => {
       '[harness.implement]\nkind = "codex"\nbin = "codex-unconfined"\nmodel = "gpt-x"\npermissions = "bypass"\nextraArgs = ["--foo"]\n\n' +
         '[watchers.prConflict]\nkind = "claude"\n',
     )
-    const harness = watcherHarnessConfig(loadConfig(repo).config, 'prConflict')
+    const harness = watcherHarnessConfig(loadRepoConfig().config, 'prConflict')
     expect(harness).toMatchObject({ kind: 'claude', permissions: 'bypass', extraArgs: [] })
     expect(harness.bin).toBeUndefined()
     expect(harness.model).toBeUndefined()
@@ -283,17 +317,17 @@ describe('loadConfig', () => {
 
   test('an unknown enum value fails loudly and names the file', () => {
     writeRepo('[tracker]\nkind = "jira"\n')
-    expect(() => loadConfig(repo)).toThrow(/config\.toml/)
+    expect(() => loadRepoConfig()).toThrow(/config\.toml/)
   })
 
   test('malformed toml is not swallowed', () => {
     writeRepo('[tracker\nkind = "beads"\n')
-    expect(() => loadConfig(repo)).toThrow()
+    expect(() => loadRepoConfig()).toThrow()
   })
 
   test('ignores stale maxParallel above the former ceiling', () => {
     writeRepo('[loop]\nmaxParallel = 100\n')
-    expect(loadConfig(repo).config.loop.autoQueue).toBe(false)
+    expect(loadRepoConfig().config.loop.autoQueue).toBe(false)
     expect(hasStaleMaxParallel(repo)).toBe(true)
   })
 
@@ -301,7 +335,7 @@ describe('loadConfig', () => {
     writeRepo(
       '[loop]\nstallWatchIntervalSec = 60\nepicCloseIntervalSec = 90\nstallTimeoutSec = 7200\n\n[watchers.epicClose]\nenabled = false\n',
     )
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(config.loop.stallWatchIntervalSec).toBe(60)
     expect(config.loop.epicCloseIntervalSec).toBe(90)
     expect(config.watchers.epicClose.enabled).toBe(false)
@@ -313,7 +347,7 @@ describe('loadConfig', () => {
       '[loop]\ncontextWarnTokens = 90000\ncontextMaxTokens = 120000\ncontextMaxRestarts = 3\n\n' +
         '[loop.contextOverrides.codex]\nmaxTokens = 110000\n',
     )
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(config.loop.contextWarnTokens).toBe(90_000)
     expect(config.loop.contextMaxTokens).toBe(120_000)
     expect(config.loop.contextMaxRestarts).toBe(3)
@@ -322,14 +356,14 @@ describe('loadConfig', () => {
 
   test('pr check interval is overridable', () => {
     writeRepo('[loop]\nprCheckIntervalSec = 120\n')
-    expect(loadConfig(repo).config.loop.prCheckIntervalSec).toBe(120)
+    expect(loadRepoConfig().config.loop.prCheckIntervalSec).toBe(120)
   })
 
   test('doom guard keys are overridable and can be disabled', () => {
     writeRepo(
       '[loop]\ndoomEnabled = false\ndoomToolWindowSec = 60\ndoomToolRepeat = 5\ndoomCheckRounds = 2\ndoomDiffWindowSec = 120\n',
     )
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(config.loop.doomEnabled).toBe(false)
     expect(config.loop.doomToolWindowSec).toBe(60)
     expect(config.loop.doomToolRepeat).toBe(5)
@@ -339,7 +373,7 @@ describe('loadConfig', () => {
 
   test('per-task budget keys are overridable', () => {
     writeRepo('[loop]\nmaxRunMinutes = 90\nmaxCostUsd = 4.5\n')
-    const config = loadConfig(repo).config
+    const config = loadRepoConfig().config
     expect(config.loop.maxRunMinutes).toBe(90)
     expect(config.loop.maxCostUsd).toBe(4.5)
   })
@@ -349,14 +383,15 @@ describe('writeConfig', () => {
   test('merges a patch into the repo config and preserves other keys', () => {
     writeRepo('[forge]\nkind = "forgejo"\n\n[loop]\nmaxParallel = 1\n')
     writeConfig(repo, { loop: { autoQueue: true } })
-    const { config } = loadConfig(repo)
+    const { config } = loadRepoConfig()
     expect(config.loop.autoQueue).toBe(true)
     expect(config.forge.kind).toBe('forgejo')
   })
 
   test('creates the repo config file when absent', () => {
     writeConfig(repo, { loop: { autoQueue: true } })
-    expect(loadConfig(repo).config.loop.autoQueue).toBe(true)
+    expect(readFileSync(join(repo, '.amagi', 'config.toml'), 'utf8')).toContain('autoQueue = true')
+    expect(() => loadConfig(repo)).toThrow(/must declare non-empty format, lint, test/)
   })
 })
 
@@ -482,7 +517,7 @@ describe('worker fleet', () => {
       fleet.map((worker) => ({ ...worker, roles: [...worker.roles], count: 1, seatCount: 1 })),
     )
     expect(config.server.port).toBe(9000)
-    expect(loadConfig(repo).config.worker).toEqual(
+    expect(loadRepoConfig().config.worker).toEqual(
       fleet.map((worker) => ({ ...worker, roles: [...worker.roles], count: 1, seatCount: 1 })),
     )
   })
@@ -511,7 +546,7 @@ describe('worker fleet', () => {
 
   test('rejects [[worker]] in a repo config, naming the global path', () => {
     writeRepo('[[worker]]\nid = "w-1"\nname = "x"\nkind = "claude"\n')
-    expect(() => loadConfig(repo)).toThrow(join(home, 'amagi', 'config.toml'))
+    expect(() => loadRepoConfig()).toThrow(join(home, 'amagi', 'config.toml'))
   })
 
   test('newWorkerId avoids taken ids', () => {

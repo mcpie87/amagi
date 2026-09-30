@@ -180,8 +180,8 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     })
   }
 
-  const { commands, format, lint } = config.checks
-  const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
+  const { commands, format, lint, test } = config.checks
+  const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
   const total = commands.length + gate.length
   checks.push({
     name: 'checks',

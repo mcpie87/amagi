@@ -408,6 +408,11 @@ beforeEach(async () => {
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.email', 'test@example.com'], { cwd: repo })
   writeFileSync(join(repo, 'README.md'), '# demo\n')
+  mkdirSync(join(repo, '.amagi'), { recursive: true })
+  writeFileSync(
+    join(repo, '.amagi', 'config.toml'),
+    '[checks]\nformat = "true"\nlint = "true"\ntest = "true"\n',
+  )
   await execOk(exec, ['git', 'add', '.'], { cwd: repo })
   await execOk(exec, ['git', 'commit', '-q', '-m', 'init'], { cwd: repo })
 })
@@ -2000,7 +2005,7 @@ describe('Runner.runOnce', () => {
     expect(finished?.type === 'checks.finished' && finished.results).toHaveLength(1)
   })
 
-  test('the mandatory format+lint gate runs first and a failing lint is handed back to the agent', async () => {
+  test('format, lint, and test run before extra checks and a failing lint is handed back', async () => {
     const harness = new FakeHarness([
       { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n') },
       { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'good\n') },
@@ -2010,9 +2015,10 @@ describe('Runner.runOnce', () => {
       harness,
       config({
         checks: {
-          commands: ['grep -q good flag'],
+          commands: ['test -f tested', 'grep -q good flag'],
           format: 'touch formatted',
           lint: 'grep -q good flag',
+          test: 'touch tested',
         },
       }),
     ).runOnce()
@@ -2021,6 +2027,7 @@ describe('Runner.runOnce', () => {
     // format ran first, so its side effect is in the committed worktree
     const wt = store.task(TASK.id)?.worktree
     expect(wt !== undefined && wt !== null && existsSync(join(wt, 'formatted'))).toBe(true)
+    expect(wt !== undefined && wt !== null && existsSync(join(wt, 'tested'))).toBe(true)
     // the failing lint was handed back to the same session to fix in place
     expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
     expect(harness.calls[1]?.prompt).toContain('grep -q good flag')

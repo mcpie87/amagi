@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -28,13 +28,20 @@ export type TestWorkspacesOptions = {
 /**
  * A Workspaces backed by a throwaway registry file and in-memory stores, so
  * server tests exercise the real repo resolution path without touching disk
- * state or real databases. Entry paths need not exist: workspace construction
- * only reads per-repo config, which defaults when absent.
+ * state or real databases. Each entry declares the required project checks.
  */
 export function testWorkspaces(keys: string[], opts: TestWorkspacesOptions = {}): TestWorkspaces {
   const dir = mkdtempSync(join(tmpdir(), 'amagi-test-'))
   const registryFile = join(dir, 'registry.json')
   const stores: Record<string, Store> = {}
+  for (const key of keys) {
+    const configDir = join(dir, key, '.amagi')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(
+      join(configDir, 'config.toml'),
+      '[checks]\nformat = "true"\nlint = "true"\ntest = "true"\n',
+    )
+  }
   saveRegistry(
     keys.map((key) => ({
       key,
