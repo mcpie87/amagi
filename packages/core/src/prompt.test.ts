@@ -6,6 +6,7 @@ import {
   commitMessage,
   commitSummary,
   explainMentionPrompt,
+  fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
   MAX_EXPLAIN_ANSWER_CHARS,
@@ -112,6 +113,13 @@ describe('prTitle', () => {
 })
 
 describe('implementSystemPrompt', () => {
+  test('forbids weakening check tooling while allowing dependencies', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('Do not edit check tooling to make checks pass')
+    expect(prompt).toContain('package scripts')
+    expect(prompt).toContain('Dependency changes are allowed')
+  })
+
   test('tells the agent to document how to use new user-facing features', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('user-facing feature')
@@ -164,6 +172,13 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('verification details out of this summary')
     expect(prompt).toContain('report verification separately in a `### Verification` section')
   })
+})
+
+test('fixChecksPrompt tells the agent to restore check tooling', () => {
+  const prompt = fixChecksPrompt([{ command: 'just check', exitCode: 1, output: 'failed' }])
+  expect(prompt).toContain('Do not edit check tooling to make checks pass')
+  expect(prompt).toContain('Restore changes to justfiles')
+  expect(prompt).toContain('package scripts')
 })
 
 describe('implementPrompt', () => {
