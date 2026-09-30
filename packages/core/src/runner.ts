@@ -21,6 +21,7 @@ import {
   isTerminal,
   type Finding as ReviewFinding,
   type StoredEvent,
+  SuggestedPriority,
   type TaskState,
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -187,6 +188,30 @@ function reviewTokens(events: StoredEvent[]): number {
     if (event.event.kind !== 'usage') return total
     return total + event.event.inputTokens + event.event.outputTokens
   }, 0)
+}
+
+/**
+ * The findings shape codex is held to with --output-schema. OpenAI strict
+ * structured output rejects an array root and any property missing from
+ * `required`, so the list is wrapped and optional fields become nullable.
+ */
+const CodexFindings = z.object({
+  findings: z.array(
+    Finding.extend({
+      covers: z.string().min(1).nullable(),
+      suggestedPriority: SuggestedPriority.nullable(),
+    }),
+  ),
+})
+
+/** Accepts a bare findings array or the codex `{ findings }` wrapper with its nulls. */
+function parseFindings(raw: unknown): ReviewFinding[] {
+  if (Array.isArray(raw)) return z.array(Finding).parse(raw)
+  return CodexFindings.parse(raw).findings.map(({ covers, suggestedPriority, ...finding }) => ({
+    ...finding,
+    ...(covers === null ? {} : { covers }),
+    ...(suggestedPriority === null ? {} : { suggestedPriority }),
+  }))
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
@@ -407,7 +432,12 @@ export class Runner {
     const openIssues = await this.deps.tracker.ready(200)
     const outputPath = join(runState, `review-${round}-${Date.now()}.json`)
     const schemaPath = join(runState, `review-${round}-${Date.now()}.schema.json`)
-    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(z.array(Finding)), null, 2))
+    const reviewerConfig =
+      this.deps.reviewerConfig ?? activeReviewerConfig(config) ?? reviewerHarnessConfig(config)
+    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
+    const codex = harness.kind === 'codex'
+    const outputShape = codex ? 'findings JSON object' : 'findings JSON array'
+    if (codex) writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(CodexFindings), null, 2))
     const instructions = [
       `Task: ${task.id} ${task.title}`,
       `Description:\n${task.description}`,
@@ -426,7 +456,7 @@ export class Runner {
         : '',
       `Open issue ids and titles for covers:\n${openIssues.map((issue) => `${issue.id}: ${issue.title}`).join('\n') || '(none)'}`,
       `Change under review:\n${diff || '(no diff)'}`,
-      `Return only the findings JSON array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
+      `Return only the ${outputShape}. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
     ]
       .filter(Boolean)
       .join('\n\n')
@@ -435,9 +465,6 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig =
-      this.deps.reviewerConfig ?? activeReviewerConfig(config) ?? reviewerHarnessConfig(config)
-    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
       : (options.reviewerSession ?? this.latestReviewerSession(task.id))
@@ -460,7 +487,7 @@ export class Runner {
       ...(reviewerConfig.seat === undefined ? {} : { seat: reviewerConfig.seat }),
       ...(reviewerConfig.model === undefined ? {} : { model: reviewerConfig.model }),
       ...(reviewerConfig.effort === undefined ? {} : { effort: reviewerConfig.effort }),
-      ...(harness.kind === 'codex' ? { outputSchema: schemaPath } : {}),
+      ...(codex ? { outputSchema: schemaPath } : {}),
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) {
@@ -478,7 +505,7 @@ export class Runner {
           prompt:
             attempt === 0
               ? prompt
-              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON array.`,
+              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid ${outputShape}.`,
         },
         'review',
         null,
@@ -494,7 +521,7 @@ export class Runner {
       try {
         writeFileSync(outputPath, run.summary ?? '')
         const parsed: unknown = JSON.parse(readFileSync(outputPath, 'utf8'))
-        findings = z.array(Finding).parse(parsed)
+        findings = parseFindings(parsed)
         reason = null
         break
       } catch (error) {

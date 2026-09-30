@@ -591,6 +591,40 @@ describe('Runner.review', () => {
     expect(reviewer.calls[2]?.resumeFrom).toBeNull()
   })
 
+  test('codex gets a strict-mode findings schema and its nulls are dropped', async () => {
+    registerTask()
+    writeFileSync(join(repo, 'README.md'), '# first change\n')
+    let schema: {
+      type?: string
+      properties?: {
+        findings?: { items?: { properties?: Record<string, unknown>; required?: string[] } }
+      }
+    } = {}
+    const reviewer = new ReviewHarness([
+      (opts) => {
+        schema = JSON.parse(readFileSync(opts.outputSchema ?? '', 'utf8'))
+        return JSON.stringify({
+          findings: [{ ...finding, covers: null, suggestedPriority: null }],
+        })
+      },
+    ])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const result = await runner.review({ task: TASK, cwd: repo, round: 1 })
+    expect(result.findings).toEqual([finding])
+    expect(schema.type).toBe('object')
+    const items = schema.properties?.findings?.items
+    expect(items?.required?.toSorted()).toEqual(Object.keys(items?.properties ?? {}).toSorted())
+  })
+
   test('parks without committing when checks fail after a review fix', async () => {
     const forge = new FakePr()
     const harness = new FakeHarness([
