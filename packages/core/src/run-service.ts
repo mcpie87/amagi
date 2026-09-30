@@ -6,7 +6,7 @@ import {
   reviewerWorkerConfig,
   type WorkerConfig,
 } from './config.ts'
-import { claimEligible, claimGate, implementModel } from './difficulty.ts'
+import { claimEligible, claimGate, implementModel, storeMergeRecords } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { Exec } from './exec.ts'
@@ -453,13 +453,14 @@ export class RunService implements RunServiceApi {
     // Difficulty gating reads the model the worker would actually run, so the
     // override config (not the stored default) is what gates the claim.
     const runConfig = { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }
+    const records = storeMergeRecords(runConfig, this.opts.store)
     if (taskId !== undefined) {
       const ready = await this.opts.tracker.ready()
       const target = ready.find((t) => t.id === taskId)
       if (target === undefined) {
         return { ok: false, status: 409, error: `task ${taskId} is not ready to run` }
       }
-      const gate = claimGate(runConfig, target, implementModel(runConfig))
+      const gate = claimGate(runConfig, target, implementModel(runConfig), records)
       if (!gate.allowed) {
         return { ok: false, status: 409, error: `task ${taskId}: ${gate.reason}` }
       }
@@ -474,6 +475,7 @@ export class RunService implements RunServiceApi {
       runConfig,
       implementModel(runConfig),
       (t, reason) => skipped.push(`${t.id}: ${reason}`),
+      records,
     )
     if (task === null) {
       const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''

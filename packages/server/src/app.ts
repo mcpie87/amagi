@@ -54,6 +54,7 @@ import {
   type Store,
   type StoredEvent,
   stageAndCommit,
+  storeMergeRecords,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
@@ -614,6 +615,7 @@ export function createApp({
         }
 
         if (workers.length === 0) continue
+        const records = storeMergeRecords(ws.config, ws.store)
         const workersBySeat = new Map<string, (typeof workers)[number][]>()
         for (const worker of workers) {
           const seat = worker.seat ?? worker.kind
@@ -630,6 +632,7 @@ export function createApp({
                 { ...ws.config, harness: { ...ws.config.harness, implement: harness } },
                 task,
                 harness.model ?? null,
+                records,
               ).allowed
             })
             if (

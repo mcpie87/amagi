@@ -1,7 +1,9 @@
 import { tmpdir } from 'node:os'
 import type { Config } from './config.ts'
 import type { AgentOutcome, Tracker, TrackerTask } from './drivers/types.ts'
+import type { StoredEvent } from './events.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import type { ProjectedTask } from './project.ts'
 import { classifyDifficultyPrompt, classifyDifficultySystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun } from './watcher-agent.ts'
@@ -32,21 +34,105 @@ function tierRank(config: Config, tier: string): number {
   return index === -1 ? -1 : index
 }
 
+/** Merged and failed PRs per model and difficulty level; read it with `mergeRecord`. */
+export type MergeRecords = Map<string, { merged: number; failed: number }>
+
+const recordKey = (model: string | null, difficulty: string): string =>
+  JSON.stringify([model, difficulty])
+
+export function mergeRecord(
+  records: MergeRecords,
+  model: string | null,
+  difficulty: string,
+): { merged: number; failed: number } | undefined {
+  return records.get(recordKey(model, difficulty))
+}
+
+/**
+ * Each finished task's PR outcome, attributed like the scorecard to the first
+ * implement agent of its current attempt and to the difficulty it was last
+ * claimed at. A merge is a success; a closed PR, a hand-closed task or a
+ * needs-human stop is a failure. Tasks that ended without a PR say nothing
+ * about the model and are left out. `events` needs task.claimed, task.reset
+ * and agent.started in seq order.
+ */
+export function mergeRecords(
+  tasks: readonly ProjectedTask[],
+  events: readonly StoredEvent[],
+): MergeRecords {
+  const attribution = new Map<string, { difficulty: string | null; model?: string | null }>()
+  for (const event of events) {
+    if (event.taskId === null) continue
+    const entry = attribution.get(event.taskId) ?? { difficulty: null }
+    if (event.type === 'task.claimed') {
+      entry.difficulty = event.difficulty ?? null
+    } else if (event.type === 'task.reset') {
+      delete entry.model
+    } else if (
+      event.type === 'agent.started' &&
+      event.role === 'implement' &&
+      entry.model === undefined
+    ) {
+      entry.model = event.model
+    }
+    attribution.set(event.taskId, entry)
+  }
+  const records: MergeRecords = new Map()
+  for (const task of tasks) {
+    const merged = task.state === 'done' && task.prNumber !== null
+    if (!merged && task.state !== 'abandoned' && task.state !== 'needs_human') continue
+    const entry = attribution.get(task.id)
+    if (entry?.model === undefined || entry.difficulty === null) continue
+    const key = recordKey(entry.model, entry.difficulty)
+    const record = records.get(key) ?? { merged: 0, failed: 0 }
+    if (merged) record.merged++
+    else record.failed++
+    records.set(key, record)
+  }
+  return records
+}
+
+/** Merge records over the whole task history in `store`; empty when nothing would read them. */
+export function storeMergeRecords(config: Config, store: Store): MergeRecords {
+  if (!config.difficulty.enabled || config.difficulty.minSamples === 0) return new Map()
+  return mergeRecords(
+    store.tasks({ states: ['done', 'abandoned', 'needs_human'], limit: 1_000_000 }),
+    store.eventsOfType(['task.claimed', 'task.reset', 'agent.started']),
+  )
+}
+
 /**
  * The enforcement point: whether a worker running `model` may claim `task`.
- * Gating is off when the feature is disabled, the task has no difficulty, or
- * the level has no required tier mapped; otherwise the model's tier must reach
- * the task's bar.
+ * Gating is off when the feature is disabled or the task has no difficulty.
+ * Once `records` hold minSamples PR outcomes for the model at the task's
+ * level, the model's merge rate there decides, in either direction; until
+ * then the model's tier must reach the level's required tier, and a level
+ * with no required tier mapped is not gated.
  */
-export function claimGate(config: Config, task: TrackerTask, model: string | null): ClaimGate {
+export function claimGate(
+  config: Config,
+  task: TrackerTask,
+  model: string | null,
+  records?: MergeRecords,
+): ClaimGate {
   if (!config.difficulty.enabled) return { allowed: true }
   const difficulty = task.difficulty ?? null
   if (difficulty === null) return { allowed: true }
+  const name = model ?? 'configured model'
+  const { minSamples, minMergeRate } = config.difficulty
+  const record = records === undefined ? undefined : mergeRecord(records, model, difficulty)
+  const outcomes = record === undefined ? 0 : record.merged + record.failed
+  if (record !== undefined && minSamples > 0 && outcomes >= minSamples) {
+    if (record.merged / outcomes >= minMergeRate) return { allowed: true }
+    return {
+      allowed: false,
+      reason: `${name} merged ${record.merged} of ${outcomes} ${difficulty} difficulty PRs, below the ${Math.round(minMergeRate * 100)}% floor`,
+    }
+  }
   const required = requiredTier(config, difficulty)
   if (tierRank(config, modelTier(config, model)) >= tierRank(config, required)) {
     return { allowed: true }
   }
-  const name = model ?? 'configured model'
   const tier = modelTier(config, model)
   return {
     allowed: false,
@@ -66,11 +152,12 @@ export async function claimEligible(
   config: Config,
   model: string | null,
   onRejected?: (task: TrackerTask, reason: string) => void,
+  records?: MergeRecords,
 ): Promise<TrackerTask | null> {
   if (!config.difficulty.enabled) return tracker.claim()
   const ready = await tracker.ready(20)
   for (const task of ready) {
-    const gate = claimGate(config, task, model)
+    const gate = claimGate(config, task, model, records)
     if (gate.allowed) {
       const claimed = await tracker.claim(task.id)
       if (claimed !== null) return claimed

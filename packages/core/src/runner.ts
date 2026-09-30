@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import * as z from 'zod'
 import { stageAndCommit } from './commit.ts'
 import { type Config, reviewerHarnessConfig } from './config.ts'
-import { claimEligible, implementModel } from './difficulty.ts'
+import { claimEligible, implementModel, storeMergeRecords } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
@@ -593,14 +593,20 @@ export class Runner {
     const { store, tracker, config } = this.deps
     const task =
       taskId === undefined
-        ? await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
-            store.append(null, {
-              type: 'claim.rejected',
-              title: skipped.title,
-              difficulty: skipped.difficulty ?? null,
-              reason,
-            })
-          })
+        ? await claimEligible(
+            tracker,
+            config,
+            implementModel(config),
+            (skipped, reason) => {
+              store.append(null, {
+                type: 'claim.rejected',
+                title: skipped.title,
+                difficulty: skipped.difficulty ?? null,
+                reason,
+              })
+            },
+            storeMergeRecords(config, store),
+          )
         : await tracker.claim(taskId)
     if (task === null) return null
     return this.runClaimed(task)

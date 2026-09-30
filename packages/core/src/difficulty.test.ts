@@ -5,12 +5,17 @@ import {
   claimGate,
   classifyDifficulty,
   implementModel,
+  type MergeRecords,
+  mergeRecord,
+  mergeRecords,
   modelTier,
   parseDifficulty,
   requiredTier,
 } from './difficulty.ts'
 import type { Tracker, TrackerTask } from './drivers/types.ts'
+import type { EventBody, StoredEvent } from './events.ts'
 import type { makeHarness } from './factory.ts'
+import { emptyProjection, project } from './project.ts'
 
 const config = (over: Record<string, unknown> = {}) =>
   Config.parse({
@@ -84,6 +89,114 @@ describe('claimGate', () => {
   test('an unlisted model counts as weakest, so high difficulty rejects it', () => {
     expect(claimGate(config(), task('high'), null).allowed).toBe(false)
     expect(claimGate(config(), task('low'), null)).toEqual({ allowed: true })
+  })
+})
+
+describe('mergeRecords', () => {
+  let seq = 0
+  const ev = (taskId: string, body: EventBody): StoredEvent =>
+    ({ seq: ++seq, ts: seq, taskId, ...body }) as StoredEvent
+  const claimed = (id: string, difficulty: string | null): StoredEvent =>
+    ev(id, { type: 'task.claimed', title: id, tracker: 'bd', difficulty })
+  const implement = (id: string, model: string): StoredEvent =>
+    ev(id, {
+      type: 'agent.started',
+      role: 'implement',
+      harness: 'claude',
+      model,
+      effort: null,
+      cwd: `/tmp/${id}`,
+      resumed: false,
+    })
+  const pr = (id: string): StoredEvent =>
+    ev(id, { type: 'pr.created', url: `https://x/${id}`, number: seq })
+  const ended = (id: string, to: 'done' | 'abandoned' | 'no_pr' | 'needs_human'): StoredEvent =>
+    ev(id, { type: 'task.state', from: 'claimed', to })
+  const records = (events: StoredEvent[]): MergeRecords =>
+    mergeRecords(Object.values(events.reduce(project, emptyProjection()).tasks), events)
+
+  test('counts merges and failed PRs per model and difficulty, ignoring tasks without a PR', () => {
+    const got = records([
+      claimed('a', 'high'),
+      implement('a', 'opus'),
+      pr('a'),
+      ended('a', 'done'),
+      claimed('b', 'high'),
+      implement('b', 'opus'),
+      ended('b', 'abandoned'),
+      claimed('c', 'high'),
+      implement('c', 'opus'),
+      ended('c', 'needs_human'),
+      claimed('d', 'high'),
+      implement('d', 'opus'),
+      ended('d', 'no_pr'),
+      claimed('e', 'high'),
+      implement('e', 'opus'),
+      ended('e', 'done'),
+      claimed('f', 'low'),
+      implement('f', 'opus'),
+      pr('f'),
+      ended('f', 'done'),
+      claimed('g', null),
+      implement('g', 'opus'),
+      ended('g', 'abandoned'),
+    ])
+    expect(mergeRecord(got, 'opus', 'high')).toEqual({ merged: 1, failed: 2 })
+    expect(mergeRecord(got, 'opus', 'low')).toEqual({ merged: 1, failed: 0 })
+    expect(got.size).toBe(2)
+  })
+
+  test('credits the first implement agent of the attempt after the latest reset', () => {
+    const got = records([
+      claimed('a', 'high'),
+      implement('a', 'haiku'),
+      implement('a', 'sonnet'),
+      ev('a', { type: 'task.reset' }),
+      claimed('a', 'high'),
+      implement('a', 'opus'),
+      implement('a', 'sonnet'),
+      pr('a'),
+      ended('a', 'done'),
+    ])
+    expect([...got.keys()]).toEqual([JSON.stringify(['opus', 'high'])])
+  })
+})
+
+describe('claimGate with merge records', () => {
+  const records = (model: string, difficulty: string, merged: number, failed: number) =>
+    new Map([[JSON.stringify([model, difficulty]), { merged, failed }]])
+
+  test('a model that merges at a level may claim it whatever its tier', () => {
+    const gate = claimGate(
+      config(),
+      task('high'),
+      'claude-haiku-4-5',
+      records('claude-haiku-4-5', 'high', 4, 1),
+    )
+    expect(gate).toEqual({ allowed: true })
+  })
+
+  test('a model below the merge rate floor is rejected whatever its tier', () => {
+    const gate = claimGate(
+      config(),
+      task('low'),
+      'claude-sonnet-4-5',
+      records('claude-sonnet-4-5', 'low', 1, 4),
+    )
+    expect(gate).toEqual({
+      allowed: false,
+      reason: 'claude-sonnet-4-5 merged 1 of 5 low difficulty PRs, below the 50% floor',
+    })
+  })
+
+  test('tiers decide until the model has minSamples outcomes, or when minSamples is 0', () => {
+    const few = records('claude-haiku-4-5', 'high', 4, 0)
+    expect(claimGate(config(), task('high'), 'claude-haiku-4-5', few).allowed).toBe(false)
+    const off = config({
+      difficulty: { enabled: true, modelTiers: { 'claude-haiku-4-5': 'fast' }, minSamples: 0 },
+    })
+    const many = records('claude-haiku-4-5', 'high', 9, 0)
+    expect(claimGate(off, task('high'), 'claude-haiku-4-5', many).allowed).toBe(false)
   })
 })
 

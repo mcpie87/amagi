@@ -415,6 +415,20 @@ export class Store {
     }))
   }
 
+  /** Every event of the given types, in seq order, across all tasks. */
+  eventsOfType(types: readonly EventBody['type'][]): StoredEvent[] {
+    const holes = types.map(() => '?').join(', ')
+    const rows = this.db
+      .query(`select * from events where type in (${holes}) order by seq`)
+      .all(...types) as { seq: number; ts: number; task_id: string | null; body: string }[]
+    return rows.map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
   eventsSince(ts: number): StoredEvent[] {
     const rows = this.db.query('select * from events where ts >= ? order by ts, seq').all(ts) as {
       seq: number
