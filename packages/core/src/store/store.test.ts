@@ -91,7 +91,14 @@ describe('Store', () => {
       reviewRound: 2,
       reviewFindings: findings,
       reviewStopReason: 'rounds',
+      reviewUnresolved: 1,
     })
+  })
+
+  test('persists why a run skipped review', () => {
+    claim()
+    store.append('bd-1', { type: 'review.skipped', reason: 'no reviewer' })
+    expect(store.task('bd-1')?.reviewSkipped).toBe('no reviewer')
   })
 
   test('sequence numbers are monotonic and returned', () => {

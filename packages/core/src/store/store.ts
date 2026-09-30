@@ -44,6 +44,8 @@ type RawTask = {
   review_round: number
   review_findings: string | null
   review_stop_reason: string | null
+  review_unresolved: number
+  review_skipped: string | null
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -85,6 +87,8 @@ const toTask = (r: RawTask): ProjectedTask => ({
   reviewRound: r.review_round,
   reviewFindings: r.review_findings === null ? null : (JSON.parse(r.review_findings) as Finding[]),
   reviewStopReason: r.review_stop_reason as ReviewStopReason | null,
+  reviewUnresolved: r.review_unresolved,
+  reviewSkipped: r.review_skipped,
   attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -133,6 +137,8 @@ const taskRow = (t: ProjectedTask): Row => ({
   review_round: t.reviewRound,
   review_findings: t.reviewFindings === null ? null : JSON.stringify(t.reviewFindings),
   review_stop_reason: t.reviewStopReason,
+  review_unresolved: t.reviewUnresolved,
+  review_skipped: t.reviewSkipped,
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({

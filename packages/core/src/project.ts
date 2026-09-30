@@ -51,6 +51,10 @@ export type ProjectedTask = {
   reviewFindings: Finding[] | null
   /** Why the review loop stopped, if it has stopped. */
   reviewStopReason: ReviewStopReason | null
+  /** Blocking findings still open when the review loop stopped. */
+  reviewUnresolved: number
+  /** Why this attempt went to commit without review, if it did. */
+  reviewSkipped: string | null
   /** 1-based; bumped by each operator reset, which wipes the run fields. */
   attempt: number
   /** Start of the current attempt: the first claim, or the latest reset. */
@@ -245,6 +249,8 @@ export function project(state: Projection, event: StoredEvent): Projection {
             reviewRound: 0,
             reviewFindings: null,
             reviewStopReason: null,
+            reviewUnresolved: 0,
+            reviewSkipped: null,
             attempt: 1,
             createdAt: event.ts,
             updatedAt: event.ts,
@@ -272,6 +278,8 @@ export function project(state: Projection, event: StoredEvent): Projection {
           reviewRound: 0,
           reviewFindings: null,
           reviewStopReason: null,
+          reviewUnresolved: 0,
+          reviewSkipped: null,
           attempt: current.attempt + 1,
           createdAt: event.ts,
           updatedAt: event.ts,
@@ -337,6 +345,17 @@ export function project(state: Projection, event: StoredEvent): Projection {
           ...current,
           reviewStopReason: event.reason,
           reviewFindings: event.findings ?? current.reviewFindings,
+          reviewUnresolved: event.unresolvedIds.length,
+          updatedAt: event.ts,
+        }
+      }
+      break
+
+    case 'review.skipped':
+      if (current) {
+        writeTasks()[event.taskId] = {
+          ...current,
+          reviewSkipped: event.reason,
           updatedAt: event.ts,
         }
       }

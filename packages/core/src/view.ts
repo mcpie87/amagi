@@ -243,6 +243,31 @@ export function reviewHistoryFor(state: DashboardState, taskId: string): ReviewH
   return { rounds: ordered, stopReason, skipped }
 }
 
+export type ReviewBadge = { text: string; tone: 'ok' | 'warn' | 'active' }
+
+/** One-line review outcome for a task row; null until the run reaches review. */
+export function reviewBadge(
+  task: Pick<
+    ProjectedTask,
+    'reviewRound' | 'reviewStopReason' | 'reviewUnresolved' | 'reviewSkipped'
+  >,
+): ReviewBadge | null {
+  if (task.reviewSkipped !== null) return { text: 'not reviewed', tone: 'warn' }
+  if (task.reviewRound === 0) return null
+  if (task.reviewStopReason === null) {
+    return { text: `reviewing · round ${task.reviewRound}`, tone: 'active' }
+  }
+  const rounds = `${task.reviewRound} round${task.reviewRound === 1 ? '' : 's'}`
+  if (task.reviewStopReason === 'acceptable') return { text: `reviewed · ${rounds}`, tone: 'ok' }
+  return {
+    text:
+      task.reviewUnresolved > 0
+        ? `${task.reviewUnresolved} unresolved · ${rounds}`
+        : `review stopped: ${task.reviewStopReason}`,
+    tone: 'warn',
+  }
+}
+
 /** Seat name when a review agent is queued for its credential. */
 export function reviewWaitingSeat(state: DashboardState, taskId: string): string | null {
   return reviewWaitingSeatForEvents(taskEvents(state, taskId), taskId)

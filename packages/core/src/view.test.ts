@@ -10,6 +10,7 @@ import {
   openQuestionsFor,
   reduceBatch,
   reduceState,
+  reviewBadge,
   reviewHistoryFor,
   reviewWaitingSeat,
   runHealth,
@@ -151,6 +152,7 @@ describe('dashboard state reducer', () => {
       reviewRound: 2,
       reviewFindings: [unresolved],
       reviewStopReason: 'rounds',
+      reviewUnresolved: 1,
     })
     const history = reviewHistoryFor(state, 'am-1')
     expect(history.stopReason).toBe('rounds')
@@ -182,6 +184,32 @@ describe('dashboard state reducer', () => {
       stopReason: null,
       skipped: 'no reviewer',
     })
+  })
+
+  test('reviewBadge tells unreviewed, in-progress, clean and unresolved tasks apart', () => {
+    const task = {
+      reviewRound: 0,
+      reviewStopReason: null,
+      reviewUnresolved: 0,
+      reviewSkipped: null,
+    }
+    expect(reviewBadge(task)).toBeNull()
+    expect(reviewBadge({ ...task, reviewSkipped: 'no reviewer' })).toEqual({
+      text: 'not reviewed',
+      tone: 'warn',
+    })
+    expect(reviewBadge({ ...task, reviewRound: 2 })?.text).toBe('reviewing · round 2')
+    expect(reviewBadge({ ...task, reviewRound: 1, reviewStopReason: 'acceptable' })).toEqual({
+      text: 'reviewed · 1 round',
+      tone: 'ok',
+    })
+    expect(
+      reviewBadge({ ...task, reviewRound: 3, reviewStopReason: 'rounds', reviewUnresolved: 2 })
+        ?.text,
+    ).toBe('2 unresolved · 3 rounds')
+    expect(reviewBadge({ ...task, reviewRound: 1, reviewStopReason: 'cost' })?.text).toBe(
+      'review stopped: cost',
+    )
   })
 
   test('reports the reviewer seat while its agent waits to start', () => {
