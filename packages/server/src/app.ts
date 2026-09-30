@@ -380,8 +380,8 @@ export function createApp({
       }
       for (const harness of [
         global.harness.implement,
-        global.harness.review,
         global.harness.triage,
+        ...(global.review.harness ? [global.review.harness] : []),
         ...Object.values(global.harness.definitions),
       ]) {
         if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
@@ -404,8 +404,8 @@ export function createApp({
       }
       for (const harness of [
         global.harness.implement,
-        global.harness.review,
         global.harness.triage,
+        ...(global.review.harness ? [global.review.harness] : []),
         ...Object.values(global.harness.definitions),
       ]) {
         if (harness.seat !== undefined) current.add(harness.seat)
@@ -440,7 +440,7 @@ export function createApp({
         if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
       }
       const harness: Record<string, unknown> = {}
-      for (const name of ['implement', 'review', 'triage'] as const) {
+      for (const name of ['implement', 'triage'] as const) {
         const original = global.harness[name]
         const seat = rewrite(original.seat)
         if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }
@@ -451,12 +451,17 @@ export function createApp({
         if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
       }
       if (Object.keys(definitions).length > 0) harness.definitions = definitions
+      const reviewSeat = global.review.harness?.seat
+      const renamedReviewSeat = rewrite(reviewSeat)
 
       writeGlobalConfig({
         seats: seatEntries,
         worker,
         ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
         ...(Object.keys(harness).length === 0 ? {} : { harness }),
+        ...(renamedReviewSeat === reviewSeat
+          ? {}
+          : { review: { harness: { seat: renamedReviewSeat ?? null } } }),
       })
       return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
