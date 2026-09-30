@@ -67,6 +67,7 @@ export type RunnerStatus = {
 export type FleetWorkerStatus = {
   id: string
   name: string
+  roles: WorkerConfig['roles']
   kind: WorkerConfig['kind']
   model: string | null
   effort: string | null
@@ -354,6 +355,7 @@ export class RunService implements RunServiceApi {
       fleet: this.workers().map((worker) => ({
         id: worker.id,
         name: worker.name,
+        roles: worker.roles,
         kind: worker.kind,
         model: worker.model ?? null,
         effort: worker.effort ?? null,

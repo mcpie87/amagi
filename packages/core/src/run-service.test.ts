@@ -380,6 +380,7 @@ describe('RunService', () => {
         {
           id: 'worker-1',
           name: 'Worker 1',
+          roles: ['implement'],
           kind: 'claude',
           model: null,
           effort: null,
@@ -392,6 +393,7 @@ describe('RunService', () => {
         {
           id: 'worker-2',
           name: 'Worker 2',
+          roles: ['implement'],
           kind: 'claude',
           model: null,
           effort: null,
@@ -659,6 +661,7 @@ describe('RunService', () => {
       {
         id: 'one',
         name: 'One',
+        roles: ['implement'],
         kind: 'claude',
         model: null,
         effort: null,
@@ -671,6 +674,7 @@ describe('RunService', () => {
       {
         id: 'disabled',
         name: 'Disabled',
+        roles: ['implement'],
         kind: 'codex',
         model: null,
         effort: null,
