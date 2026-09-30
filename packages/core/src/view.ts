@@ -159,7 +159,12 @@ export type ReviewRound = {
   failed: string | null
 }
 
-export type ReviewHistory = { rounds: ReviewRound[]; stopReason: ReviewStopReason | null }
+export type ReviewHistory = {
+  rounds: ReviewRound[]
+  stopReason: ReviewStopReason | null
+  /** Why the current attempt went to commit without review, if it did. */
+  skipped: string | null
+}
 
 /** Review details the compact task projection does not retain. */
 export function reviewHistoryFor(state: DashboardState, taskId: string): ReviewHistory {
@@ -167,8 +172,11 @@ export function reviewHistoryFor(state: DashboardState, taskId: string): ReviewH
   const replies = new Map<number, Map<string, { outcome: 'fixed' | 'disputed'; reason: string }>>()
   const proposals = new Map<string, { issueId: string; title: string; url: string | null }>()
   let stopReason: ReviewStopReason | null = null
+  let skipped: string | null = null
   for (const event of currentAttemptEvents(taskEvents(state, taskId), taskId)) {
-    if (event.type === 'review.started') {
+    if (event.type === 'review.skipped') {
+      skipped = event.reason
+    } else if (event.type === 'review.started') {
       rounds.set(event.round, {
         round: event.round,
         finalPass: event.finalPass,
@@ -232,7 +240,7 @@ export function reviewHistoryFor(state: DashboardState, taskId: string): ReviewH
         finding.outcome = 'withdrawn'
     }
   }
-  return { rounds: ordered, stopReason }
+  return { rounds: ordered, stopReason, skipped }
 }
 
 /** Seat name when a review agent is queued for its credential. */

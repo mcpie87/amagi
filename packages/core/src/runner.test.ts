@@ -848,6 +848,7 @@ describe('Runner.runOnce', () => {
 
     expect(reviewer.calls).toHaveLength(0)
     expect(types(TASK.id)).not.toContain('review.started')
+    expect(types(TASK.id)).toContain('review.skipped')
   })
 
   test('records reviewer process failures and opens an unresolved PR without invalid state transitions', async () => {
@@ -1131,6 +1132,7 @@ describe('Runner.runOnce', () => {
       'agent.exited',
       'task.state',
       'checks.finished',
+      'review.skipped',
       'commit.created',
       'task.state',
       'pr.created',

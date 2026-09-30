@@ -339,6 +339,8 @@ export const EventBody = z.discriminatedUnion('type', [
     unresolvedIds: z.array(z.string().min(1)),
     findings: z.array(Finding).optional(),
   }),
+  /** The run reached the review gate with no reviewer configured, so it went to commit unreviewed. */
+  z.object({ type: z.literal('review.skipped'), reason: z.string().min(1) }),
   z.object({
     type: z.literal('review.proposal-filed'),
     findingId: z.string().min(1),

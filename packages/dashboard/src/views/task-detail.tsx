@@ -467,6 +467,14 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
 
 function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: string }) {
   const history = reviewHistoryFor(state, taskId)
+  if (history.skipped !== null && history.rounds.length === 0) {
+    return (
+      <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-fg-muted">Review</h2>
+        <p className="text-sm text-amber-ink">Review skipped: {history.skipped}</p>
+      </section>
+    )
+  }
   if (history.rounds.length === 0) return null
   return (
     <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">

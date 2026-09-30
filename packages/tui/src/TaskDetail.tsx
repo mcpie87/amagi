@@ -243,6 +243,12 @@ export function TaskDetail({
         />
       </Box>
 
+      {reviewHistory.skipped !== null && reviewHistory.rounds.length === 0 && (
+        <Box marginTop={1}>
+          <Text color="yellow">review skipped: {reviewHistory.skipped}</Text>
+        </Box>
+      )}
+
       {reviewHistory.rounds.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text bold>review</Text>

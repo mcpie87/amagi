@@ -172,6 +172,18 @@ describe('dashboard state reducer', () => {
     ])
   })
 
+  test('reports why the current attempt skipped review', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Unreviewed', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'review.skipped', reason: 'no reviewer' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(reviewHistoryFor(state, 'am-1')).toEqual({
+      rounds: [],
+      stopReason: null,
+      skipped: 'no reviewer',
+    })
+  })
+
   test('reports the reviewer seat while its agent waits to start', () => {
     const state = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Review me', tracker: 'bd' }),

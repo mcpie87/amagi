@@ -1190,6 +1190,11 @@ export class Runner {
       reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
       if (reviewSummary === null) return
       current = reviewSummary.run
+    } else {
+      this.deps.store.append(task.id, {
+        type: 'review.skipped',
+        reason: 'no enabled fleet worker has the Review role and review.enabled is off',
+      })
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
