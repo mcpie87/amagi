@@ -184,6 +184,7 @@ export const WorkerCreateBody = z.object({
   count: z.number().int().min(1).max(16).default(1),
   seatCount: z.number().int().min(1).max(16).default(1),
   enabled: z.boolean().default(false),
+  difficulties: z.array(z.string().trim().min(1)).optional(),
 })
 export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
 
@@ -199,6 +200,7 @@ export const WorkerUpdateBody = z
     count: z.number().int().min(1).max(16).optional(),
     seatCount: z.number().int().min(1).max(16).optional(),
     enabled: z.boolean().optional(),
+    difficulties: z.array(z.string().trim().min(1)).nullable().optional(),
   })
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>

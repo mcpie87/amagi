@@ -2710,6 +2710,17 @@ describe('fleet endpoints', () => {
     expect((await send('PATCH', `/api/workers/${id}`, { roles: ['triage'] })).status).toBe(400)
   })
 
+  test('worker difficulty levels persist, a null takes every level again', async () => {
+    const { id } = await create({ name: 'Haiku', kind: 'claude', difficulties: ['low'] })
+    expect(loadGlobalConfig().worker[0]?.difficulties).toEqual(['low'])
+    const list = (await (await app.request('/api/workers')).json()) as {
+      difficultyLevels: string[]
+    }
+    expect(list.difficultyLevels).toEqual(['low', 'medium', 'high'])
+    expect((await send('PATCH', `/api/workers/${id}`, { difficulties: null })).status).toBe(200)
+    expect(loadGlobalConfig().worker[0]?.difficulties).toBeUndefined()
+  })
+
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
     fleet = [

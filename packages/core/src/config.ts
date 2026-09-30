@@ -20,12 +20,6 @@ export const DifficultyConfig = z.object({
   enabled: z.boolean().default(false),
   /** Difficulty levels a task can be classified into, easiest first. */
   levels: z.array(z.string().min(1)).default(['low', 'medium', 'high']),
-  /** Model tiers, weakest first; a model's tier is its index in this list. */
-  tierOrder: z.array(z.string().min(1)).default(['fast', 'smart']),
-  /** The minimum tier a task of a given difficulty needs; unlisted levels require the weakest tier. */
-  requiredTier: z.record(z.string(), z.string()).default({ high: 'smart' }),
-  /** Explicit model id -> tier mapping; an unlisted model counts as the weakest tier. */
-  modelTiers: z.record(z.string(), z.string()).default({}),
 })
 
 export const HarnessConfig = z.object({
@@ -89,6 +83,8 @@ export const WorkerConfig = z
     count: z.number().int().min(1).max(MAX_WORKERS).default(1),
     seatCount: z.number().int().min(1).max(MAX_WORKERS).default(1),
     enabled: z.boolean().default(false),
+    /** Difficulty levels this worker claims; unset takes every level. */
+    difficulties: z.array(z.string().min(1)).optional(),
   })
   .refine((worker) => worker.seatCount <= worker.count, {
     path: ['seatCount'],

@@ -50,7 +50,6 @@ import {
   reconcilePr,
   removeForgeCredential,
   removeWorktree,
-  resolveWorkerHarness,
   type Store,
   type StoredEvent,
   stageAndCommit,
@@ -624,14 +623,7 @@ export function createApp({
         for (const [seat, seatWorkers] of workersBySeat) {
           const tasks = eligible.get(seat) ?? []
           for (const task of ready) {
-            const canRun = seatWorkers.some((worker) => {
-              const harness = resolveWorkerHarness(ws.config, worker)
-              return claimGate(
-                { ...ws.config, harness: { ...ws.config.harness, implement: harness } },
-                task,
-                harness.model ?? null,
-              ).allowed
-            })
+            const canRun = seatWorkers.some((worker) => claimGate(ws.config, task, worker).allowed)
             if (
               !canRun ||
               tasks.some((queued) => queued.repo === repo && queued.taskId === task.id)
@@ -1612,7 +1604,12 @@ export function createApp({
       },
     )
 
-    .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
+    .get('/api/workers', async (c) =>
+      c.json({
+        workers: await fleetView(),
+        difficultyLevels: loadGlobalConfig().difficulty.levels,
+      }),
+    )
 
     .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
       const fleet = loadGlobalConfig().worker

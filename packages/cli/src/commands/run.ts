@@ -91,6 +91,7 @@ export async function workOneTask(opts: {
     config: { ...config, harness: { ...config.harness, implement } },
     repoRoot: root,
     repoName: repoName(root),
+    worker,
   })
 
   // The task is claimed inside runner.runOnce, so the worker's identity is only

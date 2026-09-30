@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import * as z from 'zod'
 import { stageAndCommit } from './commit.ts'
 import { type Config, reviewerHarnessConfig } from './config.ts'
-import { claimEligible, implementModel } from './difficulty.ts'
+import { type ClaimWorker, claimEligible } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
@@ -92,6 +92,8 @@ export type RunnerDeps = {
   channel?: boolean
   /** Fleet worker this runner belongs to, recorded on agent.started for the scorecard. */
   workerName?: string | undefined
+  /** Fleet worker `runOnce` claims for, so its difficulty levels gate the claim. */
+  worker?: ClaimWorker | undefined
 }
 
 export type RunOnceResult = {
@@ -593,7 +595,7 @@ export class Runner {
     const { store, tracker, config } = this.deps
     const task =
       taskId === undefined
-        ? await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+        ? await claimEligible(tracker, config, this.deps.worker ?? null, (skipped, reason) => {
             store.append(null, {
               type: 'claim.rejected',
               title: skipped.title,
