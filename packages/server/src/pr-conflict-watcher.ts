@@ -368,20 +368,32 @@ export function startPrConflictWatcher({
       if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
         store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
       }
-      if (
-        isConflict &&
-        task !== null &&
-        task.state !== 'pr_merge_conflict' &&
-        task.state !== 'pr_conflict_fixing'
-      ) {
-        if (canTransition(task.state, 'pr_merge_conflict')) {
-          store.append(task.id, {
+      const observedTask = task === null ? null : store.task(task.id)
+      if (manual && observedTask !== null) {
+        if (
+          observedTask.state !== 'pr_conflict_fixing' &&
+          canTransition(observedTask.state, 'pr_conflict_fixing')
+        ) {
+          store.append(observedTask.id, {
             type: 'task.state',
-            from: task.state,
-            to: 'pr_merge_conflict',
-            reason: `PR #${pr.number} has merge conflicts`,
+            from: observedTask.state,
+            to: 'pr_conflict_fixing',
+            reason: `Conflict resolution running for PR #${pr.number}`,
           })
         }
+      } else if (
+        isConflict &&
+        observedTask !== null &&
+        observedTask.state !== 'pr_merge_conflict' &&
+        observedTask.state !== 'pr_conflict_fixing' &&
+        canTransition(observedTask.state, 'pr_merge_conflict')
+      ) {
+        store.append(observedTask.id, {
+          type: 'task.state',
+          from: observedTask.state,
+          to: 'pr_merge_conflict',
+          reason: `PR #${pr.number} has merge conflicts`,
+        })
       }
       if (
         !manual &&
