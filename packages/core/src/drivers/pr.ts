@@ -90,7 +90,10 @@ async function pushTaskBranch(
   const { cwd, remote, branch } = opts
   const auth = await gitTokenConfig(exec, cwd, remote, token)
   const ref = `refs/heads/${branch}`
-  const heads = await execOk(exec, ['git', ...auth, 'ls-remote', '--heads', remote, ref], { cwd })
+  const heads = await execOk(exec, ['git', 'ls-remote', '--heads', remote, ref], {
+    cwd,
+    env: auth,
+  })
   const remoteSha =
     heads
       .split('\n')
@@ -108,8 +111,8 @@ async function pushTaskBranch(
   await assertSafePushDestination(exec, cwd, remote, branch, auth)
   await execOk(
     exec,
-    ['git', ...auth, 'push', '-u', `--force-with-lease=${ref}:${remoteSha}`, remote, branch],
-    { cwd },
+    ['git', 'push', '-u', `--force-with-lease=${ref}:${remoteSha}`, remote, branch],
+    { cwd, env: auth },
   )
 }
 
@@ -122,7 +125,10 @@ async function deleteRemoteBranch(
 ): Promise<void> {
   const auth = await gitTokenConfig(exec, cwd, remote, token)
   await assertSafePushDestination(exec, cwd, remote, branch, auth)
-  const r = await exec(['git', ...auth, 'push', remote, '--delete', branch], { cwd })
+  const r = await exec(['git', 'push', remote, '--delete', branch], {
+    cwd,
+    env: auth,
+  })
   if (r.exitCode !== 0 && !/remote ref does not exist/i.test(r.stderr)) {
     throw new Error(`deleting remote branch ${branch}: ${r.stderr.trim()}`)
   }

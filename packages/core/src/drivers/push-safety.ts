@@ -7,7 +7,7 @@ export async function assertSafePushDestination(
   cwd: string,
   remote: string,
   destination: string,
-  gitArgs: readonly string[] = [],
+  auth: Record<string, string> = {},
 ): Promise<void> {
   const branch = destination.replace(/^refs\/heads\//, '')
   if (branch === 'main' || branch === 'master') {
@@ -15,7 +15,7 @@ export async function assertSafePushDestination(
   }
 
   const pushUrls = (
-    await execOk(exec, ['git', ...gitArgs, 'remote', 'get-url', '--push', '--all', remote], { cwd })
+    await execOk(exec, ['git', 'remote', 'get-url', '--push', '--all', remote], { cwd })
   )
     .split('\n')
     .filter(Boolean)
@@ -24,8 +24,9 @@ export async function assertSafePushDestination(
   }
 
   for (const url of pushUrls) {
-    const output = await execOk(exec, ['git', ...gitArgs, 'ls-remote', '--symref', url, 'HEAD'], {
+    const output = await execOk(exec, ['git', 'ls-remote', '--symref', url, 'HEAD'], {
       cwd,
+      env: auth,
     })
     const defaultRef = output.match(/^ref: refs\/heads\/(.+)\s+HEAD$/m)?.[1]
     if (defaultRef === undefined) {
