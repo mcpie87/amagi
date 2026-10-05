@@ -51,6 +51,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref'))
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, inputs }
@@ -83,6 +88,9 @@ class FakeDriver implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     throw new Error('unused')

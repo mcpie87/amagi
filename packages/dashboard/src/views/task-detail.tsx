@@ -62,8 +62,18 @@ function ForgejoIcon({ className }: { className?: string }) {
   )
 }
 
+function GitLabIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M23.955 13.587l-3.23-9.945a.828.828 0 0 0-1.578 0L17.97 7.028H6.03L4.853 3.642a.828.828 0 0 0-1.578 0l-3.23 9.945a.828.828 0 0 0 .3.923L11.5 22.5a.828.828 0 0 0 .999 0l11.155-7.99a.828.828 0 0 0 .3-.923ZM1.98 13.61l2.064-6.36 1.944 5.63-4.008.73Zm9.52 6.92L4.78 13.23h14.44L11.5 20.53Zm10.52-6.92-4.008-.73 1.944-5.63 2.064 6.36Z" />
+    </svg>
+  )
+}
+
 function PrLink({ url }: { url: string }) {
-  const isGithub = new URL(url).hostname.endsWith('github.com')
+  const parsedUrl = new URL(url)
+  const isGithub = parsedUrl.hostname.endsWith('github.com')
+  const isGitLab = parsedUrl.pathname.includes('/-/merge_requests/')
   return (
     <a
       href={url}
@@ -71,7 +81,13 @@ function PrLink({ url }: { url: string }) {
       rel="noreferrer"
       className="inline-flex items-center gap-1.5 text-sky-ink hover:underline"
     >
-      {isGithub ? <GithubIcon className="h-4 w-4" /> : <ForgejoIcon className="h-4 w-4" />}
+      {isGithub ? (
+        <GithubIcon className="h-4 w-4" />
+      ) : isGitLab ? (
+        <GitLabIcon className="h-4 w-4" />
+      ) : (
+        <ForgejoIcon className="h-4 w-4" />
+      )}
       {url}
     </a>
   )
@@ -394,6 +410,25 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                 </span>
               )}
             </div>
+            {entry.setup !== null && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pb-2 pl-12 pr-4 text-xs text-fg-muted">
+                <span className="text-fg-faint">{entry.runs.length > 0 ? '├' : '└'}</span>
+                <span className="font-medium text-fg">setup</span>
+                <code className="min-w-0 truncate" title={entry.setup.command}>
+                  {entry.setup.command}
+                </code>
+                <span
+                  className={entry.setup.exitCode ? 'tabular-nums text-red-ink' : 'tabular-nums'}
+                >
+                  {[
+                    entry.setup.durationMs === null ? null : fmtDuration(entry.setup.durationMs),
+                    entry.setup.exitCode === null ? 'running' : `exit ${entry.setup.exitCode}`,
+                  ]
+                    .filter((part): part is string => part !== null)
+                    .join(' · ')}
+                </span>
+              </div>
+            )}
             {entry.runs.length > 0 && (
               <ol className="space-y-1 pb-2 pl-12 pr-4">
                 {entry.runs.map((run, index) => {
@@ -406,6 +441,7 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                   ].filter((part): part is string => part !== null)
                   return (
                     <li
+                      // biome-ignore lint/suspicious/noArrayIndexKey: runs can start in the same millisecond; the index disambiguates.
                       key={`${run.startedAt}-${index}`}
                       className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted"
                     >
@@ -432,6 +468,14 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
 
 function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: string }) {
   const history = reviewHistoryFor(state, taskId)
+  if (history.skipped !== null && history.rounds.length === 0) {
+    return (
+      <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-fg-muted">Review</h2>
+        <p className="text-sm text-amber-ink">Review skipped: {history.skipped}</p>
+      </section>
+    )
+  }
   if (history.rounds.length === 0) return null
   return (
     <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">

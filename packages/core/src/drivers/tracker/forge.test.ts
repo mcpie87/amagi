@@ -99,7 +99,7 @@ afterEach(() => {
 describe('GithubTracker', () => {
   test('parses open issues and skips claimed ones', async () => {
     const { exec } = fake(() => ok(GH_READY))
-    const tasks = await new GithubTracker({ cwd: '/repo', exec }).ready()
+    const tasks = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).ready()
 
     expect(tasks).toHaveLength(1)
     expect(tasks[0]).toEqual({
@@ -116,7 +116,7 @@ describe('GithubTracker', () => {
 
   test('openIds includes claimed issues too, unlike ready', async () => {
     const { exec } = fake(() => ok(GH_READY))
-    const ids = await new GithubTracker({ cwd: '/repo', exec }).openIds()
+    const ids = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).openIds()
     expect(ids).toEqual(['3', '5'])
   })
 
@@ -124,7 +124,7 @@ describe('GithubTracker', () => {
     const { exec, calls } = fake((c) =>
       c.includes('view') ? ok(GH_PROPOSED) : ok(GH_READY_PROPOSED),
     )
-    const tracker = new GithubTracker({ cwd: '/repo', exec })
+    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
     expect(await tracker.ready()).toEqual([])
     expect(await tracker.claim('3')).toBeNull()
     expect(calls.some((call) => call.includes('edit'))).toBe(false)
@@ -132,7 +132,7 @@ describe('GithubTracker', () => {
 
   test('claim marks the issue with the claim label', async () => {
     const { exec, calls } = fake((c) => (c.includes('view') ? ok(GH_VIEW) : undefined))
-    const task = await new GithubTracker({ cwd: '/repo', exec }).claim('3')
+    const task = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).claim('3')
 
     expect(task?.id).toBe('3')
     const edit = calls.find((c) => c.includes('edit'))
@@ -141,7 +141,9 @@ describe('GithubTracker', () => {
 
   test('heartbeat is a no-op on a host without leases', async () => {
     const { exec } = fake(() => ok(''))
-    expect(await new GithubTracker({ cwd: '/repo', exec }).heartbeat('3')).toBe(true)
+    expect(await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).heartbeat('3')).toBe(
+      true,
+    )
   })
 
   test('a question gate is advisory and resolves via the answer comment', async () => {
@@ -149,7 +151,7 @@ describe('GithubTracker', () => {
       if (c.includes('--json') && c.includes('comments')) return ok(GH_COMMENTS)
       return ok(GH_VIEW)
     })
-    const tracker = new GithubTracker({ cwd: '/repo', exec })
+    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
 
     const ref = await tracker.openGate('3', {
       id: 'q-1',
@@ -162,7 +164,7 @@ describe('GithubTracker', () => {
 
   test('an unanswered question keeps blocking', async () => {
     const { exec } = fake(() => ok('{"comments": []}'))
-    const tracker = new GithubTracker({ cwd: '/repo', exec })
+    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
     expect(await tracker.gateResolved({ id: '3#q-9', advisory: true })).toBe(false)
   })
 
@@ -170,7 +172,7 @@ describe('GithubTracker', () => {
     const { exec, calls } = fake((cmd) =>
       cmd.includes('create') ? ok('https://github.com/acme/amagi/issues/3\n') : ok(GH_VIEW),
     )
-    const tracker = new GithubTracker({ cwd: '/repo', exec })
+    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
     expect(tracker.capabilities).toEqual({ create: true, edit: false, dependencies: false })
     const input = {
       title: 'x',
@@ -210,7 +212,7 @@ describe('ForgejoTracker', () => {
         ? ok('https://gitea.local/acme/amagi/issues/7\n')
         : ok(TEA_READY.slice(1, -1).trim()),
     )
-    const tracker = new ForgejoTracker({ cwd: '/repo', exec })
+    const tracker = new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec })
     const task = await tracker.createTask({
       title: 'Follow up',
       description: 'From the PR',
@@ -234,7 +236,7 @@ describe('ForgejoTracker', () => {
 
   test('parses open issues from tea', async () => {
     const { exec } = fake(() => ok(TEA_READY))
-    const tasks = await new ForgejoTracker({ cwd: '/repo', exec }).ready()
+    const tasks = await new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec }).ready()
 
     expect(tasks).toHaveLength(1)
     expect(tasks[0]?.id).toBe('7')
@@ -247,7 +249,7 @@ describe('ForgejoTracker', () => {
       if (c.includes('comments') && c.includes('list')) return ok(TEA_COMMENTS)
       return ok(TEA_READY)
     })
-    const tracker = new ForgejoTracker({ cwd: '/repo', exec })
+    const tracker = new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec })
     expect(await tracker.gateResolved({ id: '7#q-2', advisory: true })).toBe(false)
   })
 
@@ -256,7 +258,7 @@ describe('ForgejoTracker', () => {
       if (c.includes('comments') && c.includes('list')) return ok(TEA_COMMENTS_ANSWERED)
       return ok(TEA_READY)
     })
-    const tracker = new ForgejoTracker({ cwd: '/repo', exec })
+    const tracker = new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec })
     expect(await tracker.gateResolved({ id: '7#q-2', advisory: true })).toBe(true)
   })
 })

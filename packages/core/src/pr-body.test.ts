@@ -41,7 +41,7 @@ describe('changesSinceBase', () => {
       if (c.includes('--numstat')) return ok('1\t0\thello.txt\n-\t-\timage.png\n')
       return undefined
     })
-    const changes = await changesSinceBase(exec, '/wt', 'main')
+    const changes = await changesSinceBase(exec, '/wt', 'origin', 'main')
 
     expect(calls).toContainEqual(['git', 'rev-parse', '--verify', '--quiet', 'origin/main'])
     expect(calls).toContainEqual(['git', 'diff', '--numstat', 'origin/main...HEAD'])
@@ -57,7 +57,7 @@ describe('changesSinceBase', () => {
       if (c.includes('--numstat')) return ok('2\t1\tsrc/app.ts\n')
       return undefined
     })
-    const changes = await changesSinceBase(exec, '/wt', 'main')
+    const changes = await changesSinceBase(exec, '/wt', 'origin', 'main')
 
     expect(calls).toContainEqual(['git', 'diff', '--numstat', 'main...HEAD'])
     expect(changes).toEqual([{ path: 'src/app.ts', additions: 2, deletions: 1 }])

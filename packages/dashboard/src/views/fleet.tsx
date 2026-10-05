@@ -26,6 +26,7 @@ type Worker = {
   count?: number
   seatCount?: number
   enabled: boolean
+  difficulties?: string[]
   taskId: string | null
 }
 
@@ -247,12 +248,14 @@ function WorkerFormModal({
   initial,
   workers,
   seats,
+  levels,
   onClose,
   onSaved,
 }: {
   initial: Worker | null
   workers: Worker[]
   seats: string[]
+  levels: string[]
   onClose: () => void
   onSaved: () => void
 }) {
@@ -260,6 +263,7 @@ function WorkerFormModal({
   const [nameTouched, setNameTouched] = useState(initial !== null)
   const [count, setCount] = useState(String(initial?.count ?? 1))
   const [roles, setRoles] = useState<WorkerRole[]>(initial?.roles ?? ['implement'])
+  const [difficulties, setDifficulties] = useState<string[]>(initial?.difficulties ?? levels)
   const [harness, setHarness] = useState<HarnessValues>({
     kind: initial?.kind ?? 'claude',
     model: initial?.model ?? '',
@@ -289,6 +293,10 @@ function WorkerFormModal({
       seat: orNull(harness.seat),
       count: workerCount,
       roles,
+      // Every level checked is saved as unset, so levels added later are taken too.
+      difficulties: levels.every((level) => difficulties.includes(level))
+        ? null
+        : levels.filter((level) => difficulties.includes(level)),
     }
     const err =
       initial === null
@@ -367,6 +375,32 @@ function WorkerFormModal({
           ))}
         </div>
       </fieldset>
+      {levels.length > 0 && (
+        <fieldset>
+          <legend className={label}>Task difficulty</legend>
+          <div className="flex flex-wrap gap-4">
+            {levels.map((level) => (
+              <label key={level} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={difficulties.includes(level)}
+                  onChange={(event) =>
+                    setDifficulties((current) =>
+                      event.target.checked
+                        ? [...current, level]
+                        : current.filter((taken) => taken !== level),
+                    )
+                  }
+                />
+                {level}
+              </label>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-fg-faint">
+            Applies when difficulty gating is on; unclassified tasks go to any worker.
+          </p>
+        </fieldset>
+      )}
       {initial?.taskId != null && (
         <p className="text-sm text-amber-ink">
           {initial.taskId} keeps its current settings; changes apply from the next run.
@@ -489,6 +523,11 @@ function WorkerCard({
             seat={worker.seat}
           />
           <p className="text-sm text-fg-faint">Worker count: {worker.count ?? 1}</p>
+          {worker.difficulties !== undefined && (
+            <p className="text-sm text-fg-faint">
+              Difficulty: {worker.difficulties.length > 0 ? worker.difficulties.join(', ') : 'none'}
+            </p>
+          )}
           {worker.taskId !== null && (
             <p className="text-sm text-fg-faint">running {worker.taskId}</p>
           )}
@@ -578,6 +617,7 @@ export function FleetWorkersSettings() {
   const [workers, setWorkers] = useState<Worker[] | null>(null)
   const [watchers, setWatchers] = useState<Watchers | null>(null)
   const [seatNames, setSeatNames] = useState<string[]>([])
+  const [difficultyLevels, setDifficultyLevels] = useState<string[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editing, setEditing] = useState<Worker | 'new' | null>(null)
   const [editingWatcher, setEditingWatcher] = useState<AgentWatcherKind | null>(null)
@@ -586,7 +626,9 @@ export function FleetWorkersSettings() {
     Promise.all([fetch(`${apiBase}/api/workers`), fetch(`${apiBase}/api/watchers`)])
       .then(async ([w, v]) => {
         if (!w.ok || !v.ok) throw new Error(`HTTP ${w.ok ? v.status : w.status}`)
-        setWorkers(((await w.json()) as { workers: Worker[] }).workers)
+        const body = (await w.json()) as { workers: Worker[]; difficultyLevels: string[] }
+        setWorkers(body.workers)
+        setDifficultyLevels(body.difficultyLevels)
         setWatchers((await v.json()) as Watchers)
         setLoadError(null)
       })
@@ -681,6 +723,7 @@ export function FleetWorkersSettings() {
           initial={editing === 'new' ? null : editing}
           workers={workers}
           seats={seatNames}
+          levels={difficultyLevels}
           onClose={() => setEditing(null)}
           onSaved={saved}
         />

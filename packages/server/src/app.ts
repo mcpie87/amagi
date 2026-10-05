@@ -24,7 +24,6 @@ import {
   type Question,
   type RegistryEntry,
   type RunServiceApi,
-  resolveWorkerHarness,
   type Store,
   type Tracker,
   Triage,
@@ -68,7 +67,7 @@ export type ServerDeps = {
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
   /** Queues one PR on the existing conflict watcher. */
-  queueConflictResolution?: (repo: string, prNumber: number) => boolean
+  queueConflictResolution?: (repo: string, prNumber: number, prUrl: string | null) => boolean
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
@@ -242,8 +241,8 @@ export function createApp({
     }
     for (const harness of [
       global.harness.implement,
-      global.harness.review,
       global.harness.triage,
+      ...(global.review.harness ? [global.review.harness] : []),
       ...Object.values(global.harness.definitions),
     ]) {
       if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
@@ -318,7 +317,7 @@ export function createApp({
         if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
       }
       const harness: Record<string, unknown> = {}
-      for (const name of ['implement', 'review', 'triage'] as const) {
+      for (const name of ['implement', 'triage'] as const) {
         const original = global.harness[name]
         const seat = rewrite(original.seat)
         if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }
@@ -329,12 +328,17 @@ export function createApp({
         if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
       }
       if (Object.keys(definitions).length > 0) harness.definitions = definitions
+      const reviewer = global.review.harness
+      const reviewerSeat = rewrite(reviewer?.seat)
 
       writeGlobalConfig({
         seats: seatEntries,
         worker,
         ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
         ...(Object.keys(harness).length === 0 ? {} : { harness }),
+        ...(reviewer === undefined || reviewerSeat === reviewer.seat
+          ? {}
+          : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
       return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
@@ -391,8 +395,25 @@ export function createApp({
         waiters.set(seat, queue)
       }
 
-      for (const { repo, service } of servedRunners()) {
-        const status = await service.status()
+      const runners = servedRunners()
+      const [statuses, queues] = await Promise.all([
+        Promise.all(runners.map(({ service }) => service.status())),
+        Promise.all(
+          workspaces.list().map(async (entry) => {
+            const ws = workspaces.get(entry.key)
+            if (ws === null) return null
+            const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+              (worker) => worker.enabled,
+            )
+            const ready = workers.length === 0 ? [] : await ws.tracker.ready()
+            return { repo: entry.key, ws, workers, ready }
+          }),
+        ),
+      ])
+
+      for (const [index, { repo }] of runners.entries()) {
+        const status = statuses[index]
+        if (status === undefined) continue
         for (const taskId of status.running) {
           const task = status.tasks[taskId]
           const ws = workspaces.get(repo)
@@ -457,16 +478,16 @@ export function createApp({
           since: null,
         })
       }
-      for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
+      for (const queue of queues) {
+        if (queue === null) continue
+        const { repo, ws, workers, ready } = queue
         for (const chat of ws.store.activeChatAgents()) {
           const startedAt = ws.store
             .events({ taskId: chat.taskId, limit: 100_000 })
             .filter((event) => event.type === 'agent.started' && event.role === 'chat')
             .at(-1)?.ts
           setHolder(chat.seat, {
-            repo: entry.key,
+            repo,
             taskId: chat.taskId,
             title: ws.store.task(chat.taskId)?.title ?? chat.taskId,
             status: 'chat',
@@ -474,11 +495,7 @@ export function createApp({
           })
         }
 
-        const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
-          (worker) => worker.enabled,
-        )
         if (workers.length === 0) continue
-        const ready = await ws.tracker.ready()
         const workersBySeat = new Map<string, (typeof workers)[number][]>()
         for (const worker of workers) {
           const seat = worker.seat ?? worker.kind
@@ -489,21 +506,14 @@ export function createApp({
         for (const [seat, seatWorkers] of workersBySeat) {
           const tasks = eligible.get(seat) ?? []
           for (const task of ready) {
-            const canRun = seatWorkers.some((worker) => {
-              const harness = resolveWorkerHarness(ws.config, worker)
-              return claimGate(
-                { ...ws.config, harness: { ...ws.config.harness, implement: harness } },
-                task,
-                harness.model ?? null,
-              ).allowed
-            })
+            const canRun = seatWorkers.some((worker) => claimGate(ws.config, task, worker).allowed)
             if (
               !canRun ||
-              tasks.some((queued) => queued.repo === entry.key && queued.taskId === task.id)
+              tasks.some((queued) => queued.repo === repo && queued.taskId === task.id)
             )
               continue
             tasks.push({
-              repo: entry.key,
+              repo,
               taskId: task.id,
               title: task.title,
               status: 'ready',
@@ -712,16 +722,16 @@ export function createApp({
     .get('/api/repos/:repo/stream', valid('param', RepoParam), valid('query', StreamQuery), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const { taskId, sinceSeq } = c.req.valid('query')
+      const { taskId, sinceSeq, compact } = c.req.valid('query')
       // A browser resends the last id it saw on reconnect; that beats whatever
       // sinceSeq was baked into the EventSource url when it first connected.
       const resumed = Number(c.req.header('Last-Event-ID'))
-      const from = Number.isInteger(resumed) && resumed >= 0 ? resumed : sinceSeq
-      return eventStream(
-        c,
-        ws.store,
-        taskId === undefined ? { sinceSeq: from } : { taskId, sinceSeq: from },
-      )
+      const isResume = Number.isInteger(resumed) && resumed >= 0
+      const from = isResume ? resumed : sinceSeq
+      // The url still asks for compact on a resume, but the client counts on
+      // the log lines it missed since the first replay.
+      const opts = { sinceSeq: from, compact: compact && !isResume }
+      return eventStream(c, ws.store, taskId === undefined ? opts : { taskId, ...opts })
     })
 
     .get(

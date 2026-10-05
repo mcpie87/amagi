@@ -260,6 +260,7 @@ function configuredFooter(config: Config): string {
 async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage?: string) {
   return prepareConflictWorktree({
     repoRoot: opts.root,
+    remote: opts.config.forge.remote,
     repoName: opts.repoName,
     worktreeRoot: opts.config.repo.worktreeRoot,
     baseBranch: opts.config.repo.baseBranch,

@@ -166,12 +166,18 @@
         let
           gaps = absent pkgs optionalNames;
           resolved = map (n: pkgs.${n}) (present pkgs (requiredNames ++ optionalNames));
+          # Runs the checkout the shell was entered from, never the cwd's: agents
+          # reach this through the amagi shim from inside their task worktrees.
+          devAmagi = pkgs.writeShellScriptBin "amagi" ''
+            export AMAGI_DEV_HOME="''${AMAGI_DEV_HOME:-''${XDG_STATE_HOME:-$HOME/.local/state}/amagi-dev}"
+            exec ${lib.getExe pkgs.bun} run "''${AMAGI_DEV_ROOT:?enter the amagi dev shell first}/packages/cli/src/index.ts" "$@"
+          '';
         in
         {
           default = pkgs.mkShell {
-            packages = resolved;
+            packages = resolved ++ [ devAmagi ];
             shellHook = ''
-              export AMAGI_DEV=1
+              export AMAGI_DEV_ROOT="$(git rev-parse --show-toplevel)"
               ${lib.optionalString (gaps != [ ]) ''
                 echo "amagi: not packaged in this nixpkgs, provide yourself if needed: ${lib.concatStringsSep " " gaps}" >&2
               ''}

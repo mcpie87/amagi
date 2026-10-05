@@ -272,6 +272,7 @@ const NAV_ITEMS: {
     | '/sessions'
     | '/seats'
     | '/settings'
+    | '/manual'
   label: string
   icon: IconName
 }[] = [
@@ -284,6 +285,7 @@ const NAV_ITEMS: {
   { to: '/sessions', label: 'Sessions', icon: 'sessions' },
   { to: '/seats', label: 'Seats', icon: 'agent' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
+  { to: '/manual', label: 'Manual', icon: 'book' },
 ]
 
 function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => void }) {

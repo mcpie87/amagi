@@ -1,13 +1,22 @@
 import {
+  addForgeCredential,
   Config,
   errMsg,
+  ForgeKind,
+  forgeTokenStates,
   type GitIdentity,
+  hasPinnedForgeRemote,
   hasStaleMaxParallel,
   LibnotifyNotifier,
+  listForgeCredentials,
+  loadConfig,
   loadGlobalConfig,
   NtfyNotifier,
   newWorkerId,
+  pickForgeCredential,
   type RunServiceApi,
+  removeForgeCredential,
+  updateForgeCredential,
   WorkerConfig,
   type Workspaces,
   writeConfig,
@@ -17,6 +26,9 @@ import { Hono } from 'hono'
 import * as z from 'zod'
 import { resolveWorkspace, valid } from './route-utils.ts'
 import {
+  ForgeCredentialCreateBody,
+  ForgeCredentialParam,
+  ForgeCredentialUpdateBody,
   GitIdentityBody,
   ParticipationBody,
   RepoParam,
@@ -27,6 +39,15 @@ import {
   WorkerCreateBody,
   WorkerUpdateBody,
 } from './schemas.ts'
+
+function gitRemotes(root: string): string[] {
+  try {
+    const result = Bun.spawnSync(['git', 'remote'], { cwd: root, stdout: 'pipe', stderr: 'pipe' })
+    return result.exitCode === 0 ? result.stdout.toString().split('\n').filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
 
 export type FleetRouteDeps = {
   workspaces: Workspaces
@@ -54,6 +75,11 @@ export function createFleetRoutes({
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
         reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
+        forgeKind: ws.config.forge.kind,
+        forgeRemote: ws.config.forge.remote,
+        forgeRemotePinned: hasPinnedForgeRemote(ws.root),
+        remotes: gitRemotes(ws.root),
+        forgeCredentials: forgeTokenStates(ws.root),
       })
     })
 
@@ -64,9 +90,40 @@ export function createFleetRoutes({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, ntfyTopic, ntfyServer, desktopFailureAlerts, reviewMaxRounds } =
-          c.req.valid('json')
+        const {
+          autoQueue,
+          ntfyTopic,
+          ntfyServer,
+          desktopFailureAlerts,
+          reviewMaxRounds,
+          forgeKind,
+          forgeRemote,
+          forgeCredentials,
+        } = c.req.valid('json')
+        const remotes = gitRemotes(ws.root)
+        if (forgeRemote != null && !remotes.includes(forgeRemote)) {
+          return c.json({ error: `no git remote named ${forgeRemote}` }, 400)
+        }
+        const known = listForgeCredentials()
+        for (const kind of ForgeKind.options) {
+          const id = forgeCredentials?.[kind]
+          if (id != null && !known.some((cred) => cred.id === id && cred.kind === kind)) {
+            return c.json({ error: `unknown ${kind} credential ${id}` }, 400)
+          }
+        }
+        for (const kind of ForgeKind.options) {
+          const id = forgeCredentials?.[kind]
+          if (id !== undefined) pickForgeCredential(ws.root, kind, id)
+        }
         writeConfig(ws.root, {
+          ...(forgeKind === undefined && forgeRemote === undefined
+            ? {}
+            : {
+                forge: {
+                  ...(forgeKind === undefined ? {} : { kind: forgeKind }),
+                  remote: forgeRemote ?? null,
+                },
+              }),
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
           ...(ntfyTopic === undefined &&
           ntfyServer === undefined &&
@@ -87,6 +144,15 @@ export function createFleetRoutes({
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
         }
         if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
+        if (
+          forgeKind !== undefined ||
+          forgeRemote !== undefined ||
+          forgeCredentials !== undefined
+        ) {
+          const { kind, remote } = loadConfig(ws.root).config.forge
+          ws.config.forge.kind = kind
+          ws.config.forge.remote = remote
+        }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
           const service = runnerFor(repo)
@@ -102,8 +168,38 @@ export function createFleetRoutes({
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
           reviewMaxRounds: ws.config.review.maxRounds,
+          forgeKind: ws.config.forge.kind,
+          forgeRemote: ws.config.forge.remote,
+          forgeRemotePinned: hasPinnedForgeRemote(ws.root),
+          remotes,
+          forgeCredentials: forgeTokenStates(ws.root),
         })
       },
+    )
+
+    .get('/api/forge-credentials', (c) => c.json({ credentials: listForgeCredentials() }))
+
+    .post('/api/forge-credentials', valid('json', ForgeCredentialCreateBody), (c) => {
+      const { kind, name, token, url } = c.req.valid('json')
+      return c.json(addForgeCredential(kind, name, token, url ?? null))
+    })
+
+    .patch(
+      '/api/forge-credentials/:id',
+      valid('param', ForgeCredentialParam),
+      valid('json', ForgeCredentialUpdateBody),
+      (c) => {
+        const credential = updateForgeCredential(c.req.valid('param').id, c.req.valid('json'))
+        return credential === null
+          ? c.json({ error: 'unknown credential' }, 404)
+          : c.json(credential)
+      },
+    )
+
+    .delete('/api/forge-credentials/:id', valid('param', ForgeCredentialParam), (c) =>
+      removeForgeCredential(c.req.valid('param').id)
+        ? c.json({ ok: true })
+        : c.json({ error: 'unknown credential' }, 404),
     )
 
     .post('/api/repos/:repo/settings/test-desktop', valid('param', RepoParam), async (c) => {
@@ -184,7 +280,12 @@ export function createFleetRoutes({
       },
     )
 
-    .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
+    .get('/api/workers', async (c) =>
+      c.json({
+        workers: await fleetView(),
+        difficultyLevels: loadGlobalConfig().difficulty.levels,
+      }),
+    )
 
     .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
       const fleet = loadGlobalConfig().worker

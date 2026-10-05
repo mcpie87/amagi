@@ -5,7 +5,11 @@ import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
 import { FleetWorkersSettings } from './fleet.tsx'
-import { RepositorySettingsCard } from './repository-settings.tsx'
+import {
+  ForgeCredentials,
+  RepositorySettingsCard,
+  useForgeCredentials,
+} from './repository-settings.tsx'
 
 const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -84,6 +88,7 @@ export function SettingsView() {
   const [ntfyTestBusy, setNtfyTestBusy] = useState(false)
   const [ntfyTestResult, setNtfyTestResult] = useState<string | null>(null)
   const repo = repos?.find(({ key }) => key === selectedRepo) ?? repos?.[0]
+  const forgeCredentials = useForgeCredentials()
 
   useEffect(() => {
     if (selected === null) return
@@ -266,7 +271,7 @@ export function SettingsView() {
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">Review</h2>
             <p className="mb-3 text-sm text-fg-faint">
-              Maximum review rounds for tasks with review enabled.
+              Tasks are reviewed when an enabled fleet worker has the Review role.
             </p>
             <label htmlFor="review-max-rounds" className="mb-1 block text-sm text-fg-muted">
               Maximum review rounds
@@ -424,6 +429,10 @@ export function SettingsView() {
         aria-labelledby="settings-tab-repositories"
         hidden={activeTab !== 'repositories'}
       >
+        <ForgeCredentials
+          credentials={forgeCredentials.credentials}
+          onChanged={forgeCredentials.reload}
+        />
         {repos !== null && repos.length > 1 && (
           <div
             role="tablist"
@@ -452,10 +461,20 @@ export function SettingsView() {
         )}
         {repo !== undefined && repos !== null && repos.length > 1 ? (
           <div id="repository-panel" role="tabpanel" aria-labelledby={`repository-tab-${repo.key}`}>
-            <RepositorySettingsCard repo={repo} onChanged={refreshRepos} />
+            <RepositorySettingsCard
+              repo={repo}
+              credentials={forgeCredentials.credentials}
+              onChanged={refreshRepos}
+              onCredentialsChanged={forgeCredentials.reload}
+            />
           </div>
         ) : repo !== undefined ? (
-          <RepositorySettingsCard repo={repo} onChanged={refreshRepos} />
+          <RepositorySettingsCard
+            repo={repo}
+            credentials={forgeCredentials.credentials}
+            onChanged={refreshRepos}
+            onCredentialsChanged={forgeCredentials.reload}
+          />
         ) : null}
       </div>
     </section>
