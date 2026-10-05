@@ -12,6 +12,7 @@ import {
   teaEnv,
   teaRepoArgs,
 } from './forge-cred.ts'
+import { assertSafePushDestination } from './push-safety.ts'
 
 export type PullRequest = { url: string; number: number }
 
@@ -104,6 +105,7 @@ async function pushTaskBranch(
     }
   }
   // An empty expected sha makes the lease demand that the branch is still absent.
+  await assertSafePushDestination(exec, cwd, remote, branch, auth)
   await execOk(
     exec,
     ['git', ...auth, 'push', '-u', `--force-with-lease=${ref}:${remoteSha}`, remote, branch],
@@ -119,6 +121,7 @@ async function deleteRemoteBranch(
   token: string | null,
 ): Promise<void> {
   const auth = await gitTokenConfig(exec, cwd, remote, token)
+  await assertSafePushDestination(exec, cwd, remote, branch, auth)
   const r = await exec(['git', ...auth, 'push', remote, '--delete', branch], { cwd })
   if (r.exitCode !== 0 && !/remote ref does not exist/i.test(r.stderr)) {
     throw new Error(`deleting remote branch ${branch}: ${r.stderr.trim()}`)
