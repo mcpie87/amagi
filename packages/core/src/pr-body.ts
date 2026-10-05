@@ -129,25 +129,12 @@ export function withAgentSections(
 
 /** File names and paths, e.g. `hello.txt` or `packages/core/pr-body.ts`. */
 const FILE_REF = /(?<![\w.-])[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}(?![\w])/g
-const CODE_COMMAND = /(?:tea logins add --token TOKEN|git -c url\.[^\s,;]+)/g
-const PROCESS_PATH_ONLY = /^\/proc\/(?:<pid>|&lt;pid&gt;|[0-9]+)\/cmdline$/
-const MARKDOWN_PROTECTED =
-  /(```[\s\S]*?```|`[^`\n]+`|\]\([^)]*\)|\/proc\/(?:<pid>|&lt;pid&gt;|[0-9]+)\/cmdline\b|&lt;[^\n]*?&gt;)/g
-const CODE_IDENTIFIER =
-  /(?<![\w.])(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*|argv|cmdline)\b/g
-const CODE_TOKEN = new RegExp(
-  [CODE_COMMAND.source, CODE_IDENTIFIER.source, FILE_REF.source].join('|'),
-  'g',
-)
 
 /** Wraps file names and paths in backticks, leaving existing code spans alone. */
 export function backtickFileRefs(text: string): string {
   return text
-    .split(MARKDOWN_PROTECTED)
-    .map((part, i) => {
-      if (i % 2 === 1) return PROCESS_PATH_ONLY.test(part) ? `\`${part}\`` : part
-      return part.replace(CODE_TOKEN, '`$&`')
-    })
+    .split(/(```[\s\S]*?```|`[^`\n]+`|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
     .join('')
 }
 

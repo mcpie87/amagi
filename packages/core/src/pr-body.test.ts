@@ -84,23 +84,13 @@ describe('backtickFileRefs', () => {
     )
   })
 
-  test('wraps technical identifiers, commands, environment variables and process paths', () => {
-    const text =
-      'ensureTeaLogin uses argv and /proc/<pid>/cmdline; set GIT_CONFIG_COUNT. ' +
-      'Run tea logins add --token TOKEN or git -c url.https://x-access-token:TOKEN@host/.insteadOf=...'
-    expect(backtickFileRefs(text)).toBe(
-      '`ensureTeaLogin` uses `argv` and `/proc/<pid>/cmdline`; set `GIT_CONFIG_COUNT`. ' +
-        'Run `tea logins add --token TOKEN` or `git -c url.https://x-access-token:TOKEN@host/.insteadOf=...`',
-    )
-  })
-
   test('does not wrap a prefix of a longer dotted token', () => {
     const text = 'text is date.toLocaleString(...)'
     expect(backtickFileRefs(text)).toBe(text)
   })
 
   test('does not rewrite markdown link destinations', () => {
-    const text = '[x](/a/b/C.tsx) [proc](/proc/<pid>/cmdline)'
+    const text = '[x](/a/b/C.tsx)'
     expect(backtickFileRefs(text)).toBe(text)
   })
 })
