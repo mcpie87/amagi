@@ -20,24 +20,24 @@ import {
   commitMessage,
   explainMentionPrompt,
   explainMentionSystemPrompt,
+  flagPrompt,
+  flagSystemPrompt,
   MAX_EXPLAIN_ANSWER_CHARS,
   respondToMentionPrompt,
   respondToMentionSystemPrompt,
-  takeDownPrompt,
-  takeDownSystemPrompt,
 } from './prompt.ts'
 import { parseQuickTaskDecision, quickTaskCandidates, resolveQuickTask } from './quick-task.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun, type WatcherAgentSession } from './watcher-agent.ts'
 import { taskIdFromBranch } from './worktree.ts'
 
-export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'take-down' | 'ambiguous'
+export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'flag' | 'ambiguous'
 
 const MENTION_KINDS: readonly MentionKind[] = [
   'fix-pr',
   'explain',
   'add-a-task',
-  'take-down',
+  'flag',
   'ambiguous',
 ]
 
@@ -124,7 +124,7 @@ export type RespondToMentionOptions = {
   mention: PrComment
   config: Config
   driver: PrDriver
-  /** Tracker used for take-down follow-up and add-a-task creation; optional so callers without one still reply on the PR. */
+  /** Tracker used to post flag reasons and create add-a-task issues; optional so callers without one still reply on the PR. */
   tracker?: Tracker
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
@@ -584,21 +584,17 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
 }
 
 /**
- * Lets the LLM judge whether a PR deserves to be taken down. When it rules
+ * Lets the LLM judge whether a PR should be flagged for closure. When it rules
  * `TAKE DOWN`, the reason is posted as a comment on the task issue in the
  * tracker; a `KEEP` verdict only replies on the PR. The agent never touches
  * the forge itself, so nothing is closed or reverted automatically.
  */
-async function respondToTakeDown(
-  opts: RespondToMentionOptions,
-  run: Exec,
-  p: Progress,
-): Promise<void> {
+async function respondToFlag(opts: RespondToMentionOptions, run: Exec, p: Progress): Promise<void> {
   const mk = opts.makeHarnessFn ?? makeHarness
   const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
-  const outPath = join(tmpdir(), `amagi-takedown-${opts.pr.number}-${opts.mention.id}.md`)
+  const outPath = join(tmpdir(), `amagi-flag-${opts.pr.number}-${opts.mention.id}.md`)
   let verdict: string
   let reason: string
   try {
@@ -611,19 +607,19 @@ async function respondToTakeDown(
           mk,
           harnessConfig,
           wt.path,
-          takeDownPrompt({
+          flagPrompt({
             pr: opts.pr,
             mention: opts.mention,
             outPath,
             conflicted: wt.conflicted,
           }),
-          takeDownSystemPrompt(),
+          flagSystemPrompt(),
           opts.repo,
         )
         return p.agent(proc, 'judging', {
           role: 'triage',
           harness: harnessConfig.kind,
-          source: `PR #${opts.pr.number} mention take-down`,
+          source: `PR #${opts.pr.number} mention flag`,
           cwd: wt.path,
         })
       },
@@ -635,7 +631,7 @@ async function respondToTakeDown(
       )
     }
     const raw = readFileSync(outPath, 'utf8').trim()
-    if (raw === '') throw new Error('agent produced no take-down verdict')
+    if (raw === '') throw new Error('agent produced no flag verdict')
     verdict = raw.split('\n', 1)[0]?.trim().toUpperCase() ?? ''
     reason = raw.split('\n').slice(1).join('\n').trim()
     if (reason === '') reason = raw
@@ -667,9 +663,9 @@ export async function respondToMention(opts: RespondToMentionOptions): Promise<M
     case 'explain':
       await respondToExplain(opts, run, p)
       return 'explain'
-    case 'take-down':
-      await respondToTakeDown(opts, run, p)
-      return 'take-down'
+    case 'flag':
+      await respondToFlag(opts, run, p)
+      return 'flag'
     case 'add-a-task':
       await respondToAddTask(opts, p)
       return 'add-a-task'
