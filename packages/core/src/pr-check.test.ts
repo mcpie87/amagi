@@ -10,7 +10,6 @@ import {
   isConflicting,
   iterationLabel,
   iterationsFromLabels,
-  listOpenPrs,
   mergeableToVerdict,
   mergeTreeVerdict,
   type PrInfo,
@@ -109,37 +108,6 @@ describe('isConflicting', () => {
       false,
     )
     expect(isConflicting(pr(), 'develop')).toBe(false)
-  })
-})
-
-describe('listOpenPrs', () => {
-  test('parses open PRs from gh pr list', async () => {
-    const { exec, calls } = fake((c) =>
-      c.includes('list') && c.includes('pr')
-        ? ok(
-            JSON.stringify([
-              { ...pr(), labels: [{ name: 'amagi' }, { name: 'P2' }] },
-              pr({ number: 8, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-            ]),
-          )
-        : undefined,
-    )
-    const prs = await listOpenPrs({ cwd: '/repo', remote: 'origin', exec })
-
-    expect(calls[0]).toEqual([
-      'gh',
-      'pr',
-      'list',
-      '--state',
-      'open',
-      '--json',
-      'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,createdAt,updatedAt,labels',
-    ])
-    expect(prs).toHaveLength(2)
-    expect(prs[0]).toMatchObject({ number: 7, headRefName: 'amagi/am-1-do-the-thing' })
-    // gh reports labels as objects; listOpenPrs reduces them to names
-    expect(prs[0]?.labels).toEqual(['amagi', 'P2'])
-    expect(prs[1]?.labels).toEqual([])
   })
 })
 
@@ -249,20 +217,6 @@ describe('fetchPullHeads', () => {
 
     expect(result.fetched).toBe(true)
     expect(result.heads).toEqual({})
-  })
-
-  test('flattens gh label objects into label names', async () => {
-    const { exec } = fake((c) =>
-      c.includes('list') && c.includes('pr')
-        ? ok(
-            JSON.stringify([
-              { ...pr(), labels: [{ name: 'amagi' }, { name: 'amagi/iterations:2' }] },
-            ]),
-          )
-        : undefined,
-    )
-    const prs = await listOpenPrs({ cwd: '/repo', remote: 'origin', exec })
-    expect(prs[0]?.labels).toEqual(['amagi', 'amagi/iterations:2'])
   })
 })
 
