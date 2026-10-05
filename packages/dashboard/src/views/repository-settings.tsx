@@ -104,6 +104,89 @@ export function RepositoryParticipation({
   )
 }
 
+export function RepositoryEpicClose({ repo }: { repo: Pick<Repo, 'key'> }) {
+  const [enabled, setEnabled] = useState(false)
+  const [available, setAvailable] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setLoaded(false)
+    setError(null)
+    fetch(`${apiBase}/api/repos/${repo.key}/settings`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as {
+          epicCloseEnabled: boolean
+          epicCloseAvailable: boolean
+        }
+      })
+      .then((settings) => {
+        if (!active) return
+        setEnabled(settings.epicCloseEnabled)
+        setAvailable(settings.epicCloseAvailable)
+        setLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        setError(err instanceof Error ? err.message : String(err))
+        setLoaded(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const setEpicClose = async (nextEnabled: boolean) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ epicCloseEnabled: nextEnabled }),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const settings = (await response.json()) as { epicCloseEnabled: boolean }
+      setEnabled(settings.epicCloseEnabled)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className={card}>
+      <h2 className="mb-1 text-sm text-fg-muted">Automatic epic closure</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Automatically close eligible Beads epics when all their child tasks are complete.
+      </p>
+      {!loaded ? (
+        <p className="text-sm text-fg-faint">Loading…</p>
+      ) : (
+        <label className="flex items-center gap-2 text-sm text-fg">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={busy || !available}
+            onChange={(event) => void setEpicClose(event.currentTarget.checked)}
+          />
+          Enable automatic epic closure
+          {!available && ' (available for Beads repositories)'}
+        </label>
+      )}
+      {error !== null && (
+        <p role="alert" className="mt-2 text-sm text-red-ink">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function RepositoryGitIdentity({ repo }: { repo: Pick<Repo, 'key'> }) {
   const [mode, setMode] = useState<GitIdentity['mode']>('path')
   const [path, setPath] = useState('')
@@ -693,6 +776,7 @@ export function RepositorySettingsCard({
   return (
     <div className="mt-6 space-y-4">
       <RepositoryParticipation repo={repo} onChanged={onChanged} />
+      <RepositoryEpicClose repo={repo} />
       <RepositoryForge
         key={repo.key}
         repo={repo}
