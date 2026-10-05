@@ -6,6 +6,23 @@ import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from 
 
 export { reviewPrompt } from './review-pack.ts'
 
+export const MENTION_KINDS = [
+  { kind: 'fix-pr', description: 'the human wants code in this PR changed' },
+  {
+    kind: 'explain',
+    description:
+      'the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
+  },
+  {
+    kind: 'add-a-task',
+    description: 'the human wants a new task tracked in the issue tracker, not done in this PR',
+  },
+  { kind: 'flag', description: 'the human explicitly wants this PR closed or reverted' },
+  { kind: 'ambiguous', description: 'only when the intent genuinely cannot be determined' },
+] as const
+
+export type MentionKind = (typeof MENTION_KINDS)[number]['kind']
+
 export type PromptContext = {
   task: TrackerTask
   worktree: string
@@ -421,21 +438,19 @@ export function classifyMentionSystemPrompt(): string {
 }
 
 export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
+  const kinds = MENTION_KINDS.map(({ kind }) => kind)
   return [
     `A human (@${ctx.mention.user}) commented on PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
     'Classify the comment into exactly one of:',
-    '- fix-pr: the human wants code in this PR changed',
-    '- explain: the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
-    '- add-a-task: the human wants a new task tracked in the issue tracker, not done in this PR',
-    '- flag: the human explicitly wants this pull request closed or reverted',
-    '- ambiguous: only when the intent genuinely cannot be determined',
+    ...MENTION_KINDS.map(({ kind, description }) => `- ${kind}: ${description}`),
     '',
     'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" and "is this already resolved?" are explain.',
+    'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
     '',
-    'Reply with exactly one token: fix-pr, explain, add-a-task, flag, or ambiguous.',
+    `Reply with exactly one token: ${kinds.join(', ').replace(/, ([^,]*)$/, ', or $1')}.`,
   ].join('\n')
 }
 

@@ -23,6 +23,8 @@ import {
   flagPrompt,
   flagSystemPrompt,
   MAX_EXPLAIN_ANSWER_CHARS,
+  MENTION_KINDS,
+  type MentionKind,
   respondToMentionPrompt,
   respondToMentionSystemPrompt,
 } from './prompt.ts'
@@ -31,20 +33,14 @@ import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun, type WatcherAgentSession } from './watcher-agent.ts'
 import { taskIdFromBranch } from './worktree.ts'
 
-export type MentionKind = 'fix-pr' | 'explain' | 'add-a-task' | 'flag' | 'ambiguous'
-
-const MENTION_KINDS: readonly MentionKind[] = [
-  'fix-pr',
-  'explain',
-  'add-a-task',
-  'flag',
-  'ambiguous',
-]
+export type { MentionKind } from './prompt.ts'
 
 /** Parse of the classifier's reply; only an exact known kind matches, anything else is ambiguous. */
 export function parseMentionKind(reply: string): MentionKind {
   const kind = reply.trim().toLowerCase()
-  return MENTION_KINDS.includes(kind as MentionKind) ? (kind as MentionKind) : 'ambiguous'
+  return MENTION_KINDS.some(({ kind: knownKind }) => knownKind === kind)
+    ? (kind as MentionKind)
+    : 'ambiguous'
 }
 
 export function mentionsPath(repoName: string): string {
