@@ -43,6 +43,12 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
 function fakeExec(baseOid: () => string = () => 'base1'): Exec {
   let unmerged = false
   return async (cmd) => {
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref')) {
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
+    }
     if (cmd.includes('ls-remote') && cmd.includes('refs/heads/main')) {
       return { exitCode: 0, stdout: `${baseOid()}\trefs/heads/main\n`, stderr: '' }
     }
@@ -531,6 +537,7 @@ test('fetches every open PR head each tick when a head moved', async () => {
   const git = fakeExec()
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd as string[])
+    if (cmd.includes('--symref')) return git(cmd, opts)
     if (cmd.includes('ls-remote')) {
       return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
     }

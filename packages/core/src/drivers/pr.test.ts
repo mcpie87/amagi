@@ -14,8 +14,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
+    if (cmd.includes('--symref')) return ok('ref: refs/heads/main\tHEAD\n')
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push'))
+      return ok('git@github.com:owner/repo.git\n')
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls }
@@ -413,6 +416,7 @@ describe('forgejoPr', () => {
     const exec: Exec = async (cmd) => {
       calls.push(cmd)
       if (cmd.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
+      if (cmd.includes('--symref')) return ok('ref: refs/heads/main\tHEAD\n')
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     return { exec, calls }

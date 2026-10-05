@@ -28,6 +28,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref'))
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     if (cmd[1] === 'diff') return { exitCode: 1, stdout: '', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }

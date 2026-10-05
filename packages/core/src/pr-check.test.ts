@@ -42,6 +42,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref'))
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, inputs }
@@ -691,5 +696,72 @@ describe('pushConflictFix', () => {
       'origin',
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
+  })
+
+  test('refuses to push to the push URL default branch', async () => {
+    const pushUrl = 'git@example.com:owner/push.git'
+    const { exec, calls } = fake((cmd) => {
+      if (cmd.includes('get-url')) {
+        return {
+          exitCode: 0,
+          stdout: cmd.includes('--push') ? `${pushUrl}\n` : 'git@example.com:owner/fetch.git\n',
+          stderr: '',
+        }
+      }
+      if (cmd.includes('--symref')) {
+        return {
+          exitCode: 0,
+          stdout: cmd.includes(pushUrl)
+            ? 'ref: refs/heads/trunk\tHEAD\n'
+            : 'ref: refs/heads/main\tHEAD\n',
+          stderr: '',
+        }
+      }
+      return undefined
+    })
+    await expect(
+      pushConflictFix({
+        cwd: '/wt/amagi-pr-7',
+        branch: 'amagi/pr-7-conflict',
+        headRef: 'trunk',
+        remote: 'origin',
+        exec,
+      }),
+    ).rejects.toThrow('remote default branch trunk')
+    expect(calls).toContainEqual(['git', 'remote', 'get-url', '--push', '--all', 'origin'])
+    expect(calls).toContainEqual(['git', 'ls-remote', '--symref', pushUrl, 'HEAD'])
+    expect(calls.some((cmd) => cmd.includes('push'))).toBe(false)
+  })
+
+  test('checks every push URL before pushing', async () => {
+    const first = 'git@example.com:owner/first.git'
+    const second = 'git@example.com:owner/second.git'
+    const { exec, calls } = fake((cmd) => {
+      if (cmd.includes('get-url') && cmd.includes('--push')) {
+        return { exitCode: 0, stdout: `${first}\n${second}\n`, stderr: '' }
+      }
+      if (cmd.includes('--symref')) {
+        return {
+          exitCode: 0,
+          stdout: cmd.includes(second)
+            ? 'ref: refs/heads/trunk\tHEAD\n'
+            : 'ref: refs/heads/main\tHEAD\n',
+          stderr: '',
+        }
+      }
+      return undefined
+    })
+    await expect(
+      pushConflictFix({
+        cwd: '/wt/amagi-pr-7',
+        branch: 'amagi/pr-7-conflict',
+        headRef: 'trunk',
+        remote: 'origin',
+        exec,
+      }),
+    ).rejects.toThrow('remote default branch trunk')
+    expect(calls).toContainEqual(['git', 'ls-remote', '--symref', first, 'HEAD'])
+    expect(calls).toContainEqual(['git', 'ls-remote', '--symref', second, 'HEAD'])
+    expect(calls.some((cmd) => cmd.includes('push'))).toBe(false)
   })
 })
