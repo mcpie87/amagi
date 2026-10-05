@@ -1,8 +1,14 @@
 import { afterEach, expect, test } from 'bun:test'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   Config,
   type CreatePrOptions,
   type CreateTrackerTask,
+  DONE_LABEL,
+  exec,
+  execOk,
   type GateRef,
   type MergeStatus,
   openDatabase,
@@ -13,6 +19,7 @@ import {
   type PrState,
   type PullRequest,
   type Question,
+  REWORK_LABEL,
   Store,
   type Tracker,
   type TrackerCapabilities,
@@ -24,6 +31,7 @@ import { startPrPoller } from './pr-poller.ts'
 
 class FakePr implements PrDriver {
   state: PrState = 'open'
+  labels: string[] = []
   mergeStatus: MergeStatus = 'conflicted'
   readonly calls: number[] = []
   readonly deleted: { remote: string; branch: string }[] = []
@@ -34,6 +42,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, number: number): Promise<PrState> {
     this.calls.push(number)
     return this.state
+  }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return this.labels
   }
   async listOpenPrs(_cwd: string): Promise<never[]> {
     return []
@@ -62,6 +73,8 @@ class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { create: false, edit: false, dependencies: false }
   readonly closed: { id: string; reason?: string }[] = []
   readonly statuses: { id: string; status: TrackerStatus }[] = []
+  readonly comments: { id: string; body: string }[] = []
+  readonly released: string[] = []
 
   async ready(): Promise<TrackerTask[]> {
     return []
@@ -84,11 +97,15 @@ class FakeTracker implements Tracker {
   async heartbeat(): Promise<boolean> {
     return true
   }
-  async comment(): Promise<void> {}
+  async comment(id: string, body: string): Promise<void> {
+    this.comments.push({ id, body })
+  }
   async setStatus(id: string, status: TrackerStatus): Promise<void> {
     this.statuses.push({ id, status })
   }
-  async release(): Promise<void> {}
+  async release(id: string): Promise<void> {
+    this.released.push(id)
+  }
   async close(id: string, reason?: string): Promise<void> {
     this.closed.push(reason === undefined ? { id } : { id, reason })
   }
@@ -102,9 +119,9 @@ class FakeTracker implements Tracker {
 }
 
 /** Claims a task and drives it to pr_open with a recorded pr number. */
-const openPr = (store: Store, prNumber = 7): void => {
+const openPr = (store: Store, prNumber = 7, worktree = '/wt/bd-1'): void => {
   store.append('bd-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
-  store.append('bd-1', { type: 'worktree.created', path: '/wt/bd-1', branch: 'amagi/bd-1-pr-work' })
+  store.append('bd-1', { type: 'worktree.created', path: worktree, branch: 'amagi/bd-1-pr-work' })
   store.append('bd-1', {
     type: 'pr.created',
     url: 'https://example.com/demo/pull/7',
@@ -125,10 +142,29 @@ const on =
   })
 
 const pollers: ReturnType<typeof startPrPoller>[] = []
+const tmpDirs: string[] = []
 
 afterEach(() => {
   for (const poller of pollers.splice(0)) poller.stop()
+  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
+
+/** A repo with the task's branch checked out in a worktree, as a runner leaves it. */
+async function repoWithWorktree(): Promise<{ repo: string; worktree: string }> {
+  const repo = mkdtempSync(join(tmpdir(), 'amagi-repo-'))
+  const wtRoot = mkdtempSync(join(tmpdir(), 'amagi-wt-'))
+  tmpDirs.push(repo, wtRoot)
+  const git = (args: string[], cwd = repo) => execOk(exec, ['git', ...args], { cwd })
+  await git(['init', '-q', '-b', 'main', '.'])
+  await git(['config', 'user.name', 'Test'])
+  await git(['config', 'user.email', 'test@example.com'])
+  writeFileSync(join(repo, 'README.md'), '# test\n')
+  await git(['add', '.'])
+  await git(['commit', '-q', '-m', 'init'])
+  const worktree = join(wtRoot, 'bd-1')
+  await git(['worktree', 'add', '-q', '-b', 'amagi/bd-1-pr-work', worktree])
+  return { repo, worktree }
+}
 
 test('a merged pr settles the task as done and closes the tracker issue', async () => {
   const store = new Store(openDatabase(':memory:'))
@@ -162,7 +198,7 @@ test('a merged pr closes the error tasks filed against it', async () => {
 
   expect(tracker.closed).toEqual([
     { id: 'bd-1', reason: 'PR merged' },
-    { id: 'bd-err', reason: 'bd-1 merged' },
+    { id: 'bd-err', reason: 'bd-1 done' },
   ])
 })
 
@@ -178,6 +214,84 @@ test('a closed pr settles the task as abandoned and closes the tracker issue', a
 
   expect(store.task('bd-1')?.state).toBe('abandoned')
   expect(tracker.statuses).toEqual([{ id: 'bd-1', status: 'closed' }])
+})
+
+test('a pr closed with the done label settles the task as done', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  store.append('bd-1', { type: 'retry.filed_as_error', errorTaskId: 'bd-err', reason: 'boom' })
+  const forge = new FakePr()
+  forge.state = 'closed'
+  forge.labels = ['amagi', DONE_LABEL]
+  const tracker = new FakeTracker()
+  tracker.open.add('bd-err')
+
+  pollers.push(startPrPoller({ store, forgeFor: on(forge), tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.state).toBe('done')
+  expect(tracker.closed).toEqual([
+    { id: 'bd-1', reason: `PR closed with ${DONE_LABEL}` },
+    { id: 'bd-err', reason: 'bd-1 done' },
+  ])
+  expect(forge.deleted).toEqual([{ remote: 'origin', branch: 'amagi/bd-1-pr-work' }])
+})
+
+test('a pr closed with the rework label starts a fresh attempt', async () => {
+  const { repo, worktree } = await repoWithWorktree()
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store, 7, worktree)
+  const forge = new FakePr()
+  forge.state = 'closed'
+  forge.labels = [REWORK_LABEL]
+  const tracker = new FakeTracker()
+
+  pollers.push(startPrPoller({ store, forgeFor: on(forge), tracker, cwd: repo, intervalMs: 10 }))
+  await Bun.sleep(200)
+
+  const task = store.task('bd-1')
+  expect(task?.state).toBe('claimed')
+  expect(task?.attempt).toBe(2)
+  expect(task?.prNumber).toBeNull()
+  expect(existsSync(worktree)).toBe(false)
+  expect(forge.deleted).toEqual([{ remote: 'origin', branch: 'amagi/bd-1-pr-work' }])
+  expect(tracker.comments.map((c) => c.id)).toEqual(['bd-1'])
+  expect(tracker.comments[0]?.body).toContain('https://example.com/demo/pull/7')
+  expect(tracker.released).toEqual(['bd-1'])
+  expect(tracker.closed).toEqual([])
+  expect(tracker.statuses).toEqual([])
+})
+
+test('a pr closed with both outcome labels is abandoned', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const forge = new FakePr()
+  forge.state = 'closed'
+  forge.labels = [DONE_LABEL, REWORK_LABEL]
+  const tracker = new FakeTracker()
+
+  pollers.push(startPrPoller({ store, forgeFor: on(forge), tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.state).toBe('abandoned')
+  expect(tracker.released).toEqual([])
+})
+
+test('a closed pr whose labels cannot be read stays unsettled', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  openPr(store)
+  const forge = new FakePr()
+  forge.state = 'closed'
+  forge.getPrLabels = async () => {
+    throw new Error('forge down')
+  }
+  const tracker = new FakeTracker()
+
+  pollers.push(startPrPoller({ store, forgeFor: on(forge), tracker, cwd: '/repo', intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.task('bd-1')?.state).toBe('pr_open')
+  expect(tracker.statuses).toEqual([])
 })
 
 test('an open pr keeps the task in pr_open', async () => {

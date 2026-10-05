@@ -32,6 +32,16 @@ export const AMAGI_LABEL = 'amagi'
  */
 export const NEEDS_CLOSING_LABEL = 'amagi/needs-closing'
 
+/** On a PR closed unmerged: the task is finished anyway, as if the PR had merged. */
+export const DONE_LABEL = 'amagi/done'
+/** On a PR closed unmerged: the work was wrong, so the task starts a fresh attempt. */
+export const REWORK_LABEL = 'amagi/rework'
+/**
+ * Created alongside every agent PR but never attached by amagi, so a human
+ * closing a PR finds them in the forge's label picker.
+ */
+export const OUTCOME_LABELS = [DONE_LABEL, REWORK_LABEL] as const
+
 /** Provenance plus an amagi/<type> intent label mirroring the source task. */
 export function amagiLabels(type: string | null): string[] {
   return type === null || type === '' ? [AMAGI_LABEL] : [AMAGI_LABEL, `amagi/${type}`]
@@ -52,6 +62,8 @@ export type PrDriver = {
   createPr(opts: CreatePrOptions): Promise<PullRequest>
   /** Resolve the remote state of a PR, run from `cwd` so the forge CLI finds the repo. */
   getPr(cwd: string, number: number): Promise<PrState>
+  /** Names of the labels on a PR in any state. */
+  getPrLabels(cwd: string, number: number): Promise<string[]>
   /** Every open PR in the repo the `cwd` belongs to. */
   listOpenPrs(cwd: string): Promise<PrInfo[]>
   /** Whether an open PR can merge, normalized to mergeable/conflicted/unknown. */
@@ -170,7 +182,7 @@ function githubPr(exec: Exec, forgeRemote: string): PrDriver {
           return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
         },
       )
-      for (const label of labels) {
+      for (const label of [...labels, ...OUTCOME_LABELS]) {
         // --force makes create idempotent; failure (e.g. no write perms) is best effort
         await exec(['gh', 'label', 'create', label, '--force'], {
           cwd,
@@ -212,6 +224,14 @@ function githubPr(exec: Exec, forgeRemote: string): PrDriver {
         default:
           return 'open'
       }
+    },
+    async getPrLabels(cwd, number) {
+      const out = await execOk(
+        exec,
+        ['gh', 'pr', 'view', String(number), '--json', 'labels', '--jq', '.labels[].name'],
+        { cwd, env: ghEnv(cwd, forgeRemote) },
+      )
+      return out.split('\n').filter((name) => name !== '')
     },
     async listOpenPrs(cwd) {
       const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
@@ -434,7 +454,7 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
         forgeToken('forgejo', cwd),
         async (head) => (await listOpenPrs(cwd)).find((pr) => pr.headRefName === head) ?? null,
       )
-      for (const label of labels) {
+      for (const label of [...labels, ...OUTCOME_LABELS]) {
         // best effort: a label that exists or a run without write perms is not fatal
         await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/labels`, {
           name: label,
@@ -471,6 +491,10 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
       if (pr.merged === true || pr.state === 'merged') return 'merged'
       if (pr.state === 'closed') return 'closed'
       return 'open'
+    },
+    async getPrLabels(cwd, number) {
+      const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
+      return ((pr.labels as Array<{ name?: string }> | undefined) ?? []).map((l) => l.name ?? '')
     },
     listOpenPrs,
     async getMergeStatus(cwd, number) {
@@ -634,7 +658,24 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
         forgeToken('gitlab', cwd),
         async (head) => (await openMrs(cwd, head))[0] ?? null,
       )
-      // GitLab creates labels on first use, so there is no create-on-demand step.
+      // GitLab creates attached labels on first use; only the unattached outcome
+      // labels need creating. Best effort: an existing label answers 409.
+      for (const label of OUTCOME_LABELS) {
+        await exec(
+          [
+            'glab',
+            'api',
+            '--method',
+            'POST',
+            'projects/:id/labels',
+            '-f',
+            `name=${label}`,
+            '-f',
+            'color=#A0A0A0',
+          ],
+          { cwd, env: glabEnv(cwd, forgeRemote) },
+        )
+      }
       await execOk(
         exec,
         [
@@ -665,6 +706,10 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
       if (state === 'merged') return 'merged'
       if (state === 'closed' || state === 'locked') return 'closed'
       return 'open'
+    },
+    async getPrLabels(cwd, number) {
+      const labels = (await mr(cwd, number)).labels
+      return Array.isArray(labels) ? labels.map(text) : []
     },
     listOpenPrs: (cwd) => openMrs(cwd),
     async getMergeStatus(cwd, number) {

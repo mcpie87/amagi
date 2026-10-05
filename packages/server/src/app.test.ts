@@ -253,6 +253,9 @@ class FakeMergePrDriver implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
@@ -1667,6 +1670,9 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     }
     async getPr(): Promise<PrState> {
       return 'open'
+    }
+    async getPrLabels(): Promise<string[]> {
+      return []
     }
     async getMergeStatus() {
       return 'mergeable' as const

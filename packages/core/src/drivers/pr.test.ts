@@ -247,7 +247,7 @@ describe('githubPr', () => {
     ).rejects.toThrow('permission denied')
   })
 
-  test('creates each label on demand before the pr', async () => {
+  test('creates each label and the outcome labels on demand before the pr', async () => {
     const { exec, calls } = fake((c) =>
       c.includes('create') && c.includes('pr') ? ok('https://github.com/x/y/pull/7\n') : undefined,
     )
@@ -265,6 +265,19 @@ describe('githubPr', () => {
     expect(creates).toEqual([
       ['gh', 'label', 'create', 'amagi', '--force'],
       ['gh', 'label', 'create', 'amagi/chore', '--force'],
+      ['gh', 'label', 'create', 'amagi/done', '--force'],
+      ['gh', 'label', 'create', 'amagi/rework', '--force'],
+    ])
+  })
+
+  test('reads pr label names from gh', async () => {
+    const { exec } = fake((c) =>
+      c.includes('view') && c.includes('labels') ? ok('amagi\namagi/rework\n') : undefined,
+    )
+
+    expect(await makePrDriver('github', 'origin', exec).getPrLabels('/repo', 7)).toEqual([
+      'amagi',
+      'amagi/rework',
     ])
   })
 

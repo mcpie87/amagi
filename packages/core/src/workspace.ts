@@ -159,6 +159,7 @@ function liveForge(config: Config): PrDriver {
   return {
     createPr: (opts) => current().createPr(opts),
     getPr: (cwd, number) => current().getPr(cwd, number),
+    getPrLabels: (cwd, number) => current().getPrLabels(cwd, number),
     listOpenPrs: (cwd) => current().listOpenPrs(cwd),
     getMergeStatus: (cwd, number) => current().getMergeStatus(cwd, number),
     getPrDiff: (cwd, number) => current().getPrDiff(cwd, number),

@@ -108,10 +108,12 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, PR creation failed, agent crash, etc.) | — |
-| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
+| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge and without an outcome label | — |
 | `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times. When `[review].enabled`, checks must pass before each review; blocking findings get a bounded implementer fix round followed by checks and another review, all before the single commit. Acceptable reviews proceed to `pr_open`; exhausted round, token, progress, or cost budgets still open a PR with unresolved findings and `amagi/review-unresolved`. The runner parks on `awaiting_answer` whenever the agent asks a question. A task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
+
+A human closing a PR unmerged can say how the task ended with one of two labels, created on the forge alongside every amagi PR: `amagi/done` settles the task to `done` and closes its tracker issue as if the PR had merged; `amagi/rework` drops the worktree and branch, comments the PR link on the tracker issue and releases it, so a worker claims it again as a fresh attempt. A PR carrying neither or both is `abandoned`.
 
 ## The runner service
 
