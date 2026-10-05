@@ -225,6 +225,7 @@ export function WatcherDetailDialog({
                           <ul className="mt-2 space-y-1 text-xs">
                             {run.actions.map((action, index) => (
                               <li
+                                // biome-ignore lint/suspicious/noArrayIndexKey: a run's actions are append-only and carry no id.
                                 key={`${run.runId}-${index}`}
                                 className={
                                   action.level === 'error' ? 'text-red-ink' : 'text-fg-muted'
@@ -277,6 +278,7 @@ export function WatcherDetailDialog({
                 <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px]">
                   {liveLog.map((entry, index) => (
                     <li
+                      // biome-ignore lint/suspicious/noArrayIndexKey: log entries can share a timestamp; the index disambiguates.
                       key={`${entry.ts}-${index}`}
                       className={entry.level === 'error' ? 'text-red-ink' : 'text-fg-muted'}
                     >

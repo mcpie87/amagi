@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as z from 'zod'
 import { stageAndCommit } from './commit.ts'
-import { type Config, reviewerHarnessConfig } from './config.ts'
-import { claimEligible, implementModel } from './difficulty.ts'
+import { activeReviewerConfig, type Config, reviewerHarnessConfig } from './config.ts'
+import { type ClaimWorker, claimEligible } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
@@ -21,6 +21,7 @@ import {
   isTerminal,
   type Finding as ReviewFinding,
   type StoredEvent,
+  SuggestedPriority,
   type TaskState,
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -90,6 +91,10 @@ export type RunnerDeps = {
    * to, so its agent is not told about either.
    */
   channel?: boolean
+  /** Fleet worker this runner belongs to, recorded on agent.started for the scorecard. */
+  workerName?: string | undefined
+  /** Fleet worker `runOnce` claims for, so its difficulty levels gate the claim. */
+  worker?: ClaimWorker | undefined
 }
 
 export type RunOnceResult = {
@@ -183,6 +188,30 @@ function reviewTokens(events: StoredEvent[]): number {
     if (event.event.kind !== 'usage') return total
     return total + event.event.inputTokens + event.event.outputTokens
   }, 0)
+}
+
+/**
+ * The reviewer's output schema, enforced by harnesses with constrained output.
+ * OpenAI strict mode (codex) rejects an array root and any property missing
+ * from `required`, so the list is wrapped and optional fields become nullable.
+ */
+const ReviewOutput = z.object({
+  findings: z.array(
+    Finding.extend({
+      covers: z.string().min(1).nullable(),
+      suggestedPriority: SuggestedPriority.nullable(),
+    }),
+  ),
+})
+
+/** Accepts the `{ findings }` wrapper with its nulls, or a bare findings array. */
+function parseFindings(raw: unknown): ReviewFinding[] {
+  if (Array.isArray(raw)) return z.array(Finding).parse(raw)
+  return ReviewOutput.parse(raw).findings.map(({ covers, suggestedPriority, ...finding }) => ({
+    ...finding,
+    ...(covers === null ? {} : { covers }),
+    ...(suggestedPriority === null ? {} : { suggestedPriority }),
+  }))
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
@@ -367,6 +396,7 @@ export class Runner {
   private contextWarned = false
   /** Fresh-context restarts already spent on the current task run, across all phases. */
   private contextRestarts = 0
+  private claimSeq: number | null = null
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -388,7 +418,7 @@ export class Runner {
     if (options.previousSnapshot) {
       fromTree = options.previousSnapshot
     } else {
-      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
       fromTree = (await execOk(this.exec, ['git', 'merge-base', base, 'HEAD'], { cwd })).trim()
     }
     const diff = await execOk(this.exec, ['git', 'diff', '--binary', fromTree, beforeTree], { cwd })
@@ -402,7 +432,10 @@ export class Runner {
     const openIssues = await this.deps.tracker.ready(200)
     const outputPath = join(runState, `review-${round}-${Date.now()}.json`)
     const schemaPath = join(runState, `review-${round}-${Date.now()}.schema.json`)
-    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(z.array(Finding)), null, 2))
+    const reviewerConfig =
+      this.deps.reviewerConfig ?? activeReviewerConfig(config) ?? reviewerHarnessConfig(config)
+    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
+    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(ReviewOutput), null, 2))
     const instructions = [
       `Task: ${task.id} ${task.title}`,
       `Description:\n${task.description}`,
@@ -421,7 +454,7 @@ export class Runner {
         : '',
       `Open issue ids and titles for covers:\n${openIssues.map((issue) => `${issue.id}: ${issue.title}`).join('\n') || '(none)'}`,
       `Change under review:\n${diff || '(no diff)'}`,
-      `Return only the findings JSON array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
+      `Return only a JSON object {"findings": [...]} holding the findings array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
     ]
       .filter(Boolean)
       .join('\n\n')
@@ -430,8 +463,6 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig = this.deps.reviewerConfig ?? reviewerHarnessConfig(config)
-    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
       : (options.reviewerSession ?? this.latestReviewerSession(task.id))
@@ -454,7 +485,7 @@ export class Runner {
       ...(reviewerConfig.seat === undefined ? {} : { seat: reviewerConfig.seat }),
       ...(reviewerConfig.model === undefined ? {} : { model: reviewerConfig.model }),
       ...(reviewerConfig.effort === undefined ? {} : { effort: reviewerConfig.effort }),
-      ...(harness.kind === 'codex' ? { outputSchema: schemaPath } : {}),
+      outputSchema: schemaPath,
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) {
@@ -472,7 +503,7 @@ export class Runner {
           prompt:
             attempt === 0
               ? prompt
-              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON array.`,
+              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON object.`,
         },
         'review',
         null,
@@ -488,7 +519,7 @@ export class Runner {
       try {
         writeFileSync(outputPath, run.summary ?? '')
         const parsed: unknown = JSON.parse(readFileSync(outputPath, 'utf8'))
-        findings = z.array(Finding).parse(parsed)
+        findings = parseFindings(parsed)
         reason = null
         break
       } catch (error) {
@@ -590,7 +621,7 @@ export class Runner {
     const { store, tracker, config } = this.deps
     const task =
       taskId === undefined
-        ? await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+        ? await claimEligible(tracker, config, this.deps.worker ?? null, (skipped, reason) => {
             store.append(null, {
               type: 'claim.rejected',
               title: skipped.title,
@@ -624,6 +655,7 @@ export class Runner {
         ? {}
         : { difficulty: task.difficulty }),
     })
+    this.claimSeq = claimEvent.seq
     const { warnTokens, maxTokens } = this.contextLimits()
     store.append(task.id, {
       type: 'run.limits',
@@ -684,6 +716,9 @@ export class Runner {
   }
 
   private transition(taskId: string, to: TaskState, reason?: string): void {
+    if (this.claimSeq !== null && this.deps.store.claimReplaced(taskId, this.claimSeq)) {
+      throw new LeaseLostError(taskId)
+    }
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
     // An external actor (the doom guard) may have parked the task in a
@@ -1013,14 +1048,18 @@ export class Runner {
         this.exec,
         this.deps.repoRoot,
         config.forge.remote,
-        forgeToken(config.forge.kind),
+        forgeToken(config.forge.kind, this.deps.repoRoot),
       )
-      if (tokenCfg.length > 0) {
-        await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+      if (Object.keys(tokenCfg).length > 0) {
+        await execOk(this.exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
           cwd: this.deps.repoRoot,
+          env: tokenCfg,
         })
       }
-      const base = tokenCfg.length > 0 ? `origin/${config.repo.baseBranch}` : config.repo.baseBranch
+      const base =
+        Object.keys(tokenCfg).length > 0
+          ? `${config.forge.remote}/${config.repo.baseBranch}`
+          : config.repo.baseBranch
       worktree = await createWorktree({
         repoRoot: this.deps.repoRoot,
         repoName: this.deps.repoName,
@@ -1031,6 +1070,8 @@ export class Runner {
         setupCmd: config.repo.setupCmd,
         persona: config.repo.persona,
         exec: this.exec,
+        onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
+        onSetupFinished: (report) => store.append(task.id, { type: 'setup.finished', ...report }),
       })
     }
     await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)
@@ -1132,7 +1173,7 @@ export class Runner {
 
     if (current.summary !== null && parseViabilityDecision(current.summary) !== null) {
       const status = await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })
-      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
       const commits = await execOk(this.exec, ['git', 'rev-list', '--count', `${base}..HEAD`], {
         cwd,
       })
@@ -1169,10 +1210,15 @@ export class Runner {
     current = checked
 
     let reviewSummary: ReviewPrSummary | null = null
-    if (config.review.enabled) {
+    if ((this.deps.reviewerConfig ?? activeReviewerConfig(config)) !== undefined) {
       reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
       if (reviewSummary === null) return
       current = reviewSummary.run
+    } else {
+      this.deps.store.append(task.id, {
+        type: 'review.skipped',
+        reason: 'no enabled fleet worker has the Review role and review.enabled is off',
+      })
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
@@ -1394,8 +1440,13 @@ export class Runner {
     reviewSummary?: ReviewPrSummary | null,
   ): Promise<void> {
     const { store, config } = this.deps
-    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
-    const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, config.forge.remote, this.exec)
+    const changes = await changesSinceBase(
+      this.exec,
+      cwd,
+      config.forge.remote,
+      config.repo.baseBranch,
+    )
     if (changes.length === 0) {
       // The worktree was dirty and a commit was made, yet the three-dot diff
       // against the base is empty: the agent re-applied change already on the
@@ -1481,7 +1532,7 @@ export class Runner {
     } catch (err) {
       const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
-        ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+        ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
         type: 'error',
@@ -1517,7 +1568,7 @@ export class Runner {
         this.throwIfCancelled(task.id)
         const retryMessage = errMsg(retryErr)
         const retryHint = /auth|login|token|not logged/i.test(retryMessage)
-          ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+          ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
           : ''
         store.append(task.id, {
           type: 'error',
@@ -1691,6 +1742,7 @@ export class Runner {
             seat: spawn.seat ?? harness.kind,
             model,
             effort,
+            ...(this.deps.workerName === undefined ? {} : { worker: this.deps.workerName }),
             cwd: opts.cwd,
             resumed: resumeFrom !== null,
           })
@@ -2203,10 +2255,11 @@ export class Runner {
       this.exec,
       this.deps.repoRoot,
       config.forge.remote,
-      forgeToken(config.forge.kind),
+      forgeToken(config.forge.kind, this.deps.repoRoot),
     )
-    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+    const fetch = await this.exec(['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
       cwd,
+      env: tokenCfg,
     })
     if (fetch.exitCode !== 0) return false
 
@@ -2215,7 +2268,10 @@ export class Runner {
       dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
     if (dirty && !stashed) return false
 
-    const rebase = await this.exec(['git', 'rebase', `origin/${config.repo.baseBranch}`], { cwd })
+    const rebase = await this.exec(
+      ['git', 'rebase', `${config.forge.remote}/${config.repo.baseBranch}`],
+      { cwd },
+    )
     if (rebase.exitCode !== 0) {
       await this.exec(['git', 'rebase', '--abort'], { cwd })
       if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
@@ -2239,7 +2295,7 @@ export class Runner {
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
-    const ref = await diffBase(this.exec, cwd, base)
+    const ref = await diffBase(this.exec, cwd, this.deps.config.forge.remote, base)
     const ahead = await this.exec(['git', 'rev-list', '--count', `${ref}..HEAD`], { cwd })
     if (ahead.exitCode !== 0 || Number(ahead.stdout.trim()) === 0) return false
 

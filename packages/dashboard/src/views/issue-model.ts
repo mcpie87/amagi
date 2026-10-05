@@ -1,4 +1,3 @@
-import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { apiBase } from '../api.ts'
 
 export type Dependency = {
@@ -25,10 +24,6 @@ export type Issue = {
   dependencies: Dependency[]
   /** Issues this one blocks; only the single-issue detail endpoint reports them. */
   dependents?: Dependency[]
-}
-
-export function isHumanOnlyIssue(issue: Pick<Issue, 'labels' | 'status'>): boolean {
-  return issue.status !== 'closed' && issue.labels.includes(HUMAN_ONLY_LABEL)
 }
 
 /** One issue with its blockers and dependents, from the tracker's detail view. */

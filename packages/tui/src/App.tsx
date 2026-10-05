@@ -6,6 +6,7 @@ import {
   isTerminal,
   type ProjectedTask,
   relTime,
+  reviewBadge,
   reviewWaitingSeat,
   runHealth,
   runHealthNearLimit,
@@ -24,6 +25,8 @@ import { useOverview } from './useOverview.ts'
 import { WatcherDetail } from './WatcherDetail.tsx'
 
 export type AppProps = { baseUrl: string; repo: string }
+
+const REVIEW_COLOR = { ok: 'green', warn: 'yellow', active: 'magenta' } as const
 
 type Screen =
   | { name: 'overview' }
@@ -163,6 +166,7 @@ function QueueScreen({
           {tasks.map((task, i) => {
             const nearLimit = runHealthNearLimit(runHealth(state, task.id, now))
             const waitingSeat = reviewWaitingSeat(state, task.id)
+            const review = reviewBadge(task)
             return (
               <Box key={task.id} gap={1}>
                 {i === selected ? <Text color="cyan">{'>'}</Text> : <Text> </Text>}
@@ -170,6 +174,7 @@ function QueueScreen({
                 {waitingSeat !== null && <Text color="yellow">waiting for seat {waitingSeat}</Text>}
                 {nearLimit && <Text color="yellow">!</Text>}
                 <Text wrap="truncate">{task.title}</Text>
+                {review !== null && <Text color={REVIEW_COLOR[review.tone]}>{review.text}</Text>}
                 <Text dimColor>
                   {task.id} {relTime(task.updatedAt)}
                 </Text>

@@ -231,6 +231,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return []
   }
@@ -759,26 +762,22 @@ describe('RunService', () => {
     expect(store.task(TASK2.id)).toBeNull()
   })
 
-  test('start refuses a specific task the model tier cannot claim', async () => {
+  test("start refuses a specific task outside the worker's difficulty levels", async () => {
     const hard = { ...TASK, difficulty: 'high' }
     const service = makeService(
       new FakeTracker([hard]),
       new FakeHarness(),
       1,
       config({
-        harness: { implement: { kind: 'claude', model: 'claude-haiku-4-5' } },
-        difficulty: {
-          enabled: true,
-          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-4-5': 'smart' },
-          requiredTier: { high: 'smart' },
-        },
+        worker: [{ id: 'worker-1', name: 'Worker 1', kind: 'claude', difficulties: ['low'] }],
+        difficulty: { enabled: true },
       }),
     )
     const res = await service.start(TASK.id)
     expect(res).toEqual({
       ok: false,
       status: 409,
-      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
+      error: 'task bd-a1b2: Worker 1 does not take high difficulty tasks',
     })
   })
 
@@ -958,42 +957,6 @@ describe('RunService', () => {
     expect(await tracker.ready()).toEqual([TASK])
     expect((await service.status()).totalSeats).toBe(0)
     service.dispose()
-  })
-
-  test('start gates a claimed task on the override model, not the configured default', async () => {
-    const hard = { ...TASK, difficulty: 'high' }
-    let captured: Config['harness']['implement'] | null = null
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([hard]),
-      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
-      config: config({
-        harness: { implement: { kind: 'claude', model: 'claude-sonnet-5' } },
-        difficulty: {
-          enabled: true,
-          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-5': 'smart' },
-          requiredTier: { high: 'smart' },
-        },
-      }),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      makeHarness: (cfg) => {
-        captured = cfg
-        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
-      },
-    })
-    const weak = await service.start(hard.id, { model: 'claude-haiku-4-5' })
-    expect(weak).toEqual({
-      ok: false,
-      status: 409,
-      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
-    })
-    expect(captured).toBeNull()
-    const ok = await service.start(hard.id, { model: 'claude-sonnet-5' })
-    expect(ok).toEqual({ ok: true, taskId: hard.id })
-    await waitFor(() => store.task(hard.id)?.state === 'pr_open')
-    expect(captured).toEqual(expect.objectContaining({ model: 'claude-sonnet-5' }))
   })
 
   test('start refuses a task the tracker does not see as ready', async () => {

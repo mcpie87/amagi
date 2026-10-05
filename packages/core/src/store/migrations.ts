@@ -124,4 +124,11 @@ export const MIGRATIONS: readonly Migration[] = [
       `)
     },
   },
+  {
+    name: '011_review_outcome',
+    sql: `
+      alter table tasks add column review_unresolved integer not null default 0;
+      alter table tasks add column review_skipped text;
+    `,
+  },
 ]

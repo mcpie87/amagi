@@ -317,6 +317,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
 
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return []
@@ -591,6 +594,40 @@ describe('Runner.review', () => {
     expect(reviewer.calls[2]?.resumeFrom).toBeNull()
   })
 
+  test('the reviewer gets a strict-mode findings schema and its nulls are dropped', async () => {
+    registerTask()
+    writeFileSync(join(repo, 'README.md'), '# first change\n')
+    let schema: {
+      type?: string
+      properties?: {
+        findings?: { items?: { properties?: Record<string, unknown>; required?: string[] } }
+      }
+    } = {}
+    const reviewer = new ReviewHarness([
+      (opts) => {
+        schema = JSON.parse(readFileSync(opts.outputSchema ?? '', 'utf8'))
+        return JSON.stringify({
+          findings: [{ ...finding, covers: null, suggestedPriority: null }],
+        })
+      },
+    ])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const result = await runner.review({ task: TASK, cwd: repo, round: 1 })
+    expect(result.findings).toEqual([finding])
+    expect(schema.type).toBe('object')
+    const items = schema.properties?.findings?.items
+    expect(items?.required?.toSorted()).toEqual(Object.keys(items?.properties ?? {}).toSorted())
+  })
+
   test('parks without committing when checks fail after a review fix', async () => {
     const forge = new FakePr()
     const harness = new FakeHarness([
@@ -672,6 +709,29 @@ describe('Runner.runOnce', () => {
       review: { enabled: true, harness: { kind: 'codex' }, ...review },
       loop,
     })
+
+  test('a replaced claim stops the old runner before its next state transition', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        effect: (cwd) => {
+          writesAFile.effect?.(cwd, '')
+          store.append(TASK.id, {
+            type: 'task.claimed',
+            title: TASK.title,
+            tracker: 'fake',
+          })
+        },
+      },
+    ])
+
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(
+      store.events({ taskId: TASK.id, limit: 999 }).some((event) => event.type === 'error'),
+    ).toBe(false)
+  })
 
   test('files uncovered follow-ups once and links both proposals and covered issues in the PR', async () => {
     class CreatingTracker extends FakeTracker {
@@ -783,6 +843,49 @@ describe('Runner.runOnce', () => {
     expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
     expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
+  })
+
+  test('an enabled fleet reviewer turns review on without review.enabled', async () => {
+    const reviewer = new ReviewHarness(['[]'])
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        worker: [
+          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
+        ],
+      }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(reviewer.calls).toHaveLength(1)
+    expect(types(TASK.id)).toContain('review.finished')
+  })
+
+  test('skips review with no fleet reviewer and review.enabled unset', async () => {
+    const reviewer = new ReviewHarness(['[]'])
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        worker: [
+          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: false },
+        ],
+      }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(reviewer.calls).toHaveLength(0)
+    expect(types(TASK.id)).not.toContain('review.started')
+    expect(types(TASK.id)).toContain('review.skipped')
   })
 
   test('records reviewer process failures and opens an unresolved PR without invalid state transitions', async () => {
@@ -1066,6 +1169,7 @@ describe('Runner.runOnce', () => {
       'agent.exited',
       'task.state',
       'checks.finished',
+      'review.skipped',
       'commit.created',
       'task.state',
       'pr.created',

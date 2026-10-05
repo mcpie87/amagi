@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
-import { classifyDifficulty } from './difficulty.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
@@ -27,6 +26,7 @@ import {
   respondToMentionPrompt,
   respondToMentionSystemPrompt,
 } from './prompt.ts'
+import { parseQuickTaskDecision, quickTaskCandidates, resolveQuickTask } from './quick-task.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun, type WatcherAgentSession } from './watcher-agent.ts'
 import { taskIdFromBranch } from './worktree.ts'
@@ -124,7 +124,7 @@ export type RespondToMentionOptions = {
   mention: PrComment
   config: Config
   driver: PrDriver
-  /** Tracker used to post flag reasons and log add-a-task responses; optional so callers without one still reply on the PR. */
+  /** Tracker used to post flag reasons and create add-a-task issues; optional so callers without one still reply on the PR. */
   tracker?: Tracker
   exec?: Exec | undefined
   /** Test seam: the harness factory, defaulting to the configured one. */
@@ -260,6 +260,7 @@ function configuredFooter(config: Config): string {
 async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage?: string) {
   return prepareConflictWorktree({
     repoRoot: opts.root,
+    remote: opts.config.forge.remote,
     repoName: opts.repoName,
     worktreeRoot: opts.config.repo.worktreeRoot,
     baseBranch: opts.config.repo.baseBranch,
@@ -504,13 +505,34 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
   return kind
 }
 
-function addTaskTitle(opts: RespondToMentionOptions): string {
-  const firstLine = opts.mention.body.trim().split('\n')[0] ?? 'New task'
-  return `PR #${opts.pr.number}: ${firstLine.slice(0, 80)}`
+function quickTaskPrompt(
+  opts: RespondToMentionOptions,
+  candidates: Awaited<ReturnType<typeof quickTaskCandidates>>,
+): string {
+  return [
+    'Draft one issue for this PR mention. The service will create it through the configured tracker.',
+    'Do not run commands or access the tracker directly. Existing open and in-progress issues are supplied below.',
+    'Record ordinary missing details as assumptions. Ask a focused question only when materially different interpretations would make a task useless or harmful.',
+    'If a supplied issue already covers the request, return its ID. If the supplied context proves it is already fixed, return the evidence.',
+    'Reply with exactly one JSON object in one of these shapes:',
+    '{"status":"create","title":"short imperative title","context":"why","goal":"outcome","scope":"boundaries","assumptions":"filled-in details","acceptance":"observable completion criteria"}',
+    '{"status":"existing","id":"ID from supplied issues"}',
+    '{"status":"fixed","explanation":"brief reason"}',
+    '{"status":"clarification","question":"one focused question"}',
+    '',
+    `PR #${opts.pr.number}: ${opts.pr.title} (${opts.pr.url})`,
+    `Mention by @${opts.mention.user}:`,
+    opts.mention.body.trim(),
+    '',
+    'Existing issues:',
+    JSON.stringify(
+      candidates.map(({ id, title, description, status }) => ({ id, title, description, status })),
+    ),
+  ].join('\n')
 }
 
 async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Promise<void> {
-  p.phase('logging a task')
+  p.phase('creating a task')
   const tracker = opts.tracker
   if (tracker === undefined || !tracker.capabilities.create) {
     await opts.driver.postComment(
@@ -520,33 +542,44 @@ async function respondToAddTask(opts: RespondToMentionOptions, p: Progress): Pro
     )
     return
   }
-  const description = [
-    `From @${opts.mention.user} on PR #${opts.pr.number} "${opts.pr.title}" (${opts.pr.url}):`,
-    '',
-    opts.mention.body.trim(),
-  ].join('\n')
-  const title = addTaskTitle(opts)
-  const difficulty = opts.config.difficulty.enabled
-    ? await classifyDifficulty(title, description, opts.config, opts.makeHarnessFn, {
-        ...(opts.store === undefined ? {} : { store: opts.store }),
-        source: `PR #${opts.pr.number} mention difficulty classification`,
-      })
-    : null
-  const task = await tracker.createTask({
-    title,
-    description,
-    acceptanceCriteria: null,
-    priority: null,
-    labels: [],
-    dependencies: [],
-    parent: null,
-    ...(difficulty === null ? {} : { difficulty }),
+  const mk = opts.makeHarnessFn ?? makeHarness
+  const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
+  const candidates = await quickTaskCandidates(tracker)
+  const proc = mk(harnessConfig).start({
+    cwd: tmpdir(),
+    prompt: quickTaskPrompt(opts, candidates),
+    systemPrompt: 'Return only the requested JSON. Do not use tools or run commands.',
+    model: harnessConfig.model,
+    effort: harnessConfig.effort,
+    ...(harnessConfig.seat === undefined ? {} : { seat: harnessConfig.seat }),
+    permissions: 'read-only',
+    allowedTools: [],
+    ...(opts.repo === undefined
+      ? {}
+      : { seatActivity: { repo: opts.repo, watcher: 'mention-watcher' } }),
   })
-  const where = task.url ?? `task ${task.id}`
+  const outcome = await p.agent(proc, 'drafting a task', {
+    role: 'triage',
+    harness: harnessConfig.kind,
+    source: `PR #${opts.pr.number} quick-task draft`,
+    cwd: tmpdir(),
+  })
+  if (!outcome.ok) throw new Error(`task drafter failed: ${agentFailure(outcome)}`)
+  const result = await resolveQuickTask(
+    tracker,
+    candidates,
+    parseQuickTaskDecision(outcome.summary ?? ''),
+  )
+  const response =
+    result.status === 'issue'
+      ? `@${opts.mention.user} Logged this as ${result.issue}.`
+      : result.status === 'fixed'
+        ? `@${opts.mention.user} This appears to be already fixed: ${result.explanation}`
+        : `@${opts.mention.user} ${result.question}`
   await opts.driver.postComment(
     opts.root,
     opts.pr.number,
-    `@${opts.mention.user} Logged this as ${where}.${configuredFooter(opts.config)}`,
+    `${response}${configuredFooter(opts.config)}`,
   )
 }
 

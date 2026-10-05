@@ -1,17 +1,23 @@
+import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { type ProjectedTask, tasksNeedingAttention } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard } from '../store.tsx'
 import { EmptyState } from '../ui.tsx'
-import { type Issue, isHumanOnlyIssue } from './issue-model.ts'
+import type { Issue } from './issue-model.ts'
 import { RunList } from './overview.tsx'
 import { AnswerBox, CloseButtons } from './task-actions.tsx'
+
+/** Last list per repo, so returning to the inbox shows it while it refreshes. */
+const humanIssuesByRepo = new Map<string, Issue[]>()
 
 export function InboxView() {
   const { state, selected } = useDashboard()
   const attention = tasksNeedingAttention(state)
-  const [humanIssues, setHumanIssues] = useState<Issue[]>([])
+  const [humanIssues, setHumanIssues] = useState<Issue[]>(
+    () => (selected === null ? undefined : humanIssuesByRepo.get(selected)) ?? [],
+  )
   const [humanIssuesError, setHumanIssuesError] = useState<string | null>(null)
   const [humanIssuesLoading, setHumanIssuesLoading] = useState(false)
   const questions = Object.values(state.questions)
@@ -26,17 +32,19 @@ export function InboxView() {
       return
     }
     let active = true
-    setHumanIssues([])
-    setHumanIssuesLoading(true)
+    const cached = humanIssuesByRepo.get(selected)
+    setHumanIssues(cached ?? [])
+    setHumanIssuesLoading(cached === undefined)
     setHumanIssuesError(null)
-    fetch(`${apiBase}/api/repos/${selected}/issues`)
+    fetch(`${apiBase}/api/repos/${selected}/issues?label=${HUMAN_ONLY_LABEL}`)
       .then(async (response) => {
         if (response.status === 501) return []
         if (!response.ok)
           throw new Error((await response.json()).error ?? `HTTP ${response.status}`)
-        return ((await response.json()) as Issue[]).filter(isHumanOnlyIssue)
+        return (await response.json()) as Issue[]
       })
       .then((issues) => {
+        humanIssuesByRepo.set(selected, issues)
         if (active) setHumanIssues(issues)
       })
       .catch((err: unknown) => {

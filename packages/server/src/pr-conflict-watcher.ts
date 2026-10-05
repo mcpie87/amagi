@@ -17,9 +17,13 @@ import {
   mergeableToVerdict,
   mergeTreeLogPath,
   mergeTreeVerdict,
+  PR_TASK_STATES,
+  PRIMARY_FORGE,
   type PrDriver,
+  type PrForge,
   type PrInfo,
   type PrPriority,
+  prForgeRouter,
   type ResolveConflictResult,
   readConflictWatch,
   recordMergeTreeObservation,
@@ -45,6 +49,8 @@ export type PrConflictWatcherOptions = {
   tracker: Tracker
   /** Forge driver for the pointlessness pass's label and comment mutations. */
   driver: PrDriver
+  /** Routes task PR URLs to their forges; defaults to matching them against the repo's git remotes. */
+  forgeFor?: ((prUrl: string | null) => PrForge) | undefined
   intervalMs?: number
   /** Test seams, forwarded to the resolver. */
   exec?: Exec | undefined
@@ -54,7 +60,8 @@ export type PrConflictWatcherOptions = {
 export type PrConflictWatcher = {
   stop(): void
   activity(): WorkerActivity
-  queue(prNumber: number): void
+  /** Queues a manual resolution; `prUrl` routes it to the forge the PR lives on. */
+  queue(prNumber: number, prUrl?: string | null): void
 }
 
 const DEFAULT_INTERVAL_MS = 300_000
@@ -79,6 +86,7 @@ export function startPrConflictWatcher({
   store,
   tracker,
   driver,
+  forgeFor = prForgeRouter(root, config, driver),
   intervalMs = DEFAULT_INTERVAL_MS,
   exec,
   makeHarnessFn,
@@ -88,7 +96,7 @@ export function startPrConflictWatcher({
   let conflicting = 0
   let resolved = 0
   /** Last seen PR head SHAs, so the per-tick fetch is skipped when none moved. */
-  let lastPullHeads: Record<string, string> = {}
+  const lastPullHeads = new Map<string, Record<string, string>>()
   let runs = 0
   let failures = 0
   let flagged = 0
@@ -102,7 +110,8 @@ export function startPrConflictWatcher({
   }
   /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
   let unknownCursor = 0
-  const queuedPrs = new Set<number>()
+  /** Conflict-watch state keys queued for a manual resolution run. */
+  const queuedPrs = new Set<string>()
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -135,11 +144,20 @@ export function startPrConflictWatcher({
    * tick are forced through the driver so the mergeability job resolves
    * round-robin and coverage accrues without a tenfold call increase.
    */
-  async function observeMergeTree(prs: PrInfo[], run: Exec, runId: string): Promise<void> {
+  async function observeMergeTree(
+    prs: PrInfo[],
+    run: Exec,
+    runId: string,
+    forge: PrForge,
+  ): Promise<void> {
     const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
-    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
+    const { kind, remote } = forge.config.forge
+    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
     for (const base of baseRefs) {
-      await execOk(run, ['git', ...tokenCfg, 'fetch', 'origin', base], { cwd: root })
+      await execOk(run, ['git', 'fetch', remote, base], {
+        cwd: root,
+        env: tokenCfg,
+      })
     }
     const forced = new Map<number, string>()
     const unknown = prs.filter((p) => p.mergeable === 'UNKNOWN')
@@ -148,7 +166,7 @@ export function startPrConflictWatcher({
       for (let i = 0; i < 2 && i < unknown.length; i++) {
         const p = unknown[(start + i) % unknown.length]
         if (p === undefined) continue
-        const status = await driver.getMergeStatus(root, p.number)
+        const status = await forge.driver.getMergeStatus(root, p.number)
         forced.set(
           p.number,
           status === 'conflicted'
@@ -166,8 +184,8 @@ export function startPrConflictWatcher({
       try {
         local = await mergeTreeVerdict({
           repoRoot: root,
-          base: `origin/${p.baseRefName}`,
-          head: `refs/remotes/origin/pr/${p.number}/head`,
+          base: `${remote}/${p.baseRefName}`,
+          head: `refs/remotes/${remote}/pr/${p.number}/head`,
           exec: run,
         })
       } catch (err) {
@@ -200,10 +218,14 @@ export function startPrConflictWatcher({
   }
 
   /** The base branch's remote head, so a base move re-arms PRs already attempted. */
-  async function baseHeadOid(run: Exec): Promise<string> {
-    const tokenCfg = await gitTokenConfig(run, root, 'origin', forgeToken('github'))
-    const ref = `refs/heads/${config.repo.baseBranch}`
-    const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', 'origin', ref], { cwd: root })
+  async function baseHeadOid(run: Exec, forge: PrForge): Promise<string> {
+    const { kind, remote } = forge.config.forge
+    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
+    const ref = `refs/heads/${forge.config.repo.baseBranch}`
+    const out = await execOk(run, ['git', 'ls-remote', remote, ref], {
+      cwd: root,
+      env: tokenCfg,
+    })
     return (
       out
         .split('\n')
@@ -213,7 +235,7 @@ export function startPrConflictWatcher({
   }
 
   /** Keeps each amagi PR's P<n> label on its bead priority; one PR's failed write never stops the rest. */
-  async function syncPriorityLabels(prs: PrInfo[], runId: string): Promise<void> {
+  async function syncPriorityLabels(prs: PrInfo[], runId: string, forge: PrForge): Promise<void> {
     let priorities: PrPriority[]
     try {
       priorities = await resolvePrPriorities(prs, (id) => tracker.get(id))
@@ -227,6 +249,7 @@ export function startPrConflictWatcher({
       try {
         await syncPrPriorityLabel({
           cwd: root,
+          remote: forge.config.forge.remote,
           number: pr.number,
           labels: pr.labels,
           priority: pri.linked ? pri.priority : null,
@@ -250,6 +273,252 @@ export function startPrConflictWatcher({
     }
   }
 
+  /** Conflict-watch state key: bare PR numbers on the configured forge, `<forge>#<n>` elsewhere. */
+  const stateKey = (forge: PrForge, prNumber: number): string =>
+    forge.key === PRIMARY_FORGE ? String(prNumber) : `${forge.key}#${prNumber}`
+  const ownsKey = (forge: PrForge, key: string): boolean =>
+    forge.key === PRIMARY_FORGE ? /^\d+$/.test(key) : key.startsWith(`${forge.key}#`)
+
+  /** The configured forge, plus every other forge a live task's PR was opened on. */
+  function forgesToScan(): PrForge[] {
+    const forges = new Map<string, PrForge>()
+    const primary = forgeFor(null)
+    forges.set(primary.key, primary)
+    for (const task of store.tasks({ states: PR_TASK_STATES })) {
+      const forge = forgeFor(task.prUrl)
+      if (!forges.has(forge.key)) forges.set(forge.key, forge)
+    }
+    return [...forges.values()]
+  }
+
+  type ScanResult = {
+    scanned: number
+    conflicting: number
+    resolvedNow: number
+    warnings: string[]
+  }
+
+  /** One forge's pass: conflicts, merge-tree audit, pointlessness and priority labels. */
+  async function scanForge(
+    forge: PrForge,
+    run: Exec,
+    runId: string,
+    queuedNow: ReadonlySet<string>,
+  ): Promise<ScanResult> {
+    const { config: forgeConfig, driver: forgeDriver } = forge
+    const heads = await fetchPullHeads({
+      repoRoot: root,
+      remote: forgeConfig.forge.remote,
+      forgeKind: forgeConfig.forge.kind,
+      lastHeads: lastPullHeads.get(forge.key) ?? {},
+      ...(exec === undefined ? {} : { exec }),
+    })
+    lastPullHeads.set(forge.key, heads.heads)
+    const prs = await forgeDriver.listOpenPrs(root)
+    if (forgeConfig.loop.mergeTreeCheck) {
+      // Observation never blocks dispatch: a failed audit is logged and skipped.
+      try {
+        await observeMergeTree(prs, run, runId, forge)
+      } catch (err) {
+        logEvent(`merge-tree observation failed: ${errMsg(err)}`, 'error')
+        console.warn(`merge-tree observation: ${errMsg(err)}`)
+      }
+    }
+    const statePath = conflictWatchPath(repoName)
+    const state = readConflictWatch(statePath)
+    const nextState: ConflictWatchState = {}
+    const conflicts = prs.filter((p) => isConflicting(p, forgeConfig.repo.baseBranch))
+    if (conflicts.length > 0) logEvent(`found ${conflicts.length} conflicting PR(s)`)
+    const baseOid = conflicts.length > 0 ? await baseHeadOid(run, forge) : ''
+    let resolvedNow = 0
+    const warnings: string[] = []
+    const recordPrLog = (pr: PrInfo, message: string, level: 'info' | 'error' = 'info'): void => {
+      const result = `PR #${pr.number}: ${message}`
+      logEvent(result, level)
+      store.append(null, {
+        type: 'watcher.action',
+        repo,
+        name: 'pr-conflict-watcher',
+        runId,
+        targetType: 'pr',
+        targetId: String(pr.number),
+        prNumber: pr.number,
+        url: pr.url,
+        result: message,
+        level,
+      })
+    }
+    const resolutionPrs = [...conflicts]
+    for (const pr of prs) {
+      if (
+        queuedNow.has(stateKey(forge, pr.number)) &&
+        !resolutionPrs.some((candidate) => candidate.number === pr.number)
+      ) {
+        resolutionPrs.push(pr)
+      }
+    }
+    for (const pr of resolutionPrs) {
+      const isConflict = conflicts.some((candidate) => candidate.number === pr.number)
+      const key = stateKey(forge, pr.number)
+      const manual = queuedNow.has(key)
+      const headOid = pr.headRefOid ?? ''
+      const seen = state[key]
+      const taskId = taskIdFromPrBranch(pr.headRefName)
+      const task = taskId === null ? null : store.task(taskId)
+      if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
+        store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
+      }
+      if (
+        isConflict &&
+        task !== null &&
+        task.state !== 'pr_merge_conflict' &&
+        task.state !== 'pr_conflict_fixing'
+      ) {
+        if (canTransition(task.state, 'pr_merge_conflict')) {
+          store.append(task.id, {
+            type: 'task.state',
+            from: task.state,
+            to: 'pr_merge_conflict',
+            reason: `PR #${pr.number} has merge conflicts`,
+          })
+        }
+      }
+      if (
+        !manual &&
+        seen !== undefined &&
+        seen.headOid === headOid &&
+        (seen.baseOid === baseOid || seen.contained === true)
+      ) {
+        nextState[key] = seen
+        continue
+      }
+      const currentTask = task === null ? null : store.task(task.id)
+      if (currentTask?.state === 'pr_merge_conflict') {
+        store.append(currentTask.id, {
+          type: 'task.state',
+          from: currentTask.state,
+          to: 'pr_conflict_fixing',
+          reason: `Conflict resolution running for PR #${pr.number}`,
+        })
+      }
+      const result: ResolveConflictResult = await resolveConflict({
+        repo,
+        repoRoot: root,
+        repoName,
+        pr,
+        config: forgeConfig,
+        driver: forgeDriver,
+        store,
+        exec,
+        makeHarnessFn,
+        manual,
+        onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
+        onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
+      })
+      const resolvedTask = task === null ? null : store.task(task.id)
+      const settledState = result.ok ? 'pr_open' : 'pr_merge_conflict'
+      if (
+        resolvedTask?.state === 'pr_conflict_fixing' &&
+        canTransition(resolvedTask.state, settledState)
+      ) {
+        store.append(resolvedTask.id, {
+          type: 'task.state',
+          from: resolvedTask.state,
+          to: settledState,
+          reason: result.ok
+            ? `Conflict resolution completed for PR #${pr.number}`
+            : `PR #${pr.number} remains conflicted after resolution attempt`,
+        })
+      }
+      if (isConflict) {
+        nextState[key] = {
+          headOid,
+          baseOid,
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+          ...(result.contained ? { contained: true } : {}),
+        }
+      }
+      if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
+        console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
+        warnings.push(`#${pr.number}: agent verdict ${result.verdict.verdict}`)
+      }
+      if (result.ok) {
+        resolved++
+        resolvedNow++
+        logEvent(`PR #${pr.number}: conflict resolution dispatched`)
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(pr.number),
+          prNumber: pr.number,
+          url: pr.url,
+          result: 'conflict resolution dispatched',
+          level: 'info',
+        })
+      } else {
+        logEvent(`PR #${pr.number}: ${result.message}`, 'error')
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(pr.number),
+          prNumber: pr.number,
+          url: pr.url,
+          result: result.message,
+          level: 'error',
+        })
+        console.warn(`pr conflict #${pr.number}: ${result.message}`)
+        warnings.push(`#${pr.number}: ${result.message}`)
+      }
+    }
+    // Only PRs that are still conflicting stay tracked; the rest drop out.
+    // Other forges' entries are kept: their own scans own them.
+    saveConflictWatch(statePath, {
+      ...Object.fromEntries(Object.entries(state).filter(([key]) => !ownsKey(forge, key))),
+      ...nextState,
+    })
+    const contained = new Map(
+      conflicts
+        .filter((p) => nextState[stateKey(forge, p.number)]?.contained === true)
+        .map((p) => [p.number, nextState[stateKey(forge, p.number)]?.verdict ?? null]),
+    )
+    const pointless = await flagPointlessPrs({
+      store,
+      tracker,
+      driver: forgeDriver,
+      cwd: root,
+      repoName,
+      prs,
+      config: forgeConfig,
+      contained,
+      ...(exec === undefined ? {} : { exec }),
+      ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
+      onLog: (pr, level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
+      onAction: (pr, result, level) =>
+        store.append(null, {
+          type: 'watcher.action',
+          repo,
+          name: 'pr-conflict-watcher',
+          runId,
+          targetType: 'pr',
+          targetId: String(pr.number),
+          prNumber: pr.number,
+          url: pr.url,
+          result,
+          level,
+        }),
+    })
+    flagged += pointless.flagged
+    cleared += pointless.cleared
+    await syncPriorityLabels(prs, runId, forge)
+    return { scanned: prs.length, conflicting: conflicts.length, resolvedNow, warnings }
+  }
+
   async function tick(): Promise<void> {
     runs++
     const runId = `${Date.now()}-${runs}`
@@ -269,215 +538,25 @@ export function startPrConflictWatcher({
     }
     try {
       const run = exec ?? defaultExec
-      const heads = await fetchPullHeads({
-        repoRoot: root,
-        lastHeads: lastPullHeads,
-        ...(exec === undefined ? {} : { exec }),
-      })
-      lastPullHeads = heads.heads
-      const prs = await driver.listOpenPrs(root)
-      scanned = prs.length
-      if (config.loop.mergeTreeCheck) {
-        // Observation never blocks dispatch: a failed audit is logged and skipped.
-        try {
-          await observeMergeTree(prs, run, runId)
-        } catch (err) {
-          logEvent(`merge-tree observation failed: ${errMsg(err)}`, 'error')
-          console.warn(`merge-tree observation: ${errMsg(err)}`)
-        }
-      }
-      const statePath = conflictWatchPath(repoName)
-      const state = readConflictWatch(statePath)
-      const nextState: ConflictWatchState = {}
-      const conflicts = prs.filter((p) => isConflicting(p, config.repo.baseBranch))
-      conflicting = conflicts.length
-      if (conflicts.length > 0) logEvent(`found ${conflicts.length} conflicting PR(s)`)
-      const baseOid = conflicts.length > 0 ? await baseHeadOid(run) : ''
-      let resolvedNow = 0
-      const warnings: string[] = []
-      const recordPrLog = (pr: PrInfo, message: string, level: 'info' | 'error' = 'info'): void => {
-        const result = `PR #${pr.number}: ${message}`
-        logEvent(result, level)
-        store.append(null, {
-          type: 'watcher.action',
-          repo,
-          name: 'pr-conflict-watcher',
-          runId,
-          targetType: 'pr',
-          targetId: String(pr.number),
-          prNumber: pr.number,
-          url: pr.url,
-          result: message,
-          level,
-        })
-      }
       const queuedNow = new Set(queuedPrs)
       queuedPrs.clear()
-      const resolutionPrs = [...conflicts]
-      for (const prNumber of queuedNow) {
-        const pr = prs.find((candidate) => candidate.number === prNumber)
-        if (pr !== undefined && !resolutionPrs.some((candidate) => candidate.number === prNumber)) {
-          resolutionPrs.push(pr)
-        }
+      let scannedNow = 0
+      let conflictingNow = 0
+      let resolvedNow = 0
+      const warnings: string[] = []
+      for (const forge of forgesToScan()) {
+        const result = await scanForge(forge, run, runId, queuedNow)
+        scannedNow += result.scanned
+        conflictingNow += result.conflicting
+        resolvedNow += result.resolvedNow
+        warnings.push(...result.warnings)
       }
-      for (const pr of resolutionPrs) {
-        const isConflict = conflicts.some((candidate) => candidate.number === pr.number)
-        const key = String(pr.number)
-        const headOid = pr.headRefOid ?? ''
-        const seen = state[key]
-        const taskId = taskIdFromPrBranch(pr.headRefName)
-        const task = taskId === null ? null : store.task(taskId)
-        if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
-          store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
-        }
-        if (
-          isConflict &&
-          task !== null &&
-          task.state !== 'pr_merge_conflict' &&
-          task.state !== 'pr_conflict_fixing'
-        ) {
-          if (canTransition(task.state, 'pr_merge_conflict')) {
-            store.append(task.id, {
-              type: 'task.state',
-              from: task.state,
-              to: 'pr_merge_conflict',
-              reason: `PR #${pr.number} has merge conflicts`,
-            })
-          }
-        }
-        if (
-          !queuedNow.has(pr.number) &&
-          seen !== undefined &&
-          seen.headOid === headOid &&
-          (seen.baseOid === baseOid || seen.contained === true)
-        ) {
-          nextState[key] = seen
-          continue
-        }
-        const currentTask = task === null ? null : store.task(task.id)
-        if (currentTask?.state === 'pr_merge_conflict') {
-          store.append(currentTask.id, {
-            type: 'task.state',
-            from: currentTask.state,
-            to: 'pr_conflict_fixing',
-            reason: `Conflict resolution running for PR #${pr.number}`,
-          })
-        }
-        const result: ResolveConflictResult = await resolveConflict({
-          repo,
-          repoRoot: root,
-          repoName,
-          pr,
-          config,
-          driver,
-          store,
-          exec,
-          makeHarnessFn,
-          onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
-          onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
-        })
-        const resolvedTask = task === null ? null : store.task(task.id)
-        const settledState = result.ok ? 'pr_open' : 'pr_merge_conflict'
-        if (
-          resolvedTask?.state === 'pr_conflict_fixing' &&
-          canTransition(resolvedTask.state, settledState)
-        ) {
-          store.append(resolvedTask.id, {
-            type: 'task.state',
-            from: resolvedTask.state,
-            to: settledState,
-            reason: result.ok
-              ? `Conflict resolution completed for PR #${pr.number}`
-              : `PR #${pr.number} remains conflicted after resolution attempt`,
-          })
-        }
-        if (isConflict) {
-          nextState[key] = {
-            headOid,
-            baseOid,
-            ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
-            ...(result.contained ? { contained: true } : {}),
-          }
-        }
-        if (result.verdict?.verdict && result.verdict.verdict !== 'RESOLVED') {
-          console.warn(`pr conflict #${pr.number}: agent verdict ${result.verdict.verdict}`)
-          warnings.push(`#${pr.number}: agent verdict ${result.verdict.verdict}`)
-        }
-        if (result.ok) {
-          resolved++
-          resolvedNow++
-          logEvent(`PR #${pr.number}: conflict resolution dispatched`)
-          store.append(null, {
-            type: 'watcher.action',
-            repo,
-            name: 'pr-conflict-watcher',
-            runId,
-            targetType: 'pr',
-            targetId: String(pr.number),
-            prNumber: pr.number,
-            url: pr.url,
-            result: 'conflict resolution dispatched',
-            level: 'info',
-          })
-        } else {
-          logEvent(`PR #${pr.number}: ${result.message}`, 'error')
-          store.append(null, {
-            type: 'watcher.action',
-            repo,
-            name: 'pr-conflict-watcher',
-            runId,
-            targetType: 'pr',
-            targetId: String(pr.number),
-            prNumber: pr.number,
-            url: pr.url,
-            result: result.message,
-            level: 'error',
-          })
-          console.warn(`pr conflict #${pr.number}: ${result.message}`)
-          warnings.push(`#${pr.number}: ${result.message}`)
-        }
-      }
-      // Only PRs that are still conflicting stay tracked; the rest drop out.
-      saveConflictWatch(statePath, nextState)
-      const contained = new Map(
-        conflicts
-          .filter((p) => nextState[String(p.number)]?.contained === true)
-          .map((p) => [p.number, nextState[String(p.number)]?.verdict ?? null]),
-      )
-      const pointless = await flagPointlessPrs({
-        store,
-        tracker,
-        driver,
-        cwd: root,
-        repoName,
-        prs,
-        config,
-        contained,
-        ...(exec === undefined ? {} : { exec }),
-        ...(makeHarnessFn === undefined ? {} : { makeHarnessFn }),
-        onLog: (pr, level, message) =>
-          recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
-        onAction: (pr, result, level) =>
-          store.append(null, {
-            type: 'watcher.action',
-            repo,
-            name: 'pr-conflict-watcher',
-            runId,
-            targetType: 'pr',
-            targetId: String(pr.number),
-            prNumber: pr.number,
-            url: pr.url,
-            result,
-            level,
-          }),
-      })
-      flagged += pointless.flagged
-      cleared += pointless.cleared
-      await syncPriorityLabels(prs, runId)
-      next.detail = `found ${conflicts.length} conflicting PRs, resolved ${resolvedNow}${
+      scanned = scannedNow
+      conflicting = conflictingNow
+      next.detail = `found ${conflictingNow} conflicting PRs, resolved ${resolvedNow}${
         warnings.length === 0 ? '' : `; warnings: ${warnings.join('; ')}`
       }`
-      logEvent(`run ${runs} completed: scanned ${prs.length} PRs, ${next.detail}`)
+      logEvent(`run ${runs} completed: scanned ${scannedNow} PRs, ${next.detail}`)
     } catch (err) {
       failures++
       next.ok = false
@@ -507,8 +586,8 @@ export function startPrConflictWatcher({
 
   const poller = startPoller(intervalMs, tick, true)
   return {
-    queue(prNumber) {
-      queuedPrs.add(prNumber)
+    queue(prNumber, prUrl = null) {
+      queuedPrs.add(stateKey(forgeFor(prUrl), prNumber))
       const runId = `queued-${Date.now()}`
       store.append(null, {
         type: 'watcher.action',
