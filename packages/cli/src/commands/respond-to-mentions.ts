@@ -36,7 +36,7 @@ export const respondToMentionsCommand = defineCommand({
     const root = repoRoot()
     const { config } = loadConfig(root)
     const name = repoName(root)
-    const driver = makePrDriver(config.forge.kind)
+    const driver = makePrDriver(config.forge.kind, config.forge.remote)
     const tracker = makeTracker(config, root)
     const handle = config.forge.agentHandle
     const tty = process.stdout.isTTY
@@ -75,7 +75,13 @@ export const respondToMentionsCommand = defineCommand({
     for (const pr of prs) {
       let mentions: PrComment[]
       try {
-        mentions = await listPrMentions({ driver, cwd: root, pr, handle })
+        mentions = await listPrMentions({
+          driver,
+          cwd: root,
+          pr,
+          handle,
+          allowedAuthors: config.watchers.mention.allowedAuthors,
+        })
       } catch (err) {
         console.log(red(`#${pr.number}: failed to read comments: ${errMsg(err)}`))
         continue

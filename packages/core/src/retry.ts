@@ -20,6 +20,13 @@ const SESSION_LIMIT_PATTERNS = [
   /\btoken limit\b/i,
 ] as const
 
+const USAGE_LIMIT_PATTERNS = [
+  /you(?:'|’)ve hit your usage limit/i,
+  /usage limit (?:has been )?(?:reached|exceeded)/i,
+  /account usage limit/i,
+  /monthly usage limit/i,
+] as const
+
 const TRANSIENT_PATTERNS = [
   /\bquota\b/i,
   /insufficient_quota/i,
@@ -40,7 +47,30 @@ const TRANSIENT_PATTERNS = [
 ] as const
 
 export function isTransientFailure(detail: string): boolean {
-  return TRANSIENT_PATTERNS.some((re) => re.test(detail))
+  return isUsageLimit(detail) || TRANSIENT_PATTERNS.some((re) => re.test(detail))
+}
+
+/** Whether the provider rejected the request because the account usage window is exhausted. */
+export function isUsageLimit(detail: string): boolean {
+  return USAGE_LIMIT_PATTERNS.some((re) => re.test(detail))
+}
+
+/** Parses a provider's local reset clock, or returns a bounded re-probe time. */
+export function usageLimitExpiry(detail: string, now = new Date()): number {
+  const clock = detail.match(/\bresets?\s+at\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i)
+  if (clock) {
+    let hour = Number(clock[1])
+    const minute = Number(clock[2])
+    const meridiem = clock[3]?.toUpperCase()
+    if (minute < 60 && hour <= (meridiem ? 12 : 23)) {
+      if (meridiem) hour = (hour % 12) + (meridiem === 'PM' ? 12 : 0)
+      const reset = new Date(now)
+      reset.setHours(hour, minute, 0, 0)
+      if (reset.getTime() <= now.getTime()) reset.setDate(reset.getDate() + 1)
+      return reset.getTime()
+    }
+  }
+  return now.getTime() + 15 * 60 * 1000
 }
 
 /** Whether the failure means the session is exhausted and must not be resumed. */

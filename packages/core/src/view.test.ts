@@ -10,8 +10,12 @@ import {
   openQuestionsFor,
   reduceBatch,
   reduceState,
+  reviewBadge,
+  reviewHistoryFor,
+  reviewWaitingSeat,
   runHealth,
   runHealthNearLimit,
+  scorecard,
   stateAtAttempt,
   statusLog,
   taskEvents,
@@ -79,6 +83,14 @@ describe('dashboard state reducer', () => {
       evidence: 'The value is dereferenced without validation.',
       failureScenario: 'A null value crashes the request.',
     }
+    const disputed = {
+      ...finding,
+      id: 'finding-2',
+      severity: 'minor',
+      title: 'Prefer a clearer name',
+    }
+    const withdrawn = { ...finding, id: 'finding-3', severity: 'nit', title: 'Optional cleanup' }
+    const unresolved = { ...finding, id: 'finding-4', severity: 'blocker', title: 'Still crashes' }
     const state = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Review me', tracker: 'bd' }),
       ev(2, 'am-1', 1100, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
@@ -94,39 +106,122 @@ describe('dashboard state reducer', () => {
       ev(7, 'am-1', 1600, {
         type: 'review.finished',
         round: 1,
-        findings: [finding],
+        findings: [finding, disputed, withdrawn],
         blockingIds: ['finding-1'],
       }),
       ev(8, 'am-1', 1700, { type: 'task.state', from: 'reviewing', to: 'fixing' }),
       ev(9, 'am-1', 1800, {
         type: 'review.fixed',
         round: 1,
-        replies: [{ id: 'finding-1', outcome: 'fixed', reason: 'Added a null check.' }],
+        replies: [
+          { id: 'finding-1', outcome: 'fixed', reason: 'Added a null check.' },
+          {
+            id: 'finding-2',
+            outcome: 'wont-fix',
+            reason: 'This is a subjective naming preference.',
+          },
+        ],
       }),
       ev(10, 'am-1', 1900, { type: 'task.state', from: 'fixing', to: 'reviewing' }),
       ev(11, 'am-1', 2000, {
         type: 'review.started',
         round: 2,
-        finalPass: false,
+        finalPass: true,
         reviewerSession: 'review-session',
       }),
       ev(12, 'am-1', 2100, {
         type: 'review.finished',
         round: 2,
-        findings: [],
-        blockingIds: [],
+        findings: [unresolved],
+        blockingIds: ['finding-4'],
       }),
       ev(13, 'am-1', 2200, {
         type: 'review.stopped',
-        reason: 'acceptable',
-        unresolvedIds: [],
+        reason: 'rounds',
+        unresolvedIds: ['finding-4'],
+      }),
+      ev(14, 'am-1', 2300, {
+        type: 'review.proposal-filed',
+        findingId: 'finding-3',
+        issueId: 'proposal-1',
+        title: 'Optional cleanup',
+        url: 'https://example.test/issues/proposal-1',
       }),
     ].reduce(reduceState, initialDashboardState())
     expect(state.tasks['am-1']).toMatchObject({
       reviewRound: 2,
-      reviewFindings: [],
-      reviewStopReason: 'acceptable',
+      reviewFindings: [unresolved],
+      reviewStopReason: 'rounds',
+      reviewUnresolved: 1,
     })
+    const history = reviewHistoryFor(state, 'am-1')
+    expect(history.stopReason).toBe('rounds')
+    expect(history.rounds).toMatchObject([
+      {
+        round: 1,
+        finalPass: false,
+        findings: [
+          { id: 'finding-1', outcome: 'fixed', outcomeReason: 'Added a null check.' },
+          {
+            id: 'finding-2',
+            outcome: 'disputed',
+            outcomeReason: 'This is a subjective naming preference.',
+          },
+          { id: 'finding-3', outcome: 'withdrawn', proposal: { issueId: 'proposal-1' } },
+        ],
+      },
+      { round: 2, finalPass: true, findings: [{ id: 'finding-4', outcome: 'unresolved' }] },
+    ])
+  })
+
+  test('reports why the current attempt skipped review', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Unreviewed', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'review.skipped', reason: 'no reviewer' }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(reviewHistoryFor(state, 'am-1')).toEqual({
+      rounds: [],
+      stopReason: null,
+      skipped: 'no reviewer',
+    })
+  })
+
+  test('reviewBadge tells unreviewed, in-progress, clean and unresolved tasks apart', () => {
+    const task = {
+      reviewRound: 0,
+      reviewStopReason: null,
+      reviewUnresolved: 0,
+      reviewSkipped: null,
+    }
+    expect(reviewBadge(task)).toBeNull()
+    expect(reviewBadge({ ...task, reviewSkipped: 'no reviewer' })).toEqual({
+      text: 'not reviewed',
+      tone: 'warn',
+    })
+    expect(reviewBadge({ ...task, reviewRound: 2 })?.text).toBe('reviewing · round 2')
+    expect(reviewBadge({ ...task, reviewRound: 1, reviewStopReason: 'acceptable' })).toEqual({
+      text: 'reviewed · 1 round',
+      tone: 'ok',
+    })
+    expect(
+      reviewBadge({ ...task, reviewRound: 3, reviewStopReason: 'rounds', reviewUnresolved: 2 })
+        ?.text,
+    ).toBe('2 unresolved · 3 rounds')
+    expect(reviewBadge({ ...task, reviewRound: 1, reviewStopReason: 'cost' })?.text).toBe(
+      'review stopped: cost',
+    )
+  })
+
+  test('reports the reviewer seat while its agent waits to start', () => {
+    const state = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'Review me', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, {
+        type: 'agent.stream',
+        role: 'review',
+        event: { kind: 'status', message: 'waiting for seat reviewer-seat' },
+      }),
+    ].reduce(reduceState, initialDashboardState())
+    expect(reviewWaitingSeat(state, 'am-1')).toBe('reviewer-seat')
   })
 
   test('replay reconstructs the same state every time', () => {
@@ -846,6 +941,34 @@ describe('status log', () => {
     expect(statusLog(state, 'am-1', null).at(-1)?.durationMs).toBeNull()
   })
 
+  test('attaches the setup command to the state it ran in, counting up while it runs', () => {
+    const claimed = [
+      ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
+      ev(2, 'am-1', 1100, { type: 'setup.started', command: 'bun install' }),
+    ]
+    const running = claimed.reduce(reduceState, initialDashboardState())
+    expect(statusLog(running, 'am-1', 1400)[0]?.setup).toEqual({
+      command: 'bun install',
+      startedAt: 1100,
+      durationMs: 300,
+      exitCode: null,
+    })
+    const finished = [
+      ...claimed,
+      ev(3, 'am-1', 1900, {
+        type: 'setup.finished',
+        command: 'bun install',
+        exitCode: 0,
+        durationMs: 800,
+        output: '',
+      }),
+      ev(4, 'am-1', 1950, { type: 'task.state', from: 'claimed', to: 'worktree_ready' }),
+    ].reduce(reduceState, initialDashboardState())
+    const log = statusLog(finished, 'am-1', 5000)
+    expect(log[0]?.setup).toMatchObject({ durationMs: 800, exitCode: 0 })
+    expect(log[1]?.setup).toBeNull()
+  })
+
   test('starts at the last reset and records reclaims with their reason', () => {
     const state = [
       ev(1, 'am-1', 1000, { type: 'task.claimed', title: 'T', tracker: 'bd' }),
@@ -1035,5 +1158,91 @@ describe('status log', () => {
       durationMs: null,
       exitCode: null,
     })
+  })
+})
+
+describe('scorecard', () => {
+  let seq = 0
+  /** A task claimed at `start` whose implement agent ran on `model`, ending in `to` at `end`. */
+  const finished = (
+    id: string,
+    model: string,
+    to: 'done' | 'abandoned' | 'no_pr' | 'needs_human' | 'cancelled',
+    start: number,
+    end: number,
+    extra: { pr?: boolean; costUsd?: number; worker?: string } = {},
+  ): StoredEvent[] => [
+    ev(++seq, id, start, { type: 'task.claimed', title: id, tracker: 'bd' }),
+    ev(++seq, id, start + 1, {
+      type: 'agent.started',
+      role: 'implement',
+      harness: 'claude',
+      model,
+      effort: 'high',
+      ...(extra.worker === undefined ? {} : { worker: extra.worker }),
+      cwd: `/tmp/${id}`,
+      resumed: false,
+    }),
+    ev(++seq, id, start + 2, {
+      type: 'agent.stream',
+      role: 'implement',
+      event: { kind: 'usage', inputTokens: 1, outputTokens: 1, costUsd: extra.costUsd ?? 1 },
+    }),
+    ...(extra.pr === true
+      ? [ev(++seq, id, start + 3, { type: 'pr.created', url: `https://x/${id}`, number: seq })]
+      : []),
+    ev(++seq, id, end, { type: 'task.state', from: 'claimed', to }),
+  ]
+
+  test('counts outcomes, cost and merge time per harness, model and effort', () => {
+    const state = reduceBatch(initialDashboardState(), [
+      ...finished('a', 'opus', 'done', 0, 1000, { pr: true, worker: 'Opus 1' }),
+      ...finished('b', 'opus', 'done', 0, 3000, { pr: true, worker: 'Opus 2' }),
+      ...finished('c', 'opus', 'abandoned', 0, 500, { costUsd: 4, worker: 'Opus 1' }),
+      ...finished('d', 'sonnet', 'no_pr', 0, 500),
+      ...finished('e', 'sonnet', 'done', 0, 500),
+      ...finished('f', 'sonnet', 'needs_human', 0, 500),
+      ...finished('g', 'sonnet', 'cancelled', 0, 500),
+    ])
+    expect(scorecard(state)).toEqual([
+      {
+        harness: 'claude',
+        model: 'opus',
+        effort: 'high',
+        workers: ['Opus 1', 'Opus 2'],
+        finished: 3,
+        merged: 2,
+        abandoned: 1,
+        noPr: 0,
+        needsHuman: 0,
+        costUsd: 6,
+        costSeen: true,
+        medianMergeMs: 2000,
+        avgReviewRounds: 0,
+      },
+      {
+        harness: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        workers: [],
+        finished: 3,
+        merged: 0,
+        abandoned: 0,
+        noPr: 2,
+        needsHuman: 1,
+        costUsd: 3,
+        costSeen: true,
+        medianMergeMs: null,
+        avgReviewRounds: 0,
+      },
+    ])
+  })
+
+  test('drops tasks that finished before the window', () => {
+    const state = reduceBatch(initialDashboardState(), [
+      ...finished('old', 'opus', 'done', 0, 1000, { pr: true }),
+      ...finished('new', 'opus', 'abandoned', 0, 5000),
+    ])
+    expect(scorecard(state, 2000)).toMatchObject([{ finished: 1, merged: 0, abandoned: 1 }])
   })
 })

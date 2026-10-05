@@ -1,5 +1,12 @@
-import { type Config, expandWorkers, resolveWorkerHarness, type WorkerConfig } from './config.ts'
-import { claimEligible, claimGate, implementModel } from './difficulty.ts'
+import {
+  type Config,
+  type ExpandedWorkerConfig,
+  expandWorkers,
+  resolveWorkerHarness,
+  reviewerWorkerConfig,
+  type WorkerConfig,
+} from './config.ts'
+import { claimEligible, claimGate } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { Exec } from './exec.ts'
@@ -7,6 +14,7 @@ import { makeHarness } from './factory.ts'
 import { processTreeStats } from './process.ts'
 import { Runner, type RunOnceResult } from './runner.ts'
 import type { Store } from './store/store.ts'
+import { readUsageHold, usageHoldKey } from './usage-hold.ts'
 
 /** Summed over the agent's whole process tree (see process.ts). */
 export type RunnerResource = {
@@ -63,6 +71,7 @@ export type FleetWorkerStatus = {
   model: string | null
   effort: string | null
   seat: string
+  displaySlot: number
   enabled: boolean
   busy: boolean
   /** The task this worker itself is running, as opposed to another worker on its seat. */
@@ -161,6 +170,8 @@ export type RunServiceOptions = {
   autoQueueActiveMs?: number
   /** Called once when automatic dispatch finds no claimable work and no run is active. */
   onQueueDrained?: () => void | Promise<void>
+  /** Called after each runner finishes, with its final projected task. */
+  onTaskFinished?: (result: NonNullable<RunOnceResult>) => void | Promise<void>
   /**
    * Seat occupancy shared by every repo's RunService in one server, so the
    * fleet's seats cap concurrency across repositories rather than per repo.
@@ -277,7 +288,7 @@ export class RunService implements RunServiceApi {
     const running = [...this.runs.keys()]
     const totalSeats = new Set(
       this.workers()
-        .filter((worker) => worker.enabled)
+        .filter((worker) => worker.enabled && worker.roles.includes('implement'))
         .map((worker) => this.workerSeat(worker)),
     ).size
     const capacity = this.availableCapacity()
@@ -347,6 +358,7 @@ export class RunService implements RunServiceApi {
         model: worker.model ?? null,
         effort: worker.effort ?? null,
         seat: this.workerSeat(worker),
+        displaySlot: worker.displaySlot,
         enabled: worker.enabled,
         busy: this.runsBySeat().has(this.workerSeat(worker)),
         taskId: [...this.runs].find(([, run]) => run.workerId === worker.id)?.[0] ?? null,
@@ -375,7 +387,7 @@ export class RunService implements RunServiceApi {
     return worker.seat ?? worker.kind
   }
 
-  private workers(): WorkerConfig[] {
+  private workers(): ExpandedWorkerConfig[] {
     return expandWorkers(this.opts.config.worker, this.opts.config.seats)
   }
 
@@ -385,7 +397,10 @@ export class RunService implements RunServiceApi {
 
   private availableWorkers(): WorkerConfig[] {
     const busy = this.runsBySeat()
-    return this.workers().filter((worker) => worker.enabled && !busy.has(this.workerSeat(worker)))
+    return this.workers().filter(
+      (worker) =>
+        worker.enabled && worker.roles.includes('implement') && !busy.has(this.workerSeat(worker)),
+    )
   }
 
   private availableCapacity(): number {
@@ -399,7 +414,9 @@ export class RunService implements RunServiceApi {
     const selected =
       opts?.workerId === undefined
         ? this.availableWorkers()[0]
-        : this.workers().find((worker) => worker.id === opts.workerId)
+        : this.workers().find(
+            (worker) => worker.id === opts.workerId && worker.roles.includes('implement'),
+          )
     if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
@@ -423,16 +440,23 @@ export class RunService implements RunServiceApi {
     opts: RunOptions | undefined,
   ): Promise<StartResult> {
     const implement = this.resolveHarness(selected, opts)
-    // Difficulty gating reads the model the worker would actually run, so the
-    // override config (not the stored default) is what gates the claim.
-    const runConfig = { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }
+    const holdKey = usageHoldKey(implement.kind, implement.model ?? null, implement.seat)
+    const activeHold = readUsageHold(holdKey)
+    if (activeHold) {
+      const expiry = new Date(activeHold.expiresAt).toLocaleString()
+      return {
+        ok: false,
+        status: 409,
+        error: `${activeHold.harness}+${activeHold.model} usage limit hold until ${expiry}`,
+      }
+    }
     if (taskId !== undefined) {
       const ready = await this.opts.tracker.ready()
       const target = ready.find((t) => t.id === taskId)
       if (target === undefined) {
         return { ok: false, status: 409, error: `task ${taskId} is not ready to run` }
       }
-      const gate = claimGate(runConfig, target, implementModel(runConfig))
+      const gate = claimGate(this.opts.config, target, selected)
       if (!gate.allowed) {
         return { ok: false, status: 409, error: `task ${taskId}: ${gate.reason}` }
       }
@@ -442,11 +466,8 @@ export class RunService implements RunServiceApi {
       return { ok: true, taskId: task.id }
     }
     const skipped: string[] = []
-    const task = await claimEligible(
-      this.opts.tracker,
-      runConfig,
-      implementModel(runConfig),
-      (t, reason) => skipped.push(`${t.id}: ${reason}`),
+    const task = await claimEligible(this.opts.tracker, this.opts.config, selected, (t, reason) =>
+      skipped.push(`${t.id}: ${reason}`),
     )
     if (task === null) {
       const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''
@@ -487,25 +508,39 @@ export class RunService implements RunServiceApi {
       makeHarnessFn === makeHarness && implement.kind === config.harness.implement.kind
         ? this.opts.harness
         : makeHarnessFn(implement)
+    const reviewerConfig = reviewerWorkerConfig(config)
     const runner = new Runner({
       store,
       tracker,
       harness,
       config: { ...config, harness: { ...config.harness, implement } },
+      reviewerConfig,
+      ...(reviewerConfig === undefined ? {} : { reviewerHarness: makeHarnessFn(reviewerConfig) }),
       repoRoot,
       repoName,
       // A server-side run has the ask and git-request channels to POST to.
       channel: true,
       exec,
       forge,
+      workerName: worker.name,
     })
     const seat = this.workerSeat(worker)
     const holder = `${repoName}/${task.id}`
     this.seats.set(seat, holder)
-    const done = runner.runClaimed(task).finally(() => {
-      this.runs.delete(task.id)
-      if (this.seats.get(seat) === holder) this.seats.delete(seat)
-    })
+    const done = runner
+      .runClaimed(task)
+      .then(async (result) => {
+        try {
+          if (result !== null) await this.opts.onTaskFinished?.(result)
+        } catch (err) {
+          console.warn(`completion notification failed for ${task.id}: ${String(err)}`)
+        }
+        return result
+      })
+      .finally(() => {
+        this.runs.delete(task.id)
+        if (this.seats.get(seat) === holder) this.seats.delete(seat)
+      })
     this.runs.set(task.id, { runner, startedAt: Date.now(), done, workerId: worker.id, seat })
   }
 }

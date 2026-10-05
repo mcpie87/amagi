@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { stateHome } from './paths.ts'
+import { hostStateHome } from './paths.ts'
 import { pidAlive } from './process.ts'
 
 const DEFAULT_WAIT_MS = 5 * 60 * 1000
@@ -73,7 +73,8 @@ export class SeatWaitTimeoutError extends Error {
 function rootDir(override?: string): string {
   if (override) return override
   const envOverride = process.env.AMAGI_SEAT_LOCK_DIR
-  return envOverride ?? join(stateHome(), 'amagi', 'seat-locks')
+  // A seat is a real subscription, so a dev amagi must queue behind the installed one.
+  return envOverride ?? join(hostStateHome(), 'amagi', 'seat-locks')
 }
 
 function seatDir(seat: string, directory?: string): string {

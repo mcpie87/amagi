@@ -13,16 +13,26 @@ export type PrChange = {
 
 /**
  * Resolves the ref the worktree branched from so the PR diff excludes base
- * changes: `origin/<base>` when a token fetch happened, else `<base>`.
+ * changes: `<remote>/<base>` when a token fetch happened, else `<base>`.
  */
-export async function diffBase(run: Exec, cwd: string, base: string): Promise<string> {
-  const remote = `origin/${base}`
-  const r = await run(['git', 'rev-parse', '--verify', '--quiet', remote], { cwd })
-  return r.exitCode === 0 ? remote : base
+export async function diffBase(
+  run: Exec,
+  cwd: string,
+  remote: string,
+  base: string,
+): Promise<string> {
+  const tracking = `${remote}/${base}`
+  const r = await run(['git', 'rev-parse', '--verify', '--quiet', tracking], { cwd })
+  return r.exitCode === 0 ? tracking : base
 }
 
-export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
-  const ref = await diffBase(run, cwd, base)
+export async function changesSinceBase(
+  run: Exec,
+  cwd: string,
+  remote: string,
+  base: string,
+): Promise<PrChange[]> {
+  const ref = await diffBase(run, cwd, remote, base)
   const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
   return r.stdout
     .split('\n')
@@ -165,6 +175,18 @@ export type PrReviewSummary = {
     failureScenario: string
     reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
   }[]
+  followUps?: readonly {
+    id: string
+    title: string
+    path: string
+    line: number
+    evidence: string
+    failureScenario: string
+    covers?: string
+    proposalId?: string
+    proposalUrl?: string | null
+  }[]
+  proposalCreationSupported?: boolean
   history: string
 }
 
@@ -246,6 +268,33 @@ export function formatPrBody(
   }
   if (review !== undefined) {
     lines.push('', '### 🔎 Review', '', review.history)
+    const followUps = review.followUps ?? []
+    const covered = followUps.filter((finding) => finding.covers !== undefined)
+    if (followUps.length > 0) {
+      lines.push('', '### Follow-up findings', '')
+      if (review.proposalCreationSupported === false) {
+        lines.push('This tracker cannot create issues, so these follow-ups are recorded here only.')
+      }
+      for (const finding of followUps) {
+        const proposal =
+          finding.proposalId === undefined
+            ? finding.covers === undefined
+              ? ''
+              : `, covered by issue \`${finding.covers}\``
+            : finding.proposalUrl === null || finding.proposalUrl === undefined
+              ? `, proposed as \`${finding.proposalId}\``
+              : `, proposed as [\`${finding.proposalId}\`](${finding.proposalUrl})`
+        lines.push(
+          `- **\`${finding.id}\`: ${finding.title}** (${finding.path}:${finding.line}${proposal})\n  Evidence: ${finding.evidence}\n  Failure scenario: ${finding.failureScenario}`,
+        )
+      }
+    }
+    if (covered.length > 0) {
+      lines.push(
+        '',
+        `Covered issues: ${covered.map((finding) => `\`${finding.covers}\``).join(', ')}`,
+      )
+    }
     if (review.unresolved) {
       lines.push(
         '',

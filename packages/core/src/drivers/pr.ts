@@ -2,7 +2,17 @@ import type { MergeStatus } from '../events.ts'
 import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
 import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
-import { forgeToken, ghEnv, gitTokenConfig, parseRemote } from './forge-cred.ts'
+import {
+  forgeToken,
+  forgeUrl,
+  ghEnv,
+  gitTokenConfig,
+  glabEnv,
+  parseRemote,
+  teaEnv,
+  teaRepoArgs,
+} from './forge-cred.ts'
+import { assertSafePushDestination } from './push-safety.ts'
 
 export type PullRequest = { url: string; number: number }
 
@@ -21,6 +31,16 @@ export const AMAGI_LABEL = 'amagi'
  * stops, so a human closing the PR is the only terminal step.
  */
 export const NEEDS_CLOSING_LABEL = 'amagi/needs-closing'
+
+/** On a PR closed unmerged: the task is finished anyway, as if the PR had merged. */
+export const DONE_LABEL = 'amagi/done'
+/** On a PR closed unmerged: the work was wrong, so the task starts a fresh attempt. */
+export const REWORK_LABEL = 'amagi/rework'
+/**
+ * Created alongside every agent PR but never attached by amagi, so a human
+ * closing a PR finds them in the forge's label picker.
+ */
+export const OUTCOME_LABELS = [DONE_LABEL, REWORK_LABEL] as const
 
 /** Provenance plus an amagi/<type> intent label mirroring the source task. */
 export function amagiLabels(type: string | null): string[] {
@@ -42,6 +62,8 @@ export type PrDriver = {
   createPr(opts: CreatePrOptions): Promise<PullRequest>
   /** Resolve the remote state of a PR, run from `cwd` so the forge CLI finds the repo. */
   getPr(cwd: string, number: number): Promise<PrState>
+  /** Names of the labels on a PR in any state. */
+  getPrLabels(cwd: string, number: number): Promise<string[]>
   /** Every open PR in the repo the `cwd` belongs to. */
   listOpenPrs(cwd: string): Promise<PrInfo[]>
   /** Whether an open PR can merge, normalized to mergeable/conflicted/unknown. */
@@ -80,7 +102,10 @@ async function pushTaskBranch(
   const { cwd, remote, branch } = opts
   const auth = await gitTokenConfig(exec, cwd, remote, token)
   const ref = `refs/heads/${branch}`
-  const heads = await execOk(exec, ['git', ...auth, 'ls-remote', '--heads', remote, ref], { cwd })
+  const heads = await execOk(exec, ['git', 'ls-remote', '--heads', remote, ref], {
+    cwd,
+    env: auth,
+  })
   const remoteSha =
     heads
       .split('\n')
@@ -95,10 +120,11 @@ async function pushTaskBranch(
     }
   }
   // An empty expected sha makes the lease demand that the branch is still absent.
+  await assertSafePushDestination(exec, cwd, remote, branch, auth)
   await execOk(
     exec,
-    ['git', ...auth, 'push', '-u', `--force-with-lease=${ref}:${remoteSha}`, remote, branch],
-    { cwd },
+    ['git', 'push', '-u', `--force-with-lease=${ref}:${remoteSha}`, remote, branch],
+    { cwd, env: auth },
   )
 }
 
@@ -110,7 +136,11 @@ async function deleteRemoteBranch(
   token: string | null,
 ): Promise<void> {
   const auth = await gitTokenConfig(exec, cwd, remote, token)
-  const r = await exec(['git', ...auth, 'push', remote, '--delete', branch], { cwd })
+  await assertSafePushDestination(exec, cwd, remote, branch, auth)
+  const r = await exec(['git', 'push', remote, '--delete', branch], {
+    cwd,
+    env: auth,
+  })
   if (r.exitCode !== 0 && !/remote ref does not exist/i.test(r.stderr)) {
     throw new Error(`deleting remote branch ${branch}: ${r.stderr.trim()}`)
   }
@@ -121,7 +151,7 @@ async function deleteRemoteBranch(
  * so gh never touches the operator's auth state. Token-only: without
  * GH_TOKEN/GITHUB_TOKEN in the process environment gh fails closed.
  */
-function githubPr(exec: Exec): PrDriver {
+function githubPr(exec: Exec, forgeRemote: string): PrDriver {
   let ownerRepo: string | null = null
 
   async function repoSlug(cwd: string): Promise<string> {
@@ -130,7 +160,7 @@ function githubPr(exec: Exec): PrDriver {
         await execOk(
           exec,
           ['gh', 'repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-          { cwd, env: ghEnv() },
+          { cwd, env: ghEnv(cwd, forgeRemote) },
         )
       ).trim()
     }
@@ -139,17 +169,25 @@ function githubPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote, title, body, labels }) {
-      await pushTaskBranch(exec, { cwd, remote, branch }, forgeToken('github'), async (head) => {
-        const out = await execOk(
-          exec,
-          ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
-          { cwd, env: ghEnv() },
-        )
-        return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
-      })
-      for (const label of labels) {
+      await pushTaskBranch(
+        exec,
+        { cwd, remote, branch },
+        forgeToken('github', cwd),
+        async (head) => {
+          const out = await execOk(
+            exec,
+            ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
+            { cwd, env: ghEnv(cwd, forgeRemote) },
+          )
+          return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
+        },
+      )
+      for (const label of [...labels, ...OUTCOME_LABELS]) {
         // --force makes create idempotent; failure (e.g. no write perms) is best effort
-        await exec(['gh', 'label', 'create', label, '--force'], { cwd, env: ghEnv() })
+        await exec(['gh', 'label', 'create', label, '--force'], {
+          cwd,
+          env: ghEnv(cwd, forgeRemote),
+        })
       }
       const out = await execOk(
         exec,
@@ -167,7 +205,7 @@ function githubPr(exec: Exec): PrDriver {
           '-',
           ...labels.flatMap((label) => ['--label', label]),
         ],
-        { cwd, stdin: body, env: ghEnv() },
+        { cwd, stdin: body, env: ghEnv(cwd, forgeRemote) },
       )
       const url = out.trim()
       return { url, number: Number(url.split('/').pop() ?? 0) }
@@ -176,7 +214,7 @@ function githubPr(exec: Exec): PrDriver {
       const out = await execOk(
         exec,
         ['gh', 'pr', 'view', String(number), '--json', 'state', '--jq', '.state'],
-        { cwd, env: ghEnv() },
+        { cwd, env: ghEnv(cwd, forgeRemote) },
       )
       switch (out.trim().toUpperCase()) {
         case 'MERGED':
@@ -187,10 +225,18 @@ function githubPr(exec: Exec): PrDriver {
           return 'open'
       }
     },
+    async getPrLabels(cwd, number) {
+      const out = await execOk(
+        exec,
+        ['gh', 'pr', 'view', String(number), '--json', 'labels', '--jq', '.labels[].name'],
+        { cwd, env: ghEnv(cwd, forgeRemote) },
+      )
+      return out.split('\n').filter((name) => name !== '')
+    },
     async listOpenPrs(cwd) {
       const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
         cwd,
-        env: ghEnv(),
+        env: ghEnv(cwd, forgeRemote),
       })
       const raw = JSON.parse(out) as Array<
         Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
@@ -205,7 +251,7 @@ function githubPr(exec: Exec): PrDriver {
         const out = await execOk(
           exec,
           ['gh', 'pr', 'view', String(number), '--json', 'mergeable,mergeStateStatus'],
-          { cwd, env: ghEnv() },
+          { cwd, env: ghEnv(cwd, forgeRemote) },
         )
         const status = JSON.parse(out) as { mergeable: string; mergeStateStatus: string }
         if (status.mergeable === 'CONFLICTING' || status.mergeStateStatus === 'DIRTY') {
@@ -219,7 +265,10 @@ function githubPr(exec: Exec): PrDriver {
       return 'unknown'
     },
     async getPrDiff(cwd, number) {
-      return execOk(exec, ['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv() })
+      return execOk(exec, ['gh', 'pr', 'diff', String(number)], {
+        cwd,
+        env: ghEnv(cwd, forgeRemote),
+      })
     },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
@@ -239,7 +288,7 @@ function githubPr(exec: Exec): PrDriver {
             '--jq',
             '.[] | {id: (.id|tostring), user: .user.login, body}',
           ],
-          { cwd, env: ghEnv() },
+          { cwd, env: ghEnv(cwd, forgeRemote) },
         )
         for (const line of raw.split('\n')) {
           if (line.trim() === '') continue
@@ -252,51 +301,48 @@ function githubPr(exec: Exec): PrDriver {
       await execOk(exec, ['gh', 'pr', 'comment', String(number), '--body-file', '-'], {
         cwd,
         stdin: body,
-        env: ghEnv(),
+        env: ghEnv(cwd, forgeRemote),
       })
     },
     async closePr(cwd, number, reason) {
       await execOk(exec, ['gh', 'pr', 'close', String(number), '--comment', reason], {
         cwd,
-        env: ghEnv(),
+        env: ghEnv(cwd, forgeRemote),
       })
     },
     async addLabel(cwd, number, label) {
-      await addPrLabels(exec, cwd, number, [label])
+      await addPrLabels(exec, cwd, forgeRemote, number, [label])
     },
     async removeLabel(cwd, number, label) {
-      await removePrLabel(exec, cwd, number, label)
+      await removePrLabel(exec, cwd, forgeRemote, number, label)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github'))
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github', cwd))
     },
   }
 }
 
 type ForgejoRemote = { base: string; ownerRepo: string }
 
-/**
- * Forgejo PRs through a direct token-authenticated API client. tea's `pulls
- * create` crashes on its own output in current releases, so the PR lifecycle
- * skips tea and talks to the Forgejo API with the token from the environment;
- * the ForgejoTracker still uses tea for issues.
- */
-function forgejoPr(exec: Exec): PrDriver {
+/** Forgejo PR writes use tea, with API reads for PR state and metadata. */
+function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
   let remote: ForgejoRemote | null = null
 
   async function forge(cwd: string): Promise<ForgejoRemote> {
     if (remote !== null) return remote
-    const url = await execOk(exec, ['git', 'remote', 'get-url', 'origin'], { cwd })
+    const url = await execOk(exec, ['git', 'remote', 'get-url', forgeRemote], { cwd })
     const parsed = parseRemote(url.trim())
     if (parsed === null) throw new Error(`cannot parse forge remote: ${url.trim()}`)
-    remote = parsed
+    remote = { ...parsed, base: forgeUrl('forgejo', cwd) ?? parsed.base }
     return remote
   }
 
-  async function forgeTokenOrThrow(): Promise<string> {
-    const t = forgeToken('forgejo')
+  async function forgeTokenOrThrow(cwd: string): Promise<string> {
+    const t = forgeToken('forgejo', cwd)
     if (t === null) {
-      throw new Error('forgejo token missing: set FORGEJO_TOKEN in the amagi process environment')
+      throw new Error(
+        'forgejo token missing: set it in the repository settings or FORGEJO_TOKEN in the amagi process environment',
+      )
     }
     return t
   }
@@ -311,7 +357,7 @@ function forgejoPr(exec: Exec): PrDriver {
     const res = await fetch(`${r.base}/api/v1/${path}`, {
       method,
       headers: {
-        authorization: `token ${await forgeTokenOrThrow()}`,
+        authorization: `token ${await forgeTokenOrThrow(cwd)}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -401,40 +447,54 @@ function forgejoPr(exec: Exec): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote: remoteName, title, body, labels }) {
+      await forgeTokenOrThrow(cwd)
       await pushTaskBranch(
         exec,
         { cwd, remote: remoteName, branch },
-        forgeToken('forgejo'),
+        forgeToken('forgejo', cwd),
         async (head) => (await listOpenPrs(cwd)).find((pr) => pr.headRefName === head) ?? null,
       )
-      for (const label of labels) {
+      for (const label of [...labels, ...OUTCOME_LABELS]) {
         // best effort: a label that exists or a run without write perms is not fatal
         await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/labels`, {
           name: label,
           color: 'A0A0A0',
         }).catch(() => {})
       }
-      const created = await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/pulls`, {
-        title,
-        body,
-        head: branch,
-        base,
-        labels,
-      })
-      const number = Number(created.index ?? created.number ?? 0)
-      return {
-        url:
-          typeof created.html_url === 'string'
-            ? created.html_url
-            : `${(await forge(cwd)).base}/${(await forge(cwd)).ownerRepo}/pulls/${number}`,
-        number,
+      await execOk(
+        exec,
+        [
+          'tea',
+          'pr',
+          'create',
+          ...teaRepoArgs(cwd, forgeRemote),
+          '--base',
+          base,
+          '--head',
+          branch,
+          '--title',
+          title,
+          '--description',
+          body,
+          ...(labels.length === 0 ? [] : ['--labels', labels.join(',')]),
+        ],
+        { cwd, env: await teaEnv(exec, cwd, forgeRemote) },
+      )
+      const created = (await listOpenPrs(cwd)).find((pr) => pr.headRefName === branch)
+      if (created === undefined) {
+        throw new Error(`tea created a pull request for ${branch}, but it could not be found`)
       }
+      return { url: created.url, number: created.number }
     },
     async getPr(cwd, number) {
       const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
       if (pr.merged === true || pr.state === 'merged') return 'merged'
       if (pr.state === 'closed') return 'closed'
       return 'open'
+    },
+    async getPrLabels(cwd, number) {
+      const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
+      return ((pr.labels as Array<{ name?: string }> | undefined) ?? []).map((l) => l.name ?? '')
     },
     listOpenPrs,
     async getMergeStatus(cwd, number) {
@@ -471,9 +531,15 @@ function forgejoPr(exec: Exec): PrDriver {
       return out
     },
     async postComment(cwd, number, body) {
-      await api(cwd, 'POST', `repos/${(await forge(cwd)).ownerRepo}/issues/${number}/comments`, {
-        body,
-      })
+      await forgeTokenOrThrow(cwd)
+      await execOk(
+        exec,
+        ['tea', 'comment', ...teaRepoArgs(cwd, forgeRemote), String(number), body],
+        {
+          cwd,
+          env: await teaEnv(exec, cwd, forgeRemote),
+        },
+      )
     },
     async closePr(cwd, number, _reason) {
       await api(cwd, 'PATCH', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`, {
@@ -498,17 +564,203 @@ function forgejoPr(exec: Exec): PrDriver {
       await api(cwd, 'DELETE', `repos/${r.ownerRepo}/issues/${number}/labels/${id}`)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('forgejo'))
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('forgejo', cwd))
     },
   }
 }
 
-export function makePrDriver(kind: string, exec: Exec = defaultExec): PrDriver {
+const GITLAB_PAGE = 100
+
+/**
+ * GitLab merge requests through `glab`, with the repo's token and an
+ * Amagi-owned GLAB_CONFIG_DIR so glab never touches the operator's login.
+ * Everything but creation and the diff goes through `glab api`, whose `:id`
+ * placeholder resolves the project from the repo `cwd` is in.
+ */
+function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
+  async function api(cwd: string, args: readonly string[]): Promise<unknown> {
+    const out = await execOk(exec, ['glab', 'api', ...args], {
+      cwd,
+      env: glabEnv(cwd, forgeRemote),
+    })
+    return out.trim() === '' ? null : (JSON.parse(out) as unknown)
+  }
+
+  // Explicit page walk: glab's --paginate concatenates raw JSON arrays.
+  async function pages(cwd: string, path: string): Promise<Array<Record<string, unknown>>> {
+    const all: Array<Record<string, unknown>> = []
+    const sep = path.includes('?') ? '&' : '?'
+    for (let page = 1; ; page++) {
+      const raw = await api(cwd, [`${path}${sep}per_page=${GITLAB_PAGE}&page=${page}`])
+      const items = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : []
+      all.push(...items)
+      if (items.length < GITLAB_PAGE) return all
+    }
+  }
+
+  async function mr(cwd: string, number: number): Promise<Record<string, unknown>> {
+    const raw = await api(cwd, [`projects/:id/merge_requests/${number}`])
+    return typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+  }
+
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+
+  /** Maps GitLab's has_conflicts + merge_status onto the shared shape. */
+  function mergeFields(item: Record<string, unknown>): PrMergeStatus {
+    if (item.has_conflicts === true) return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+    if (item.merge_status === 'can_be_merged') {
+      return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+    }
+    return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+  }
+
+  function toPrInfo(item: Record<string, unknown>): PrInfo {
+    return {
+      number: Number(item.iid ?? 0),
+      title: text(item.title),
+      body: text(item.description),
+      url: text(item.web_url),
+      headRefName: text(item.source_branch),
+      baseRefName: text(item.target_branch),
+      headRefOid: typeof item.sha === 'string' ? item.sha : null,
+      ...mergeFields(item),
+      createdAt: text(item.created_at),
+      updatedAt: text(item.updated_at),
+      labels: Array.isArray(item.labels) ? item.labels.map(text) : [],
+    }
+  }
+
+  async function openMrs(cwd: string, sourceBranch?: string): Promise<PrInfo[]> {
+    const filter =
+      sourceBranch === undefined ? '' : `&source_branch=${encodeURIComponent(sourceBranch)}`
+    return (await pages(cwd, `projects/:id/merge_requests?state=opened${filter}`)).map(toPrInfo)
+  }
+
+  async function postComment(cwd: string, number: number, body: string): Promise<void> {
+    await api(cwd, [
+      '--method',
+      'POST',
+      `projects/:id/merge_requests/${number}/notes`,
+      '-f',
+      `body=${body}`,
+    ])
+  }
+
+  async function update(cwd: string, number: number, field: string): Promise<void> {
+    await api(cwd, ['--method', 'PUT', `projects/:id/merge_requests/${number}`, '-f', field])
+  }
+
+  return {
+    async createPr({ cwd, branch, base, remote, title, body, labels }) {
+      await pushTaskBranch(
+        exec,
+        { cwd, remote, branch },
+        forgeToken('gitlab', cwd),
+        async (head) => (await openMrs(cwd, head))[0] ?? null,
+      )
+      // GitLab creates attached labels on first use; only the unattached outcome
+      // labels need creating. Best effort: an existing label answers 409.
+      for (const label of OUTCOME_LABELS) {
+        await exec(
+          [
+            'glab',
+            'api',
+            '--method',
+            'POST',
+            'projects/:id/labels',
+            '-f',
+            `name=${label}`,
+            '-f',
+            'color=#A0A0A0',
+          ],
+          { cwd, env: glabEnv(cwd, forgeRemote) },
+        )
+      }
+      await execOk(
+        exec,
+        [
+          'glab',
+          'mr',
+          'create',
+          '--source-branch',
+          branch,
+          '--target-branch',
+          base,
+          '--title',
+          title,
+          '--description',
+          body,
+          ...(labels.length === 0 ? [] : ['--label', labels.join(',')]),
+          '--yes',
+        ],
+        { cwd, env: glabEnv(cwd, forgeRemote) },
+      )
+      const created = (await openMrs(cwd, branch))[0]
+      if (created === undefined) {
+        throw new Error(`glab created a merge request for ${branch}, but it could not be found`)
+      }
+      return { url: created.url, number: created.number }
+    },
+    async getPr(cwd, number) {
+      const state = (await mr(cwd, number)).state
+      if (state === 'merged') return 'merged'
+      if (state === 'closed' || state === 'locked') return 'closed'
+      return 'open'
+    },
+    async getPrLabels(cwd, number) {
+      const labels = (await mr(cwd, number)).labels
+      return Array.isArray(labels) ? labels.map(text) : []
+    },
+    listOpenPrs: (cwd) => openMrs(cwd),
+    async getMergeStatus(cwd, number) {
+      const { mergeable } = mergeFields(await mr(cwd, number))
+      if (mergeable === 'CONFLICTING') return 'conflicted'
+      if (mergeable === 'MERGEABLE') return 'mergeable'
+      return 'unknown'
+    },
+    async getPrDiff(cwd, number) {
+      return execOk(exec, ['glab', 'mr', 'diff', String(number), '--raw'], {
+        cwd,
+        env: glabEnv(cwd, forgeRemote),
+      })
+    },
+    async listComments(cwd, number) {
+      // Notes cover conversation comments, review threads and inline diff comments.
+      const notes = await pages(cwd, `projects/:id/merge_requests/${number}/notes`)
+      return notes
+        .filter((note) => note.system !== true && typeof note.body === 'string')
+        .map((note) => ({
+          id: String(note.id ?? ''),
+          user: text((note.author as { username?: unknown } | null | undefined)?.username),
+          body: text(note.body),
+        }))
+    },
+    postComment,
+    async closePr(cwd, number, reason) {
+      await postComment(cwd, number, reason)
+      await update(cwd, number, 'state_event=close')
+    },
+    async addLabel(cwd, number, label) {
+      await update(cwd, number, `add_labels=${label}`)
+    },
+    async removeLabel(cwd, number, label) {
+      await update(cwd, number, `remove_labels=${label}`)
+    },
+    async deleteBranch(cwd, remote, branch) {
+      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('gitlab', cwd))
+    },
+  }
+}
+
+/** A driver bound to `remote`: every forge CLI call and API URL targets that remote's repository. */
+export function makePrDriver(kind: string, remote: string, exec: Exec = defaultExec): PrDriver {
   switch (kind) {
     case 'github':
-      return githubPr(exec)
+      return githubPr(exec, remote)
+    case 'gitlab':
+      return gitlabPr(exec, remote)
     case 'forgejo':
-      return forgejoPr(exec)
+      return forgejoPr(exec, remote)
     default:
       throw new NotImplementedDriverError('forge', kind)
   }

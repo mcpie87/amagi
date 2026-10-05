@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Exec, ExecResult } from '../../exec.ts'
-import { BeadsTracker, gateTitle, HUMAN_ONLY_LABEL } from './beads.ts'
+import { BeadsTracker, gateTitle, HUMAN_ONLY_LABEL, PROPOSED_LABEL } from './beads.ts'
 
 /** Recorded from bd 1.3.0. */
 const READY_JSON = `[
@@ -283,8 +283,21 @@ describe('BeadsTracker', () => {
     await tracker.claim()
 
     for (const call of calls) {
-      expect(call[call.indexOf('--exclude-label') + 1]).toBe(HUMAN_ONLY_LABEL)
+      const labels = call.flatMap((arg, index) =>
+        arg === '--exclude-label' ? [call[index + 1]] : [],
+      )
+      expect(labels).toEqual([HUMAN_ONLY_LABEL, PROPOSED_LABEL])
     }
+  })
+
+  test('an explicitly requested proposed issue is never claimed', async () => {
+    const proposed = READY_JSON.replace(
+      '"status": "open",',
+      '"status": "open",\n    "labels": ["proposed"],',
+    )
+    const { exec, calls } = fake((c) => (c.includes('show') ? ok(proposed) : undefined))
+    expect(await new BeadsTracker({ cwd: '/repo', exec }).claim('tst-lmc')).toBeNull()
+    expect(calls.some((call) => call.includes('update'))).toBe(false)
   })
 
   test('actor is threaded through for provenance', async () => {
@@ -318,6 +331,26 @@ describe('BeadsTracker', () => {
     const ids = await new BeadsTracker({ cwd: '/repo', exec }).openIds()
     expect(ids).toEqual(['tst-lmc'])
     expect(calls[0]).not.toContain('--all')
+  })
+
+  test('openWithLabel asks bd for open issues with the label, uncapped', async () => {
+    const { exec, calls } = fake((c) => (c.includes('list') ? ok(READY_JSON) : undefined))
+    const issues = await new BeadsTracker({ cwd: '/repo', exec }).openWithLabel('human')
+    expect(issues.map((i) => i.id)).toEqual(['tst-lmc'])
+    expect(calls[0]).toEqual(['bd', 'list', '--label', 'human', '--json', '--limit', '0'])
+  })
+
+  test('gc collects Dolt garbage without deleting issues and reports the sizes', async () => {
+    const { exec, calls } = fake(() =>
+      ok(
+        JSON.stringify({
+          dolt_gc: { size_before_bytes: 154_600_000, size_after_bytes: 47_600_000 },
+        }),
+      ),
+    )
+    const result = await new BeadsTracker({ cwd: '/repo', exec }).gc()
+    expect(result).toEqual({ sizeBeforeBytes: 154_600_000, sizeAfterBytes: 47_600_000 })
+    expect(calls[0]).toEqual(['bd', 'gc', '--skip-decay', '--force', '--json'])
   })
 
   test('gate id comes from a tagged lookup, not from parsing prose', async () => {

@@ -84,7 +84,11 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
     '   opens no pull request, so the verdict is what tells the operator what to do next.',
     ...verdictPromptLines().map((l) => `   ${l}`),
-    'It is rendered as markdown, so wrap paths, identifiers and commands in `backticks`.',
+    'The final message is rendered as markdown. Before finishing, check its prose',
+    'and wrap references to code identifiers, environment variables, paths and',
+    'commands in `backticks` (for example `ensureTeaLogin`, `GIT_CONFIG_COUNT`,',
+    '`/proc/<pid>/cmdline` and `tea logins add --token TOKEN`). Use the meaning',
+    'in context to decide what is code, rather than spelling alone.',
   ]
 
   if (ctx.askCommand) {

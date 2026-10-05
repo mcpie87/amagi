@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as z from 'zod'
-import { lintCommitMessage } from './commit-lint.ts'
-import { type Config, reviewerHarnessConfig } from './config.ts'
-import { claimEligible, implementModel } from './difficulty.ts'
+import { stageAndCommit } from './commit.ts'
+import { activeReviewerConfig, type Config, reviewerHarnessConfig } from './config.ts'
+import { type ClaimWorker, claimEligible } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
+import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import { errMsg } from './errors.ts'
 import {
@@ -20,11 +21,12 @@ import {
   isTerminal,
   type Finding as ReviewFinding,
   type StoredEvent,
+  SuggestedPriority,
   type TaskState,
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
-import { MANDATORY_WORKER_CHECKS, runMandatoryWorkerChecks } from './mandatory-checks.ts'
+import { MANDATORY_WORKER_CHECKS } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -35,8 +37,6 @@ import {
 } from './pr-body.ts'
 import {
   answerPrompt,
-  CHECKPOINT_COMMIT_SUMMARY,
-  commitMessage,
   commitSummary,
   fixChecksPrompt,
   implementAfterVerifyPrompt,
@@ -51,9 +51,22 @@ import {
   whyNoChangesPrompt,
   withRestartHandoff,
 } from './prompt.ts'
-import { backoffDelayMs, isSessionLimit, isTransientFailure } from './retry.ts'
+import {
+  backoffDelayMs,
+  isSessionLimit,
+  isTransientFailure,
+  isUsageLimit,
+  usageLimitExpiry,
+} from './retry.ts'
 import { reviewPrompt } from './review-pack.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
+import {
+  acquireUsageProbe,
+  clearUsageHold,
+  readUsageHold,
+  recordUsageHold,
+  usageHoldKey,
+} from './usage-hold.ts'
 import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
 import { applyRepoIdentity, createWorktree, type WorktreeSpec } from './worktree.ts'
 
@@ -69,6 +82,8 @@ export type RunnerDeps = {
   forge?: PrDriver | undefined
   /** Override the configured reviewer harness in tests. */
   reviewerHarness?: Harness | undefined
+  /** Resolved reviewer worker profile, when the fleet assigns one. */
+  reviewerConfig?: Config['harness']['implement'] | undefined
   /** Lease heartbeat cadence override for tests; defaults to a third of the tracker TTL. */
   leaseHeartbeatMs?: number
   /**
@@ -77,6 +92,10 @@ export type RunnerDeps = {
    * to, so its agent is not told about either.
    */
   channel?: boolean
+  /** Fleet worker this runner belongs to, recorded on agent.started for the scorecard. */
+  workerName?: string | undefined
+  /** Fleet worker `runOnce` claims for, so its difficulty levels gate the claim. */
+  worker?: ClaimWorker | undefined
 }
 
 export type RunOnceResult = {
@@ -170,6 +189,30 @@ function reviewTokens(events: StoredEvent[]): number {
     if (event.event.kind !== 'usage') return total
     return total + event.event.inputTokens + event.event.outputTokens
   }, 0)
+}
+
+/**
+ * The reviewer's output schema, enforced by harnesses with constrained output.
+ * OpenAI strict mode (codex) rejects an array root and any property missing
+ * from `required`, so the list is wrapped and optional fields become nullable.
+ */
+const ReviewOutput = z.object({
+  findings: z.array(
+    Finding.extend({
+      covers: z.string().min(1).nullable(),
+      suggestedPriority: SuggestedPriority.nullable(),
+    }),
+  ),
+})
+
+/** Accepts the `{ findings }` wrapper with its nulls, or a bare findings array. */
+function parseFindings(raw: unknown): ReviewFinding[] {
+  if (Array.isArray(raw)) return z.array(Finding).parse(raw)
+  return ReviewOutput.parse(raw).findings.map(({ covers, suggestedPriority, ...finding }) => ({
+    ...finding,
+    ...(covers === null ? {} : { covers }),
+    ...(suggestedPriority === null ? {} : { suggestedPriority }),
+  }))
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
@@ -286,6 +329,19 @@ type ReviewPrSummary = {
     failureScenario: string
     reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
   }[]
+  findings: ReviewFinding[]
+  followUps: {
+    id: string
+    title: string
+    path: string
+    line: number
+    evidence: string
+    failureScenario: string
+    covers?: string
+    proposalId?: string
+    proposalUrl?: string | null
+  }[]
+  proposalCreationSupported: boolean
   history: string
 }
 
@@ -342,6 +398,7 @@ export class Runner {
   private contextWarned = false
   /** Fresh-context restarts already spent on the current task run, across all phases. */
   private contextRestarts = 0
+  private claimSeq: number | null = null
 
   constructor(private readonly deps: RunnerDeps) {
     this.exec = deps.exec ?? defaultExec
@@ -363,7 +420,7 @@ export class Runner {
     if (options.previousSnapshot) {
       fromTree = options.previousSnapshot
     } else {
-      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
       fromTree = (await execOk(this.exec, ['git', 'merge-base', base, 'HEAD'], { cwd })).trim()
     }
     const diff = await execOk(this.exec, ['git', 'diff', '--binary', fromTree, beforeTree], { cwd })
@@ -377,7 +434,10 @@ export class Runner {
     const openIssues = await this.deps.tracker.ready(200)
     const outputPath = join(runState, `review-${round}-${Date.now()}.json`)
     const schemaPath = join(runState, `review-${round}-${Date.now()}.schema.json`)
-    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(z.array(Finding)), null, 2))
+    const reviewerConfig =
+      this.deps.reviewerConfig ?? activeReviewerConfig(config) ?? reviewerHarnessConfig(config)
+    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
+    writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(ReviewOutput), null, 2))
     const instructions = [
       `Task: ${task.id} ${task.title}`,
       `Description:\n${task.description}`,
@@ -396,7 +456,7 @@ export class Runner {
         : '',
       `Open issue ids and titles for covers:\n${openIssues.map((issue) => `${issue.id}: ${issue.title}`).join('\n') || '(none)'}`,
       `Change under review:\n${diff || '(no diff)'}`,
-      `Return only the findings JSON array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
+      `Return only a JSON object {"findings": [...]} holding the findings array. The runner stores your final response at ${outputPath} outside the worktree. Do not modify repository files, use git-request, create commits, or contact the tracker or forge.`,
     ]
       .filter(Boolean)
       .join('\n\n')
@@ -405,8 +465,6 @@ export class Runner {
       changedFiles,
       roundInstructions: instructions,
     })
-    const reviewerConfig = reviewerHarnessConfig(config)
-    const harness = this.deps.reviewerHarness ?? makeHarness(reviewerConfig)
     const previousReviewerSession = finalPass
       ? null
       : (options.reviewerSession ?? this.latestReviewerSession(task.id))
@@ -429,7 +487,7 @@ export class Runner {
       ...(reviewerConfig.seat === undefined ? {} : { seat: reviewerConfig.seat }),
       ...(reviewerConfig.model === undefined ? {} : { model: reviewerConfig.model }),
       ...(reviewerConfig.effort === undefined ? {} : { effort: reviewerConfig.effort }),
-      ...(harness.kind === 'codex' ? { outputSchema: schemaPath } : {}),
+      outputSchema: schemaPath,
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) {
@@ -447,7 +505,7 @@ export class Runner {
           prompt:
             attempt === 0
               ? prompt
-              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON array.`,
+              : `${prompt}\n\nThe previous output was invalid: ${reason}. Correct it and return only a schema-valid findings JSON object.`,
         },
         'review',
         null,
@@ -463,7 +521,7 @@ export class Runner {
       try {
         writeFileSync(outputPath, run.summary ?? '')
         const parsed: unknown = JSON.parse(readFileSync(outputPath, 'utf8'))
-        findings = z.array(Finding).parse(parsed)
+        findings = parseFindings(parsed)
         reason = null
         break
       } catch (error) {
@@ -565,7 +623,7 @@ export class Runner {
     const { store, tracker, config } = this.deps
     const task =
       taskId === undefined
-        ? await claimEligible(tracker, config, implementModel(config), (skipped, reason) => {
+        ? await claimEligible(tracker, config, this.deps.worker ?? null, (skipped, reason) => {
             store.append(null, {
               type: 'claim.rejected',
               title: skipped.title,
@@ -587,7 +645,7 @@ export class Runner {
     this.peakContext = 0
     this.contextWarned = false
     this.contextRestarts = 0
-    store.append(task.id, {
+    const claimEvent = store.append(task.id, {
       type: 'task.claimed',
       title: task.title,
       tracker: this.deps.tracker.kind,
@@ -599,6 +657,7 @@ export class Runner {
         ? {}
         : { difficulty: task.difficulty }),
     })
+    this.claimSeq = claimEvent.seq
     const { warnTokens, maxTokens } = this.contextLimits()
     store.append(task.id, {
       type: 'run.limits',
@@ -614,12 +673,10 @@ export class Runner {
       if (err instanceof RunCancelledError) {
         await this.finishCancelled(task.id)
       } else if (err instanceof LeaseLostError) {
-        // The tracker claim was reclaimed (stall watcher recovery, bd reclaim,
-        // or another worker took over). Stop before colliding with the new
-        // owner and leave the task where the reclaim parked it: either the new
-        // worker drives it, or the next one resumes its recorded worktree, so no
-        // human attention is needed.
-        store.append(task.id, { type: 'error', message: errMsg(err), fatal: false })
+        // A reclaim outside this process (for example, `bd reclaim`) has no
+        // event to clear the stale active state. Queue it only if no replacement
+        // runner has claimed the task since this run started.
+        store.recordLeaseLoss(task.id, claimEvent.seq, errMsg(err))
       } else {
         const message = errMsg(err)
         store.append(task.id, { type: 'error', message, fatal: true })
@@ -661,6 +718,9 @@ export class Runner {
   }
 
   private transition(taskId: string, to: TaskState, reason?: string): void {
+    if (this.claimSeq !== null && this.deps.store.claimReplaced(taskId, this.claimSeq)) {
+      throw new LeaseLostError(taskId)
+    }
     const from = this.deps.store.task(taskId)?.state ?? null
     if (from === to) return
     // An external actor (the doom guard) may have parked the task in a
@@ -866,69 +926,10 @@ export class Runner {
       priorReplies = replies
       for (const reply of replies) if (reply.outcome === 'fixed') fixedIds.add(reply.id)
 
-      let checksPassed = false
-      for (let checkRound = 0; checkRound <= config.loop.maxCheckRounds; checkRound++) {
-        this.transition(task.id, 'checks')
-        const checks = await this.runChecks(cwd)
-        this.throwIfBudgetExhausted(task.id, budget)
-        checksPassed = checks.every((check) => check.exitCode === 0)
-        store.append(task.id, {
-          type: 'checks.finished',
-          ok: checksPassed,
-          results: checks,
-        })
-        if (checksPassed) {
-          verification = checks
-          break
-        }
-        if (checkRound === config.loop.maxCheckRounds) {
-          const detail = checks
-            .filter((check) => check.exitCode !== 0)
-            .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
-            .join('\n')
-          this.transition(
-            task.id,
-            'needs_human',
-            `mandatory checks still fail after review fixes:\n${detail}`,
-          )
-          return null
-        }
-        this.transition(task.id, 'implementing')
-        let checkFix: AgentRun & { stopped: boolean }
-        try {
-          checkFix = await this.runAgentWithRetry(
-            task.id,
-            run.sessionId,
-            {
-              cwd,
-              prompt: fixChecksPrompt(checks),
-              permissions: config.harness.implement.permissions,
-              extraArgs: config.harness.implement.extraArgs,
-            },
-            'fix checks',
-            lease,
-            budget,
-            'implement',
-            this.deps.harness,
-            `mandatory checks failed before review repair:\n${checks
-              .filter((check) => check.exitCode !== 0)
-              .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
-              .join('\n')}\nRepair agent failure: `,
-          )
-        } catch (error) {
-          if (budget.spentReason() !== null) {
-            stopReason = 'cost'
-            break
-          }
-          throw error
-        }
-        if (checkFix.stopped) return null
-        run = mergeAgentRuns(run, checkFix)
-        const checked = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
-        if (checked === null) return null
-        run = mergeAgentRuns(run, checked)
-      }
-      if (!checksPassed) break
+      const checked = await this.runCheckRounds(task, cwd, run, lease, budget, 'needs-human')
+      if (checked === null) return null
+      run = checked.run
+      verification = checked.verification
       const sinceReview = store
         .events({ taskId: task.id, limit: 1_000_000 })
         .filter((event) => event.seq > reviewStartSeq)
@@ -952,6 +953,7 @@ export class Runner {
       type: 'review.stopped',
       reason: stopReason ?? 'rounds',
       unresolvedIds,
+      findings: latestFindings,
     })
     const minorFindings = latestFindings.filter(
       (finding) =>
@@ -988,6 +990,23 @@ export class Runner {
             reply: reply === undefined ? null : { outcome: reply.outcome, reason: reply.reason },
           }
         }),
+      findings: latestFindings,
+      followUps: [
+        ...new Map(
+          latestFindings
+            .filter((finding) => finding.scope === 'follow-up')
+            .map((finding) => [finding.id, finding] as const),
+        ).values(),
+      ].map((finding) => ({
+        id: finding.id,
+        title: finding.title,
+        path: finding.path,
+        line: finding.line,
+        evidence: finding.evidence,
+        failureScenario: finding.failureScenario,
+        ...(finding.covers === undefined ? {} : { covers: finding.covers }),
+      })),
+      proposalCreationSupported: this.deps.tracker.capabilities.create,
       history,
     }
   }
@@ -1034,14 +1053,18 @@ export class Runner {
         this.exec,
         this.deps.repoRoot,
         config.forge.remote,
-        forgeToken(config.forge.kind),
+        forgeToken(config.forge.kind, this.deps.repoRoot),
       )
-      if (tokenCfg.length > 0) {
-        await execOk(this.exec, ['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+      if (Object.keys(tokenCfg).length > 0) {
+        await execOk(this.exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
           cwd: this.deps.repoRoot,
+          env: tokenCfg,
         })
       }
-      const base = tokenCfg.length > 0 ? `origin/${config.repo.baseBranch}` : config.repo.baseBranch
+      const base =
+        Object.keys(tokenCfg).length > 0
+          ? `${config.forge.remote}/${config.repo.baseBranch}`
+          : config.repo.baseBranch
       worktree = await createWorktree({
         repoRoot: this.deps.repoRoot,
         repoName: this.deps.repoName,
@@ -1052,6 +1075,8 @@ export class Runner {
         setupCmd: config.repo.setupCmd,
         persona: config.repo.persona,
         exec: this.exec,
+        onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
+        onSetupFinished: (report) => store.append(task.id, { type: 'setup.finished', ...report }),
       })
     }
     await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)
@@ -1080,7 +1105,7 @@ export class Runner {
     budget: TaskBudget,
     resume = false,
   ): Promise<void> {
-    const { store, config } = this.deps
+    const { config } = this.deps
     // The claimed task is a lite ready row without notes or comments; re-read the
     // full issue so the agent sees the tracker context (and never needs bd inside
     // the worktree, where it has no database). Best effort, like the PR-body re-read.
@@ -1153,7 +1178,7 @@ export class Runner {
 
     if (current.summary !== null && parseViabilityDecision(current.summary) !== null) {
       const status = await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })
-      const base = await diffBase(this.exec, cwd, config.repo.baseBranch)
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
       const commits = await execOk(this.exec, ['git', 'rev-list', '--count', `${base}..HEAD`], {
         cwd,
       })
@@ -1185,91 +1210,22 @@ export class Runner {
       }
     }
 
-    let recoveryGiven = false
-    let recoveryRetry = false
-    let finalChecks: CheckResult[] = []
-    for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
-      this.throwIfCancelled(task.id)
-      this.transition(task.id, 'checks')
-      const results = await this.runChecks(cwd)
-      this.throwIfBudgetExhausted(task.id, budget)
-      const ok = results.every((r) => r.exitCode === 0)
-      store.append(task.id, { type: 'checks.finished', ok, results })
-      const failureDetail = results
-        .filter((result) => result.exitCode !== 0)
-        .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
-        .join('\n')
-
-      if (ok) {
-        finalChecks = results
-        break
-      }
-      // The fix rounds are spent, or nothing is left to resume. Rather than
-      // parking the task silently (a stale worktree makes checks fail that a
-      // fresh base passes), ask the operator once how to proceed and apply it.
-      if (round === config.loop.maxCheckRounds || (current.sessionId === null && !recoveryRetry)) {
-        if (!recoveryGiven) {
-          recoveryGiven = true
-          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
-          if (action === null) return
-          if (action === 'park') {
-            this.transition(
-              task.id,
-              'needs_human',
-              `project checks still failing:\n${failureDetail}`,
-            )
-            return
-          }
-          if (action === 'rebase') {
-            const rebased = await this.updateFromBase(cwd)
-            if (!rebased) {
-              this.transition(
-                task.id,
-                'needs_human',
-                `project checks still failing; updating the worktree to the latest base failed:\n${failureDetail}`,
-              )
-              return
-            }
-          }
-          // 'retry' or a successful 'rebase': give the fix rounds another full
-          // pass, resuming the recorded session or starting a fresh one.
-          recoveryRetry = true
-          round = -1
-          continue
-        }
-        this.transition(task.id, 'needs_human', `project checks still failing:\n${failureDetail}`)
-        return
-      }
-
-      this.transition(task.id, 'implementing')
-      const fix = await this.runAgentWithRetry(
-        task.id,
-        current.sessionId,
-        {
-          cwd,
-          prompt: fixChecksPrompt(results),
-          permissions: config.harness.implement.permissions,
-          extraArgs: config.harness.implement.extraArgs,
-        },
-        'fix checks',
-        lease,
-        budget,
-      )
-      if (fix.stopped) return
-      current = mergeAgentRuns(current, fix)
-      if (lease.isLost) throw new LeaseLostError(task.id)
-
-      const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
-      if (resumed === null) return
-      current = mergeAgentRuns(current, resumed)
-    }
+    const checked = await this.runCheckRounds(task, cwd, current, lease, budget)
+    if (checked === null) return
+    current = checked.run
+    let finalChecks = checked.verification
 
     let reviewSummary: ReviewPrSummary | null = null
-    if (config.review.enabled) {
+    if ((this.deps.reviewerConfig ?? activeReviewerConfig(config)) !== undefined) {
       reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
       if (reviewSummary === null) return
       current = reviewSummary.run
       if (reviewSummary.verification.length > 0) finalChecks = reviewSummary.verification
+    } else {
+      this.deps.store.append(task.id, {
+        type: 'review.skipped',
+        reason: 'no enabled fleet worker has the Review role and review.enabled is off',
+      })
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
@@ -1321,6 +1277,7 @@ export class Runner {
       return
     }
     this.transition(task.id, 'committed')
+    if (reviewSummary !== null) await this.fileFollowUps(task, reviewSummary)
     await this.openPullRequest(
       task,
       cwd,
@@ -1396,6 +1353,88 @@ export class Runner {
     return null
   }
 
+  private async fileFollowUps(task: TrackerTask, review: ReviewPrSummary): Promise<void> {
+    if (!this.deps.tracker.capabilities.create) return
+    for (const followUp of review.followUps) {
+      if (followUp.covers !== undefined) continue
+      const finding = review.findings.find((entry) => entry.id === followUp.id)
+      if (finding === undefined) continue
+      const suggested = finding.suggestedPriority
+      const priority =
+        typeof suggested === 'number'
+          ? suggested
+          : typeof suggested === 'string'
+            ? (suggested.match(/^(?:P)?([0-4])$/i)?.[1] ?? null)
+            : null
+      const description = [
+        `Finding: ${finding.path}:${finding.line}`,
+        '',
+        `Evidence: ${finding.evidence}`,
+        '',
+        `Failure scenario: ${finding.failureScenario}`,
+        '',
+        'Why this is outside the source task: this is a follow-up finding outside the scope of the implemented task.',
+        '',
+        `Source task: ${task.id}`,
+        'Source PR: added when the pull request is opened.',
+      ].join('\n')
+      try {
+        const created = await this.deps.tracker.createTask({
+          title: finding.title,
+          description,
+          acceptanceCriteria: null,
+          priority: priority === null ? null : Number(priority),
+          labels: [PROPOSED_LABEL],
+          dependencies: [],
+          parent: task.id,
+        })
+        followUp.proposalId = created.id
+        followUp.proposalUrl = created.url
+        this.deps.store.append(task.id, {
+          type: 'review.proposal-filed',
+          findingId: finding.id,
+          issueId: created.id,
+          title: created.title,
+          url: created.url,
+        })
+      } catch (error) {
+        this.deps.store.append(task.id, {
+          type: 'error',
+          message: `filing follow-up finding ${finding.id} failed: ${errMsg(error)}`,
+          fatal: false,
+        })
+      }
+    }
+  }
+
+  private async updateProposalPrLinks(
+    taskId: string,
+    review: ReviewPrSummary | null | undefined,
+    prUrl: string,
+  ): Promise<void> {
+    if (review === null || review === undefined || !this.deps.tracker.capabilities.edit) return
+    for (const followUp of review.followUps) {
+      if (followUp.proposalId === undefined) continue
+      const finding = review.findings.find((entry) => entry.id === followUp.id)
+      if (finding === undefined) continue
+      try {
+        const proposal = await this.deps.tracker.get(followUp.proposalId)
+        if (proposal === null) continue
+        const description = proposal.description.replace(
+          'Source PR: added when the pull request is opened.',
+          `Source PR: ${prUrl}`,
+        )
+        await this.deps.tracker.updateTask(followUp.proposalId, { description })
+      } catch (error) {
+        this.deps.store.append(taskId, {
+          type: 'error',
+          message: `adding source PR ${prUrl} to proposal ${followUp.proposalId} failed: ${errMsg(error)}`,
+          fatal: false,
+        })
+      }
+    }
+  }
+
   /** Pushes the worktree branch and opens a pull request, with one recovery attempt on failure. */
   private async openPullRequest(
     task: TrackerTask,
@@ -1410,8 +1449,13 @@ export class Runner {
     verification?: readonly CheckResult[],
   ): Promise<void> {
     const { store, config } = this.deps
-    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, this.exec)
-    const changes = await changesSinceBase(this.exec, cwd, config.repo.baseBranch)
+    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, config.forge.remote, this.exec)
+    const changes = await changesSinceBase(
+      this.exec,
+      cwd,
+      config.forge.remote,
+      config.repo.baseBranch,
+    )
     if (changes.length === 0) {
       // The worktree was dirty and a commit was made, yet the three-dot diff
       // against the base is empty: the agent re-applied change already on the
@@ -1479,6 +1523,8 @@ export class Runner {
               unresolved: reviewSummary.unresolved,
               unresolvedIds: reviewSummary.unresolvedIds,
               unresolvedFindings: reviewSummary.unresolvedFindings,
+              followUps: reviewSummary.followUps,
+              proposalCreationSupported: reviewSummary.proposalCreationSupported,
               history: reviewSummary.history,
             },
         verification,
@@ -1492,10 +1538,11 @@ export class Runner {
       const pr = await forge.createPr(opts)
       store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
       this.transition(task.id, 'pr_open')
+      await this.updateProposalPrLinks(task.id, reviewSummary, pr.url)
     } catch (err) {
       const message = errMsg(err)
       const hint = /auth|login|token|not logged/i.test(message)
-        ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+        ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
         type: 'error',
@@ -1526,11 +1573,12 @@ export class Runner {
         const pr = await forge.createPr(opts)
         store.append(task.id, { type: 'pr.created', url: pr.url, number: pr.number })
         this.transition(task.id, 'pr_open')
+        await this.updateProposalPrLinks(task.id, reviewSummary, pr.url)
       } catch (retryErr) {
         this.throwIfCancelled(task.id)
         const retryMessage = errMsg(retryErr)
         const retryHint = /auth|login|token|not logged/i.test(retryMessage)
-          ? ` (forge needs a token: set GH_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
+          ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
           : ''
         store.append(task.id, {
           type: 'error',
@@ -1704,6 +1752,7 @@ export class Runner {
             seat: spawn.seat ?? harness.kind,
             model,
             effort,
+            ...(this.deps.workerName === undefined ? {} : { worker: this.deps.workerName }),
             cwd: opts.cwd,
             resumed: resumeFrom !== null,
           })
@@ -1916,10 +1965,31 @@ export class Runner {
     let model: string | null = null
     let effort: string | null = null
     let runOpts = opts
+    const implement = config.harness.implement
+    const holdKey = usageHoldKey(
+      harness.kind,
+      opts.model ?? implement.model ?? null,
+      opts.seat ?? implement.seat,
+    )
 
     for (let attempt = 1; ; attempt++) {
-      const run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
-      this.throwIfCancelled(taskId)
+      const waitingOnUsageHold = readUsageHold(holdKey) !== null
+      const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
+      if (waitingOnUsageHold && !this.isCancelled(taskId))
+        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+      let run: Awaited<ReturnType<Runner['runAgent']>>
+      try {
+        run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
+      } catch (err) {
+        releaseProbe?.()
+        throw err
+      }
+      try {
+        this.throwIfCancelled(taskId)
+      } catch (err) {
+        releaseProbe?.()
+        throw err
+      }
       sessionId = run.sessionId
       summary = run.summary
       model = run.model
@@ -1928,11 +1998,14 @@ export class Runner {
         // Checked before ok: a hard kill must stop the run even when the
         // process happens to report a clean exit.
         if (this.contextRestarts >= config.loop.contextMaxRestarts) {
-          this.transition(
-            taskId,
-            'needs_human',
-            `${failureContext}context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
-          )
+          releaseProbe?.()
+          if (role !== 'review') {
+            this.transition(
+              taskId,
+              'needs_human',
+              `${failureContext}context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+            )
+          }
           return { sessionId, stopped: true, summary, model, effort }
         }
         // Fresh-context restart: keep the worktree and claim, and hand the new
@@ -1952,14 +2025,52 @@ export class Runner {
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
         this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+        releaseProbe?.()
         continue
       }
-      if (run.ok) return { sessionId, stopped: false, summary, model, effort }
-      if (lease?.isLost) throw new LeaseLostError(taskId)
+      if (run.ok) {
+        clearUsageHold(holdKey)
+        releaseProbe?.()
+        return { sessionId, stopped: false, summary, model, effort }
+      }
+      if (lease?.isLost) {
+        releaseProbe?.()
+        throw new LeaseLostError(taskId)
+      }
 
-      if (!isTransientFailure(run.detail ?? '') || attempt > config.loop.maxRetries) {
-        this.transition(taskId, 'needs_human', `${failureContext}${run.detail ?? 'agent failed'}`)
+      const usageLimited = isUsageLimit(run.detail ?? '')
+      if (
+        !isTransientFailure(run.detail ?? '') ||
+        (!usageLimited && attempt > config.loop.maxRetries)
+      ) {
+        releaseProbe?.()
+        if (role !== 'review')
+          this.transition(taskId, 'needs_human', `${failureContext}${run.detail ?? 'agent failed'}`)
         return { sessionId, stopped: true, summary, model, effort }
+      }
+      if (usageLimited) {
+        const detail = run.detail ?? 'provider usage limit reached'
+        const expiresAt = usageLimitExpiry(detail)
+        const hold = recordUsageHold(
+          holdKey,
+          harness.kind,
+          opts.model ?? implement.model ?? run.model,
+          detail,
+          expiresAt,
+        )
+        const reason = `${harness.kind}+${hold.model} usage limit hold until ${new Date(expiresAt).toLocaleString()}`
+        store.append(taskId, {
+          type: 'retry.scheduled',
+          attempt,
+          delayMs: Math.max(0, expiresAt - Date.now()),
+          reason,
+          detail,
+        })
+        this.transition(taskId, 'retrying', reason)
+        if (isSessionLimit(detail)) sessionId = null
+        releaseProbe?.()
+        this.throwIfCancelled(taskId)
+        continue
       }
       const delayMs = backoffDelayMs(config.loop.retryBaseMs, config.loop.retryMaxMs, attempt)
       store.append(taskId, {
@@ -1972,6 +2083,7 @@ export class Runner {
       // A session that hit its own limit (turn/context window) is spent and
       // cannot be resumed; the retry starts a fresh session in the same worktree.
       if (isSessionLimit(run.detail ?? '')) sessionId = null
+      releaseProbe?.()
       if (role !== 'review') this.transition(taskId, 'retrying')
       // Polled so a stop interrupts the backoff instead of waiting it out,
       // and a retry-now request skips the wait for an immediate retry.
@@ -2007,6 +2119,100 @@ export class Runner {
       if (r.exitCode !== 0) break
     }
     return results
+  }
+
+  private async runCheckRounds(
+    task: TrackerTask,
+    cwd: string,
+    initialRun: AgentRun,
+    lease: Lease,
+    budget: TaskBudget,
+    onExhausted: 'recover' | 'needs-human' = 'recover',
+  ): Promise<{ run: AgentRun; verification: CheckResult[] } | null> {
+    const { config, store } = this.deps
+    let run = initialRun
+    let recoveryGiven = false
+    let recoveryRetry = false
+    for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
+      this.throwIfCancelled(task.id)
+      this.transition(task.id, 'checks')
+      const results = await this.runChecks(cwd)
+      this.throwIfBudgetExhausted(task.id, budget)
+      const ok = results.every((result) => result.exitCode === 0)
+      store.append(task.id, { type: 'checks.finished', ok, results })
+      if (ok) return { run, verification: results }
+
+      const failureDetail = results
+        .filter((result) => result.exitCode !== 0)
+        .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+        .join('\n')
+
+      if (round === config.loop.maxCheckRounds || (run.sessionId === null && !recoveryRetry)) {
+        if (onExhausted === 'needs-human') {
+          this.transition(
+            task.id,
+            'needs_human',
+            `mandatory checks still fail after review fixes:\n${failureDetail}`,
+          )
+          return null
+        }
+        if (!recoveryGiven) {
+          recoveryGiven = true
+          const action = await this.recoverFailingChecks(task.id, results, lease, budget)
+          if (action === null) return null
+          if (action === 'park') {
+            this.transition(
+              task.id,
+              'needs_human',
+              `project checks still failing:\n${failureDetail}`,
+            )
+            return null
+          }
+          if (action === 'rebase') {
+            const rebased = await this.updateFromBase(cwd)
+            if (!rebased) {
+              this.transition(
+                task.id,
+                'needs_human',
+                `project checks still failing; updating the worktree to the latest base failed:\n${failureDetail}`,
+              )
+              return null
+            }
+          }
+          recoveryRetry = true
+          round = -1
+          continue
+        }
+        this.transition(task.id, 'needs_human', `project checks still failing:\n${failureDetail}`)
+        return null
+      }
+
+      this.transition(task.id, 'implementing')
+      const fix = await this.runAgentWithRetry(
+        task.id,
+        run.sessionId,
+        {
+          cwd,
+          prompt: fixChecksPrompt(results),
+          permissions: config.harness.implement.permissions,
+          extraArgs: config.harness.implement.extraArgs,
+        },
+        'fix checks',
+        lease,
+        budget,
+        'implement',
+        this.deps.harness,
+        `mandatory checks failed before repair:\n${failureDetail}\nRepair agent failure: `,
+      )
+      if (fix.stopped) return null
+      run = mergeAgentRuns(run, fix)
+      if (lease.isLost) throw new LeaseLostError(task.id)
+
+      const resumed = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
+      if (resumed === null) return null
+      run = mergeAgentRuns(run, resumed)
+    }
+    return null
   }
 
   /**
@@ -2077,10 +2283,11 @@ export class Runner {
       this.exec,
       this.deps.repoRoot,
       config.forge.remote,
-      forgeToken(config.forge.kind),
+      forgeToken(config.forge.kind, this.deps.repoRoot),
     )
-    const fetch = await this.exec(['git', ...tokenCfg, 'fetch', 'origin', config.repo.baseBranch], {
+    const fetch = await this.exec(['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
       cwd,
+      env: tokenCfg,
     })
     if (fetch.exitCode !== 0) return false
 
@@ -2089,7 +2296,10 @@ export class Runner {
       dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
     if (dirty && !stashed) return false
 
-    const rebase = await this.exec(['git', 'rebase', `origin/${config.repo.baseBranch}`], { cwd })
+    const rebase = await this.exec(
+      ['git', 'rebase', `${config.forge.remote}/${config.repo.baseBranch}`],
+      { cwd },
+    )
     if (rebase.exitCode !== 0) {
       await this.exec(['git', 'rebase', '--abort'], { cwd })
       if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
@@ -2109,11 +2319,11 @@ export class Runner {
     base: string,
     run: { summary: string; model: string | null; effort: string | null },
   ): Promise<boolean> {
-    await this.stageAndCommit(task, cwd, run.summary, this.commitMeta(run.model, run.effort))
+    await stageAndCommit(this.exec, task, cwd, run.summary, this.commitMeta(run.model, run.effort))
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
-    const ref = await diffBase(this.exec, cwd, base)
+    const ref = await diffBase(this.exec, cwd, this.deps.config.forge.remote, base)
     const ahead = await this.exec(['git', 'rev-list', '--count', `${ref}..HEAD`], { cwd })
     if (ahead.exitCode !== 0 || Number(ahead.stdout.trim()) === 0) return false
 
@@ -2133,80 +2343,6 @@ export class Runner {
       harness: this.deps.harness.kind,
       model: model ?? implement.model ?? null,
       effort: effort ?? implement.effort ?? null,
-    }
-  }
-
-  /**
-   * Stages and commits the worktree with a message commit-lint.ts accepts.
-   * `committed: false` means the worktree was already clean; a git failure or
-   * a malformed message throws, since the caller decides how to surface it.
-   */
-  private async stageAndCommit(
-    task: Pick<TrackerTask, 'id' | 'title'>,
-    cwd: string,
-    summary: string,
-    meta: PrBodyMeta,
-  ): Promise<{ committed: false } | { committed: true; sha: string }> {
-    const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-    if (status.stdout.trim() === '') return { committed: false }
-    const message = commitMessage(task, summary, meta)
-    const lint = lintCommitMessage(message)
-    if (lint.length > 0) throw new Error(`malformed commit message: ${lint.join('; ')}`)
-    await this.exec(['git', 'add', '-A'], { cwd })
-    const commit = await this.exec(['git', 'commit', '-q', '-F', '-'], { cwd, stdin: message })
-    if (commit.exitCode !== 0) {
-      throw new Error(`git commit failed: ${(commit.stderr || commit.stdout).trim()}`)
-    }
-    const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
-    return { committed: true, sha }
-  }
-
-  /**
-   * The one sanctioned git write an agent can cause, over the server channel:
-   * stages and commits the worktree, records `commit.created`, and returns
-   * the sha. A clean worktree or a git failure is returned as an error so the
-   * agent learns immediately. No state transition, so it is usable any number
-   * of times within a run.
-   */
-  async requestCommit(
-    taskId: string,
-    cwd: string,
-  ): Promise<{ ok: true; sha: string } | { ok: false; error: string }> {
-    const task = this.deps.store.task(taskId)
-    if (task === null) return { ok: false, error: `unknown task ${taskId}` }
-    try {
-      const status = await this.exec(['git', 'status', '--porcelain'], { cwd })
-      if (status.stdout.trim() === '') {
-        return { ok: false, error: 'nothing to commit; the worktree is clean' }
-      }
-      const checks = await runMandatoryWorkerChecks(this.exec, cwd)
-      const checksPassed = checks.every((check) => check.exitCode === 0)
-      this.deps.store.append(taskId, { type: 'checks.finished', ok: checksPassed, results: checks })
-      if (!checksPassed) {
-        const detail = checks
-          .filter((check) => check.exitCode !== 0)
-          .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
-          .join('\n')
-        return {
-          ok: false,
-          error: `mandatory checks failed; fix the failures and retry:\n${detail}`,
-        }
-      }
-      const staged = await this.stageAndCommit(
-        task,
-        cwd,
-        CHECKPOINT_COMMIT_SUMMARY,
-        this.commitMeta(null, null),
-      )
-      if (!staged.committed) return { ok: false, error: 'nothing to commit; the worktree is clean' }
-      this.deps.store.append(taskId, {
-        type: 'commit.created',
-        sha: staged.sha,
-        subject: `[${task.id}] ${task.title}`,
-      })
-      return { ok: true, sha: staged.sha }
-    } catch (err) {
-      return { ok: false, error: errMsg(err) }
     }
   }
 

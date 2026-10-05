@@ -70,6 +70,12 @@ export type EpicCloseResult = {
   reason: string
 }
 
+/** What a Dolt garbage collection reclaimed from the store, in bytes. */
+export type BeadsGcResult = {
+  sizeBeforeBytes: number
+  sizeAfterBytes: number
+}
+
 /** bd grants a five minute lease on claim and expects heartbeats under that. */
 const LEASE_TTL_MS = 5 * 60_000
 
@@ -81,6 +87,8 @@ const NOT_WORK_TYPES = ['epic', 'milestone', 'gate'] as const
 
 /** Opt out marker for work that is the operator's to do, not an agent's. */
 export const HUMAN_ONLY_LABEL = 'human'
+/** Keeps proposed work out of the worker queue until a human accepts it. */
+export const PROPOSED_LABEL = 'proposed'
 
 const STATUS_MAP: Record<string, TrackerStatus> = {
   open: 'open',
@@ -180,12 +188,21 @@ export class BeadsTracker implements Tracker {
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
       HUMAN_ONLY_LABEL,
+      '--exclude-label',
+      PROPOSED_LABEL,
     ])
     return parseIssues(out).map(toTask)
   }
 
   async list(limit = 200): Promise<BeadsIssue[]> {
     return parseIssues(await this.bd(['list', '--all', '--json', '--limit', String(limit)])).map(
+      toIssue,
+    )
+  }
+
+  /** Every open issue carrying `label`, uncapped so none fall outside a window. */
+  async openWithLabel(label: string): Promise<BeadsIssue[]> {
+    return parseIssues(await this.bd(['list', '--label', label, '--json', '--limit', '0'])).map(
       toIssue,
     )
   }
@@ -229,6 +246,8 @@ export class BeadsTracker implements Tracker {
 
   async claim(id?: string): Promise<TrackerTask | null> {
     if (id !== undefined) {
+      const issue = await this.getIssue(id)
+      if (issue === null || issue.labels.includes(PROPOSED_LABEL)) return null
       await this.bd(['update', id, '--status', 'in_progress'])
       return this.get(id)
     }
@@ -243,6 +262,8 @@ export class BeadsTracker implements Tracker {
       NOT_WORK_TYPES.join(','),
       '--exclude-label',
       HUMAN_ONLY_LABEL,
+      '--exclude-label',
+      PROPOSED_LABEL,
     ])
     const issues = parseIssues(out)
     const claimed = issues[0]
@@ -427,6 +448,22 @@ export class BeadsTracker implements Tracker {
     return {
       closed: Array.isArray(parsed.closed) ? parsed.closed.map(String) : [],
       reason: String(parsed.reason ?? ''),
+    }
+  }
+
+  /**
+   * Dolt GC only. Decay would delete closed issues, and compaction rewrites
+   * history that other clones sync against, so both stay operator decisions.
+   * Concurrent bd calls wait on the store lock for the ~1s it takes.
+   */
+  async gc(): Promise<BeadsGcResult> {
+    const out = await this.bd(['gc', '--skip-decay', '--force', '--json'])
+    const parsed = (JSON.parse(out) ?? {}) as {
+      dolt_gc?: { size_before_bytes?: unknown; size_after_bytes?: unknown }
+    }
+    return {
+      sizeBeforeBytes: Number(parsed.dolt_gc?.size_before_bytes ?? 0),
+      sizeAfterBytes: Number(parsed.dolt_gc?.size_after_bytes ?? 0),
     }
   }
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
@@ -26,6 +26,7 @@ import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
+import { readUsageHold, usageHoldKey } from './usage-hold.ts'
 
 const TASK: TrackerTask = {
   id: 'bd-a1b2',
@@ -178,7 +179,7 @@ class ReviewHarness implements Harness {
   readonly kind = 'codex'
   readonly calls: { resumeFrom: string | null; opts: AgentStartOptions }[] = []
 
-  constructor(private readonly outputs: string[]) {}
+  constructor(private readonly outputs: (string | ((opts: AgentStartOptions) => string))[]) {}
 
   start(opts: AgentStartOptions): AgentProcess {
     return this.run(null, opts)
@@ -200,7 +201,8 @@ class ReviewHarness implements Harness {
     if (!opts.prompt.includes('runner stores your final response')) {
       throw new Error('review prompt did not explain where findings are stored')
     }
-    const summary = this.outputs.shift() ?? '[]'
+    const output = this.outputs.shift()
+    const summary = typeof output === 'function' ? output(opts) : (output ?? '[]')
     const queue = new AsyncQueue<AgentEvent>()
     queue.push({
       kind: 'usage',
@@ -226,6 +228,26 @@ class ReviewHarness implements Harness {
       model: null,
       effort: null,
     }
+  }
+}
+
+function failedReviewProcess(): AgentProcess {
+  const queue = new AsyncQueue<AgentEvent>()
+  queue.close()
+  return {
+    pid: -1,
+    events: () => queue,
+    done: Promise.resolve({
+      exitCode: 1,
+      ok: false,
+      sessionId: 'failed-review-session',
+      summary: null,
+      usage: null,
+      stderr: 'reviewer process failed',
+    }),
+    kill: async () => {},
+    model: null,
+    effort: null,
   }
 }
 
@@ -295,6 +317,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
 
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return []
@@ -322,6 +347,8 @@ class FakePr implements PrDriver {
 let repo: string
 let wtRoot: string
 let store: Store
+let stateRoot: string
+let previousStateHome: string | undefined
 
 const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
@@ -382,6 +409,9 @@ beforeEach(async () => {
   delete process.env.GITHUB_TOKEN
   repo = mkdtempSync(join(tmpdir(), 'amagi-run-repo-'))
   wtRoot = mkdtempSync(join(tmpdir(), 'amagi-run-wt-'))
+  stateRoot = mkdtempSync(join(tmpdir(), 'amagi-run-state-'))
+  previousStateHome = process.env.XDG_STATE_HOME
+  process.env.XDG_STATE_HOME = stateRoot
   store = new Store(openDatabase(':memory:'))
   await execOk(exec, ['git', 'init', '-q', '-b', 'main', '.'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
@@ -395,6 +425,9 @@ afterEach(() => {
   store.close()
   rmSync(repo, { recursive: true, force: true })
   rmSync(wtRoot, { recursive: true, force: true })
+  rmSync(stateRoot, { recursive: true, force: true })
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousStateHome
 })
 
 const writesAFile: Turn = {
@@ -570,6 +603,80 @@ describe('Runner.review', () => {
     expect(reviewer.calls[2]?.resumeFrom).toBeNull()
   })
 
+  test('the reviewer gets a strict-mode findings schema and its nulls are dropped', async () => {
+    registerTask()
+    writeFileSync(join(repo, 'README.md'), '# first change\n')
+    let schema: {
+      type?: string
+      properties?: {
+        findings?: { items?: { properties?: Record<string, unknown>; required?: string[] } }
+      }
+    } = {}
+    const reviewer = new ReviewHarness([
+      (opts) => {
+        schema = JSON.parse(readFileSync(opts.outputSchema ?? '', 'utf8'))
+        return JSON.stringify({
+          findings: [{ ...finding, covers: null, suggestedPriority: null }],
+        })
+      },
+    ])
+    const runner = makeRunner(
+      new FakeTracker([]),
+      new FakeHarness([]),
+      reviewConfig(),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    )
+
+    const result = await runner.review({ task: TASK, cwd: repo, round: 1 })
+    expect(result.findings).toEqual([finding])
+    expect(schema.type).toBe('object')
+    const items = schema.properties?.findings?.items
+    expect(items?.required?.toSorted()).toEqual(Object.keys(items?.properties ?? {}).toSorted())
+  })
+
+  test('parks without committing when checks fail after a review fix', async () => {
+    const forge = new FakePr()
+    const harness = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          const replyPath = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (replyPath === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(
+            replyPath,
+            JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Fixed.' }]),
+          )
+          writeFileSync(join(cwd, 'review-broke-checks'), 'broken\n')
+        },
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' }, maxRounds: 2 },
+        checks: { commands: ['test ! -e review-broke-checks'] },
+        loop: { maxCheckRounds: 0 },
+      }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('after review fix')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(types(TASK.id)).not.toContain('pr.created')
+    expect(forge.calls).toHaveLength(0)
+  })
+
   test('invalid findings are re-asked once in the same session and reported as failed', async () => {
     registerTask()
     const reviewer = new ReviewHarness(['not json', '{"not":"an array"}'])
@@ -611,6 +718,108 @@ describe('Runner.runOnce', () => {
       review: { enabled: true, harness: { kind: 'codex' }, ...review },
       loop,
     })
+
+  test('a replaced claim stops the old runner before its next state transition', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        effect: (cwd) => {
+          writesAFile.effect?.(cwd, '')
+          store.append(TASK.id, {
+            type: 'task.claimed',
+            title: TASK.title,
+            tracker: 'fake',
+          })
+        },
+      },
+    ])
+
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(
+      store.events({ taskId: TASK.id, limit: 999 }).some((event) => event.type === 'error'),
+    ).toBe(false)
+  })
+
+  test('files uncovered follow-ups once and links both proposals and covered issues in the PR', async () => {
+    class CreatingTracker extends FakeTracker {
+      override readonly capabilities: TrackerCapabilities = {
+        create: true,
+        edit: true,
+        dependencies: true,
+      }
+      readonly created: { input: CreateTrackerTask; task: TrackerTask }[] = []
+
+      override async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
+        const task: TrackerTask = {
+          id: 'bd-proposal',
+          title: input.title,
+          description: input.description,
+          status: 'open',
+          priority: input.priority,
+          type: 'task',
+          url: null,
+        }
+        this.created.push({ input, task })
+        return task
+      }
+
+      override async get(id?: string): Promise<TrackerTask | null> {
+        return this.created.find((entry) => entry.task.id === id)?.task ?? null
+      }
+
+      override async updateTask(id: string, input: UpdateTrackerTask): Promise<TrackerTask> {
+        const entry = this.created.find((item) => item.task.id === id)
+        if (entry === undefined) throw new Error(`unknown issue ${id}`)
+        entry.task.description = input.description ?? entry.task.description
+        return entry.task
+      }
+    }
+    const tracker = new CreatingTracker([TASK])
+    const forge = new FakePr()
+    const uncovered = {
+      ...finding,
+      id: 'F-2',
+      scope: 'follow-up',
+      title: 'Handle the stale cache',
+      path: 'src/cache.ts',
+      line: 12,
+      evidence: 'The cache is never invalidated.',
+      failureScenario: 'Users keep seeing stale values.',
+      suggestedPriority: 2,
+    }
+    const covered = {
+      ...uncovered,
+      id: 'F-3',
+      title: 'Reuse existing retry handling',
+      covers: 'bd-existing',
+    }
+    const result = await makeRunner(
+      tracker,
+      new FakeHarness([writesAFile]),
+      reviewConfig({ maxRounds: 1 }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([uncovered, covered])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(tracker.created).toHaveLength(1)
+    expect(tracker.created[0]?.input).toMatchObject({
+      title: 'Handle the stale cache',
+      priority: 2,
+      labels: ['proposed'],
+      parent: TASK.id,
+    })
+    expect(tracker.created[0]?.input.description).toContain('src/cache.ts:12')
+    expect(tracker.created[0]?.input.description).toContain('Source task: bd-a1b2')
+    expect(tracker.created[0]?.task.description).toContain('https://example.com/demo/pull/7')
+    expect(forge.calls[0]?.body).toContain('bd-proposal')
+    expect(forge.calls[0]?.body).toContain('bd-existing')
+    expect(types(TASK.id)).toContain('review.proposal-filed')
+  })
 
   test('fixes a blocking finding and opens a clean PR after the next review', async () => {
     const forge = new FakePr()
@@ -686,6 +895,194 @@ describe('Runner.runOnce', () => {
     expect(forge.calls).toHaveLength(0)
     expect(stateReason(TASK.id)).toContain('checks still fail after review fixes')
     expect(stateReason(TASK.id)).toContain('test -f good.txt')
+  })
+
+  test('an enabled fleet reviewer turns review on without review.enabled', async () => {
+    const reviewer = new ReviewHarness(['[]'])
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        worker: [
+          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
+        ],
+      }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(reviewer.calls).toHaveLength(1)
+    expect(types(TASK.id)).toContain('review.finished')
+  })
+
+  test('skips review with no fleet reviewer and review.enabled unset', async () => {
+    const reviewer = new ReviewHarness(['[]'])
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        worker: [
+          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: false },
+        ],
+      }),
+      new FakePr(),
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(reviewer.calls).toHaveLength(0)
+    expect(types(TASK.id)).not.toContain('review.started')
+    expect(types(TASK.id)).toContain('review.skipped')
+  })
+
+  test('records reviewer process failures and opens an unresolved PR without invalid state transitions', async () => {
+    const reviewer: Harness = {
+      kind: 'codex',
+      start: () => failedReviewProcess(),
+      resume: () => failedReviewProcess(),
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      reviewConfig(),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(types(TASK.id)).toContain('review.failed')
+    expect(types(TASK.id)).toContain('review.stopped')
+    expect(forge.calls[0]?.labels).toContain('amagi/review-unresolved')
+  })
+
+  test('catches and fixes a seeded boundary defect before opening a clean PR', async () => {
+    const task: TrackerTask = {
+      ...TASK,
+      id: 'bd-range',
+      title: 'Add an inclusive range check',
+      description: 'Add isWithinRange(value, min, max) and include both endpoints.',
+      acceptanceCriteria: 'The minimum and maximum values are within the range.',
+    }
+    const file = 'src/range.js'
+    const initial =
+      'function isWithinRange(value, min, max) { return value > min && value < max }\n'
+    const fixed =
+      'function isWithinRange(value, min, max) { return value >= min && value <= max }\n'
+    const sourceAt = (cwd: string) => readFileSync(join(cwd, file), 'utf8')
+    const evaluates = (source: string) => new Function(`${source}\nreturn isWithinRange`)()
+    const finding = {
+      id: 'F-RANGE-1',
+      severity: 'major',
+      scope: 'in-scope',
+      path: file,
+      line: 1,
+      title: 'The range check excludes both endpoints',
+      evidence: 'The comparisons use > and < despite the inclusive contract.',
+      failureScenario: 'A value equal to min or max is incorrectly rejected.',
+    } as const
+    const implementer = new FakeHarness(
+      [
+        {
+          effect: (cwd) => {
+            mkdirSync(join(cwd, 'src'), { recursive: true })
+            writeFileSync(join(cwd, file), initial)
+          },
+          events: [
+            { kind: 'usage', inputTokens: 100, outputTokens: 20, cachedTokens: 0, costUsd: 0.02 },
+          ],
+        },
+        {
+          effect: (cwd, prompt) => {
+            expect(prompt).toContain('F-RANGE-1')
+            writeFileSync(join(cwd, file), fixed)
+            const replyPath = prompt.match(
+              /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+            )?.[1]
+            if (replyPath === undefined) throw new Error('review fix prompt omitted reply path')
+            writeFileSync(
+              replyPath,
+              JSON.stringify([
+                { id: 'F-RANGE-1', outcome: 'fixed', reason: 'Included both boundaries.' },
+              ]),
+            )
+          },
+          events: [
+            { kind: 'usage', inputTokens: 150, outputTokens: 40, cachedTokens: 0, costUsd: 0.03 },
+          ],
+        },
+      ],
+      'viable',
+      'claude',
+    )
+    const reviewer = new ReviewHarness([
+      ({ cwd, prompt }) => {
+        expect(prompt).toContain('Lens: typescript-javascript')
+        expect(prompt).toContain('The minimum and maximum values are within the range.')
+        const implementation = sourceAt(cwd)
+        expect(evaluates(implementation)(2, 2, 4)).toBe(false)
+        return JSON.stringify([finding])
+      },
+      ({ cwd, prompt }) => {
+        expect(prompt).toContain('Prior findings:')
+        expect(prompt).toContain('Implementer replies:')
+        expect(sourceAt(cwd)).toBe(fixed)
+        expect(evaluates(sourceAt(cwd))(2, 2, 4)).toBe(true)
+        expect(evaluates(sourceAt(cwd))(4, 2, 4)).toBe(true)
+        return '[]'
+      },
+    ])
+    const forge = new FakePr()
+    const result = await makeRunner(
+      new FakeTracker([task]),
+      implementer,
+      config({
+        harness: { implement: { kind: 'claude', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' }, maxRounds: 3 },
+      }),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    const events = store.events({ taskId: task.id, limit: 999 })
+    const usageByRole = (role: 'implement' | 'review') =>
+      events.reduce((tokens, event) => {
+        if (event.type !== 'agent.stream' || event.role !== role || event.event.kind !== 'usage') {
+          return tokens
+        }
+        return tokens + event.event.inputTokens + event.event.outputTokens
+      }, 0)
+    expect(result?.state).toBe('pr_open')
+    expect(reviewer.calls).toHaveLength(2)
+    expect(implementer.calls).toHaveLength(2)
+    expect(usageByRole('review')).toBe(30)
+    expect(usageByRole('implement')).toBe(310)
+    expect(events.filter((event) => event.type === 'review.finished')).toMatchObject([
+      { round: 1, findings: [finding], blockingIds: ['F-RANGE-1'] },
+      { round: 2, findings: [], blockingIds: [] },
+    ])
+    expect(events.find((event) => event.type === 'review.fixed')).toMatchObject({
+      round: 1,
+      replies: [{ id: 'F-RANGE-1', outcome: 'fixed' }],
+    })
+    expect(events.find((event) => event.type === 'review.stopped')).toMatchObject({
+      reason: 'acceptable',
+      unresolvedIds: [],
+    })
+    expect(forge.calls).toHaveLength(1)
+    expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
+    expect(forge.calls[0]?.body).toContain('Fixed: F-RANGE-1.')
   })
 
   test('counts a fresh final pass as a review round', async () => {
@@ -835,6 +1232,7 @@ describe('Runner.runOnce', () => {
       'agent.exited',
       'task.state',
       'checks.finished',
+      'review.skipped',
       'commit.created',
       'task.state',
       'pr.created',
@@ -1395,10 +1793,8 @@ describe('Runner.runOnce', () => {
   })
 
   test('a reclaimed lease stops the run without parking the task in needs_human', async () => {
-    // The stall watcher (or bd reclaim) takes the claim back mid-run: the
-    // tracker heartbeat goes dead and the runner must stop before colliding
-    // with the new owner, leaving the task in the claimed state the reclaim
-    // parked it in instead of escalating to needs_human.
+    // An external reclaim has no local task.reclaimed event, so the runner
+    // must queue the task after it stops, without escalating to needs_human.
     const tracker = new FakeTracker([TASK])
     tracker.leaseAlive = false
     const released: string[] = []
@@ -1423,8 +1819,6 @@ describe('Runner.runOnce', () => {
       kind: 'fake',
       start: () => {
         queue.push({ kind: 'text', text: 'working...' })
-        // The stall watcher reclaims the claim while the agent is still running.
-        setTimeout(() => store.append(TASK.id, { type: 'task.reclaimed' }), 100)
         setTimeout(() => {
           queue.close()
           resolveDone({
@@ -1451,9 +1845,63 @@ describe('Runner.runOnce', () => {
     expect(types(TASK.id)).not.toContain('needs_human')
     // The claim was already reclaimed, so the runner must not release it again.
     expect(released).toEqual([])
-    // Let the harness's reclaim/completion timers fire while this test's store
-    // is still live; otherwise the 100ms timer leaks into the next test's
-    // store and corrupts it with a spurious task.reclaimed event.
+    // Let the harness completion timer fire while this test's store is live.
+    await new Promise((resolve) => setTimeout(resolve, 350))
+  })
+
+  test('a reclaimed lease does not reset a replacement runner claim', async () => {
+    const task = { ...TASK, id: 'bd-replaced' }
+    const tracker = new FakeTracker([task])
+    tracker.leaseAlive = false
+    let resolveDone!: (o: AgentOutcome) => void
+    const done = new Promise<AgentOutcome>((resolve) => {
+      resolveDone = resolve
+    })
+    const queue = new AsyncQueue<AgentEvent>()
+    const agent: AgentProcess = {
+      pid: 9,
+      events: () => queue,
+      done,
+      kill: async () => {},
+      model: null,
+      effort: null,
+    }
+    const harness: Harness = {
+      kind: 'fake',
+      start: () => {
+        queue.push({ kind: 'text', text: 'working...' })
+        setTimeout(
+          () =>
+            store.append(task.id, {
+              type: 'task.claimed',
+              title: task.title,
+              tracker: 'fake',
+            }),
+          100,
+        )
+        setTimeout(() => {
+          queue.close()
+          resolveDone({
+            exitCode: 0,
+            ok: true,
+            sessionId: 'sess-1',
+            summary: 'done',
+            usage: null,
+            stderr: '',
+          })
+        }, 300)
+        return agent
+      },
+      resume: () => agent,
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+
+    const result = await makeRunner(tracker, harness, config(), new FakePr(), exec, 50).runOnce()
+
+    expect(result?.state).toBe('claimed')
+    expect(store.task(task.id)?.state).toBe('claimed')
+    expect(store.task(task.id)?.lastError).toBeNull()
     await new Promise((resolve) => setTimeout(resolve, 350))
   })
 
@@ -1749,6 +2197,35 @@ describe('Runner.runOnce', () => {
     expect(scheduled[0]?.detail).toBe('rate limit exceeded')
     expect(store.task(TASK.id)?.retryCount).toBe(1)
     expect(states(TASK.id)).toContain('retrying')
+  })
+
+  test('a usage limit parks the task and records a shared hold past the retry budget', async () => {
+    const harness = new FakeHarness([
+      {
+        outcome: {
+          ok: false,
+          exitCode: 1,
+          stderr: "You've hit your usage limit, resets at 23:59",
+          sessionId: 'sess-1',
+        },
+      },
+    ])
+    const runner = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'claude', model: 'sonnet' } },
+        loop: { maxRetries: 0 },
+      }),
+    )
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.task(TASK.id)?.state === 'retrying')
+    expect(stateReason(TASK.id)).toContain('fake+sonnet usage limit hold until')
+    expect(readUsageHold(usageHoldKey('fake', 'sonnet'))?.reason).toContain('usage limit')
+    expect(harness.calls).toHaveLength(1)
+    runner.cancel()
+    expect((await pending)?.state).toBe('cancelled')
   })
 
   test('a session-limit failure defers, retries in a fresh session, and keeps one worktree', async () => {
@@ -2331,92 +2808,6 @@ describe('Runner.cancel', () => {
     expect(harness.calls).toHaveLength(2)
     // The run completed well inside the 60s backoff, so it cannot have slept it out.
     expect(Date.now() - started).toBeLessThan(10_000)
-  })
-})
-
-describe('Runner.requestCommit', () => {
-  const withWorktree = async (): Promise<string> => {
-    const wtPath = join(wtRoot, 'request-commit-worktree')
-    await execOk(exec, ['git', 'worktree', 'add', '-b', 'amagi/bd-a1b2-commit', wtPath, 'main'], {
-      cwd: repo,
-    })
-    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
-    return wtPath
-  }
-
-  test('stages and commits the worktree, returning the sha and recording commit.created', async () => {
-    const wtPath = await withWorktree()
-    writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
-
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      TASK.id,
-      wtPath,
-    )
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.sha).toMatch(/^[0-9a-f]{40}$/)
-    const created = store
-      .events({ taskId: TASK.id })
-      .find(
-        (e): e is Extract<StoredEvent, { type: 'commit.created' }> => e.type === 'commit.created',
-      )
-    expect(created?.sha).toBe(result.sha)
-    expect(created?.subject).toBe(`[${TASK.id}] ${TASK.title}`)
-    const subject = (
-      await execOk(exec, ['git', 'show', '-s', '--format=%s', 'HEAD'], {
-        cwd: wtPath,
-      })
-    ).trim()
-    expect(subject).toBe(created?.subject ?? '')
-    const head = (await execOk(exec, ['git', 'rev-parse', 'HEAD'], { cwd: wtPath })).trim()
-    expect(head).toBe(result.sha)
-  })
-
-  test('a clean worktree is a failure, not a commit', async () => {
-    const wtPath = await withWorktree()
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      TASK.id,
-      wtPath,
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('nothing to commit')
-    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
-  })
-
-  test('failed mandatory checks block a checkpoint commit and return the failure details', async () => {
-    const wtPath = await withWorktree()
-    writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
-
-    const result = await makeRunner(
-      new FakeTracker([TASK]),
-      new FakeHarness([]),
-      config(),
-      new FakePr(),
-      exec,
-      undefined,
-      undefined,
-      'typecheck failed',
-    ).requestCommit(TASK.id, wtPath)
-
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('just check')
-    expect(result.error).toContain('typecheck failed')
-    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'commit.created')).toBe(false)
-    expect((await execOk(exec, ['git', 'status', '--porcelain'], { cwd: wtPath })).trim()).not.toBe(
-      '',
-    )
-  })
-
-  test('an unknown task is a failure', async () => {
-    const result = await makeRunner(new FakeTracker([TASK]), new FakeHarness([])).requestCommit(
-      'nope',
-      repo,
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.error).toContain('unknown task')
   })
 })
 

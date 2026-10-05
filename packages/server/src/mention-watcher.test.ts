@@ -19,7 +19,11 @@ import {
 import { startMentionWatcher } from './mention-watcher.ts'
 
 const config = (): Config =>
-  Config.parse({ repo: { baseBranch: 'main' }, checks: { commands: [] } })
+  Config.parse({
+    repo: { baseBranch: 'main' },
+    checks: { commands: [] },
+    watchers: { mention: { allowedAuthors: ['bob', 'alice'] } },
+  })
 
 const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 7,
@@ -50,6 +54,9 @@ class FakePr implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return this.prs
@@ -306,7 +313,14 @@ test('records classification outcomes as mention.classified events when a store 
   const store = new Store(openDatabase(':memory:'))
   start(driver, noopExec, { store })
 
-  await Bun.sleep(60)
+  const deadline = Date.now() + 1_000
+  while (
+    (driver.posted.length === 0 ||
+      !store.events().some((event) => event.type === 'mention.classified')) &&
+    Date.now() < deadline
+  ) {
+    await Bun.sleep(10)
+  }
 
   expect(driver.posted).toHaveLength(1)
   const events = store.events().filter((event) => event.type === 'mention.classified')

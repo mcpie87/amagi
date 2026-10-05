@@ -6,6 +6,7 @@ import { QueueView } from './views/board.tsx'
 import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
 import { IssuesView } from './views/issues.tsx'
+import { ManualView } from './views/manual.tsx'
 import { OverviewView } from './views/overview.tsx'
 import { SeatsView } from './views/seats.tsx'
 import { SettingsView } from './views/settings.tsx'
@@ -51,6 +52,13 @@ const settingsRoute = createRoute({
   path: '/settings',
   component: SettingsView,
 })
+export const manualRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/manual',
+  validateSearch: (search: Record<string, unknown>): { page?: string } =>
+    typeof search.page === 'string' ? { page: search.page } : {},
+  component: ManualView,
+})
 const seatsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/seats',
@@ -81,6 +89,7 @@ const routeTree = rootRoute.addChildren([
   sessionsRoute,
   settingsRoute,
   seatsRoute,
+  manualRoute,
   taskRoute,
   gitRoute,
   gitCommitRoute,

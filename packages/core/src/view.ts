@@ -1,7 +1,9 @@
 import {
   type AgentRole,
   currentAttemptEvents,
+  type Finding,
   isTerminal,
+  type ReviewStopReason,
   type StoredEvent,
   type TaskState,
 } from './events.ts'
@@ -143,6 +145,149 @@ export function currentAgentFor(
   return null
 }
 
+export type ReviewFindingOutcome = 'fixed' | 'disputed' | 'withdrawn' | 'unresolved'
+
+export type ReviewRound = {
+  round: number
+  finalPass: boolean
+  completed: boolean
+  findings: (Finding & {
+    outcome: ReviewFindingOutcome
+    outcomeReason: string | null
+    proposal: { issueId: string; title: string; url: string | null } | null
+  })[]
+  failed: string | null
+}
+
+export type ReviewHistory = {
+  rounds: ReviewRound[]
+  stopReason: ReviewStopReason | null
+  /** Why the current attempt went to commit without review, if it did. */
+  skipped: string | null
+}
+
+/** Review details the compact task projection does not retain. */
+export function reviewHistoryFor(state: DashboardState, taskId: string): ReviewHistory {
+  const rounds = new Map<number, ReviewRound>()
+  const replies = new Map<number, Map<string, { outcome: 'fixed' | 'disputed'; reason: string }>>()
+  const proposals = new Map<string, { issueId: string; title: string; url: string | null }>()
+  let stopReason: ReviewStopReason | null = null
+  let skipped: string | null = null
+  for (const event of currentAttemptEvents(taskEvents(state, taskId), taskId)) {
+    if (event.type === 'review.skipped') {
+      skipped = event.reason
+    } else if (event.type === 'review.started') {
+      rounds.set(event.round, {
+        round: event.round,
+        finalPass: event.finalPass,
+        completed: false,
+        findings: [],
+        failed: null,
+      })
+      stopReason = null
+    } else if (event.type === 'review.finished') {
+      const round = rounds.get(event.round)
+      if (round) {
+        round.completed = true
+        round.findings = event.findings.map((finding) => ({
+          ...finding,
+          outcome: 'unresolved',
+          outcomeReason: null,
+          proposal: null,
+        }))
+      }
+    } else if (event.type === 'review.failed') {
+      const round = rounds.get(event.round)
+      if (round) {
+        round.failed = event.reason
+        round.completed = true
+      }
+    } else if (event.type === 'review.fixed') {
+      replies.set(
+        event.round,
+        new Map(
+          event.replies.map((reply) => [
+            reply.id,
+            { outcome: reply.outcome === 'fixed' ? 'fixed' : 'disputed', reason: reply.reason },
+          ]),
+        ),
+      )
+    } else if (event.type === 'review.stopped') {
+      stopReason = event.reason
+      const latest = [...rounds.values()].at(-1)
+      if (latest) {
+        for (const finding of latest.findings) {
+          if (event.unresolvedIds.includes(finding.id)) finding.outcome = 'unresolved'
+        }
+      }
+    } else if (event.type === 'review.proposal-filed') {
+      proposals.set(event.findingId, { issueId: event.issueId, title: event.title, url: event.url })
+    }
+  }
+  const ordered = [...rounds.values()].sort((a, b) => a.round - b.round)
+  for (let i = 0; i < ordered.length; i++) {
+    const round = ordered[i]
+    if (!round) continue
+    const nextIds = new Set(ordered[i + 1]?.findings.map((finding) => finding.id) ?? [])
+    const roundReplies = replies.get(round.round)
+    for (const finding of round.findings) {
+      finding.proposal = proposals.get(finding.id) ?? null
+      const reply = roundReplies?.get(finding.id)
+      if (reply !== undefined) {
+        finding.outcome = reply.outcome
+        finding.outcomeReason = reply.reason
+      } else if (ordered[i + 1]?.completed && !nextIds.has(finding.id))
+        finding.outcome = 'withdrawn'
+    }
+  }
+  return { rounds: ordered, stopReason, skipped }
+}
+
+export type ReviewBadge = { text: string; tone: 'ok' | 'warn' | 'active' }
+
+/** One-line review outcome for a task row; null until the run reaches review. */
+export function reviewBadge(
+  task: Pick<
+    ProjectedTask,
+    'reviewRound' | 'reviewStopReason' | 'reviewUnresolved' | 'reviewSkipped'
+  >,
+): ReviewBadge | null {
+  if (task.reviewSkipped !== null) return { text: 'not reviewed', tone: 'warn' }
+  if (task.reviewRound === 0) return null
+  if (task.reviewStopReason === null) {
+    return { text: `reviewing · round ${task.reviewRound}`, tone: 'active' }
+  }
+  const rounds = `${task.reviewRound} round${task.reviewRound === 1 ? '' : 's'}`
+  if (task.reviewStopReason === 'acceptable') return { text: `reviewed · ${rounds}`, tone: 'ok' }
+  return {
+    text:
+      task.reviewUnresolved > 0
+        ? `${task.reviewUnresolved} unresolved · ${rounds}`
+        : `review stopped: ${task.reviewStopReason}`,
+    tone: 'warn',
+  }
+}
+
+/** Seat name when a review agent is queued for its credential. */
+export function reviewWaitingSeat(state: DashboardState, taskId: string): string | null {
+  return reviewWaitingSeatForEvents(taskEvents(state, taskId), taskId)
+}
+
+export function reviewWaitingSeatForEvents(events: StoredEvent[], taskId: string): string | null {
+  let waiting: string | null = null
+  for (const event of currentAttemptEvents(events, taskId)) {
+    if (event.type === 'agent.stream' && event.role === 'review' && event.event.kind === 'status') {
+      const match = /^waiting for seat (.+)$/.exec(event.event.message)
+      if (match) waiting = match[1] ?? null
+    } else if (event.type === 'agent.started' && event.role === 'review') {
+      waiting = null
+    } else if (event.type === 'agent.exited' && event.role === 'review') {
+      waiting = null
+    }
+  }
+  return waiting
+}
+
 /** Context size of the agent currently running on the task, if any usage has been reported. */
 export function currentUsageFor(
   state: DashboardState,
@@ -248,7 +393,17 @@ export type StatusEntry = {
   reason: string | null
   /** Time spent in `to`: until the next entry, else until `now` while in flight, else null. */
   durationMs: number | null
+  /** The repo's setupCmd, run while the task was in this state. */
+  setup: StatusSetup | null
   runs: StatusRun[]
+}
+
+export type StatusSetup = {
+  command: string
+  startedAt: number
+  /** Until it finished, else until `now` while in flight, else null. */
+  durationMs: number | null
+  exitCode: number | null
 }
 
 export type StatusRun = {
@@ -293,12 +448,14 @@ export function statusLog(
       to,
       reason: reason ?? null,
       durationMs: null,
+      setup: null,
       runs: [],
     })
     current = to
   }
   const events = currentAttemptEvents(taskEvents(state, taskId), taskId)
   let activeRun: StatusRun | null = null
+  let activeSetup: StatusSetup | null = null
   let pendingRestart: number | null = null
   let checksSinceImplement = false
   for (const event of events) {
@@ -317,6 +474,24 @@ export function statusLog(
         break
       case 'run.restarted':
         pendingRestart = event.restart
+        break
+      case 'setup.started': {
+        activeSetup = {
+          command: event.command,
+          startedAt: event.ts,
+          durationMs: null,
+          exitCode: null,
+        }
+        const entry = entries.at(-1)
+        if (entry !== undefined) entry.setup = activeSetup
+        break
+      }
+      case 'setup.finished':
+        if (activeSetup !== null) {
+          activeSetup.durationMs = event.durationMs
+          activeSetup.exitCode = event.exitCode
+          activeSetup = null
+        }
         break
       case 'agent.started': {
         const label = [
@@ -373,6 +548,9 @@ export function statusLog(
   }
   if (activeRun !== null) {
     activeRun.durationMs = now === null ? null : now - activeRun.startedAt
+  }
+  if (activeSetup !== null) {
+    activeSetup.durationMs = now === null ? null : now - activeSetup.startedAt
   }
   return entries
 }
@@ -486,4 +664,125 @@ export function runHealthNearLimit(health: RunHealth): boolean {
     return true
   }
   return false
+}
+
+/** One harness + model + effort configuration's track record over finished tasks. */
+export type ScorecardRow = {
+  harness: string
+  model: string | null
+  effort: string | null
+  /** Fleet workers that ran this configuration, sorted; ad-hoc runs add none. */
+  workers: string[]
+  finished: number
+  /** Tasks whose PR merged. */
+  merged: number
+  /** PR closed unmerged, or the task was closed by hand. */
+  abandoned: number
+  /** Finished with no PR: no changes, or marked done because the work was already there. */
+  noPr: number
+  needsHuman: number
+  /** Agent cost of every finished task in the row, all roles but chat. */
+  costUsd: number
+  /** Whether any of that usage carried a dollar figure. */
+  costSeen: boolean
+  /** Median wall-clock from attempt start to merge; null when nothing merged. */
+  medianMergeMs: number | null
+  /** Mean review rounds per finished task. */
+  avgReviewRounds: number
+}
+
+/**
+ * Outcome per harness + model + effort, from each finished task's current
+ * attempt, attributed to the attempt's first implement agent. Cancelled tasks
+ * are left out: stopping a run is the operator's call, not the agent's
+ * failure. `since` keeps tasks that finished at or after that epoch ms.
+ */
+export function scorecard(state: DashboardState, since = 0): ScorecardRow[] {
+  const rows = new Map<string, ScorecardRow & { mergeMs: number[]; reviewRounds: number }>()
+  for (const task of Object.values(state.tasks)) {
+    if (
+      task.state !== 'done' &&
+      task.state !== 'abandoned' &&
+      task.state !== 'no_pr' &&
+      task.state !== 'needs_human'
+    ) {
+      continue
+    }
+    let agent: Extract<StoredEvent, { type: 'agent.started' }> | null = null
+    let finishedAt = task.updatedAt
+    let costUsd = 0
+    let costSeen = false
+    for (const event of currentAttemptEvents(taskEvents(state, task.id), task.id)) {
+      if (event.type === 'agent.started' && event.role === 'implement' && agent === null) {
+        agent = event
+      } else if (event.type === 'task.state' && event.to === task.state) {
+        finishedAt = event.ts
+      } else if (
+        event.type === 'agent.stream' &&
+        event.role !== 'chat' &&
+        event.event.kind === 'usage' &&
+        event.event.costUsd !== undefined
+      ) {
+        costUsd += event.event.costUsd
+        costSeen = true
+      }
+    }
+    if (agent === null || finishedAt < since) continue
+    const key = JSON.stringify([agent.harness, agent.model, agent.effort])
+    let row = rows.get(key)
+    if (row === undefined) {
+      row = {
+        harness: agent.harness,
+        model: agent.model,
+        effort: agent.effort,
+        workers: [],
+        finished: 0,
+        merged: 0,
+        abandoned: 0,
+        noPr: 0,
+        needsHuman: 0,
+        costUsd: 0,
+        costSeen: false,
+        medianMergeMs: null,
+        avgReviewRounds: 0,
+        mergeMs: [],
+        reviewRounds: 0,
+      }
+      rows.set(key, row)
+    }
+    if (agent.worker !== undefined && !row.workers.includes(agent.worker)) {
+      row.workers.push(agent.worker)
+    }
+    row.finished++
+    row.costUsd += costUsd
+    row.costSeen ||= costSeen
+    row.reviewRounds += task.reviewRound
+    if (task.state === 'done' && task.prNumber !== null) {
+      row.merged++
+      row.mergeMs.push(finishedAt - task.createdAt)
+    } else if (task.state === 'done' || task.state === 'no_pr') {
+      row.noPr++
+    } else if (task.state === 'abandoned') {
+      row.abandoned++
+    } else {
+      row.needsHuman++
+    }
+  }
+  return [...rows.values()]
+    .map(({ mergeMs, reviewRounds, ...row }) => ({
+      ...row,
+      workers: row.workers.sort(),
+      medianMergeMs: median(mergeMs),
+      avgReviewRounds: reviewRounds / row.finished,
+    }))
+    .sort((a, b) => b.finished - a.finished)
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1
+    ? (sorted[mid] ?? 0)
+    : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
 }
