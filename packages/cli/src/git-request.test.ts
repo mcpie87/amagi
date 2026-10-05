@@ -26,6 +26,7 @@ beforeEach(() => {
   git(repo, ['config', 'user.name', 'Test'])
   git(repo, ['config', 'user.email', 'test@example.com'])
   writeFileSync(join(repo, 'README.md'), '# demo\n')
+  writeFileSync(join(repo, 'justfile'), 'check:\n  true\n\nfresh-check:\n  true\n')
   git(repo, ['add', '.'])
   git(repo, ['commit', '-q', '-m', 'init'])
   wt = mkdtempSync(join(tmpdir(), 'amagi-git-request-wt-'))

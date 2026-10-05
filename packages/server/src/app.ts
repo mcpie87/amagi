@@ -50,6 +50,7 @@ import {
   reconcilePr,
   removeForgeCredential,
   removeWorktree,
+  runMandatoryWorkerChecks,
   type Store,
   type StoredEvent,
   stageAndCommit,
@@ -1845,6 +1846,23 @@ export function createApp({
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
         try {
+          const status = await exec(['git', 'status', '--porcelain'], { cwd: task.worktree })
+          if (status.stdout.trim() === '') {
+            return c.json({ error: 'nothing to commit; the worktree is clean' }, 500)
+          }
+          const checks = await runMandatoryWorkerChecks(exec, task.worktree)
+          const checksPassed = checks.every((check) => check.exitCode === 0)
+          ws.store.append(id, { type: 'checks.finished', ok: checksPassed, results: checks })
+          if (!checksPassed) {
+            const detail = checks
+              .filter((check) => check.exitCode !== 0)
+              .map((check) => `$ ${check.command}\nexit ${check.exitCode}\n${check.output.trim()}`)
+              .join('\n')
+            return c.json(
+              { error: `mandatory checks failed; fix the failures and retry:\n${detail}` },
+              500,
+            )
+          }
           const staged = await stageAndCommit(
             exec,
             task,

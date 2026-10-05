@@ -188,7 +188,33 @@ describe('resolveConflict', () => {
     ])
     const merge = calls.find((call) => call[1] === 'merge')
     expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
-    expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
+    const message = logs.find((line) => line.includes('base merges cleanly'))
+    expect(message).toContain('base merges cleanly; pushed the merge to update the PR')
+    expect(message).toContain('Verification: just check passed; just fresh-check passed')
+  })
+
+  test('does not push a clean merge when mandatory checks fail', async () => {
+    const { exec, calls } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return ok('Already up to date')
+      if (c[0] === 'sh' && c[1] === '-c' && c[2] === 'just check') {
+        return { exitCode: 2, stdout: '', stderr: 'check failed' }
+      }
+      return undefined
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => fakeHarness(),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('$ just check\nexit 2\ncheck failed')
+    expect(calls.some((call) => call[1] === 'push')).toBe(false)
   })
 
   test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
@@ -417,6 +443,46 @@ describe('resolveConflict', () => {
     expect(result.ok).toBe(false)
     expect(result.message).toContain('model overloaded')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('parks with failed check details when a conflict repair agent fails', async () => {
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'x', tracker: 'beads' })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('am-1', { type: 'task.state', from: null, to })
+    }
+    const { exec, calls } = fake((command) => {
+      if (command[0] === 'sh') return fail('check failed')
+      return conflicted(command)
+    })
+    let launches = 0
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      store,
+      exec,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness(launches === 1 ? {} : { ok: false, stderr: 'repair failed' })
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('just check')
+    expect(result.message).toContain('check failed')
+    expect(result.message).toContain('repair failed')
+    expect(result.message).toContain('parked the task at needs_human')
+    expect(store.task('am-1')?.state).toBe('needs_human')
+    expect(calls.some((command) => command.includes('push'))).toBe(false)
   })
 
   test('out of iterations, parks a pr_open task and leaves a task already off pr_open alone', async () => {

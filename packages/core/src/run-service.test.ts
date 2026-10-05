@@ -20,7 +20,7 @@ import type {
   UpdateTrackerTask,
 } from './drivers/types.ts'
 import type { AgentEvent } from './events.ts'
-import { exec, execOk } from './exec.ts'
+import { type Exec, exec, execOk } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
 import { RunService, type RunServiceOptions } from './run-service.ts'
 import type { RunOnceResult } from './runner.ts'
@@ -259,6 +259,11 @@ let store: Store
 let stateRoot: string
 let previousStateHome: string | undefined
 
+const testExec: Exec = (cmd, opts) =>
+  cmd[0] === 'sh' && cmd[1] === '-c' && (cmd[2] === 'just check' || cmd[2] === 'just fresh-check')
+    ? Promise.resolve({ exitCode: 0, stdout: '', stderr: '' })
+    : exec(cmd, opts)
+
 const config = (over: Record<string, unknown> = {}) => {
   const { worker = [{ id: 'worker-1', name: 'Worker 1', kind: 'claude' }], ...rest } = over
   return Config.parse({
@@ -294,6 +299,7 @@ const makeService = (
     repoRoot: repo,
     repoName: 'demo',
     forge: new FakePr(),
+    exec: testExec,
     ...over,
   })
 }
@@ -621,6 +627,7 @@ describe('RunService', () => {
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
+      exec: testExec,
       autoQueue: true,
       autoQueueIdleMs: 60_000,
     })
@@ -647,6 +654,7 @@ describe('RunService', () => {
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
+      exec: testExec,
     })
 
     expect(await service.start(undefined, { workerId: 'disabled' })).toEqual({
@@ -822,6 +830,7 @@ describe('RunService', () => {
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
+      exec: testExec,
       makeHarness: (c) => {
         captured = c
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
@@ -857,6 +866,7 @@ describe('RunService', () => {
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
+      exec: testExec,
       makeHarness: (cfg) => {
         captured = cfg
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
@@ -890,6 +900,7 @@ describe('RunService', () => {
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
+      exec: testExec,
       makeHarness: (cfg) => {
         captured = cfg
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
@@ -926,6 +937,7 @@ describe('RunService', () => {
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
+      exec: testExec,
       makeHarness: (cfg) => {
         captured.push(cfg)
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))

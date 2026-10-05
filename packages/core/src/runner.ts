@@ -26,6 +26,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { MANDATORY_WORKER_CHECKS } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -316,6 +317,7 @@ export type ReviewRoundResult = {
 
 type ReviewPrSummary = {
   run: AgentRun
+  verification: CheckResult[]
   unresolved: boolean
   unresolvedIds: string[]
   unresolvedFindings: {
@@ -758,6 +760,7 @@ export class Runner {
     const withdrawnIds = new Set<string>()
     let unresolvedIds: string[] = []
     let failure: string | null = null
+    let verification: CheckResult[] = []
     let stopReason: 'acceptable' | 'rounds' | 'tokens' | 'no-progress' | 'cost' | null = null
 
     while (stopReason === null) {
@@ -925,7 +928,8 @@ export class Runner {
 
       const checked = await this.runCheckRounds(task, cwd, run, lease, budget, 'needs-human')
       if (checked === null) return null
-      run = checked
+      run = checked.run
+      verification = checked.verification
       const sinceReview = store
         .events({ taskId: task.id, limit: 1_000_000 })
         .filter((event) => event.seq > reviewStartSeq)
@@ -969,6 +973,7 @@ export class Runner {
       .join('\n')
     return {
       run,
+      verification,
       unresolved: stopReason !== 'acceptable',
       unresolvedIds,
       unresolvedFindings: latestFindings
@@ -1207,13 +1212,15 @@ export class Runner {
 
     const checked = await this.runCheckRounds(task, cwd, current, lease, budget)
     if (checked === null) return
-    current = checked
+    current = checked.run
+    let finalChecks = checked.verification
 
     let reviewSummary: ReviewPrSummary | null = null
     if ((this.deps.reviewerConfig ?? activeReviewerConfig(config)) !== undefined) {
       reviewSummary = await this.reviewAndFix(task, cwd, current, lease, budget)
       if (reviewSummary === null) return
       current = reviewSummary.run
+      if (reviewSummary.verification.length > 0) finalChecks = reviewSummary.verification
     } else {
       this.deps.store.append(task.id, {
         type: 'review.skipped',
@@ -1283,6 +1290,7 @@ export class Runner {
         ? withVerdictLine(current.summary ?? '', 'needs-human')
         : current.summary,
       reviewSummary,
+      finalChecks,
     )
     this.throwIfCancelled(task.id)
   }
@@ -1438,6 +1446,7 @@ export class Runner {
     effort: string | null,
     fallbackSummary?: string | null,
     reviewSummary?: ReviewPrSummary | null,
+    verification?: readonly CheckResult[],
   ): Promise<void> {
     const { store, config } = this.deps
     const forge = this.deps.forge ?? makePrDriver(config.forge.kind, config.forge.remote, this.exec)
@@ -1518,6 +1527,7 @@ export class Runner {
               proposalCreationSupported: reviewSummary.proposalCreationSupported,
               history: reviewSummary.history,
             },
+        verification,
       ),
       labels: [
         ...amagiLabels(current.type),
@@ -1947,6 +1957,7 @@ export class Runner {
     budget: TaskBudget | null,
     role: AgentRole = 'implement',
     harness: Harness = this.deps.harness,
+    failureContext = '',
   ): Promise<AgentRun & { stopped: boolean }> {
     const { store, config } = this.deps
     let sessionId = resumeFrom
@@ -1992,7 +2003,7 @@ export class Runner {
             this.transition(
               taskId,
               'needs_human',
-              `context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
+              `${failureContext}context budget exceeded after ${this.contextRestarts} restart${this.contextRestarts === 1 ? '' : 's'}: peak ${this.peakContext} input tokens (limit ${this.contextLimits().maxTokens})`,
             )
           }
           return { sessionId, stopped: true, summary, model, effort }
@@ -2033,7 +2044,8 @@ export class Runner {
         (!usageLimited && attempt > config.loop.maxRetries)
       ) {
         releaseProbe?.()
-        if (role !== 'review') this.transition(taskId, 'needs_human', run.detail ?? 'agent failed')
+        if (role !== 'review')
+          this.transition(taskId, 'needs_human', `${failureContext}${run.detail ?? 'agent failed'}`)
         return { sessionId, stopped: true, summary, model, effort }
       }
       if (usageLimited) {
@@ -2092,7 +2104,7 @@ export class Runner {
     // The mandatory gate always runs before the configured commands, so a PR
     // cannot be pushed until the worktree is formatted and lint-clean.
     const gate = [format, lint].filter((c): c is string => c !== null && c !== '')
-    return [...gate, ...commands]
+    return [...new Set([...gate, ...commands, ...MANDATORY_WORKER_CHECKS])]
   }
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
@@ -2116,7 +2128,7 @@ export class Runner {
     lease: Lease,
     budget: TaskBudget,
     onExhausted: 'recover' | 'needs-human' = 'recover',
-  ): Promise<AgentRun | null> {
+  ): Promise<{ run: AgentRun; verification: CheckResult[] } | null> {
     const { config, store } = this.deps
     let run = initialRun
     let recoveryGiven = false
@@ -2128,11 +2140,20 @@ export class Runner {
       this.throwIfBudgetExhausted(task.id, budget)
       const ok = results.every((result) => result.exitCode === 0)
       store.append(task.id, { type: 'checks.finished', ok, results })
-      if (ok) return run
+      if (ok) return { run, verification: results }
+
+      const failureDetail = results
+        .filter((result) => result.exitCode !== 0)
+        .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+        .join('\n')
 
       if (round === config.loop.maxCheckRounds || (run.sessionId === null && !recoveryRetry)) {
         if (onExhausted === 'needs-human') {
-          this.transition(task.id, 'needs_human', 'project checks still failing after review fix')
+          this.transition(
+            task.id,
+            'needs_human',
+            `mandatory checks still fail after review fixes:\n${failureDetail}`,
+          )
           return null
         }
         if (!recoveryGiven) {
@@ -2140,7 +2161,11 @@ export class Runner {
           const action = await this.recoverFailingChecks(task.id, results, lease, budget)
           if (action === null) return null
           if (action === 'park') {
-            this.transition(task.id, 'needs_human', 'project checks still failing')
+            this.transition(
+              task.id,
+              'needs_human',
+              `project checks still failing:\n${failureDetail}`,
+            )
             return null
           }
           if (action === 'rebase') {
@@ -2149,7 +2174,7 @@ export class Runner {
               this.transition(
                 task.id,
                 'needs_human',
-                'project checks still failing; updating the worktree to the latest base failed',
+                `project checks still failing; updating the worktree to the latest base failed:\n${failureDetail}`,
               )
               return null
             }
@@ -2158,7 +2183,7 @@ export class Runner {
           round = -1
           continue
         }
-        this.transition(task.id, 'needs_human', 'project checks still failing')
+        this.transition(task.id, 'needs_human', `project checks still failing:\n${failureDetail}`)
         return null
       }
 
@@ -2175,6 +2200,9 @@ export class Runner {
         'fix checks',
         lease,
         budget,
+        'implement',
+        this.deps.harness,
+        `mandatory checks failed before repair:\n${failureDetail}\nRepair agent failure: `,
       )
       if (fix.stopped) return null
       run = mergeAgentRuns(run, fix)

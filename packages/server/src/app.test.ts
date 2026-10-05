@@ -3386,6 +3386,7 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
     git(repo, ['config', 'user.name', 'Test'])
     git(repo, ['config', 'user.email', 'test@example.com'])
     writeFileSync(join(repo, 'README.md'), '# demo\n')
+    writeFileSync(join(repo, 'justfile'), 'check:\n  true\n\nfresh-check:\n  true\n')
     git(repo, ['add', '.'])
     git(repo, ['commit', '-q', '-m', 'init'])
     wt = mkdtempSync(join(tmpdir(), 'amagi-git-request-wt-'))
@@ -3450,6 +3451,21 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
     expect(res.status).toBe(500)
     const body = (await res.json()) as { error: string }
     expect(body.error).toContain('nothing to commit')
+  })
+
+  test('failed mandatory checks block a checkpoint commit', async () => {
+    writeFileSync(join(wt, 'hello.txt'), 'hi\n')
+    writeFileSync(
+      join(wt, 'justfile'),
+      'check:\n  echo typecheck failed >&2\n  false\n\nfresh-check:\n  true\n',
+    )
+    const res = await request('bd-1', 'commit', store.token('bd-1'))
+    expect(res.status).toBe(500)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('just check')
+    expect(body.error).toContain('typecheck failed')
+    expect(store.events({ taskId: 'bd-1' }).some((e) => e.type === 'commit.created')).toBe(false)
+    expect(git(wt, ['status', '--porcelain']).stdout.trim()).not.toBe('')
   })
 })
 

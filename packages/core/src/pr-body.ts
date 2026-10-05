@@ -1,4 +1,5 @@
 import type { TrackerTask } from './drivers/types.ts'
+import type { CheckResult } from './events.ts'
 import type { Exec } from './exec.ts'
 import { modelFooter } from './footer.ts'
 
@@ -223,6 +224,7 @@ export function formatPrBody(
   /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
   fallbackSummary?: string | null,
   review?: PrReviewSummary,
+  verification?: readonly CheckResult[],
 ): string {
   const created = createdAgo(task.createdAt)
   const lines = [
@@ -251,6 +253,17 @@ export function formatPrBody(
       '### 🧠 Conclusion',
       '',
       renderDescriptionMarkdown(normalizeWorktreeLinks(conclusionBody)),
+    )
+  }
+  if (verification !== undefined) {
+    lines.push(
+      '',
+      '### ✅ Verification',
+      '',
+      ...verification.map(
+        (result) =>
+          `- \`${result.command}\`: ${result.exitCode === 0 ? 'passed' : `failed (exit ${result.exitCode})`}`,
+      ),
     )
   }
   if (review !== undefined) {
