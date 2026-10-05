@@ -20,8 +20,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
     calls.push(cmd)
     invocations.push({ cmd, env: opts?.env })
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
+    if (cmd.includes('--symref')) return ok('ref: refs/heads/main\tHEAD\n')
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push'))
+      return ok('git@github.com:owner/repo.git\n')
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, invocations }

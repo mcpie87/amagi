@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import type { Config } from './config.ts'
 import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
+import { assertSafePushDestination } from './drivers/push-safety.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { cacheHome } from './paths.ts'
@@ -411,6 +412,7 @@ export type PushConflictFixOptions = {
 export async function pushConflictFix(opts: PushConflictFixOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
   const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github', opts.cwd))
+  await assertSafePushDestination(run, opts.cwd, opts.remote, opts.headRef, tokenCfg)
   await execOk(run, ['git', 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`], {
     cwd: opts.cwd,
     env: tokenCfg,
