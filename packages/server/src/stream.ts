@@ -13,9 +13,18 @@ export function streamClientCount(store: Store): number {
 
 type Tick = 'tick'
 
+const isTransientNotice = (event: StoredEvent): boolean =>
+  event.type === 'notify.idle' || event.type === 'notify.failed'
+
 export type EventStreamOptions = {
   taskId?: string
   sinceSeq: number
+  /**
+   * Replay the backlog without agent log lines (see `Store.events`), then
+   * send a `replayed` event carrying the last backlog seq, so the client knows
+   * which lines it must fetch per task and which will arrive live.
+   */
+  compact?: boolean
 }
 
 /**
@@ -23,7 +32,11 @@ export type EventStreamOptions = {
  * event appended while the backlog pages out is already queued, and the
  * `seq <= cursor` check drops it if that page carried it too.
  */
-export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: EventStreamOptions) {
+export function eventStream(
+  c: Context,
+  store: Store,
+  { taskId, sinceSeq, compact = false }: EventStreamOptions,
+) {
   const scope = { taskId }
 
   return streamSSE(c, async (stream) => {
@@ -50,12 +63,24 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
     try {
       let cursor = sinceSeq
       for (;;) {
-        const page = store.events({ ...scope, sinceSeq: cursor, limit: BACKLOG_PAGE })
+        const page = store.events({
+          ...scope,
+          sinceSeq: cursor,
+          limit: BACKLOG_PAGE,
+          withoutAgentLog: compact,
+        })
         for (const event of page) {
-          if (event.type !== 'notify.idle') await send(event)
+          if (!isTransientNotice(event)) await send(event)
           cursor = event.seq
         }
         if (page.length < BACKLOG_PAGE || stream.aborted) break
+      }
+      if (compact) {
+        // The backlog skipped lines up to the store's head, not just up to the
+        // last event it sent. The cursor must stay put: an event appended since
+        // the last page is already queued live and would be dropped.
+        const replayed = Math.max(cursor, store.latestSeq())
+        await stream.writeSSE({ event: 'replayed', data: String(replayed) })
       }
 
       for await (const event of live) {
@@ -65,7 +90,7 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
           await stream.write(': ping\n\n')
           continue
         }
-        if (event.seq <= cursor && event.type !== 'notify.idle') continue
+        if (event.seq <= cursor && !isTransientNotice(event)) continue
         cursor = Math.max(cursor, event.seq)
         await send(event)
       }

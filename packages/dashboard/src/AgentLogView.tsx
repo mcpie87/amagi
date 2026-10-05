@@ -1,6 +1,7 @@
 import { type AgentLogLine, agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useAgentLogBackfill } from './store.tsx'
 import { EmptyState, Time } from './ui.tsx'
 
 const ROW_HEIGHT = 18
@@ -40,6 +41,7 @@ export function AgentLogView({
   const stickToBottom = useRef(true)
   const logKey = agentLogKey(repo, taskId, attempt)
   const [following, setFollowing] = useState(true)
+  useAgentLogBackfill(repo, taskId, attempt)
 
   useSyncExternalStore(
     (listener) => agentLogStore.subscribe(logKey, listener),

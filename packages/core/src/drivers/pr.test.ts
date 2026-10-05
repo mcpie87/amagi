@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Exec, ExecResult } from '../exec.ts'
 import type { PrInfo } from '../pr-check.ts'
 import { gitTokenConfig } from './forge-cred.ts'
@@ -6,16 +9,25 @@ import { amagiLabels, makePrDriver } from './pr.ts'
 
 type Call = readonly string[]
 
-function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
+function fake(routes: (cmd: Call) => ExecResult | undefined): {
+  exec: Exec
+  calls: Call[]
+  invocations: { cmd: Call; env: Record<string, string> | undefined }[]
+} {
   const calls: Call[] = []
+  const invocations: { cmd: Call; env: Record<string, string> | undefined }[] = []
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
+    invocations.push({ cmd, env: opts?.env })
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
+    if (cmd.includes('--symref')) return ok('ref: refs/heads/main\tHEAD\n')
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push'))
+      return ok('git@github.com:owner/repo.git\n')
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { exec, calls }
+  return { exec, calls, invocations }
 }
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
@@ -36,38 +48,52 @@ const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   ...over,
 })
 
+const savedState = process.env.XDG_STATE_HOME
+let state: string
+
 beforeEach(() => {
+  // Stored forge credentials would otherwise leak in from the operator's state dir.
+  state = mkdtempSync(join(tmpdir(), 'amagi-pr-state-'))
+  process.env.XDG_STATE_HOME = state
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
+  delete process.env.GITLAB_TOKEN
   delete process.env.FORGEJO_TOKEN
 })
 
 afterEach(() => {
   delete process.env.GH_TOKEN
   delete process.env.GITHUB_TOKEN
+  delete process.env.GITLAB_TOKEN
   delete process.env.FORGEJO_TOKEN
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = savedState
+  rmSync(state, { recursive: true, force: true })
 })
 
 describe('gitTokenConfig', () => {
   const remote = (url: string): { exec: Exec; calls: Call[] } =>
     fake((c) => (c.includes('get-url') ? ok(url) : undefined))
 
-  test('is empty without a token so git keeps the ssh remote', async () => {
+  test('has no config without a token so git keeps the ssh remote', async () => {
     expect(
       await gitTokenConfig(remote('git@github.com:x/y.git').exec, '/repo', 'origin', null),
-    ).toEqual([])
+    ).toEqual({})
   })
 
   test('rewrites the remote to an https token url', async () => {
     const { exec, calls } = remote('git@github.com:mcpie87/amagi.git')
-    const [flag, cfg] = await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc')
-    expect(flag).toBe('-c')
-    expect(cfg).toBe('url.https://x-access-token:ghp_abc@github.com/.insteadOf=git@github.com:')
+    const auth = await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc')
+    expect(auth).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:ghp_abc@github.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
     expect(calls[0]).toEqual(['git', 'remote', 'get-url', 'origin'])
   })
 
   test('is empty when the remote cannot be parsed', async () => {
-    expect(await gitTokenConfig(remote('not-a-remote').exec, '/repo', 'origin', 'tok')).toEqual([])
+    expect(await gitTokenConfig(remote('not-a-remote').exec, '/repo', 'origin', 'tok')).toEqual({})
   })
 })
 
@@ -85,12 +111,12 @@ describe('amagiLabels', () => {
 describe('githubPr', () => {
   test('pushes over the token rewrite and creates the pr with the title', async () => {
     process.env.GH_TOKEN = 'ghp_abc'
-    const { exec, calls } = fake((c) => {
+    const { exec, calls, invocations } = fake((c) => {
       if (c.includes('get-url')) return ok('git@github.com:mcpie87/amagi.git')
       if (c.includes('create') && c.includes('pr')) return ok('https://github.com/x/y/pull/7\n')
       return undefined
     })
-    const pr = await makePrDriver('github', exec).createPr({
+    const pr = await makePrDriver('github', 'origin', exec).createPr({
       cwd: '/wt',
       branch: 'amagi/am-1-do-the-thing',
       base: 'main',
@@ -103,14 +129,17 @@ describe('githubPr', () => {
     const push = calls.find((c) => c.includes('push'))
     expect(push).toEqual([
       'git',
-      '-c',
-      'url.https://x-access-token:ghp_abc@github.com/.insteadOf=git@github.com:',
       'push',
       '-u',
       '--force-with-lease=refs/heads/amagi/am-1-do-the-thing:',
       'origin',
       'amagi/am-1-do-the-thing',
     ])
+    expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:ghp_abc@github.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
     expect(calls.find((c) => c.includes('create') && c.includes('pr'))).toEqual([
       'gh',
       'pr',
@@ -141,7 +170,7 @@ describe('githubPr', () => {
       if (c.includes('create') && c.includes('pr')) return ok('https://github.com/x/y/pull/8\n')
       return undefined
     })
-    const pr = await makePrDriver('github', exec).createPr({
+    const pr = await makePrDriver('github', 'origin', exec).createPr({
       cwd: '/wt',
       branch: 'amagi/am-1-do-the-thing',
       base: 'main',
@@ -181,7 +210,7 @@ describe('githubPr', () => {
       }
       return undefined
     })
-    const create = makePrDriver('github', exec).createPr({
+    const create = makePrDriver('github', 'origin', exec).createPr({
       cwd: '/wt',
       branch: 'amagi/am-1',
       base: 'main',
@@ -205,7 +234,7 @@ describe('githubPr', () => {
           }
         : undefined,
     )
-    await makePrDriver('github', exec).deleteBranch('/repo', 'origin', 'amagi/am-1')
+    await makePrDriver('github', 'origin', exec).deleteBranch('/repo', 'origin', 'amagi/am-1')
     expect(calls).toContainEqual(['git', 'push', 'origin', '--delete', 'amagi/am-1'])
   })
 
@@ -214,15 +243,15 @@ describe('githubPr', () => {
       c.includes('--delete') ? { exitCode: 1, stdout: '', stderr: 'permission denied' } : undefined,
     )
     await expect(
-      makePrDriver('github', exec).deleteBranch('/repo', 'origin', 'amagi/am-1'),
+      makePrDriver('github', 'origin', exec).deleteBranch('/repo', 'origin', 'amagi/am-1'),
     ).rejects.toThrow('permission denied')
   })
 
-  test('creates each label on demand before the pr', async () => {
+  test('creates each label and the outcome labels on demand before the pr', async () => {
     const { exec, calls } = fake((c) =>
       c.includes('create') && c.includes('pr') ? ok('https://github.com/x/y/pull/7\n') : undefined,
     )
-    await makePrDriver('github', exec).createPr({
+    await makePrDriver('github', 'origin', exec).createPr({
       cwd: '/wt',
       branch: 'amagi/am-1',
       base: 'main',
@@ -236,6 +265,19 @@ describe('githubPr', () => {
     expect(creates).toEqual([
       ['gh', 'label', 'create', 'amagi', '--force'],
       ['gh', 'label', 'create', 'amagi/chore', '--force'],
+      ['gh', 'label', 'create', 'amagi/done', '--force'],
+      ['gh', 'label', 'create', 'amagi/rework', '--force'],
+    ])
+  })
+
+  test('reads pr label names from gh', async () => {
+    const { exec } = fake((c) =>
+      c.includes('view') && c.includes('labels') ? ok('amagi\namagi/rework\n') : undefined,
+    )
+
+    expect(await makePrDriver('github', 'origin', exec).getPrLabels('/repo', 7)).toEqual([
+      'amagi',
+      'amagi/rework',
     ])
   })
 
@@ -243,7 +285,7 @@ describe('githubPr', () => {
     const { exec, calls } = fake((c) =>
       c.includes('view') && c.includes('pr') ? ok('MERGED\n') : undefined,
     )
-    const state = await makePrDriver('github', exec).getPr('/repo', 7)
+    const state = await makePrDriver('github', 'origin', exec).getPr('/repo', 7)
 
     expect(calls).toContainEqual(['gh', 'pr', 'view', '7', '--json', 'state', '--jq', '.state'])
     expect(state).toBe('merged')
@@ -253,8 +295,8 @@ describe('githubPr', () => {
     const closed = fake((c) => (c.includes('view') ? ok('CLOSED\n') : undefined))
     const open = fake((c) => (c.includes('view') ? ok('OPEN\n') : undefined))
 
-    expect(await makePrDriver('github', closed.exec).getPr('/repo', 7)).toBe('closed')
-    expect(await makePrDriver('github', open.exec).getPr('/repo', 7)).toBe('open')
+    expect(await makePrDriver('github', 'origin', closed.exec).getPr('/repo', 7)).toBe('closed')
+    expect(await makePrDriver('github', 'origin', open.exec).getPr('/repo', 7)).toBe('open')
   })
 
   test('resolves the merge status from gh', async () => {
@@ -270,13 +312,15 @@ describe('githubPr', () => {
       c.includes('view') ? ok('{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}\n') : undefined,
     )
 
-    expect(await makePrDriver('github', conflicting.exec).getMergeStatus('/repo', 7)).toBe(
-      'conflicted',
-    )
-    expect(await makePrDriver('github', mergeable.exec).getMergeStatus('/repo', 7)).toBe(
+    expect(
+      await makePrDriver('github', 'origin', conflicting.exec).getMergeStatus('/repo', 7),
+    ).toBe('conflicted')
+    expect(await makePrDriver('github', 'origin', mergeable.exec).getMergeStatus('/repo', 7)).toBe(
       'mergeable',
     )
-    expect(await makePrDriver('github', unknown.exec).getMergeStatus('/repo', 7)).toBe('unknown')
+    expect(await makePrDriver('github', 'origin', unknown.exec).getMergeStatus('/repo', 7)).toBe(
+      'unknown',
+    )
   })
 
   test('collects conversation, review, and inline comments from the api', async () => {
@@ -295,7 +339,7 @@ describe('githubPr', () => {
       }
       return undefined
     })
-    const comments = await makePrDriver('github', exec).listComments('/repo', 7)
+    const comments = await makePrDriver('github', 'origin', exec).listComments('/repo', 7)
 
     expect(calls.some((c) => c[0] === 'gh' && c[1] === 'repo' && c.includes('nameWithOwner'))).toBe(
       true,
@@ -309,7 +353,7 @@ describe('githubPr', () => {
 
   test('posts a comment to the pr conversation', async () => {
     const { exec, calls } = fake(() => undefined)
-    await makePrDriver('github', exec).postComment('/repo', 7, 'explanation')
+    await makePrDriver('github', 'origin', exec).postComment('/repo', 7, 'explanation')
 
     expect(calls).toContainEqual(['gh', 'pr', 'comment', '7', '--body-file', '-'])
     expect(calls).toContainEqual(['<stdin>', 'explanation'])
@@ -317,7 +361,7 @@ describe('githubPr', () => {
 
   test('closes the pr with the reason as the closing comment', async () => {
     const { exec, calls } = fake(() => undefined)
-    await makePrDriver('github', exec).closePr('/repo', 7, 'pointless')
+    await makePrDriver('github', 'origin', exec).closePr('/repo', 7, 'pointless')
 
     expect(calls).toContainEqual(['gh', 'pr', 'close', '7', '--comment', 'pointless'])
   })
@@ -328,7 +372,7 @@ describe('githubPr', () => {
         ? ok(JSON.stringify([prInfo(), prInfo({ number: 8, headRefName: 'amagi/am-2' })]))
         : undefined,
     )
-    const prs = await makePrDriver('github', exec).listOpenPrs('/repo')
+    const prs = await makePrDriver('github', 'origin', exec).listOpenPrs('/repo')
 
     expect(calls[0]).toEqual([
       'gh',
@@ -350,7 +394,7 @@ describe('githubPr', () => {
       if (n === 1) return ok(JSON.stringify({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }))
       return ok(JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }))
     })
-    const status = await makePrDriver('github', exec).getMergeStatus('/repo', 7)
+    const status = await makePrDriver('github', 'origin', exec).getMergeStatus('/repo', 7)
 
     expect(status).toBe('mergeable')
     expect(calls).toHaveLength(2)
@@ -360,7 +404,7 @@ describe('githubPr', () => {
     const { exec, calls } = fake((c) =>
       c.includes('diff') ? ok('diff --git a/x b/x\n') : undefined,
     )
-    const diff = await makePrDriver('github', exec).getPrDiff('/repo', 7)
+    const diff = await makePrDriver('github', 'origin', exec).getPrDiff('/repo', 7)
 
     expect(calls[0]).toEqual(['gh', 'pr', 'diff', '7'])
     expect(diff).toBe('diff --git a/x b/x\n')
@@ -368,7 +412,7 @@ describe('githubPr', () => {
 
   test('adds and removes a label on an existing pr', async () => {
     const { exec, calls } = fake(() => undefined)
-    const driver = makePrDriver('github', exec)
+    const driver = makePrDriver('github', 'origin', exec)
     await driver.addLabel('/repo', 7, 'amagi/needs-closing')
     await driver.removeLabel('/repo', 7, 'amagi/needs-closing')
 
@@ -392,15 +436,8 @@ describe('githubPr', () => {
 })
 
 describe('forgejoPr', () => {
-  const remote = (): { exec: Exec; calls: Call[] } => {
-    const calls: Call[] = []
-    const exec: Exec = async (cmd) => {
-      calls.push(cmd)
-      if (cmd.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
-      return { exitCode: 0, stdout: '', stderr: '' }
-    }
-    return { exec, calls }
-  }
+  const remote = () =>
+    fake((cmd) => (cmd.includes('get-url') ? ok('git@git.example.com:owner/repo.git') : undefined))
 
   const withFetch = <T>(
     routes: (path: string, method: string, body?: unknown) => Response,
@@ -420,22 +457,31 @@ describe('forgejoPr', () => {
     })
   }
 
-  test('pushes and creates the pr through the forgejo api', async () => {
+  test('pushes and creates the pr through tea', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
-    const { exec, calls } = remote()
+    const { exec, calls, invocations } = remote()
     await withFetch(
       (path, method) => {
-        if (path.startsWith('repos/owner/repo/pulls') && method === 'POST') {
+        if (path === 'repos/owner/repo/pulls?state=open' && method === 'GET') {
           return new Response(
-            JSON.stringify({ index: 3, html_url: 'https://git.example.com/owner/repo/pulls/3' }),
-            { status: 201 },
+            JSON.stringify([
+              {
+                number: 3,
+                html_url: 'https://git.example.com/owner/repo/pulls/3',
+                head: { ref: 'amagi/am-1' },
+              },
+            ]),
+            { status: 200 },
           )
+        }
+        if (path === 'repos/owner/repo/labels' && method === 'GET') {
+          return new Response(JSON.stringify([{ id: 42, name: 'amagi' }]), { status: 200 })
         }
         if (path.endsWith('/labels')) return new Response('{}', { status: 201 })
         return new Response('[]', { status: 200 })
       },
       async () => {
-        const pr = await makePrDriver('forgejo', exec).createPr({
+        const pr = await makePrDriver('forgejo', 'origin', exec).createPr({
           cwd: '/wt',
           branch: 'amagi/am-1',
           base: 'main',
@@ -448,9 +494,42 @@ describe('forgejoPr', () => {
       },
     )
     const push = calls.find((c) => c.includes('push'))
-    // the push went out over the tokenized remote
-    expect(push?.join(' ')).toContain('x-access-token:fj_tok@git.example.com/')
-    expect(push?.join(' ')).toContain('insteadOf=git@git.example.com:')
+    expect(push).toEqual([
+      'git',
+      'push',
+      '-u',
+      '--force-with-lease=refs/heads/amagi/am-1:',
+      'origin',
+      'amagi/am-1',
+    ])
+    expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:fj_tok@git.example.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@git.example.com:',
+    })
+    expect(calls).toContainEqual([
+      'tea',
+      'pr',
+      'create',
+      '--base',
+      'main',
+      '--head',
+      'amagi/am-1',
+      '--title',
+      'Do the thing',
+      '--description',
+      'Task: am-1',
+      '--labels',
+      'amagi',
+    ])
+  })
+
+  test('posts a comment through tea', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec, calls } = remote()
+    await makePrDriver('forgejo', 'origin', exec).postComment('/wt', 3, 'explanation')
+
+    expect(calls).toContainEqual(['tea', 'comment', '3', 'explanation'])
   })
 
   test('resolves merged state from the forgejo api', async () => {
@@ -459,7 +538,7 @@ describe('forgejoPr', () => {
     const state = await withFetch(
       (_path, _method) =>
         new Response(JSON.stringify({ state: 'closed', merged: true }), { status: 200 }),
-      () => makePrDriver('forgejo', exec).getPr('/wt', 3),
+      () => makePrDriver('forgejo', 'origin', exec).getPr('/wt', 3),
     )
     expect(state).toBe('merged')
   })
@@ -490,7 +569,7 @@ describe('forgejoPr', () => {
         }
         return new Response('[]', { status: 200 })
       },
-      () => makePrDriver('forgejo', exec).listOpenPrs('/wt'),
+      () => makePrDriver('forgejo', 'origin', exec).listOpenPrs('/wt'),
     )
 
     expect(prs).toEqual([
@@ -519,14 +598,14 @@ describe('forgejoPr', () => {
         new Response(JSON.stringify({ mergeable: true, mergeable_state: 'clean' }), {
           status: 200,
         }),
-      () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
+      () => makePrDriver('forgejo', 'origin', exec).getMergeStatus('/wt', 3),
     )
     const conflicted = await withFetch(
       () =>
         new Response(JSON.stringify({ mergeable: false, mergeable_state: 'has_conflicts' }), {
           status: 200,
         }),
-      () => makePrDriver('forgejo', exec).getMergeStatus('/wt', 3),
+      () => makePrDriver('forgejo', 'origin', exec).getMergeStatus('/wt', 3),
     )
     expect(mergeable).toBe('mergeable')
     expect(conflicted).toBe('conflicted')
@@ -540,7 +619,7 @@ describe('forgejoPr', () => {
         path === 'repos/owner/repo/pulls/3.diff'
           ? new Response('diff --git a/x b/x\n', { status: 200 })
           : new Response('[]', { status: 200 }),
-      () => makePrDriver('forgejo', exec).getPrDiff('/wt', 3),
+      () => makePrDriver('forgejo', 'origin', exec).getPrDiff('/wt', 3),
     )
     expect(diff).toBe('diff --git a/x b/x\n')
   })
@@ -558,7 +637,7 @@ describe('forgejoPr', () => {
         }
         return new Response('{}', { status: 200 })
       },
-      () => makePrDriver('forgejo', exec).closePr('/wt', 3, 'pointless'),
+      () => makePrDriver('forgejo', 'origin', exec).closePr('/wt', 3, 'pointless'),
     )
     expect(patched).toBe(true)
   })
@@ -568,7 +647,7 @@ describe('forgejoPr', () => {
     await expect(
       withFetch(
         () => new Response('{}', { status: 200 }),
-        () => makePrDriver('forgejo', exec).postComment('/wt', 3, 'hi'),
+        () => makePrDriver('forgejo', 'origin', exec).postComment('/wt', 3, 'hi'),
       ),
     ).rejects.toThrow(/FORGEJO_TOKEN/)
   })
@@ -592,10 +671,162 @@ describe('forgejoPr', () => {
         return new Response('{}', { status: 200 })
       },
       async () => {
-        const driver = makePrDriver('forgejo', exec)
+        const driver = makePrDriver('forgejo', 'origin', exec)
         await driver.addLabel('/wt', 3, 'amagi/needs-closing')
         await driver.removeLabel('/wt', 3, 'amagi/needs-closing')
       },
     )
+  })
+})
+
+describe('gitlabPr', () => {
+  const mr = (over: Record<string, unknown> = {}) => ({
+    iid: 7,
+    title: 'Do the thing',
+    description: 'Task: am-1',
+    web_url: 'https://gitlab.example.com/owner/repo/-/merge_requests/7',
+    source_branch: 'amagi/am-1-do-the-thing',
+    target_branch: 'main',
+    sha: 'deadbeef',
+    has_conflicts: false,
+    merge_status: 'can_be_merged',
+    created_at: '2026-09-20T10:00:00Z',
+    updated_at: '2026-09-21T10:00:00Z',
+    labels: ['amagi'],
+    ...over,
+  })
+
+  test('pushes over the token rewrite and creates the merge request through glab', async () => {
+    process.env.GITLAB_TOKEN = 'glpat-abc'
+    let created = false
+    const { exec, calls, invocations } = fake((c) => {
+      if (c.includes('get-url')) return ok('git@gitlab.example.com:owner/repo.git')
+      if (c[0] === 'glab' && c[1] === 'mr' && c[2] === 'create') {
+        created = true
+        return ok('')
+      }
+      if (c[0] === 'glab' && c[1] === 'api') return ok(JSON.stringify(created ? [mr()] : []))
+      return undefined
+    })
+    const pr = await makePrDriver('gitlab', 'origin', exec).createPr({
+      cwd: '/wt',
+      branch: 'amagi/am-1-do-the-thing',
+      base: 'main',
+      remote: 'origin',
+      title: 'Do the thing',
+      body: 'Task: am-1',
+      labels: amagiLabels('bug'),
+    })
+
+    expect(calls.find((c) => c.includes('push'))).toEqual([
+      'git',
+      'push',
+      '-u',
+      '--force-with-lease=refs/heads/amagi/am-1-do-the-thing:',
+      'origin',
+      'amagi/am-1-do-the-thing',
+    ])
+    expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:glpat-abc@gitlab.example.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@gitlab.example.com:',
+    })
+    expect(calls.find((c) => c[1] === 'mr' && c[2] === 'create')).toEqual([
+      'glab',
+      'mr',
+      'create',
+      '--source-branch',
+      'amagi/am-1-do-the-thing',
+      '--target-branch',
+      'main',
+      '--title',
+      'Do the thing',
+      '--description',
+      'Task: am-1',
+      '--label',
+      'amagi,amagi/bug',
+      '--yes',
+    ])
+    expect(pr).toEqual({ number: 7, url: mr().web_url })
+  })
+
+  test('lists open merge requests across pages in the shared shape', async () => {
+    const first = Array.from({ length: 100 }, (_, i) => mr({ iid: i + 1 }))
+    const { exec, calls } = fake((c) => {
+      const path = c[2] ?? ''
+      if (path.endsWith('&page=1')) return ok(JSON.stringify(first))
+      if (path.endsWith('&page=2'))
+        return ok(JSON.stringify([mr({ iid: 101, has_conflicts: true })]))
+      return undefined
+    })
+    const prs = await makePrDriver('gitlab', 'origin', exec).listOpenPrs('/repo')
+    expect(prs).toHaveLength(101)
+    expect(prs[0]).toEqual(prInfo({ number: 1, url: mr().web_url }))
+    expect(prs[100]).toMatchObject({ number: 101, mergeable: 'CONFLICTING' })
+    expect(calls.map((c) => c[2])).toEqual([
+      'projects/:id/merge_requests?state=opened&per_page=100&page=1',
+      'projects/:id/merge_requests?state=opened&per_page=100&page=2',
+    ])
+  })
+
+  test('maps merge request state and merge status', async () => {
+    const reply = { state: 'merged', has_conflicts: false, merge_status: 'checking' }
+    const { exec } = fake((c) => (c[0] === 'glab' ? ok(JSON.stringify(reply)) : undefined))
+    const driver = makePrDriver('gitlab', 'origin', exec)
+    expect(await driver.getPr('/repo', 7)).toBe('merged')
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('unknown')
+    reply.state = 'locked'
+    reply.has_conflicts = true
+    expect(await driver.getPr('/repo', 7)).toBe('closed')
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('conflicted')
+  })
+
+  test('collects notes as comments, skipping system notes', async () => {
+    const notes = [
+      { id: 1, body: '@chise-maru explain', author: { username: 'mcpie' }, system: false },
+      { id: 2, body: 'added 1 commit', author: { username: 'mcpie' }, system: true },
+    ]
+    const { exec } = fake((c) => (c[0] === 'glab' ? ok(JSON.stringify(notes)) : undefined))
+    expect(await makePrDriver('gitlab', 'origin', exec).listComments('/repo', 7)).toEqual([
+      { id: '1', user: 'mcpie', body: '@chise-maru explain' },
+    ])
+  })
+
+  test('closes with the reason as a note, and edits labels in place', async () => {
+    const { exec, calls } = fake(() => ok('{}'))
+    const driver = makePrDriver('gitlab', 'origin', exec)
+    await driver.closePr('/repo', 7, 'superseded')
+    await driver.addLabel('/repo', 7, 'amagi/needs-closing')
+    await driver.removeLabel('/repo', 7, 'P2')
+    expect(calls).toEqual([
+      [
+        'glab',
+        'api',
+        '--method',
+        'POST',
+        'projects/:id/merge_requests/7/notes',
+        '-f',
+        'body=superseded',
+      ],
+      [
+        'glab',
+        'api',
+        '--method',
+        'PUT',
+        'projects/:id/merge_requests/7',
+        '-f',
+        'state_event=close',
+      ],
+      [
+        'glab',
+        'api',
+        '--method',
+        'PUT',
+        'projects/:id/merge_requests/7',
+        '-f',
+        'add_labels=amagi/needs-closing',
+      ],
+      ['glab', 'api', '--method', 'PUT', 'projects/:id/merge_requests/7', '-f', 'remove_labels=P2'],
+    ])
   })
 })

@@ -41,6 +41,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref'))
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, inputs }
@@ -113,6 +118,8 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
+      forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef' },
       exec,
     })
@@ -129,6 +136,8 @@ describe('fetchPullHeads', () => {
     )
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
+      forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef', 'refs/pull/8/head': 'cafe12' },
       exec,
     })
@@ -139,14 +148,69 @@ describe('fetchPullHeads', () => {
       'fetch',
       '--prune',
       'origin',
-      '+refs/pull/*/head:refs/remotes/origin/pr/*',
+      '+refs/pull/*/head:refs/remotes/origin/pr/*/head',
     ])
+  })
+
+  test('mirrors GitLab merge request heads into the same local refs', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote') ? ok('newsha\trefs/merge-requests/7/head\n') : undefined,
+    )
+    const result = await fetchPullHeads({
+      repoRoot: '/repo',
+      remote: 'origin',
+      forgeKind: 'gitlab',
+      lastHeads: {},
+      exec,
+    })
+
+    expect(result).toEqual({
+      fetched: true,
+      heads: { 'refs/merge-requests/7/head': 'newsha' },
+    })
+    expect(calls).toContainEqual([
+      'git',
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/merge-requests/*/head:refs/remotes/origin/pr/*/head',
+    ])
+  })
+
+  test('deletes legacy flat pr/<n> mirror refs before fetching into pr/<n>/head', async () => {
+    const { exec, calls } = fake((c) =>
+      c.includes('ls-remote')
+        ? ok('newsha\trefs/pull/7/head\n')
+        : c.includes('for-each-ref')
+          ? ok('refs/remotes/origin/pr/7\nrefs/remotes/origin/pr/8/head\n')
+          : undefined,
+    )
+    const stdins: unknown[] = []
+    const run: Exec = async (cmd, opts) => {
+      if (cmd.includes('update-ref')) stdins.push(opts?.stdin)
+      return exec(cmd, opts)
+    }
+    await fetchPullHeads({
+      repoRoot: '/repo',
+      remote: 'origin',
+      forgeKind: 'github',
+      lastHeads: {},
+      exec: run,
+    })
+
+    expect(stdins).toEqual(['delete refs/remotes/origin/pr/7\n'])
+    const updateAt = calls.findIndex((c) => c.includes('update-ref'))
+    const fetchAt = calls.findIndex((c) => c[1] === 'fetch')
+    expect(updateAt).toBeGreaterThan(-1)
+    expect(updateAt).toBeLessThan(fetchAt)
   })
 
   test('fetches when a PR head disappears so the mirror is pruned', async () => {
     const { exec } = fake((c) => (c.includes('ls-remote') ? ok('') : undefined))
     const result = await fetchPullHeads({
       repoRoot: '/repo',
+      remote: 'origin',
+      forgeKind: 'github',
       lastHeads: { 'refs/pull/7/head': 'deadbeef' },
       exec,
     })
@@ -179,6 +243,7 @@ describe('iterations', () => {
     const { exec, calls, inputs } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
+      remote: 'origin',
       pr: pr({ labels: ['amagi'] }),
       exec,
     })
@@ -192,6 +257,7 @@ describe('iterations', () => {
     const { exec, calls, inputs } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
+      remote: 'origin',
       pr: pr({ labels: ['amagi/iterations:2'] }),
       exec,
     })
@@ -203,7 +269,13 @@ describe('iterations', () => {
 
   test('drops the previous count even when the PR snapshot predates it', async () => {
     const { exec, calls } = fake(() => undefined)
-    await stampIterationLabel({ cwd: '/repo', pr: pr({ labels: ['amagi'] }), iteration: 3, exec })
+    await stampIterationLabel({
+      cwd: '/repo',
+      remote: 'origin',
+      pr: pr({ labels: ['amagi'] }),
+      iteration: 3,
+      exec,
+    })
 
     expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
     expect(calls).not.toContainEqual(removeLabelCall(7, 'amagi/iterations:3'))
@@ -213,6 +285,7 @@ describe('iterations', () => {
     const { exec, calls } = fake(() => undefined)
     const stamped = await stampIterationLabel({
       cwd: '/repo',
+      remote: 'origin',
       pr: pr({ headRefName: 'feature/foo' }),
       exec,
     })
@@ -340,6 +413,7 @@ describe('syncPrPriorityLabel', () => {
     const { exec, calls, inputs } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
+      remote: 'origin',
       number: 7,
       labels: ['amagi', 'P1', 'P3'],
       priority: 2,
@@ -355,6 +429,7 @@ describe('syncPrPriorityLabel', () => {
     const { exec, calls } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
+      remote: 'origin',
       number: 7,
       labels: ['amagi', 'P4'],
       priority: 4,
@@ -368,6 +443,7 @@ describe('syncPrPriorityLabel', () => {
     const { exec, calls } = fake(() => undefined)
     await syncPrPriorityLabel({
       cwd: '/repo',
+      remote: 'origin',
       number: 7,
       labels: ['amagi', 'P2'],
       priority: null,
@@ -381,9 +457,9 @@ describe('syncPrPriorityLabel', () => {
 describe('removePrLabel', () => {
   test('a label already gone from the PR is not an error, any other failure is', async () => {
     const gone = fake(() => fail('gh: Label does not exist (HTTP 404)'))
-    await removePrLabel(gone.exec, '/repo', 7, 'P2')
+    await removePrLabel(gone.exec, '/repo', 'origin', 7, 'P2')
     const denied = fake(() => fail('gh: Resource not accessible (HTTP 403)'))
-    await expect(removePrLabel(denied.exec, '/repo', 7, 'P2')).rejects.toThrow(/HTTP 403/)
+    await expect(removePrLabel(denied.exec, '/repo', 'origin', 7, 'P2')).rejects.toThrow(/HTTP 403/)
   })
 })
 
@@ -396,6 +472,7 @@ describe('prepareConflictWorktree', () => {
     })
     const wt = await prepareConflictWorktree({
       repoRoot: '/repo',
+      remote: 'origin',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -439,6 +516,7 @@ describe('prepareConflictWorktree', () => {
     })
     const wt = await prepareConflictWorktree({
       repoRoot: '/repo',
+      remote: 'origin',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -462,6 +540,7 @@ describe('prepareConflictWorktree', () => {
     )
     await prepareConflictWorktree({
       repoRoot: '/repo',
+      remote: 'origin',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -488,6 +567,7 @@ describe('prepareConflictWorktree', () => {
       })
       const wt = await prepareConflictWorktree({
         repoRoot: '/repo',
+        remote: 'origin',
         repoName: 'amagi',
         worktreeRoot: root,
         baseBranch: 'main',
@@ -527,6 +607,7 @@ describe('prepareConflictWorktree', () => {
 
       await prepareConflictWorktree({
         repoRoot: '/repo',
+        remote: 'origin',
         repoName: 'amagi',
         worktreeRoot: '/wt',
         baseBranch: 'main',
@@ -569,5 +650,72 @@ describe('pushConflictFix', () => {
       'origin',
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
+  })
+
+  test('refuses to push to the push URL default branch', async () => {
+    const pushUrl = 'git@example.com:owner/push.git'
+    const { exec, calls } = fake((cmd) => {
+      if (cmd.includes('get-url')) {
+        return {
+          exitCode: 0,
+          stdout: cmd.includes('--push') ? `${pushUrl}\n` : 'git@example.com:owner/fetch.git\n',
+          stderr: '',
+        }
+      }
+      if (cmd.includes('--symref')) {
+        return {
+          exitCode: 0,
+          stdout: cmd.includes(pushUrl)
+            ? 'ref: refs/heads/trunk\tHEAD\n'
+            : 'ref: refs/heads/main\tHEAD\n',
+          stderr: '',
+        }
+      }
+      return undefined
+    })
+    await expect(
+      pushConflictFix({
+        cwd: '/wt/amagi-pr-7',
+        branch: 'amagi/pr-7-conflict',
+        headRef: 'trunk',
+        remote: 'origin',
+        exec,
+      }),
+    ).rejects.toThrow('remote default branch trunk')
+    expect(calls).toContainEqual(['git', 'remote', 'get-url', '--push', '--all', 'origin'])
+    expect(calls).toContainEqual(['git', 'ls-remote', '--symref', pushUrl, 'HEAD'])
+    expect(calls.some((cmd) => cmd.includes('push'))).toBe(false)
+  })
+
+  test('checks every push URL before pushing', async () => {
+    const first = 'git@example.com:owner/first.git'
+    const second = 'git@example.com:owner/second.git'
+    const { exec, calls } = fake((cmd) => {
+      if (cmd.includes('get-url') && cmd.includes('--push')) {
+        return { exitCode: 0, stdout: `${first}\n${second}\n`, stderr: '' }
+      }
+      if (cmd.includes('--symref')) {
+        return {
+          exitCode: 0,
+          stdout: cmd.includes(second)
+            ? 'ref: refs/heads/trunk\tHEAD\n'
+            : 'ref: refs/heads/main\tHEAD\n',
+          stderr: '',
+        }
+      }
+      return undefined
+    })
+    await expect(
+      pushConflictFix({
+        cwd: '/wt/amagi-pr-7',
+        branch: 'amagi/pr-7-conflict',
+        headRef: 'trunk',
+        remote: 'origin',
+        exec,
+      }),
+    ).rejects.toThrow('remote default branch trunk')
+    expect(calls).toContainEqual(['git', 'ls-remote', '--symref', first, 'HEAD'])
+    expect(calls).toContainEqual(['git', 'ls-remote', '--symref', second, 'HEAD'])
+    expect(calls.some((cmd) => cmd.includes('push'))).toBe(false)
   })
 })

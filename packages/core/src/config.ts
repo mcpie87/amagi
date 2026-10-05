@@ -3,13 +3,14 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { delimiter, dirname, join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
+import { matchForgeRemote } from './drivers/forge-cred.ts'
 import { FindingSeverity, findingSeverityAtOrAbove } from './events.ts'
 import { MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
-export const ForgeKind = z.enum(['github', 'forgejo'])
+export const ForgeKind = z.enum(['github', 'gitlab', 'forgejo'])
 
 export const DifficultyConfig = z.object({
   /**
@@ -19,12 +20,6 @@ export const DifficultyConfig = z.object({
   enabled: z.boolean().default(false),
   /** Difficulty levels a task can be classified into, easiest first. */
   levels: z.array(z.string().min(1)).default(['low', 'medium', 'high']),
-  /** Model tiers, weakest first; a model's tier is its index in this list. */
-  tierOrder: z.array(z.string().min(1)).default(['fast', 'smart']),
-  /** The minimum tier a task of a given difficulty needs; unlisted levels require the weakest tier. */
-  requiredTier: z.record(z.string(), z.string()).default({ high: 'smart' }),
-  /** Explicit model id -> tier mapping; an unlisted model counts as the weakest tier. */
-  modelTiers: z.record(z.string(), z.string()).default({}),
 })
 
 export const HarnessConfig = z.object({
@@ -73,6 +68,9 @@ const WatcherHarnessConfig = z.object({
  * A named lane in the fleet. `id` is the identity (locks and run history key
  * on it); `name` is a free-text label that may be renamed or duplicated.
  */
+export const WorkerRole = z.enum(['implement', 'review'])
+export type WorkerRole = z.infer<typeof WorkerRole>
+
 export const WorkerConfig = z
   .object({
     id: z.string().regex(/^[a-z0-9-]+$/),
@@ -81,9 +79,12 @@ export const WorkerConfig = z
     model: z.string().optional(),
     effort: z.string().optional(),
     seat: z.string().min(1).optional(),
+    roles: z.array(WorkerRole).default(['implement']),
     count: z.number().int().min(1).max(MAX_WORKERS).default(1),
     seatCount: z.number().int().min(1).max(MAX_WORKERS).default(1),
     enabled: z.boolean().default(false),
+    /** Difficulty levels this worker claims; unset takes every level. */
+    difficulties: z.array(z.string().min(1)).optional(),
   })
   .refine((worker) => worker.seatCount <= worker.count, {
     path: ['seatCount'],
@@ -105,21 +106,29 @@ export const SeatConfig = z.union([
 export type SeatConfig = z.infer<typeof SeatConfig>
 
 /** Expands a configured worker profile into independently schedulable instances. */
-export function expandWorkers(workers: WorkerConfig[], seats: SeatConfig[] = []): WorkerConfig[] {
+export type ExpandedWorkerConfig = WorkerConfig & { displaySlot: number }
+
+export function expandWorkers(
+  workers: WorkerConfig[],
+  seats: SeatConfig[] = [],
+): ExpandedWorkerConfig[] {
   const capacity = new Map(seats.map((seat) => [seat.name, seat.count]))
   const nextSlot = new Map<string, number>()
   return workers.flatMap((worker) => {
     const seatName = worker.seat ?? worker.kind
     const effectiveSeatCount = capacity.get(seatName) ?? worker.seatCount
     return Array.from({ length: worker.count }, (_, index) => {
+      if (worker.count === 1 && effectiveSeatCount === 1 && !capacity.has(seatName)) {
+        return { ...worker, displaySlot: 1 }
+      }
       const { count, seatCount: _seatCount, ...profile } = worker
-      if (count === 1 && effectiveSeatCount === 1 && !capacity.has(seatName)) return worker
       const slot = nextSlot.get(seatName) ?? 0
       nextSlot.set(seatName, slot + 1)
       return {
         ...profile,
         count: 1,
         seatCount: 1,
+        displaySlot: (slot % effectiveSeatCount) + 1,
         id: count === 1 ? worker.id : `${worker.id}-${index + 1}`,
         name: count === 1 ? worker.name : `${worker.name} ${index + 1}`,
         seat:
@@ -155,9 +164,22 @@ export function resolveWorkerHarness(
   }
 }
 
+/** Resolves the assigned reviewer profile, when an enabled reviewer is configured. */
+export function reviewerWorkerConfig(config: Config): Config['harness']['implement'] | undefined {
+  const worker = expandWorkers(config.worker, config.seats).find(
+    (candidate) => candidate.enabled && candidate.roles.includes('review'),
+  )
+  return worker === undefined ? undefined : resolveWorkerHarness(config, worker)
+}
+
 const AgentWatcherConfig = z.object({
   enabled: z.boolean().default(true),
   ...WatcherHarnessConfig.shape,
+})
+
+const MentionWatcherConfig = AgentWatcherConfig.extend({
+  /** Forge usernames allowed to trigger agent responses to PR mentions. */
+  allowedAuthors: z.array(z.string().min(1)).default([]),
 })
 
 export const Config = z
@@ -201,6 +223,10 @@ export const Config = z
     forge: z
       .object({
         kind: ForgeKind.default('github'),
+        /**
+         * Git remote pushes and forge CLI calls go through. Left unset, loadConfig
+         * fills in the remote whose host matches `kind`, falling back to origin.
+         */
         remote: z.string().default('origin'),
         /** Forge handle (without the @) the agent is pinged under on PRs; mentions of it trigger responses. */
         agentHandle: z.string().default('chise-maru'),
@@ -215,17 +241,17 @@ export const Config = z
          */
         definitions: z.record(z.string().min(1), HarnessConfig).default({}),
         implement: HarnessConfig.prefault({ kind: 'claude' }),
-        review: HarnessConfig.prefault({ kind: 'codex' }),
         triage: HarnessConfig.prefault({ kind: 'claude' }),
       })
       .prefault({}),
     review: ReviewConfig.prefault({}),
     watchers: z
       .object({
-        mention: AgentWatcherConfig.prefault({ enabled: true }),
+        mention: MentionWatcherConfig.prefault({ enabled: true }),
         prConflict: AgentWatcherConfig.prefault({ enabled: true }),
         stall: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
         epicClose: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
+        beadsGc: z.object({ enabled: z.boolean().default(true) }).prefault({ enabled: true }),
       })
       .prefault({}),
     loop: z
@@ -270,6 +296,12 @@ export const Config = z
         stallWatchIntervalSec: z.number().int().min(1).default(300),
         /** How often the server closes beads epics whose children are all complete. */
         epicCloseIntervalSec: z.number().int().min(1).default(300),
+        /**
+         * How often the server garbage-collects a beads store. Every bd write
+         * grows Dolt's journal and every bd call replays it on start, so an
+         * uncollected store gets slower by the day.
+         */
+        beadsGcIntervalSec: z.number().int().min(60).default(3600),
         /**
          * How long a task may sit in an in-progress state with no worker
          * heartbeat before the stall watcher reclaims it (release the tracker
@@ -380,6 +412,7 @@ export const Config = z
       .object({
         idle: z.boolean().default(true),
         desktop: z.boolean().default(true),
+        desktopFailureAlerts: z.boolean().default(false),
         ntfyTopic: z.string().nullable().default(null),
         ntfyServer: z.string().default('https://ntfy.sh'),
       })
@@ -437,6 +470,18 @@ export function reviewerHarnessConfig(config: Config): Config['harness']['implem
     )
   }
   return HarnessConfig.parse({ kind })
+}
+
+/**
+ * The reviewer for a run, or undefined when review is off. An enabled fleet
+ * worker with the review role turns review on and wins over [review.harness];
+ * without one, review.enabled decides.
+ */
+export function activeReviewerConfig(config: Config): Config['harness']['implement'] | undefined {
+  return (
+    reviewerWorkerConfig(config) ??
+    (config.review.enabled ? reviewerHarnessConfig(config) : undefined)
+  )
 }
 
 export type AgentWatcherKind = 'mention' | 'prConflict'
@@ -513,6 +558,15 @@ export function hasStaleMaxParallel(repoRoot: string): boolean {
   })
 }
 
+/** Whether either config names `forge.remote`, instead of leaving loadConfig to match it to the forge. */
+export function hasPinnedForgeRemote(repoRoot: string): boolean {
+  const paths = [globalConfigPath(), repoConfigPath(repoRoot)]
+  return paths.some((path) => {
+    const raw = readToml(path)
+    return isPlainObject(raw.forge) && 'remote' in raw.forge
+  })
+}
+
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
@@ -532,6 +586,9 @@ export function loadConfig(repoRoot: string): LoadedConfig {
 
   const config = parsed.data
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
+  if (!(isPlainObject(merged.forge) && 'remote' in merged.forge)) {
+    config.forge.remote = matchForgeRemote(repoRoot, config.forge.kind) ?? 'origin'
+  }
   return { config, sources }
 }
 
@@ -565,6 +622,7 @@ export function migrateFleet(): WorkerConfig[] {
       id: newWorkerId([]),
       name: `${HARNESS_LABEL[kind]} 1`,
       kind,
+      roles: ['implement'],
       ...(model === undefined ? {} : { model }),
       ...(effort === undefined ? {} : { effort }),
       seat: seat ?? kind,

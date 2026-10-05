@@ -192,7 +192,9 @@ export function startMentionWatcher({
           scanned++
           scannedNow++
           const mentions = comments.filter(
-            (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
+            (c) =>
+              isAgentMention(c, config.forge.agentHandle, config.watchers.mention.allowedAuthors) &&
+              !handled.has(c.id),
           )
           recordAction(
             runId,

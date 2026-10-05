@@ -26,6 +26,7 @@ import { RunService, type RunServiceOptions } from './run-service.ts'
 import type { RunOnceResult } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
+import { recordUsageHold, usageHoldKey } from './usage-hold.ts'
 
 const TASK: TrackerTask = {
   id: 'bd-a1b2',
@@ -230,6 +231,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return []
   }
@@ -252,6 +256,8 @@ class FakePr implements PrDriver {
 let repo: string
 let wtRoot: string
 let store: Store
+let stateRoot: string
+let previousStateHome: string | undefined
 
 const config = (over: Record<string, unknown> = {}) => {
   const { worker = [{ id: 'worker-1', name: 'Worker 1', kind: 'claude' }], ...rest } = over
@@ -305,6 +311,9 @@ beforeEach(async () => {
   delete process.env.GITHUB_TOKEN
   repo = mkdtempSync(join(tmpdir(), 'amagi-runservice-repo-'))
   wtRoot = mkdtempSync(join(tmpdir(), 'amagi-runservice-wt-'))
+  stateRoot = mkdtempSync(join(tmpdir(), 'amagi-runservice-state-'))
+  previousStateHome = process.env.XDG_STATE_HOME
+  process.env.XDG_STATE_HOME = stateRoot
   store = new Store(openDatabase(':memory:'))
   await execOk(exec, ['git', 'init', '-q', '-b', 'main', '.'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
@@ -318,9 +327,45 @@ afterEach(() => {
   store.close()
   rmSync(repo, { recursive: true, force: true })
   rmSync(wtRoot, { recursive: true, force: true })
+  rmSync(stateRoot, { recursive: true, force: true })
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousStateHome
 })
 
 describe('RunService', () => {
+  test('does not claim a ready task while its harness and model are held', async () => {
+    const tracker = new FakeTracker([TASK])
+    let spawned = 0
+    const harness: Harness = {
+      kind: 'claude',
+      start: (opts) => {
+        spawned++
+        return new FakeHarness().start(opts)
+      },
+      resume: () => {
+        throw new Error('unexpected resume')
+      },
+      listModels: async () => [],
+      listEfforts: async () => [],
+    }
+    const cfg = config({ harness: { implement: { kind: 'claude', model: 'sonnet' } } })
+    const key = usageHoldKey('claude', 'sonnet')
+    recordUsageHold(key, 'claude', 'sonnet', 'usage limit reached', Date.now() + 60_000)
+    const service = makeService(tracker, harness, 1, cfg, { autoQueue: true, autoQueueIdleMs: 10 })
+
+    const result = await service.start()
+    expect(result).toMatchObject({ ok: false, status: 409 })
+    expect(result.ok ? '' : result.error).toContain('claude+sonnet usage limit hold')
+    expect(await tracker.ready()).toEqual([TASK])
+    expect(spawned).toBe(0)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(store.task(TASK.id)).toBeNull()
+    expect(store.events({ taskId: TASK.id }).some((event) => event.type === 'agent.started')).toBe(
+      false,
+    )
+    service.dispose()
+  })
+
   test('status reports availability and capacity', async () => {
     const service = makeService(new FakeTracker(), new FakeHarness(), 2)
     expect(await service.status()).toEqual({
@@ -342,6 +387,7 @@ describe('RunService', () => {
           model: null,
           effort: null,
           seat: 'seat-1',
+          displaySlot: 1,
           enabled: true,
           busy: false,
           taskId: null,
@@ -353,6 +399,7 @@ describe('RunService', () => {
           model: null,
           effort: null,
           seat: 'seat-2',
+          displaySlot: 1,
           enabled: true,
           busy: false,
           taskId: null,
@@ -619,6 +666,7 @@ describe('RunService', () => {
         model: null,
         effort: null,
         seat: 'seat-one',
+        displaySlot: 1,
         enabled: true,
         busy: true,
         taskId: TASK.id,
@@ -630,6 +678,7 @@ describe('RunService', () => {
         model: null,
         effort: null,
         seat: 'codex',
+        displaySlot: 1,
         enabled: false,
         busy: false,
         taskId: null,
@@ -713,26 +762,22 @@ describe('RunService', () => {
     expect(store.task(TASK2.id)).toBeNull()
   })
 
-  test('start refuses a specific task the model tier cannot claim', async () => {
+  test("start refuses a specific task outside the worker's difficulty levels", async () => {
     const hard = { ...TASK, difficulty: 'high' }
     const service = makeService(
       new FakeTracker([hard]),
       new FakeHarness(),
       1,
       config({
-        harness: { implement: { kind: 'claude', model: 'claude-haiku-4-5' } },
-        difficulty: {
-          enabled: true,
-          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-4-5': 'smart' },
-          requiredTier: { high: 'smart' },
-        },
+        worker: [{ id: 'worker-1', name: 'Worker 1', kind: 'claude', difficulties: ['low'] }],
+        difficulty: { enabled: true },
       }),
     )
     const res = await service.start(TASK.id)
     expect(res).toEqual({
       ok: false,
       status: 409,
-      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
+      error: 'task bd-a1b2: Worker 1 does not take high difficulty tasks',
     })
   })
 
@@ -858,40 +903,60 @@ describe('RunService', () => {
     )
   })
 
-  test('start gates a claimed task on the override model, not the configured default', async () => {
-    const hard = { ...TASK, difficulty: 'high' }
-    let captured: Config['harness']['implement'] | null = null
+  test('review runs resolve their harness, model, and seat from an assigned reviewer', async () => {
+    const captured: Config['harness']['implement'][] = []
     const service = new RunService({
       store,
-      tracker: new FakeTracker([hard]),
+      tracker: new FakeTracker([TASK]),
       harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
       config: config({
-        harness: { implement: { kind: 'claude', model: 'claude-sonnet-5' } },
-        difficulty: {
-          enabled: true,
-          modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-5': 'smart' },
-          requiredTier: { high: 'smart' },
-        },
+        worker: [
+          { id: 'implementer', name: 'Implementer', kind: 'claude', roles: ['implement'] },
+          {
+            id: 'reviewer',
+            name: 'Reviewer',
+            kind: 'codex',
+            model: 'review-model',
+            effort: 'high',
+            seat: 'review-seat',
+            roles: ['review'],
+          },
+        ],
       }),
       repoRoot: repo,
       repoName: 'demo',
       forge: new FakePr(),
       makeHarness: (cfg) => {
-        captured = cfg
+        captured.push(cfg)
         return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
       },
     })
-    const weak = await service.start(hard.id, { model: 'claude-haiku-4-5' })
-    expect(weak).toEqual({
-      ok: false,
-      status: 409,
-      error: 'task bd-a1b2: claude-haiku-4-5 is only a fast model but high difficulty needs smart',
-    })
-    expect(captured).toBeNull()
-    const ok = await service.start(hard.id, { model: 'claude-sonnet-5' })
-    expect(ok).toEqual({ ok: true, taskId: hard.id })
-    await waitFor(() => store.task(hard.id)?.state === 'pr_open')
-    expect(captured).toEqual(expect.objectContaining({ model: 'claude-sonnet-5' }))
+    const result = await service.start()
+    expect(result).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+    expect(captured).toEqual([
+      expect.objectContaining({ kind: 'claude' }),
+      expect.objectContaining({
+        kind: 'codex',
+        model: 'review-model',
+        effort: 'high',
+        seat: 'review-seat',
+      }),
+    ])
+  })
+
+  test('review-only workers are not eligible for implementation runs', async () => {
+    const tracker = new FakeTracker([TASK])
+    const service = makeService(
+      tracker,
+      new FakeHarness(() => {}),
+      1,
+      config({ worker: [{ id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'] }] }),
+    )
+    expect(await service.start()).toMatchObject({ ok: false, error: 'no available worker' })
+    expect(await tracker.ready()).toEqual([TASK])
+    expect((await service.status()).totalSeats).toBe(0)
+    service.dispose()
   })
 
   test('start refuses a task the tracker does not see as ready', async () => {

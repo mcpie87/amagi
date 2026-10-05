@@ -33,7 +33,7 @@ build:
 # gitignored build output, not checked-in source.
 # Run the tests (builds dashboard dist first)
 test: build-dashboard
-    bun test
+    bun test --parallel=8
 
 # Build dashboard dist (needed before test)
 build-dashboard:
