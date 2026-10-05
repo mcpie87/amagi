@@ -136,6 +136,18 @@ describe('ClaudeHarness argv', () => {
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe(DEFAULT_ALLOWED_TOOLS.join(' '))
   })
 
+  test('passes the output schema inline without its meta-schema URI', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'claude-schema-'))
+    const outputSchema = join(dir, 'schema.json')
+    writeFileSync(
+      outputSchema,
+      JSON.stringify({ $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object' }),
+    )
+    const argv = new ClaudeHarness().argv({ ...base, outputSchema }, null)
+    rmSync(dir, { recursive: true, force: true })
+    expect(argv[argv.indexOf('--json-schema') + 1]).toBe('{"type":"object"}')
+  })
+
   test('read-only mode only allows repository inspection tools', () => {
     const argv = new ClaudeHarness().argv({ ...base, permissions: 'read-only' }, null)
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('Read Glob Grep')

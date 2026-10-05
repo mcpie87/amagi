@@ -2,7 +2,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
-import { ghEnv } from './drivers/forge-cred.ts'
 import { AMAGI_LABEL, NEEDS_CLOSING_LABEL, type PrDriver } from './drivers/pr.ts'
 import type { Tracker, TrackerTask } from './drivers/types.ts'
 import { agentFailure, errMsg } from './errors.ts'
@@ -97,20 +96,11 @@ export function pointlessReason(pr: PrInfo, contained = false): string {
 
 /**
  * The v1 pointlessness criterion, checked mechanically: the three-dot diff
- * against base is empty. GitHub-only, matching the gh-bound PR list that feeds
- * the watcher; an empty diff already subsumes superseded work, since changes
+ * against base is empty. An empty diff subsumes superseded work, since changes
  * that landed on base by another route make the diff go empty by itself.
  */
-export async function prDiffEmpty(
-  cwd: string,
-  number: number,
-  run: Exec = defaultExec,
-): Promise<boolean> {
-  const r = await run(['gh', 'pr', 'diff', String(number)], { cwd, env: ghEnv() })
-  if (r.exitCode !== 0) {
-    throw new Error(r.stderr.trim() || `gh pr diff ${number} failed`)
-  }
-  return r.stdout.trim() === ''
+export async function prDiffEmpty(cwd: string, number: number, driver: PrDriver): Promise<boolean> {
+  return (await driver.getPrDiff(cwd, number)).trim() === ''
 }
 
 /** Last-evaluated head per amagi PR, so an unchanged PR is not re-commented every tick. */
@@ -185,6 +175,7 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
   try {
     const wt = await prepareConflictWorktree({
       repoRoot: opts.root,
+      remote: opts.config.forge.remote,
       repoName: opts.repoName,
       worktreeRoot: opts.config.repo.worktreeRoot,
       baseBranch: opts.config.repo.baseBranch,
@@ -255,7 +246,6 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
  * of their diff, so a human's PR is never touched.
  */
 export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<FlagPointlessResult> {
-  const run = opts.exec ?? defaultExec
   const tasks = new Map(
     opts.store.tasks({ states: ['pr_open', 'pr_flagged'] }).map((t) => [t.prNumber, t]),
   )
@@ -285,7 +275,7 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
     let empty = contained
     if (!empty) {
       try {
-        empty = await prDiffEmpty(opts.cwd, pr.number, run)
+        empty = await prDiffEmpty(opts.cwd, pr.number, opts.driver)
       } catch (err) {
         console.warn(`pr pointless #${pr.number}: ${errMsg(err)}`)
         report(pr, `pointlessness check failed: ${errMsg(err)}`, 'error')

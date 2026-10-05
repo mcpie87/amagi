@@ -56,6 +56,12 @@ const StreamContext = createContext<DashboardState>(initialDashboardState())
 /** The repo's unclaimed ready queue, FCFS from the tracker. */
 const ReadyQueueContext = createContext<TrackerTask[]>([])
 
+/**
+ * The seq the selected repo's compact replay covered, or null until it
+ * finishes. Agent log lines up to it are fetched per task; later ones stream.
+ */
+const ReplayContext = createContext<{ repo: string; seq: number | null } | null>(null)
+
 type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'
 const ConnectionContext = createContext<ConnectionStatus>('connecting')
 
@@ -68,8 +74,9 @@ function readStored(): string | null {
 }
 
 /**
- * One EventSource per selected repository, replayed from seq 0 and resumed
- * from the browser's Last-Event-ID on reconnect. The reducer state is scoped
+ * One EventSource per selected repository, replayed from seq 0 without agent
+ * log lines (log views backfill those per task, see useAgentLogBackfill) and
+ * resumed from the browser's Last-Event-ID on reconnect. The reducer state is scoped
  * to the repo (the stream component is keyed by repo, so switching resets it)
  * and agent logs are namespaced by repo, so identical issue ids across repos
  * never collide in the dashboard.
@@ -153,6 +160,8 @@ function RepoStream({
   // Survives reconnects, which only replay missed events, so a resumed stream
   // keeps counting resets from where the first connection left off.
   const attemptsRef = useRef(new Map<string, number>())
+  const replayedRef = useRef<number | null>(null)
+  const [replayed, setReplayed] = useState<number | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -179,8 +188,15 @@ function RepoStream({
     // reconnection only replays what the stale connection missed. The first
     // connect replays everything (latestSeq is 0).
     void resync
+    // Only the first connect is compact: a resumed stream's gap is small, and
+    // its log lines past the replayed seq belong in the buffers.
+    const compact = latestSeqRef.current === 0
+    if (compact) {
+      agentLogStore.clear(`${repo}/`)
+      forgetBackfills(repo)
+    }
     const source = new EventSource(
-      `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}`,
+      `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}${compact ? '&compact=1' : ''}`,
     )
     // A replay delivers tens of thousands of events back to back; one dispatch
     // each meant one full render each. Queue them and fold once per frame.
@@ -199,6 +215,10 @@ function RepoStream({
     }
     source.addEventListener('open', () => setConnection('connected'))
     source.addEventListener('error', () => setConnection('reconnecting'))
+    source.addEventListener('replayed', (event: MessageEvent) => {
+      replayedRef.current = Number(event.data)
+      setReplayed(replayedRef.current)
+    })
     source.addEventListener('message', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data) as StoredEvent
@@ -227,7 +247,9 @@ function RepoStream({
           attempts.set(parsed.taskId, (attempts.get(parsed.taskId) ?? 1) + 1)
         }
         if (parsed.type === 'agent.stream') {
-          if (parsed.taskId !== null) {
+          // Lines up to the replayed seq come from the per-task backfill.
+          const live = replayedRef.current !== null && parsed.seq > replayedRef.current
+          if (parsed.taskId !== null && live) {
             const attempt = attemptsRef.current.get(parsed.taskId) ?? 1
             agentLogStore.append(
               agentLogKey(repo, parsed.taskId, attempt),
@@ -256,11 +278,49 @@ function RepoStream({
 
   return (
     <ConnectionContext.Provider value={connection}>
-      <StreamContext.Provider value={state}>
-        <ReadyQueueContext.Provider value={readyQueue}>{children}</ReadyQueueContext.Provider>
-      </StreamContext.Provider>
+      <ReplayContext.Provider value={{ repo, seq: replayed }}>
+        <StreamContext.Provider value={state}>
+          <ReadyQueueContext.Provider value={readyQueue}>{children}</ReadyQueueContext.Provider>
+        </StreamContext.Provider>
+      </ReplayContext.Provider>
     </ConnectionContext.Provider>
   )
+}
+
+/** The replayed seq each agent log buffer was backfilled up to. */
+const backfills = new Map<string, number>()
+
+function forgetBackfills(repo: string): void {
+  for (const key of backfills.keys()) if (key.startsWith(`${repo}/`)) backfills.delete(key)
+}
+
+/**
+ * Fills a task's agent log buffer with the lines the compact replay left out.
+ * A repo other than the streamed one has no live lines, so it gets everything
+ * stored so far.
+ */
+export function useAgentLogBackfill(repo: string, taskId: string, attempt: number): void {
+  const replay = useContext(ReplayContext)
+  const untilSeq = replay === null || replay.repo !== repo ? Number.MAX_SAFE_INTEGER : replay.seq
+  useEffect(() => {
+    if (untilSeq === null) return
+    const key = agentLogKey(repo, taskId, attempt)
+    if (backfills.get(key) === untilSeq) return
+    backfills.set(key, untilSeq)
+    fetch(
+      `${apiBase}/api/repos/${repo}/tasks/${encodeURIComponent(taskId)}/agent-log?attempt=${attempt}&untilSeq=${untilSeq}`,
+    )
+      .then((res) => (res.ok ? (res.json() as Promise<StoredEvent[]>) : []))
+      .then((events) => {
+        // A reconnect since the request cleared the buffer and asked again.
+        if (backfills.get(key) !== untilSeq) return
+        agentLogStore.backfill(
+          key,
+          events.flatMap((event) => (event.type === 'agent.stream' ? [event] : [])),
+        )
+      })
+      .catch(() => backfills.delete(key))
+  }, [repo, taskId, attempt, untilSeq])
 }
 
 export function useDashboard(): DashboardValue & { state: DashboardState } {
@@ -328,7 +388,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       .catch(() => {
         if (selectedRef.current === repo) setStatus(null)
       })
-  }, [base, selected])
+  }, [selected])
 
   useEffect(() => {
     setStatus(null)
@@ -352,7 +412,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       alive = false
       clearInterval(timer)
     }
-  }, [base, refresh, selected])
+  }, [refresh, selected])
 
   const start = async (
     taskId?: string,

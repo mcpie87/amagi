@@ -12,9 +12,27 @@ function xdg(envVar: string, fallback: string): string {
   return v && isAbsolute(v) ? v : join(homedir(), fallback)
 }
 
+/**
+ * Set by the dev shell's `amagi` wrapper so a from-source amagi keeps its own
+ * stores, registry, shims and worktrees instead of sharing the installed
+ * amagi's. Config is not moved: the fleet and git personas stay the operator's.
+ */
+function devHome(): string | undefined {
+  const v = process.env.AMAGI_DEV_HOME
+  return v && isAbsolute(v) ? v : undefined
+}
+
 export const configHome = (): string => xdg('XDG_CONFIG_HOME', '.config')
-export const stateHome = (): string => xdg('XDG_STATE_HOME', '.local/state')
-export const cacheHome = (): string => xdg('XDG_CACHE_HOME', '.cache')
+/** The operator's state home, ignoring AMAGI_DEV_HOME: for state every amagi must share. */
+export const hostStateHome = (): string => xdg('XDG_STATE_HOME', '.local/state')
+export const stateHome = (): string => {
+  const dev = devHome()
+  return dev ? join(dev, 'state') : hostStateHome()
+}
+export const cacheHome = (): string => {
+  const dev = devHome()
+  return dev ? join(dev, 'cache') : xdg('XDG_CACHE_HOME', '.cache')
+}
 
 export const globalConfigPath = (): string => join(configHome(), 'amagi', 'config.toml')
 export const repoConfigPath = (repoRoot: string): string => join(repoRoot, '.amagi', 'config.toml')

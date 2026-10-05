@@ -13,11 +13,12 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge, PILL } from '../badges.tsx'
 import { fmtElapsed, fmtLastRun } from '../format.ts'
-import { useDashboard, useRunner } from '../store.tsx'
+import { useAgentLogBackfill, useDashboard, useRunner } from '../store.tsx'
 import { WatcherDetailDialog } from './watcher-detail-dialog.tsx'
 
 /** The tail of one task's ring buffer, live from the rAF-batched log store. */
 function LastLogLine({ repo, taskId, attempt }: { repo: string; taskId: string; attempt: number }) {
+  useAgentLogBackfill(repo, taskId, attempt)
   const key = agentLogKey(repo, taskId, attempt)
   useSyncExternalStore(
     (listener) => agentLogStore.subscribe(key, listener),

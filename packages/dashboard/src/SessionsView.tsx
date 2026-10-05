@@ -1,6 +1,7 @@
 import { AgentRole } from '@amagi/core/events'
 import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import { type SessionView, sessionsFromEvents } from '@amagi/core/sessions'
+import { type ScorecardRow, scorecard } from '@amagi/core/view'
 import { useMemo, useState } from 'react'
 import { useDashboard } from './store.tsx'
 import { Time } from './ui.tsx'
@@ -48,6 +49,114 @@ function StatCard({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg border border-line bg-surface px-4 py-3">
       <div className="text-xs text-fg-faint">{label}</div>
       <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+const DAY_MS = 86_400_000
+const WINDOWS = [
+  { label: '7d', ms: 7 * DAY_MS },
+  { label: '30d', ms: 30 * DAY_MS },
+  { label: 'all', ms: null },
+] as const
+
+function fmtUsd(row: ScorecardRow, usd: number): string {
+  return row.costSeen ? `$${usd.toFixed(2)}` : '-'
+}
+
+function Scorecard() {
+  const { state } = useDashboard()
+  const [span, setSpan] = useState<(typeof WINDOWS)[number]['label']>('30d')
+  const ms = WINDOWS.find((w) => w.label === span)?.ms ?? null
+  const rows = useMemo(() => scorecard(state, ms === null ? 0 : Date.now() - ms), [state, ms])
+
+  return (
+    <div className="mt-6">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fg-muted">
+          Outcomes by model + harness
+        </h2>
+        <fieldset className="flex gap-1.5">
+          <legend className="sr-only">Scorecard window</legend>
+          {WINDOWS.map((w) => (
+            <button
+              key={w.label}
+              type="button"
+              aria-pressed={span === w.label}
+              onClick={() => setSpan(w.label)}
+              className={`rounded-full px-3 py-1 text-xs ring-1 ring-inset ${
+                span === w.label
+                  ? 'bg-sky-500/15 text-sky-700 ring-sky-500/40 dark:text-sky-300'
+                  : 'bg-surface text-fg-muted ring-line hover:text-fg'
+              }`}
+            >
+              {w.label}
+            </button>
+          ))}
+        </fieldset>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-line">
+        <table className="w-full text-sm">
+          <thead className="bg-surface text-left text-xs uppercase tracking-wide text-fg-faint">
+            <tr>
+              <th className="px-4 py-2 font-medium">model</th>
+              <th className="px-4 py-2 font-medium">harness</th>
+              <th className="px-4 py-2 font-medium">workers</th>
+              <th className="px-4 py-2 text-right font-medium">finished</th>
+              <th className="px-4 py-2 text-right font-medium">merged</th>
+              <th
+                className="px-4 py-2 text-right font-medium"
+                title="abandoned / no PR / needs human"
+              >
+                failed
+              </th>
+              <th className="px-4 py-2 text-right font-medium">cost / merge</th>
+              <th className="px-4 py-2 text-right font-medium">time to merge</th>
+              <th className="px-4 py-2 text-right font-medium">review rounds</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line bg-sunken">
+            {rows.map((row) => (
+              <tr key={`${row.harness}/${row.model}/${row.effort}`}>
+                <td className="px-4 py-2 font-mono text-xs">
+                  {row.model ?? 'unknown'}
+                  {row.effort === null ? '' : ` · ${row.effort}`}
+                </td>
+                <td className="px-4 py-2">{row.harness}</td>
+                <td className="px-4 py-2 text-xs text-fg-muted">
+                  {row.workers.length === 0 ? 'ad hoc' : row.workers.join(', ')}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">{row.finished}</td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.merged} ({Math.round((row.merged / row.finished) * 100)}%)
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.abandoned} / {row.noPr} / {row.needsHuman}
+                </td>
+                <td
+                  className="px-4 py-2 text-right tabular-nums"
+                  title={`total ${fmtUsd(row, row.costUsd)}`}
+                >
+                  {row.merged === 0 ? '-' : fmtUsd(row, row.costUsd / row.merged)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.medianMergeMs === null ? '-' : fmtDuration(row.medianMergeMs)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.avgReviewRounds.toFixed(1)}
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-4 py-6 text-center text-fg-faint">
+                  No finished tasks in this window.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -117,6 +226,8 @@ export function SessionsView() {
         <StatCard label="Tokens used" value={fmtTokens(usedTokens)} />
         <StatCard label="Tokens cached" value={fmtTokens(cachedTokens)} />
       </div>
+
+      <Scorecard />
 
       <div className="mt-6">
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">

@@ -387,6 +387,7 @@ function ProposalsInbox({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    void refresh
     let active = true
     setError(null)
     Promise.all(
