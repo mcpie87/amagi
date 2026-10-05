@@ -202,6 +202,7 @@ describe('classifyMentionPrompt', () => {
     expect(prompt).toContain('still relevant')
     expect(prompt).toContain('never ambiguous')
     expect(prompt).toContain('flag: the human explicitly wants this PR closed or reverted')
+    expect(prompt).toContain('ambiguous: the comment is not a request at all')
     expect(prompt).toContain('fix-pr, explain, add-a-task, flag, or ambiguous')
     expect(prompt).toContain(
       'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
@@ -224,6 +225,7 @@ test('explain prompt answers an already-resolved question briefly', () => {
     pr: { number: 247, title: 'Old task', url: 'https://github.com/owner/repo/pull/247' },
     mention: { user: 'reviewer', body: "@chise-maru isn't this already resolved?" },
     diff: 'diff',
+    baseCommits: ['abc123 Fix the relevant behavior'],
     outPath: '/tmp/answer.md',
     conflicted: false,
   })
@@ -232,4 +234,8 @@ test('explain prompt answers an already-resolved question briefly', () => {
   expect(prompt).toContain('If it is resolved, stop there')
   expect(prompt).toContain(`${MAX_EXPLAIN_ANSWER_CHARS} characters`)
   expect(prompt).toContain('Do not recap the PR')
+  expect(prompt).toContain("Answer the human's actual question directly and first")
+  expect(prompt).toContain(
+    'Base commits landed since the PR branch point:\nabc123 Fix the relevant behavior',
+  )
 })
