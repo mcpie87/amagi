@@ -291,6 +291,7 @@ export function TaskDetail({
             guard warnings
           </Text>
           {health.warnings.map((w, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: warnings are plain strings that may repeat.
             <Text key={i} wrap="truncate">
               {w}
             </Text>

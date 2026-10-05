@@ -388,7 +388,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       .catch(() => {
         if (selectedRef.current === repo) setStatus(null)
       })
-  }, [base, selected])
+  }, [selected])
 
   useEffect(() => {
     setStatus(null)
@@ -412,7 +412,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       alive = false
       clearInterval(timer)
     }
-  }, [base, refresh, selected])
+  }, [refresh, selected])
 
   const start = async (
     taskId?: string,

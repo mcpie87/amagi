@@ -72,7 +72,7 @@ export function EpicDetails({
   status,
   totalChildren,
   closedChildren,
-  children,
+  childIssues,
   detailError,
   childrenError,
   loading,
@@ -85,7 +85,7 @@ export function EpicDetails({
   status: string
   totalChildren: number
   closedChildren: number
-  children: Issue[]
+  childIssues: Issue[]
   detailError: string | null
   childrenError: string | null
   loading: boolean
@@ -109,17 +109,17 @@ export function EpicDetails({
       </p>
       {detailError !== null && <p className="mt-2 text-sm text-red-ink">{detailError}</p>}
       <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        Child tasks ({children.length})
+        Child tasks ({childIssues.length})
       </h2>
       {childrenError !== null ? (
         <p className="text-sm text-red-ink">{childrenError}</p>
       ) : loading ? (
         <p className="text-sm text-fg-faint">Loading child tasks...</p>
-      ) : children.length === 0 ? (
+      ) : childIssues.length === 0 ? (
         <p className="text-sm text-fg-faint">No child tasks.</p>
       ) : (
         <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
-          {children.map((child) => (
+          {childIssues.map((child) => (
             <li key={child.id}>
               <button
                 type="button"
@@ -225,6 +225,7 @@ export function EpicDetailView({
   const [childrenError, setChildrenError] = useState<string | null>(null)
 
   useEffect(() => {
+    void refresh
     let active = true
     setChildren([])
     setLoading(true)
@@ -275,7 +276,7 @@ export function EpicDetailView({
       closedChildren={
         selectedEpic?.closedChildren ?? children.filter((child) => child.status === 'closed').length
       }
-      children={children}
+      childIssues={children}
       detailError={detailError}
       childrenError={childrenError}
       loading={loading}
@@ -291,6 +292,7 @@ function useIssueDetail(repo: string | null, id: string, refresh: number) {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    void refresh
     let active = true
     setError(null)
     if (repo === null)

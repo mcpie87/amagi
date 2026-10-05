@@ -441,6 +441,7 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                   ].filter((part): part is string => part !== null)
                   return (
                     <li
+                      // biome-ignore lint/suspicious/noArrayIndexKey: runs can start in the same millisecond; the index disambiguates.
                       key={`${run.startedAt}-${index}`}
                       className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted"
                     >

@@ -242,6 +242,7 @@ function DiffLine({
       </span>
       <code
         className="diff-code px-3"
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: highlightedLine escapes the diff text.
         dangerouslySetInnerHTML={highlightedLine(row?.text ?? '', language)}
       />
     </div>
@@ -357,9 +358,11 @@ export function CommitDetailView() {
                     <div className="overflow-x-auto py-2 font-mono text-xs leading-5 text-fg">
                       {layout === 'stacked'
                         ? file.hunks.map((hunk, hunkIndex) => (
+                            // biome-ignore lint/suspicious/noArrayIndexKey: a parsed diff never reorders; its position is its identity.
                             <div key={`${file.path}-${hunkIndex}`} className="mb-2 last:mb-0">
                               {hunk.map((row, index) => (
                                 <DiffLine
+                                  // biome-ignore lint/suspicious/noArrayIndexKey: a parsed diff never reorders; its position is its identity.
                                   key={`${row.kind}-${row.oldLine}-${row.newLine}-${index}`}
                                   row={row}
                                   language={file.language}
@@ -369,12 +372,14 @@ export function CommitDetailView() {
                           ))
                         : file.sideBySideHunks.map((hunk, hunkIndex) => (
                             <div
+                              // biome-ignore lint/suspicious/noArrayIndexKey: a parsed diff never reorders; its position is its identity.
                               key={`${file.path}-${hunkIndex}`}
                               className="mb-2 grid min-w-max grid-cols-2 last:mb-0"
                             >
                               <div className="border-r border-line">
                                 {hunk.map((pair, index) => (
                                   <DiffLine
+                                    // biome-ignore lint/suspicious/noArrayIndexKey: a parsed diff never reorders; its position is its identity.
                                     key={`left-${index}`}
                                     row={pair.left}
                                     side="left"
@@ -385,6 +390,7 @@ export function CommitDetailView() {
                               <div>
                                 {hunk.map((pair, index) => (
                                   <DiffLine
+                                    // biome-ignore lint/suspicious/noArrayIndexKey: a parsed diff never reorders; its position is its identity.
                                     key={`right-${index}`}
                                     row={pair.right}
                                     side="right"

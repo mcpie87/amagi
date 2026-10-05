@@ -135,9 +135,11 @@ function ChatReply({
     return parts.map((part, index) => {
       const task = tasks[part]
       if (task !== undefined) {
+        // biome-ignore lint/suspicious/noArrayIndexKey: the same reference can repeat within one text.
         return <TaskReference key={`${part}-${index}`} task={task} />
       }
       if (/^[a-f0-9]{7,40}$/i.test(part)) {
+        // biome-ignore lint/suspicious/noArrayIndexKey: the same reference can repeat within one text.
         return <CommitReference key={`${part}-${index}`} hash={part} repo={repo} />
       }
       return part
@@ -149,6 +151,7 @@ function ChatReply({
     if (value === null) return 'None'
     if (Array.isArray(value))
       return value.map((item, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: agent output values are plain data with no identity.
         <div key={index} className="ml-3">
           {renderValue(item)}
         </div>
