@@ -268,8 +268,9 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
     forgeToken(opts.forgeKind, opts.repoRoot),
   )
 
-  const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', opts.remote, remoteRef], {
+  const out = await execOk(run, ['git', 'ls-remote', opts.remote, remoteRef], {
     cwd: opts.repoRoot,
+    env: tokenCfg,
   })
   const heads: Record<string, string> = {}
   for (const line of out.trim().split('\n')) {
@@ -302,15 +303,8 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
 
   await execOk(
     run,
-    [
-      'git',
-      ...tokenCfg,
-      'fetch',
-      '--prune',
-      opts.remote,
-      `+${remoteRef}:refs/remotes/${opts.remote}/pr/*/head`,
-    ],
-    { cwd: opts.repoRoot },
+    ['git', 'fetch', '--prune', opts.remote, `+${remoteRef}:refs/remotes/${opts.remote}/pr/*/head`],
+    { cwd: opts.repoRoot, env: tokenCfg },
   )
   return { fetched: true, heads }
 }
@@ -357,11 +351,13 @@ export async function prepareConflictWorktree(
     forgeToken('github', opts.repoRoot),
   )
 
-  await execOk(run, ['git', ...tokenCfg, 'fetch', opts.remote, opts.baseBranch], {
+  await execOk(run, ['git', 'fetch', opts.remote, opts.baseBranch], {
     cwd: opts.repoRoot,
+    env: tokenCfg,
   })
-  await execOk(run, ['git', ...tokenCfg, 'fetch', opts.remote, opts.pr.headRefName], {
+  await execOk(run, ['git', 'fetch', opts.remote, opts.pr.headRefName], {
     cwd: opts.repoRoot,
+    env: tokenCfg,
   })
 
   const branch = `amagi/pr-${opts.pr.number}-conflict`
@@ -415,11 +411,10 @@ export type PushConflictFixOptions = {
 export async function pushConflictFix(opts: PushConflictFixOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
   const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github', opts.cwd))
-  await execOk(
-    run,
-    ['git', ...tokenCfg, 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`],
-    { cwd: opts.cwd },
-  )
+  await execOk(run, ['git', 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`], {
+    cwd: opts.cwd,
+    env: tokenCfg,
+  })
 }
 
 export type PrMergeStatus = {

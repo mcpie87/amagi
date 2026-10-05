@@ -154,7 +154,10 @@ export function startPrConflictWatcher({
     const { kind, remote } = forge.config.forge
     const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
     for (const base of baseRefs) {
-      await execOk(run, ['git', ...tokenCfg, 'fetch', remote, base], { cwd: root })
+      await execOk(run, ['git', 'fetch', remote, base], {
+        cwd: root,
+        env: tokenCfg,
+      })
     }
     const forced = new Map<number, string>()
     const unknown = prs.filter((p) => p.mergeable === 'UNKNOWN')
@@ -219,7 +222,10 @@ export function startPrConflictWatcher({
     const { kind, remote } = forge.config.forge
     const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
     const ref = `refs/heads/${forge.config.repo.baseBranch}`
-    const out = await execOk(run, ['git', ...tokenCfg, 'ls-remote', remote, ref], { cwd: root })
+    const out = await execOk(run, ['git', 'ls-remote', remote, ref], {
+      cwd: root,
+      env: tokenCfg,
+    })
     return (
       out
         .split('\n')

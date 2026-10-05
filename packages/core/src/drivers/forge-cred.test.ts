@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from '../exec.ts'
@@ -237,15 +237,17 @@ describe('gitTokenConfig', () => {
     const { exec, calls } = fake((c) =>
       c.includes('get-url') ? ok('git@github.com:x/y.git') : undefined,
     )
-    expect(await gitTokenConfig(exec, '/repo', 'origin', null)).toEqual([])
+    expect(await gitTokenConfig(exec, '/repo', 'origin', null)).toEqual({})
     expect(calls).toHaveLength(0)
   })
 
   test('reads the remote and rewrites it once with a token', async () => {
     const { exec } = fake((c) => (c.includes('get-url') ? ok('git@github.com:x/y.git') : undefined))
-    const [flag, cfg] = await gitTokenConfig(exec, '/repo', 'origin', 'tok')
-    expect(flag).toBe('-c')
-    expect(cfg).toBe('url.https://x-access-token:tok@github.com/.insteadOf=git@github.com:')
+    expect(await gitTokenConfig(exec, '/repo', 'origin', 'tok')).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:tok@github.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
   })
 })
 
@@ -259,18 +261,13 @@ describe('teaEnv', () => {
     })
     const env = await teaEnv(exec, '/repo', 'origin')
     expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'tea'))
-    expect(calls).toContainEqual([
-      'tea',
-      'logins',
-      'add',
-      '--name',
-      'amagi',
-      '--url',
-      'https://git.example.com',
-      '--token',
-      'fj_tok',
-      '--no-version-check',
-    ])
+    const configHome = env.XDG_CONFIG_HOME
+    if (configHome === undefined) throw new Error('tea config home is missing')
+    const config = readFileSync(join(configHome, 'tea', 'config.yml'), 'utf8')
+    expect(JSON.parse(config)).toEqual({
+      logins: [{ name: 'amagi', url: 'https://git.example.com', token: 'fj_tok', default: true }],
+    })
+    expect(calls.some((c) => c[0] === 'tea')).toBe(false)
   })
 
   test('logs tea into the credential URL instead of the origin host', async () => {
@@ -278,13 +275,15 @@ describe('teaEnv', () => {
     mkdirSync(repo)
     Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
     addForgeCredential('forgejo', 'bot', 'fj_tok', 'http://forge.lan:3000')
-    const { exec, calls } = fake((c) =>
+    const { exec } = fake((c) =>
       c.includes('get-url') ? ok('ssh://git@git.lan:2222/o/r.git') : undefined,
     )
     const env = await teaEnv(exec, repo, 'origin')
     expect(env.XDG_CONFIG_HOME).toBe(teaXdgHome('fj_tok', 'http://forge.lan:3000'))
-    const login = calls.find((c) => c[0] === 'tea')
-    expect(login?.[login.indexOf('--url') + 1]).toBe('http://forge.lan:3000')
+    const configHome = env.XDG_CONFIG_HOME
+    if (configHome === undefined) throw new Error('tea config home is missing')
+    const config = JSON.parse(readFileSync(join(configHome, 'tea', 'config.yml'), 'utf8'))
+    expect(config.logins[0].url).toBe('http://forge.lan:3000')
   })
 
   test('skips provisioning without a token', async () => {

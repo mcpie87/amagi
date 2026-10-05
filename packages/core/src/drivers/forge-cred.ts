@@ -470,22 +470,25 @@ export function gitRewrite(url: string, token: string): { from: string; to: stri
 }
 
 /**
- * git -c args so push/fetch over `remote` authenticate with the forge token
- * instead of whatever credential helper or ssh key the operator configured.
- * Empty without a token (or an unparseable remote), so git keeps its remote
- * and prompts; Amagi never blocks on that prompt in the unattended path.
+ * Git config environment entries so push/fetch over `remote` authenticate
+ * with the forge token without exposing it in process argv. Empty without a
+ * token (or an unparseable remote), so git keeps its remote and prompts.
  */
 export async function gitTokenConfig(
   exec: Exec,
   cwd: string,
   remote: string,
   token: string | null,
-): Promise<string[]> {
-  if (token === null) return []
+): Promise<Record<string, string>> {
+  if (token === null) return {}
   const url = await execOk(exec, ['git', 'remote', 'get-url', remote], { cwd }).catch(() => '')
   const rewrite = gitRewrite(url.trim(), token)
-  if (rewrite === null) return []
-  return ['-c', `url.${rewrite.to}.insteadOf=${rewrite.from}`]
+  if (rewrite === null) return {}
+  return {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: `url.${rewrite.to}.insteadOf`,
+    GIT_CONFIG_VALUE_0: rewrite.from,
+  }
 }
 
 /** Base URL of `remote`, for provisioning a tea login. */
@@ -506,27 +509,16 @@ async function ensureTeaLogin(
   remote: string,
   token: string | null,
   configured: string | null,
-  env: Record<string, string>,
 ): Promise<void> {
   const cfg = join(teaXdgHome(token, configured), 'tea', 'config.yml')
   if (existsSync(cfg)) return
   const url = configured ?? process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, remote))
   if (token === null || url === null) return
-  await execOk(
-    exec,
-    [
-      'tea',
-      'logins',
-      'add',
-      '--name',
-      TEA_LOGIN,
-      '--url',
-      url,
-      '--token',
-      token,
-      '--no-version-check',
-    ],
-    { cwd, env },
+  mkdirSync(dirname(cfg), { recursive: true, mode: 0o700 })
+  writeFileSync(
+    cfg,
+    `${JSON.stringify({ logins: [{ name: TEA_LOGIN, url, token, default: true }] }, null, 2)}\n`,
+    { mode: 0o600 },
   )
 }
 
@@ -539,7 +531,7 @@ export async function teaEnv(
   const token = forgeToken('forgejo', cwd)
   const url = forgeUrl('forgejo', cwd)
   const env: Record<string, string> = { XDG_CONFIG_HOME: teaXdgHome(token, url) }
-  await ensureTeaLogin(exec, cwd, remote, token, url, env)
+  await ensureTeaLogin(exec, cwd, remote, token, url)
   return env
 }
 
