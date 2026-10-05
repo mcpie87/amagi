@@ -9,10 +9,16 @@ import { amagiLabels, makePrDriver } from './pr.ts'
 
 type Call = readonly string[]
 
-function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
+function fake(routes: (cmd: Call) => ExecResult | undefined): {
+  exec: Exec
+  calls: Call[]
+  invocations: { cmd: Call; env: Record<string, string> | undefined }[]
+} {
   const calls: Call[] = []
+  const invocations: { cmd: Call; env: Record<string, string> | undefined }[] = []
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
+    invocations.push({ cmd, env: opts?.env })
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
     if (cmd.includes('--symref')) return ok('ref: refs/heads/main\tHEAD\n')
     const hit = routes(cmd)
@@ -21,7 +27,7 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
       return ok('git@github.com:owner/repo.git\n')
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { exec, calls }
+  return { exec, calls, invocations }
 }
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
@@ -69,22 +75,25 @@ describe('gitTokenConfig', () => {
   const remote = (url: string): { exec: Exec; calls: Call[] } =>
     fake((c) => (c.includes('get-url') ? ok(url) : undefined))
 
-  test('is empty without a token so git keeps the ssh remote', async () => {
+  test('has no config without a token so git keeps the ssh remote', async () => {
     expect(
       await gitTokenConfig(remote('git@github.com:x/y.git').exec, '/repo', 'origin', null),
-    ).toEqual([])
+    ).toEqual({})
   })
 
   test('rewrites the remote to an https token url', async () => {
     const { exec, calls } = remote('git@github.com:mcpie87/amagi.git')
-    const [flag, cfg] = await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc')
-    expect(flag).toBe('-c')
-    expect(cfg).toBe('url.https://x-access-token:ghp_abc@github.com/.insteadOf=git@github.com:')
+    const auth = await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc')
+    expect(auth).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:ghp_abc@github.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
     expect(calls[0]).toEqual(['git', 'remote', 'get-url', 'origin'])
   })
 
   test('is empty when the remote cannot be parsed', async () => {
-    expect(await gitTokenConfig(remote('not-a-remote').exec, '/repo', 'origin', 'tok')).toEqual([])
+    expect(await gitTokenConfig(remote('not-a-remote').exec, '/repo', 'origin', 'tok')).toEqual({})
   })
 })
 
@@ -102,7 +111,7 @@ describe('amagiLabels', () => {
 describe('githubPr', () => {
   test('pushes over the token rewrite and creates the pr with the title', async () => {
     process.env.GH_TOKEN = 'ghp_abc'
-    const { exec, calls } = fake((c) => {
+    const { exec, calls, invocations } = fake((c) => {
       if (c.includes('get-url')) return ok('git@github.com:mcpie87/amagi.git')
       if (c.includes('create') && c.includes('pr')) return ok('https://github.com/x/y/pull/7\n')
       return undefined
@@ -120,14 +129,17 @@ describe('githubPr', () => {
     const push = calls.find((c) => c.includes('push'))
     expect(push).toEqual([
       'git',
-      '-c',
-      'url.https://x-access-token:ghp_abc@github.com/.insteadOf=git@github.com:',
       'push',
       '-u',
       '--force-with-lease=refs/heads/amagi/am-1-do-the-thing:',
       'origin',
       'amagi/am-1-do-the-thing',
     ])
+    expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:ghp_abc@github.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
     expect(calls.find((c) => c.includes('create') && c.includes('pr'))).toEqual([
       'gh',
       'pr',
@@ -411,16 +423,8 @@ describe('githubPr', () => {
 })
 
 describe('forgejoPr', () => {
-  const remote = (): { exec: Exec; calls: Call[] } => {
-    const calls: Call[] = []
-    const exec: Exec = async (cmd) => {
-      calls.push(cmd)
-      if (cmd.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
-      if (cmd.includes('--symref')) return ok('ref: refs/heads/main\tHEAD\n')
-      return { exitCode: 0, stdout: '', stderr: '' }
-    }
-    return { exec, calls }
-  }
+  const remote = () =>
+    fake((cmd) => (cmd.includes('get-url') ? ok('git@git.example.com:owner/repo.git') : undefined))
 
   const withFetch = <T>(
     routes: (path: string, method: string, body?: unknown) => Response,
@@ -442,7 +446,7 @@ describe('forgejoPr', () => {
 
   test('pushes and creates the pr through tea', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
-    const { exec, calls } = remote()
+    const { exec, calls, invocations } = remote()
     await withFetch(
       (path, method) => {
         if (path === 'repos/owner/repo/pulls?state=open' && method === 'GET') {
@@ -477,9 +481,19 @@ describe('forgejoPr', () => {
       },
     )
     const push = calls.find((c) => c.includes('push'))
-    // the push went out over the tokenized remote
-    expect(push?.join(' ')).toContain('x-access-token:fj_tok@git.example.com/')
-    expect(push?.join(' ')).toContain('insteadOf=git@git.example.com:')
+    expect(push).toEqual([
+      'git',
+      'push',
+      '-u',
+      '--force-with-lease=refs/heads/amagi/am-1:',
+      'origin',
+      'amagi/am-1',
+    ])
+    expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:fj_tok@git.example.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@git.example.com:',
+    })
     expect(calls).toContainEqual([
       'tea',
       'pr',
@@ -672,7 +686,7 @@ describe('gitlabPr', () => {
   test('pushes over the token rewrite and creates the merge request through glab', async () => {
     process.env.GITLAB_TOKEN = 'glpat-abc'
     let created = false
-    const { exec, calls } = fake((c) => {
+    const { exec, calls, invocations } = fake((c) => {
       if (c.includes('get-url')) return ok('git@gitlab.example.com:owner/repo.git')
       if (c[0] === 'glab' && c[1] === 'mr' && c[2] === 'create') {
         created = true
@@ -691,9 +705,19 @@ describe('gitlabPr', () => {
       labels: amagiLabels('bug'),
     })
 
-    expect(calls.find((c) => c.includes('push'))?.[2]).toBe(
-      'url.https://x-access-token:glpat-abc@gitlab.example.com/.insteadOf=git@gitlab.example.com:',
-    )
+    expect(calls.find((c) => c.includes('push'))).toEqual([
+      'git',
+      'push',
+      '-u',
+      '--force-with-lease=refs/heads/amagi/am-1-do-the-thing:',
+      'origin',
+      'amagi/am-1-do-the-thing',
+    ])
+    expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:glpat-abc@gitlab.example.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@gitlab.example.com:',
+    })
     expect(calls.find((c) => c[1] === 'mr' && c[2] === 'create')).toEqual([
       'glab',
       'mr',

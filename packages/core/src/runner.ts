@@ -1050,15 +1050,14 @@ export class Runner {
         config.forge.remote,
         forgeToken(config.forge.kind, this.deps.repoRoot),
       )
-      if (tokenCfg.length > 0) {
-        await execOk(
-          this.exec,
-          ['git', ...tokenCfg, 'fetch', config.forge.remote, config.repo.baseBranch],
-          { cwd: this.deps.repoRoot },
-        )
+      if (Object.keys(tokenCfg).length > 0) {
+        await execOk(this.exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
+          cwd: this.deps.repoRoot,
+          env: tokenCfg,
+        })
       }
       const base =
-        tokenCfg.length > 0
+        Object.keys(tokenCfg).length > 0
           ? `${config.forge.remote}/${config.repo.baseBranch}`
           : config.repo.baseBranch
       worktree = await createWorktree({
@@ -2258,10 +2257,10 @@ export class Runner {
       config.forge.remote,
       forgeToken(config.forge.kind, this.deps.repoRoot),
     )
-    const fetch = await this.exec(
-      ['git', ...tokenCfg, 'fetch', config.forge.remote, config.repo.baseBranch],
-      { cwd },
-    )
+    const fetch = await this.exec(['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
+      cwd,
+      env: tokenCfg,
+    })
     if (fetch.exitCode !== 0) return false
 
     const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
