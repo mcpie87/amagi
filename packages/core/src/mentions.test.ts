@@ -642,6 +642,10 @@ describe('respondToMention', () => {
     const outPath = join(tmpdir(), `amagi-explain-7-10.md`)
     writeFileSync(outPath, 'It drifts from base.\n')
     const { exec } = fake((c) => {
+      if (c[1] === 'merge-base') return { exitCode: 0, stdout: 'branch-point\n', stderr: '' }
+      if (c[1] === 'log') {
+        return { exitCode: 0, stdout: 'abc123 Relevant fix landed\n', stderr: '' }
+      }
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
       return undefined
@@ -671,6 +675,7 @@ describe('respondToMention', () => {
     expect(kind).toBe('explain')
     expect(prompts.join('\n')).toContain('does not merge cleanly into this PR')
     expect(prompts.join('\n')).toContain('drift')
+    expect(prompts.join('\n')).toContain('abc123 Relevant fix landed')
   })
 
   test('classification uses the mention watcher harness overrides', async () => {

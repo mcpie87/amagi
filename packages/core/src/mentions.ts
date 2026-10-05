@@ -399,6 +399,23 @@ async function respondToExplain(
   p.phase('preparing worktree')
   const wt = await prWorktree(opts, run)
   const diff = await opts.driver.getPrDiff(opts.root, opts.pr.number)
+  const branchPoint = await run(
+    ['git', 'merge-base', `${opts.config.forge.remote}/${opts.pr.headRefName}`, wt.baseOid],
+    { cwd: wt.path },
+  )
+  if (branchPoint.exitCode !== 0) {
+    throw new Error(
+      `could not find PR branch point: ${(branchPoint.stderr || branchPoint.stdout).trim()}`,
+    )
+  }
+  const baseLog = await run(
+    ['git', 'log', '--format=%h %s', '--reverse', `${branchPoint.stdout.trim()}..${wt.baseOid}`],
+    { cwd: wt.path },
+  )
+  if (baseLog.exitCode !== 0) {
+    throw new Error(`could not read base commits: ${(baseLog.stderr || baseLog.stdout).trim()}`)
+  }
+  const baseCommits = baseLog.stdout.trim() === '' ? [] : baseLog.stdout.trim().split('\n')
   const outPath = join(tmpdir(), `amagi-explain-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('explaining')
@@ -414,6 +431,7 @@ async function respondToExplain(
             pr: opts.pr,
             mention: opts.mention,
             diff,
+            baseCommits,
             outPath,
             conflicted: wt.conflicted,
           }),

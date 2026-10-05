@@ -18,7 +18,7 @@ export const MENTION_KINDS = [
     description: 'the human wants a new task tracked in the issue tracker, not done in this PR',
   },
   { kind: 'flag', description: 'the human explicitly wants this PR closed or reverted' },
-  { kind: 'ambiguous', description: 'only when the intent genuinely cannot be determined' },
+  { kind: 'ambiguous', description: 'the comment is not a request at all' },
 ] as const
 
 export type MentionKind = (typeof MENTION_KINDS)[number]['kind']
@@ -409,6 +409,8 @@ export type ExplainMentionContext = {
   pr: { number: number; title: string; url: string }
   mention: { user: string; body: string }
   diff: string
+  /** Base branch commits after the PR branch point, in chronological order. */
+  baseCommits: string[]
   outPath: string
   /** True when the base branch does not merge cleanly into the PR head. */
   conflicted: boolean
@@ -447,7 +449,7 @@ export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
     'Classify the comment into exactly one of:',
     ...MENTION_KINDS.map(({ kind, description }) => `- ${kind}: ${description}`),
     '',
-    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" and "is this already resolved?" are explain.',
+    'Any question about this PR is explain, never ambiguous, even if it is not asking why or how something was done. For example, "is this change still relevant?" and "is this already resolved?" are explain. Use ambiguous only for comments that are not requests at all.',
     'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
     '',
     `Reply with exactly one token: ${kinds.join(', ').replace(/, ([^,]*)$/, ', or $1')}.`,
@@ -461,7 +463,7 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     ctx.mention.body.trim(),
     '',
     `Write your answer to this file: ${ctx.outPath}`,
-    'It will be posted as a comment on the PR. Answer the question first.',
+    "It will be posted as a comment on the PR. Answer the human's actual question directly and first.",
     'For a question like "is this already resolved?", check the current code and relevant history, then say yes or no with one decisive fact. If it is resolved, stop there.',
     `Use plain text, at most two short sentences and ${MAX_EXPLAIN_ANSWER_CHARS} characters. Do not recap the PR or list implementation details unless the human asks for them.`,
   ]
@@ -472,7 +474,17 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
       'base. Mention this conflict if it matters to the answer.',
     )
   }
-  parts.push('', 'Pull request diff:', '', ctx.diff, '', 'Write the answer to the file and stop.')
+  parts.push(
+    '',
+    'Base commits landed since the PR branch point:',
+    ...(ctx.baseCommits.length > 0 ? ctx.baseCommits : ['(none)']),
+    '',
+    'Pull request diff:',
+    '',
+    ctx.diff,
+    '',
+    'Write the answer to the file and stop.',
+  )
   return parts.join('\n')
 }
 
