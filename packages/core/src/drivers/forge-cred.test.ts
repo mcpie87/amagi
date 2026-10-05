@@ -1,9 +1,27 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Exec, ExecResult } from '../exec.ts'
-import { forgeToken, ghEnv, gitRewrite, gitTokenConfig, parseRemote, teaEnv } from './forge-cred.ts'
+import {
+  addForgeCredential,
+  forgeToken,
+  forgeTokenStates,
+  forgeTokensPath,
+  forgeUrl,
+  ghEnv,
+  gitRewrite,
+  gitTokenConfig,
+  glabEnv,
+  listForgeCredentials,
+  parseRemote,
+  pickForgeCredential,
+  removeForgeCredential,
+  teaEnv,
+  teaRepoArgs,
+  teaXdgHome,
+  updateForgeCredential,
+} from './forge-cred.ts'
 
 type Call = readonly string[]
 
@@ -60,6 +78,96 @@ describe('forgeToken', () => {
   })
 })
 
+describe('forge credentials', () => {
+  function repoWithWorktree(): { repo: string; worktree: string } {
+    const repo = join(home, 'repo')
+    const worktree = join(home, 'wt')
+    mkdirSync(repo)
+    const git = (...args: string[]) =>
+      Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: repo })
+    git('init', '-q')
+    git('commit', '-q', '--allow-empty', '-m', 'init')
+    git('worktree', 'add', '-q', worktree)
+    return { repo, worktree }
+  }
+
+  test('the only credential for a forge beats the env and covers worktrees', () => {
+    process.env.GITLAB_TOKEN = 'env_tok'
+    try {
+      const { repo, worktree } = repoWithWorktree()
+      expect(forgeTokenStates(repo).gitlab).toEqual({ credential: null, source: 'environment' })
+      const bot = addForgeCredential('gitlab', 'bot', 'bot_tok')
+      expect(forgeToken('gitlab', repo)).toBe('bot_tok')
+      expect(forgeToken('gitlab', worktree)).toBe('bot_tok')
+      expect(forgeTokenStates(repo).gitlab).toEqual({ credential: bot.id, source: 'only' })
+      expect(forgeToken('github', repo)).toBeNull()
+      removeForgeCredential(bot.id)
+      expect(forgeToken('gitlab', repo)).toBe('env_tok')
+    } finally {
+      delete process.env.GITLAB_TOKEN
+    }
+  })
+
+  test('with several credentials a repo uses its pick, and rotation reaches it', () => {
+    const { repo } = repoWithWorktree()
+    const personal = addForgeCredential('github', 'personal', 'tok_a')
+    const org = addForgeCredential('github', 'org', 'tok_b')
+    expect(forgeToken('github', repo)).toBeNull()
+    expect(pickForgeCredential(repo, 'github', org.id)).toBe(true)
+    expect(forgeTokenStates(repo).github).toEqual({ credential: org.id, source: 'picked' })
+    updateForgeCredential(org.id, { token: 'tok_b2' })
+    expect(forgeToken('github', repo)).toBe('tok_b2')
+    expect(pickForgeCredential(repo, 'gitlab', personal.id)).toBe(false)
+    removeForgeCredential(org.id)
+    expect(forgeTokenStates(repo).github).toEqual({ credential: personal.id, source: 'only' })
+    expect(JSON.stringify(listForgeCredentials())).not.toContain('tok_')
+  })
+
+  test('a credential carries its server URL until it is cleared', () => {
+    const { repo } = repoWithWorktree()
+    const bot = addForgeCredential('gitlab', 'bot', 'tok', 'https://example.com/gitlab/')
+    expect(bot.url).toBe('https://example.com/gitlab')
+    expect(forgeUrl('gitlab', repo)).toBe('https://example.com/gitlab')
+    expect(glabEnv(repo, 'origin')).toMatchObject({
+      GITLAB_TOKEN: 'tok',
+      GITLAB_API_HOST: 'example.com/gitlab',
+      GLAB_API_PROTOCOL: 'https',
+    })
+    updateForgeCredential(bot.id, { url: null })
+    expect(listForgeCredentials()[0]?.url).toBeNull()
+    expect(glabEnv(repo, 'origin').GITLAB_API_HOST).toBeUndefined()
+  })
+
+  test('migrates per-repo tokens into shared credentials, one per distinct token', () => {
+    const { repo } = repoWithWorktree()
+    const other = join(home, 'other')
+    mkdirSync(join(home, 'amagi', 'forge'), { recursive: true })
+    writeFileSync(
+      forgeTokensPath(),
+      JSON.stringify({ [repo]: { github: 'same' }, [other]: { github: 'same', forgejo: 'fj' } }),
+    )
+    const credentials = listForgeCredentials()
+    expect(credentials.map(({ kind }) => kind).sort()).toEqual(['forgejo', 'github'])
+    expect(listForgeCredentials()).toEqual(credentials)
+    expect(forgeToken('github', repo)).toBe('same')
+  })
+})
+
+describe('remote pinning', () => {
+  test('gh, glab and tea target the configured remote, not whichever they prefer', () => {
+    const repo = join(home, 'multi')
+    mkdirSync(repo)
+    const git = (...args: string[]) => Bun.spawnSync(['git', ...args], { cwd: repo })
+    git('init', '-q')
+    git('remote', 'add', 'origin', 'git@github.com:me/app.git')
+    git('remote', 'add', 'gitlab', 'git@gitlab.example.com:group/app.git')
+    expect(ghEnv(repo, 'origin').GH_REPO).toBe('github.com/me/app')
+    expect(glabEnv(repo, 'gitlab').GLAB_REMOTE_ALIAS).toBe('gitlab')
+    expect(teaRepoArgs(repo, 'gitlab')).toEqual(['--login', 'amagi', '--repo', 'group/app'])
+    expect(teaRepoArgs(repo, 'missing')).toEqual([])
+  })
+})
+
 describe('parseRemote', () => {
   test('splits ssh scp-form remotes into base and slug', () => {
     expect(parseRemote('git@git.example.com:owner/repo.git')).toEqual({
@@ -112,13 +220,13 @@ describe('gitRewrite', () => {
 describe('ghEnv', () => {
   test('isolates gh config from the operator while carrying the token', () => {
     process.env.GH_TOKEN = 'ghp_abc'
-    const env = ghEnv()
+    const env = ghEnv(home, 'origin')
     expect(env.GH_TOKEN).toBe('ghp_abc')
     expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi', 'forge', 'github'))
   })
 
   test('still isolates gh config without a token so it fails closed', () => {
-    const env = ghEnv()
+    const env = ghEnv(home, 'origin')
     expect(env.GH_TOKEN).toBeUndefined()
     expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi', 'forge', 'github'))
   })
@@ -129,15 +237,17 @@ describe('gitTokenConfig', () => {
     const { exec, calls } = fake((c) =>
       c.includes('get-url') ? ok('git@github.com:x/y.git') : undefined,
     )
-    expect(await gitTokenConfig(exec, '/repo', 'origin', null)).toEqual([])
+    expect(await gitTokenConfig(exec, '/repo', 'origin', null)).toEqual({})
     expect(calls).toHaveLength(0)
   })
 
   test('reads the remote and rewrites it once with a token', async () => {
     const { exec } = fake((c) => (c.includes('get-url') ? ok('git@github.com:x/y.git') : undefined))
-    const [flag, cfg] = await gitTokenConfig(exec, '/repo', 'origin', 'tok')
-    expect(flag).toBe('-c')
-    expect(cfg).toBe('url.https://x-access-token:tok@github.com/.insteadOf=git@github.com:')
+    expect(await gitTokenConfig(exec, '/repo', 'origin', 'tok')).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:tok@github.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
   })
 })
 
@@ -149,38 +259,49 @@ describe('teaEnv', () => {
       if (c[0] === 'tea' && c[1] === 'logins') return ok('')
       return undefined
     })
-    const env = await teaEnv(exec, '/repo')
+    const env = await teaEnv(exec, '/repo', 'origin')
     expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'tea'))
-    expect(calls).toContainEqual([
-      'tea',
-      'logins',
-      'add',
-      '--name',
-      'amagi',
-      '--url',
-      'https://git.example.com',
-      '--token',
-      'fj_tok',
-      '--no-version-check',
-    ])
+    const configHome = env.XDG_CONFIG_HOME
+    if (configHome === undefined) throw new Error('tea config home is missing')
+    const config = readFileSync(join(configHome, 'tea', 'config.yml'), 'utf8')
+    expect(JSON.parse(config)).toEqual({
+      logins: [{ name: 'amagi', url: 'https://git.example.com', token: 'fj_tok', default: true }],
+    })
+    expect(calls.some((c) => c[0] === 'tea')).toBe(false)
+  })
+
+  test('logs tea into the credential URL instead of the origin host', async () => {
+    const repo = join(home, 'fj')
+    mkdirSync(repo)
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
+    addForgeCredential('forgejo', 'bot', 'fj_tok', 'http://forge.lan:3000')
+    const { exec } = fake((c) =>
+      c.includes('get-url') ? ok('ssh://git@git.lan:2222/o/r.git') : undefined,
+    )
+    const env = await teaEnv(exec, repo, 'origin')
+    expect(env.XDG_CONFIG_HOME).toBe(teaXdgHome('fj_tok', 'http://forge.lan:3000'))
+    const configHome = env.XDG_CONFIG_HOME
+    if (configHome === undefined) throw new Error('tea config home is missing')
+    const config = JSON.parse(readFileSync(join(configHome, 'tea', 'config.yml'), 'utf8'))
+    expect(config.logins[0].url).toBe('http://forge.lan:3000')
   })
 
   test('skips provisioning without a token', async () => {
     const { exec, calls } = fake(() => undefined)
-    const env = await teaEnv(exec, '/repo')
+    const env = await teaEnv(exec, '/repo', 'origin')
     expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'tea'))
     expect(calls.some((c) => c[0] === 'tea')).toBe(false)
   })
 
   test('reuses an existing profile instead of re-provisioning', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
-    const dir = join(home, 'amagi', 'forge', 'tea', 'tea')
+    const dir = join(teaXdgHome('fj_tok'), 'tea')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'config.yml'), 'logins: []\n')
     const { exec, calls } = fake((c) =>
       c.includes('get-url') ? ok('git@git.example.com:o/r.git') : undefined,
     )
-    await teaEnv(exec, '/repo')
+    await teaEnv(exec, '/repo', 'origin')
     expect(calls.some((c) => c[0] === 'tea')).toBe(false)
   })
 })

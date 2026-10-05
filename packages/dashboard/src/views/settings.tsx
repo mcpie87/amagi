@@ -4,7 +4,12 @@ import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
 import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
-import { FleetWorkersSettings, RepositoryParticipationCard } from './fleet.tsx'
+import { FleetWorkersSettings } from './fleet.tsx'
+import {
+  ForgeCredentials,
+  RepositorySettingsCard,
+  useForgeCredentials,
+} from './repository-settings.tsx'
 
 const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -67,6 +72,9 @@ export function SettingsView() {
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [staleMaxParallel, setStaleMaxParallel] = useState(false)
+  const [reviewMaxRounds, setReviewMaxRounds] = useState(3)
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewResult, setReviewResult] = useState<string | null>(null)
   const [ntfyTopic, setNtfyTopic] = useState('')
   const [ntfyServer, setNtfyServer] = useState('https://ntfy.sh')
   const [savedNtfyTopic, setSavedNtfyTopic] = useState('')
@@ -80,6 +88,7 @@ export function SettingsView() {
   const [ntfyTestBusy, setNtfyTestBusy] = useState(false)
   const [ntfyTestResult, setNtfyTestResult] = useState<string | null>(null)
   const repo = repos?.find(({ key }) => key === selectedRepo) ?? repos?.[0]
+  const forgeCredentials = useForgeCredentials()
 
   useEffect(() => {
     if (selected === null) return
@@ -97,6 +106,7 @@ export function SettingsView() {
               ntfyTopic: string | null
               ntfyServer: string
               desktopFailureAlerts: boolean
+              reviewMaxRounds: number
             }>)
           : null,
       )
@@ -109,6 +119,7 @@ export function SettingsView() {
         setSavedNtfyTopic(body?.ntfyTopic ?? '')
         setSavedNtfyServer(body?.ntfyServer ?? 'https://ntfy.sh')
         setDesktopFailureAlerts(body?.desktopFailureAlerts ?? false)
+        setReviewMaxRounds(body?.reviewMaxRounds ?? 3)
       })
       .catch(() => {
         if (active) setLoaded(true)
@@ -166,6 +177,30 @@ export function SettingsView() {
       setDesktopResult(err instanceof Error ? err.message : String(err))
     } finally {
       setDesktopBusy(false)
+    }
+  }
+
+  const saveReviewMaxRounds = async () => {
+    if (selected === null) return
+    setReviewBusy(true)
+    setReviewResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${selected}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reviewMaxRounds }),
+      })
+      if (!res.ok) {
+        const body = (await res.json()) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      const body = (await res.json()) as { reviewMaxRounds: number }
+      setReviewMaxRounds(body.reviewMaxRounds)
+      setReviewResult('Saved')
+    } catch (err) {
+      setReviewResult(err instanceof Error ? err.message : String(err))
+    } finally {
+      setReviewBusy(false)
     }
   }
 
@@ -232,6 +267,42 @@ export function SettingsView() {
         hidden={activeTab !== 'general'}
       >
         <Appearance />
+        {selected !== null && loaded && (
+          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+            <h2 className="mb-1 text-sm text-fg-muted">Review</h2>
+            <p className="mb-3 text-sm text-fg-faint">
+              Tasks are reviewed when an enabled fleet worker has the Review role.
+            </p>
+            <label htmlFor="review-max-rounds" className="mb-1 block text-sm text-fg-muted">
+              Maximum review rounds
+            </label>
+            <input
+              id="review-max-rounds"
+              type="number"
+              min={1}
+              step={1}
+              value={reviewMaxRounds}
+              disabled={reviewBusy}
+              onChange={(event) => setReviewMaxRounds(Number(event.currentTarget.value))}
+              className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={reviewBusy || !Number.isInteger(reviewMaxRounds) || reviewMaxRounds < 1}
+                onClick={() => void saveReviewMaxRounds()}
+                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+              >
+                {reviewBusy ? 'Saving…' : 'Save'}
+              </button>
+              {reviewResult !== null && (
+                <span role="status" className="text-sm text-fg-faint">
+                  {reviewResult}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         {selected !== null && loaded && (
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">Desktop notifications</h2>
@@ -358,6 +429,10 @@ export function SettingsView() {
         aria-labelledby="settings-tab-repositories"
         hidden={activeTab !== 'repositories'}
       >
+        <ForgeCredentials
+          credentials={forgeCredentials.credentials}
+          onChanged={forgeCredentials.reload}
+        />
         {repos !== null && repos.length > 1 && (
           <div
             role="tablist"
@@ -386,10 +461,20 @@ export function SettingsView() {
         )}
         {repo !== undefined && repos !== null && repos.length > 1 ? (
           <div id="repository-panel" role="tabpanel" aria-labelledby={`repository-tab-${repo.key}`}>
-            <RepositoryParticipationCard repo={repo} onChanged={refreshRepos} />
+            <RepositorySettingsCard
+              repo={repo}
+              credentials={forgeCredentials.credentials}
+              onChanged={refreshRepos}
+              onCredentialsChanged={forgeCredentials.reload}
+            />
           </div>
         ) : repo !== undefined ? (
-          <RepositoryParticipationCard repo={repo} onChanged={refreshRepos} />
+          <RepositorySettingsCard
+            repo={repo}
+            credentials={forgeCredentials.credentials}
+            onChanged={refreshRepos}
+            onCredentialsChanged={forgeCredentials.reload}
+          />
         ) : null}
       </div>
     </section>

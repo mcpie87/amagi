@@ -1,4 +1,4 @@
-import { HarnessKind, TaskState, WorkerRole } from '@amagi/core'
+import { ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -13,6 +13,9 @@ export const TaskListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(200),
 })
 export type TaskListQuery = z.infer<typeof TaskListQuery>
+
+/** With a label, the issue list holds only the open issues carrying it. */
+export const IssueListQuery = z.object({ label: z.string().min(1).optional() })
 
 /** Every repo-scoped route starts with the workspace key. */
 export const RepoParam = z.object({ repo: z.string().min(1) })
@@ -45,8 +48,19 @@ export type EventQuery = z.infer<typeof EventQuery>
 export const StreamQuery = z.object({
   taskId: z.string().min(1).optional(),
   sinceSeq: z.coerce.number().int().min(0).default(0),
+  compact: z
+    .enum(['0', '1'])
+    .default('0')
+    .transform((value) => value === '1'),
 })
 export type StreamQuery = z.infer<typeof StreamQuery>
+
+export const AgentLogQuery = z.object({
+  attempt: z.coerce.number().int().min(1).default(1),
+  untilSeq: z.coerce.number().int().min(0),
+  limit: z.coerce.number().int().min(1).max(4000).default(4000),
+})
+export type AgentLogQuery = z.infer<typeof AgentLogQuery>
 
 export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
@@ -117,6 +131,21 @@ export const SettingsBody = z
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),
+    reviewMaxRounds: z.number().int().min(1).optional(),
+    forgeKind: ForgeKind.optional(),
+    /**
+     * Git remote every forge call targets; must name an existing remote of the
+     * repo. Null matches it to the forge's host. Changing forgeKind alone also unpins it.
+     */
+    forgeRemote: z.string().trim().min(1).nullable().optional(),
+    /** A credential id picks it for that forge in this repo; null drops the pick. */
+    forgeCredentials: z
+      .object({
+        github: z.string().min(1).nullable().optional(),
+        gitlab: z.string().min(1).nullable().optional(),
+        forgejo: z.string().min(1).nullable().optional(),
+      })
+      .optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',
@@ -124,6 +153,27 @@ export const SettingsBody = z
 export type SettingsBody = z.infer<typeof SettingsBody>
 
 const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
+
+export const ForgeCredentialParam = z.object({ id: z.string().min(1) })
+
+/** A forge's web base URL, e.g. https://git.example.com or https://example.com/gitlab. */
+const ForgeUrl = z.url({ protocol: /^https?$/ }).trim()
+
+export const ForgeCredentialCreateBody = z.object({
+  kind: ForgeKind,
+  name: z.string().trim().min(1),
+  token: z.string().trim().min(1),
+  url: ForgeUrl.nullable().optional(),
+})
+
+/** A new token rotates the credential for every repo using it; a null url goes back to origin. */
+export const ForgeCredentialUpdateBody = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    token: z.string().trim().min(1).optional(),
+    url: ForgeUrl.nullable().optional(),
+  })
+  .refine(nonEmpty, { message: 'provide a name, token or url' })
 
 export const WorkerCreateBody = z.object({
   name: z.string().trim().min(1),
@@ -135,6 +185,7 @@ export const WorkerCreateBody = z.object({
   count: z.number().int().min(1).max(16).default(1),
   seatCount: z.number().int().min(1).max(16).default(1),
   enabled: z.boolean().default(false),
+  difficulties: z.array(z.string().trim().min(1)).optional(),
 })
 export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
 
@@ -150,6 +201,7 @@ export const WorkerUpdateBody = z
     count: z.number().int().min(1).max(16).optional(),
     seatCount: z.number().int().min(1).max(16).optional(),
     enabled: z.boolean().optional(),
+    difficulties: z.array(z.string().trim().min(1)).nullable().optional(),
   })
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>

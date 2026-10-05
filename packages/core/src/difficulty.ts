@@ -8,54 +8,28 @@ import { recordWatcherAgentRun } from './watcher-agent.ts'
 
 export type ClaimGate = { allowed: true } | { allowed: false; reason: string }
 
-/** The model the implement harness would run, or null when unconfigured. */
-export function implementModel(config: Config): string | null {
-  return config.harness.implement.model ?? null
-}
-
-/** A model's tier, weakest tier for an unlisted model so gating fails closed on unknown models. */
-export function modelTier(config: Config, model: string | null): string {
-  const tiers = config.difficulty.tierOrder
-  const listed = model !== null ? config.difficulty.modelTiers[model] : undefined
-  return listed ?? tiers[0] ?? 'fast'
-}
-
-/** The minimum tier a difficulty level needs, weakest tier when unlisted so only mapped levels gate. */
-export function requiredTier(config: Config, difficulty: string | null): string {
-  const tiers = config.difficulty.tierOrder
-  const listed = difficulty !== null ? config.difficulty.requiredTier[difficulty] : undefined
-  return listed ?? tiers[0] ?? 'fast'
-}
-
-function tierRank(config: Config, tier: string): number {
-  const index = config.difficulty.tierOrder.indexOf(tier)
-  return index === -1 ? -1 : index
-}
+/** The worker a claim is made for; unset `difficulties` takes every level. */
+export type ClaimWorker = { name: string; difficulties?: readonly string[] | undefined }
 
 /**
- * The enforcement point: whether a worker running `model` may claim `task`.
- * Gating is off when the feature is disabled, the task has no difficulty, or
- * the level has no required tier mapped; otherwise the model's tier must reach
- * the task's bar.
+ * The enforcement point: whether `worker` may claim `task`. Gating is off when
+ * the feature is disabled, the task has no difficulty, or the worker takes
+ * every level (including ad-hoc runs with no worker); otherwise the task's
+ * level must be in the worker's list.
  */
-export function claimGate(config: Config, task: TrackerTask, model: string | null): ClaimGate {
-  if (!config.difficulty.enabled) return { allowed: true }
+export function claimGate(
+  config: Config,
+  task: TrackerTask,
+  worker: ClaimWorker | null,
+): ClaimGate {
+  if (!config.difficulty.enabled || worker?.difficulties === undefined) return { allowed: true }
   const difficulty = task.difficulty ?? null
-  if (difficulty === null) return { allowed: true }
-  const required = requiredTier(config, difficulty)
-  if (tierRank(config, modelTier(config, model)) >= tierRank(config, required)) {
-    return { allowed: true }
-  }
-  const name = model ?? 'configured model'
-  const tier = modelTier(config, model)
-  return {
-    allowed: false,
-    reason: `${name} is only a ${tier} model but ${difficulty} difficulty needs ${required}`,
-  }
+  if (difficulty === null || worker.difficulties.includes(difficulty)) return { allowed: true }
+  return { allowed: false, reason: `${worker.name} does not take ${difficulty} difficulty tasks` }
 }
 
 /**
- * Claims the next ready task a worker's model is allowed to take, skipping
+ * Claims the next ready task the worker takes, skipping
  * (and reporting) the gated ones. Falls back to the tracker's own atomic
  * claim when gating is off, so the common path is unchanged. Claims by id so
  * a gated task is never taken and released in the same breath, which would
@@ -64,13 +38,13 @@ export function claimGate(config: Config, task: TrackerTask, model: string | nul
 export async function claimEligible(
   tracker: Tracker,
   config: Config,
-  model: string | null,
+  worker: ClaimWorker | null,
   onRejected?: (task: TrackerTask, reason: string) => void,
 ): Promise<TrackerTask | null> {
-  if (!config.difficulty.enabled) return tracker.claim()
+  if (!config.difficulty.enabled || worker?.difficulties === undefined) return tracker.claim()
   const ready = await tracker.ready(20)
   for (const task of ready) {
-    const gate = claimGate(config, task, model)
+    const gate = claimGate(config, task, worker)
     if (gate.allowed) {
       const claimed = await tracker.claim(task.id)
       if (claimed !== null) return claimed

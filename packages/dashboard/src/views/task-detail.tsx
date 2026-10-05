@@ -9,8 +9,6 @@ import {
 } from '@amagi/core/events'
 import { fmtDuration, fmtTokens } from '@amagi/core/format'
 import {
-  chatInFlight,
-  chatTurns,
   currentAgentFor,
   type DashboardState,
   openQuestionsFor,
@@ -24,25 +22,16 @@ import {
   taskEvents,
 } from '@amagi/core/view'
 import { Link, useParams } from '@tanstack/react-router'
-import {
-  type FormEvent,
-  type ReactNode,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AgentLogView } from '../AgentLogView.tsx'
-import { apiBase } from '../api.ts'
 import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
 import { useDateFormatPref } from '../date-format.ts'
 import { fmtDateTime, fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
-import { gitCommitRoute, taskRoute } from '../routes.tsx'
+import { taskRoute } from '../routes.tsx'
 import { useDashboard, useRunner } from '../store.tsx'
-import { Blockers, fetchIssue, type Issue, Unblocks } from './issues.tsx'
+import { Blockers, Unblocks } from './issue-dependencies.tsx'
+import { fetchIssue, type Issue } from './issue-model.ts'
 import {
   AnswerBox,
   AttemptSwitcher,
@@ -55,6 +44,7 @@ import {
   RetryNowButton,
   StopButton,
 } from './task-actions.tsx'
+import { ChatPanel, TaskReference } from './task-chat.tsx'
 
 function GithubIcon({ className }: { className?: string }) {
   return (
@@ -72,8 +62,18 @@ function ForgejoIcon({ className }: { className?: string }) {
   )
 }
 
+function GitLabIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M23.955 13.587l-3.23-9.945a.828.828 0 0 0-1.578 0L17.97 7.028H6.03L4.853 3.642a.828.828 0 0 0-1.578 0l-3.23 9.945a.828.828 0 0 0 .3.923L11.5 22.5a.828.828 0 0 0 .999 0l11.155-7.99a.828.828 0 0 0 .3-.923ZM1.98 13.61l2.064-6.36 1.944 5.63-4.008.73Zm9.52 6.92L4.78 13.23h14.44L11.5 20.53Zm10.52-6.92-4.008-.73 1.944-5.63 2.064 6.36Z" />
+    </svg>
+  )
+}
+
 function PrLink({ url }: { url: string }) {
-  const isGithub = new URL(url).hostname.endsWith('github.com')
+  const parsedUrl = new URL(url)
+  const isGithub = parsedUrl.hostname.endsWith('github.com')
+  const isGitLab = parsedUrl.pathname.includes('/-/merge_requests/')
   return (
     <a
       href={url}
@@ -81,7 +81,13 @@ function PrLink({ url }: { url: string }) {
       rel="noreferrer"
       className="inline-flex items-center gap-1.5 text-sky-ink hover:underline"
     >
-      {isGithub ? <GithubIcon className="h-4 w-4" /> : <ForgejoIcon className="h-4 w-4" />}
+      {isGithub ? (
+        <GithubIcon className="h-4 w-4" />
+      ) : isGitLab ? (
+        <GitLabIcon className="h-4 w-4" />
+      ) : (
+        <ForgejoIcon className="h-4 w-4" />
+      )}
       {url}
     </a>
   )
@@ -278,300 +284,6 @@ function RetryPanel({ task }: { task: ProjectedTask }) {
   )
 }
 
-/**
- * Operator/worker chat on a parked no_pr task. Each message resumes the task's
- * recorded session in its worktree; the answer streams in through the repo
- * event stream, so this component only renders what chatTurns folds from it.
- * A settled task (e.g. marked done) keeps the conversation read-only so it is
- * not lost on completion, while the send form only shows while the task is a
- * chattable no_pr run with a session and worktree to resume.
- */
-function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
-  const { state } = useDashboard()
-  const [text, setText] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const task = state.tasks[taskId]
-  const interactive =
-    task !== undefined &&
-    task.state === 'no_pr' &&
-    task.statusReason !== null &&
-    task.sessionId !== null &&
-    task.worktree !== null
-  const messages = useMemo(() => chatTurns(state, taskId), [state, taskId])
-  const responding = useMemo(() => chatInFlight(state, taskId), [state, taskId])
-  const scrollRef = useRef<HTMLDivElement>(null)
-  // Tail the conversation after every render, like the agent log.
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-  })
-
-  const send = async (event: FormEvent) => {
-    event.preventDefault()
-    const message = text.trim()
-    if (message === '' || responding || !interactive) return
-    setError(null)
-    setText('')
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/chat`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message }),
-      })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-    } catch {
-      setError('could not reach the amagi server')
-    }
-  }
-
-  return (
-    <div className="mt-6 rounded-lg border border-line bg-surface p-4">
-      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        Chat with worker
-      </h2>
-      <div
-        ref={scrollRef}
-        className="mb-3 max-h-80 space-y-2 overflow-auto rounded-lg border border-line bg-sunken p-3"
-      >
-        {messages.length === 0 && interactive && (
-          <p className="text-sm text-fg-faint">Ask the worker about why there is no PR.</p>
-        )}
-        {messages.map((m) => (
-          <div
-            key={m.id}
-            className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
-              m.role === 'user'
-                ? 'ml-auto bg-sky-600 text-on-solid'
-                : 'mr-auto border border-line-strong bg-raised text-fg'
-            }`}
-          >
-            {m.role === 'user' ? (
-              m.text
-            ) : m.pending ? (
-              `${m.text === '' ? 'worker is responding' : m.text}...`
-            ) : (
-              <ChatReply text={m.text} tasks={state.tasks} />
-            )}
-          </div>
-        ))}
-      </div>
-      {interactive ? (
-        <form onSubmit={send} className="flex gap-2">
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            disabled={responding}
-            placeholder={responding ? 'worker is responding...' : 'ask the worker'}
-            className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
-          />
-          <button
-            type="submit"
-            disabled={responding || text.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-          >
-            Send
-          </button>
-        </form>
-      ) : (
-        <p className="text-xs text-fg-faint">Conversation preserved; the task is settled.</p>
-      )}
-      {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
-    </div>
-  )
-}
-
-function ChatReply({ text, tasks }: { text: string; tasks: Record<string, ProjectedTask> }) {
-  const { selected } = useDashboard()
-  let content: unknown = text
-  let structured = false
-  try {
-    const parsed: unknown = JSON.parse(text)
-    if (parsed !== null && typeof parsed === 'object') {
-      content = parsed
-      structured = true
-    }
-  } catch {
-    // Plain worker prose remains unchanged.
-  }
-
-  const taskIds = Object.keys(tasks).sort((a, b) => b.length - a.length)
-  const references = [...taskIds.map(escapeRegExp), '[a-f0-9]{7,40}'].join('|')
-  const linkedText = (value: string): ReactNode => {
-    const pattern = new RegExp(`(?<![a-z0-9_.-])(${references})(?![a-z0-9_.-])`, 'gi')
-    const parts = value.split(pattern)
-    return parts.map((part, index) => {
-      const task = tasks[part]
-      if (task !== undefined) {
-        return <TaskReference key={`${part}-${index}`} task={task} />
-      }
-      if (/^[a-f0-9]{7,40}$/i.test(part)) {
-        return <CommitReference key={`${part}-${index}`} hash={part} repo={selected} />
-      }
-      return part
-    })
-  }
-  const renderValue = (value: unknown): ReactNode => {
-    if (typeof value === 'string') return linkedText(value)
-    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-    if (value === null) return 'None'
-    if (Array.isArray(value))
-      return value.map((item, index) => (
-        <div key={index} className="ml-3">
-          {renderValue(item)}
-        </div>
-      ))
-    if (typeof value === 'object')
-      return (
-        <div className="space-y-1">
-          {Object.entries(value).map(([key, item]) => (
-            <div key={key}>
-              <span className="font-medium text-fg-muted">{humanizeKey(key)}:</span>{' '}
-              {renderValue(item)}
-            </div>
-          ))}
-        </div>
-      )
-    return String(value)
-  }
-  return structured ? (
-    <div className="space-y-1">{renderValue(content)}</div>
-  ) : (
-    <span>{linkedText(text)}</span>
-  )
-}
-
-function ReferencePopover({
-  label,
-  children,
-  onOpen,
-}: {
-  label: string
-  children: ReactNode
-  onOpen?: () => void
-}) {
-  const [open, setOpen] = useState(false)
-  const popupId = useId()
-  return (
-    <span className="relative inline-flex items-center gap-1">
-      <button
-        type="button"
-        aria-label={`Preview ${label}`}
-        aria-expanded={open}
-        aria-controls={popupId}
-        onClick={() => {
-          if (!open) onOpen?.()
-          setOpen(!open)
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') setOpen(false)
-        }}
-        className="rounded px-0.5 text-xs text-fg-faint hover:bg-surface-muted hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink"
-      >
-        ⓘ
-      </button>
-      {open && (
-        <span
-          id={popupId}
-          className="absolute left-0 top-full z-20 mt-1 w-72 rounded-lg border border-line bg-surface p-3 text-left text-sm shadow-lg"
-        >
-          {children}
-        </span>
-      )}
-    </span>
-  )
-}
-
-function TaskReference({ task }: { task: ProjectedTask }) {
-  return (
-    <span className="inline-flex items-center gap-1">
-      <Link to={taskRoute.to} params={{ id: task.id }} className="text-sky-ink underline">
-        {task.id}
-      </Link>
-      <ReferencePopover label={`task ${task.id}`}>
-        <span className="block font-medium text-fg">{task.title || '(no task title)'}</span>
-        <span className="mt-1 block text-xs text-fg-muted">State: {task.state}</span>
-        <Link
-          to={taskRoute.to}
-          params={{ id: task.id }}
-          className="mt-2 inline-block text-sm text-sky-ink hover:underline"
-        >
-          Open task
-        </Link>
-      </ReferencePopover>
-    </span>
-  )
-}
-
-function CommitReference({ hash, repo }: { hash: string; repo: string | null }) {
-  const [subject, setSubject] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  const load = () => {
-    if (repo === null || loading || subject !== null) return
-    setLoading(true)
-    setError(null)
-    fetch(
-      `${apiBase}/api/repos/${encodeURIComponent(repo)}/git/commits/${encodeURIComponent(hash)}`,
-    )
-      .then(async (response) => {
-        const body: unknown = await response.json()
-        if (!response.ok) {
-          const message =
-            body !== null && typeof body === 'object' && 'error' in body
-              ? String(body.error)
-              : `HTTP ${response.status}`
-          throw new Error(message)
-        }
-        if (body === null || typeof body !== 'object' || !('title' in body)) {
-          throw new Error('Invalid commit response')
-        }
-        setSubject(String(body.title) || '(no commit title)')
-      })
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : 'could not reach the amagi server')
-      })
-      .finally(() => setLoading(false))
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1">
-      <Link to={gitCommitRoute.to} params={{ hash }} className="text-sky-ink underline">
-        {hash}
-      </Link>
-      <ReferencePopover label={`commit ${hash}`} onOpen={load}>
-        <code className="block break-all text-xs text-fg-muted">{hash}</code>
-        {loading ? (
-          <span className="mt-1 block text-fg-muted">Loading commit…</span>
-        ) : error !== null ? (
-          <span className="mt-1 block text-red-ink">{error}</span>
-        ) : (
-          <span className="mt-1 block font-medium text-fg">
-            {subject ?? '(commit subject unavailable)'}
-          </span>
-        )}
-        <Link
-          to={gitCommitRoute.to}
-          params={{ hash }}
-          className="mt-2 inline-block text-sm text-sky-ink hover:underline"
-        >
-          Open commit
-        </Link>
-      </ReferencePopover>
-    </span>
-  )
-}
-
-function humanizeKey(key: string): string {
-  return key
-    .replace(/[_-]+/g, ' ')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/^./, (c) => c.toUpperCase())
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 const REPORT_LOG_LINES = 100
 
 /** Markdown summary of a task, ready to feed an LLM for bug-report generation. */
@@ -698,6 +410,25 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                 </span>
               )}
             </div>
+            {entry.setup !== null && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pb-2 pl-12 pr-4 text-xs text-fg-muted">
+                <span className="text-fg-faint">{entry.runs.length > 0 ? '├' : '└'}</span>
+                <span className="font-medium text-fg">setup</span>
+                <code className="min-w-0 truncate" title={entry.setup.command}>
+                  {entry.setup.command}
+                </code>
+                <span
+                  className={entry.setup.exitCode ? 'tabular-nums text-red-ink' : 'tabular-nums'}
+                >
+                  {[
+                    entry.setup.durationMs === null ? null : fmtDuration(entry.setup.durationMs),
+                    entry.setup.exitCode === null ? 'running' : `exit ${entry.setup.exitCode}`,
+                  ]
+                    .filter((part): part is string => part !== null)
+                    .join(' · ')}
+                </span>
+              </div>
+            )}
             {entry.runs.length > 0 && (
               <ol className="space-y-1 pb-2 pl-12 pr-4">
                 {entry.runs.map((run, index) => {
@@ -710,6 +441,7 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
                   ].filter((part): part is string => part !== null)
                   return (
                     <li
+                      // biome-ignore lint/suspicious/noArrayIndexKey: runs can start in the same millisecond; the index disambiguates.
                       key={`${run.startedAt}-${index}`}
                       className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted"
                     >
@@ -736,6 +468,14 @@ function StatusLogView({ entries }: { entries: StatusEntry[] }) {
 
 function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: string }) {
   const history = reviewHistoryFor(state, taskId)
+  if (history.skipped !== null && history.rounds.length === 0) {
+    return (
+      <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
+        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-fg-muted">Review</h2>
+        <p className="text-sm text-amber-ink">Review skipped: {history.skipped}</p>
+      </section>
+    )
+  }
   if (history.rounds.length === 0) return null
   return (
     <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">

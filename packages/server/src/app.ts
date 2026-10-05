@@ -9,24 +9,32 @@ import {
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
+  addForgeCredential,
   BeadsTracker,
   CAPABILITY_WORDS,
+  CHECKPOINT_COMMIT_SUMMARY,
   ChatService,
   Config,
   canReset,
   claimGate,
   classifyDifficulty,
   errMsg,
+  exec,
   expandTilde,
   expandWorkers,
+  ForgeKind,
+  forgeTokenStates,
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
+  hasPinnedForgeRemote,
   hasStaleMaxParallel,
   isTerminal,
   LibnotifyNotifier,
   type LiveRun,
+  listForgeCredentials,
+  loadConfig,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
@@ -34,21 +42,23 @@ import {
   type Notifier,
   NtfyNotifier,
   newWorkerId,
+  pickForgeCredential,
   pidAlive,
   type Question,
   type RegistryEntry,
-  Runner,
   type RunServiceApi,
   reconcilePr,
+  removeForgeCredential,
   removeWorktree,
-  resolveWorkerHarness,
   type Store,
   type StoredEvent,
+  stageAndCommit,
   type Tracker,
   type TrackerCapabilities,
   type TrackerTask,
   Triage,
   type UpdateTrackerTask,
+  updateForgeCredential,
   type WorkerActivity,
   WorkerConfig,
   type Workspace,
@@ -65,6 +75,7 @@ import { Hono } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import * as z from 'zod'
 import {
+  AgentLogQuery,
   AnswerBody,
   AskBody,
   AwaitQuery,
@@ -72,9 +83,13 @@ import {
   CloseTaskBody,
   EpicCloseBody,
   EventQuery,
+  ForgeCredentialCreateBody,
+  ForgeCredentialParam,
+  ForgeCredentialUpdateBody,
   GitIdentityBody,
   GitRequestBody,
   IssueCreateBody,
+  IssueListQuery,
   IssueUpdateBody,
   ParticipationBody,
   QuestionQuery,
@@ -112,7 +127,7 @@ export type ServerDeps = {
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
   /** Queues one PR on the existing conflict watcher. */
-  queueConflictResolution?: (repo: string, prNumber: number) => boolean
+  queueConflictResolution?: (repo: string, prNumber: number, prUrl: string | null) => boolean
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
@@ -271,6 +286,15 @@ function gitOutput(root: string, args: string[]): string {
   return result.stdout.toString()
 }
 
+/** Remote names of the repo at `root`; empty when git fails. */
+function gitRemotes(root: string): string[] {
+  try {
+    return gitOutput(root, ['remote']).split('\n').filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 export function createApp({
   workspaces,
   notify = [],
@@ -355,8 +379,8 @@ export function createApp({
       }
       for (const harness of [
         global.harness.implement,
-        global.harness.review,
         global.harness.triage,
+        ...(global.review.harness ? [global.review.harness] : []),
         ...Object.values(global.harness.definitions),
       ]) {
         if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
@@ -379,8 +403,8 @@ export function createApp({
       }
       for (const harness of [
         global.harness.implement,
-        global.harness.review,
         global.harness.triage,
+        ...(global.review.harness ? [global.review.harness] : []),
         ...Object.values(global.harness.definitions),
       ]) {
         if (harness.seat !== undefined) current.add(harness.seat)
@@ -415,7 +439,7 @@ export function createApp({
         if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
       }
       const harness: Record<string, unknown> = {}
-      for (const name of ['implement', 'review', 'triage'] as const) {
+      for (const name of ['implement', 'triage'] as const) {
         const original = global.harness[name]
         const seat = rewrite(original.seat)
         if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }
@@ -426,12 +450,17 @@ export function createApp({
         if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
       }
       if (Object.keys(definitions).length > 0) harness.definitions = definitions
+      const reviewer = global.review.harness
+      const reviewerSeat = rewrite(reviewer?.seat)
 
       writeGlobalConfig({
         seats: seatEntries,
         worker,
         ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
         ...(Object.keys(harness).length === 0 ? {} : { harness }),
+        ...(reviewer === undefined || reviewerSeat === reviewer.seat
+          ? {}
+          : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
       return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
@@ -488,8 +517,25 @@ export function createApp({
         waiters.set(seat, queue)
       }
 
-      for (const { repo, service } of servedRunners()) {
-        const status = await service.status()
+      const runners = servedRunners()
+      const [statuses, queues] = await Promise.all([
+        Promise.all(runners.map(({ service }) => service.status())),
+        Promise.all(
+          workspaces.list().map(async (entry) => {
+            const ws = workspaces.get(entry.key)
+            if (ws === null) return null
+            const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+              (worker) => worker.enabled,
+            )
+            const ready = workers.length === 0 ? [] : await ws.tracker.ready()
+            return { repo: entry.key, ws, workers, ready }
+          }),
+        ),
+      ])
+
+      for (const [index, { repo }] of runners.entries()) {
+        const status = statuses[index]
+        if (status === undefined) continue
         for (const taskId of status.running) {
           const task = status.tasks[taskId]
           const ws = workspaces.get(repo)
@@ -554,16 +600,16 @@ export function createApp({
           since: null,
         })
       }
-      for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
+      for (const queue of queues) {
+        if (queue === null) continue
+        const { repo, ws, workers, ready } = queue
         for (const chat of ws.store.activeChatAgents()) {
           const startedAt = ws.store
             .events({ taskId: chat.taskId, limit: 100_000 })
             .filter((event) => event.type === 'agent.started' && event.role === 'chat')
             .at(-1)?.ts
           setHolder(chat.seat, {
-            repo: entry.key,
+            repo,
             taskId: chat.taskId,
             title: ws.store.task(chat.taskId)?.title ?? chat.taskId,
             status: 'chat',
@@ -571,11 +617,7 @@ export function createApp({
           })
         }
 
-        const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
-          (worker) => worker.enabled,
-        )
         if (workers.length === 0) continue
-        const ready = await ws.tracker.ready()
         const workersBySeat = new Map<string, (typeof workers)[number][]>()
         for (const worker of workers) {
           const seat = worker.seat ?? worker.kind
@@ -586,21 +628,14 @@ export function createApp({
         for (const [seat, seatWorkers] of workersBySeat) {
           const tasks = eligible.get(seat) ?? []
           for (const task of ready) {
-            const canRun = seatWorkers.some((worker) => {
-              const harness = resolveWorkerHarness(ws.config, worker)
-              return claimGate(
-                { ...ws.config, harness: { ...ws.config.harness, implement: harness } },
-                task,
-                harness.model ?? null,
-              ).allowed
-            })
+            const canRun = seatWorkers.some((worker) => claimGate(ws.config, task, worker).allowed)
             if (
               !canRun ||
-              tasks.some((queued) => queued.repo === entry.key && queued.taskId === task.id)
+              tasks.some((queued) => queued.repo === repo && queued.taskId === task.id)
             )
               continue
             tasks.push({
-              repo: entry.key,
+              repo,
               taskId: task.id,
               title: task.title,
               status: 'ready',
@@ -734,7 +769,7 @@ export function createApp({
     .get('/api/repos/:repo/issues/:id', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
+      const beads = ws.beads
       if (beads === null) {
         return c.json({ error: `issue detail is unavailable for ${repo}` }, 501)
       }
@@ -746,7 +781,7 @@ export function createApp({
     .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
+      const beads = ws.beads
       if (beads === null) {
         return c.json({ error: `issue details are unavailable for ${repo}` }, 501)
       }
@@ -786,7 +821,7 @@ export function createApp({
             }
           : body
         const created: TrackerTask = await ws.tracker.createTask(input)
-        const beads = beadsTracker(ws)
+        const beads = ws.beads
         const issue = beads === null ? null : await beads.getIssue(created.id)
         return c.json(issue ?? created, 201)
       },
@@ -823,7 +858,7 @@ export function createApp({
         if (body.dependencies !== undefined) {
           const depCap = capabilityError(ws.tracker, 'dependencies')
           if (depCap !== null) return c.json({ error: depCap }, 501)
-          const beads = beadsTracker(ws)
+          const beads = ws.beads
           if (beads === null) {
             return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
           }
@@ -834,7 +869,7 @@ export function createApp({
           }
         }
         const updated = await ws.tracker.updateTask(id, input)
-        const beads = beadsTracker(ws)
+        const beads = ws.beads
         const issue = beads === null ? null : await beads.getIssue(updated.id)
         return c.json(issue ?? updated)
       },
@@ -886,20 +921,33 @@ export function createApp({
       return c.json({ prs: await ws.forge.listOpenPrs(ws.root) })
     })
 
-    .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
+    .get(
+      '/api/repos/:repo/issues',
+      valid('param', RepoParam),
+      valid('query', IssueListQuery),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const { label } = c.req.valid('query')
+        const ws = resolveWorkspace(workspaces, repo)
+        const beads = ws.beads
+        if (beads === null) {
+          return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
+        }
+        return c.json(await (label === undefined ? beads.list() : beads.openWithLabel(label)))
+      },
+    )
+
+    .get('/api/repos/:repo/beads', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
-      if (beads === null) {
-        return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
-      }
-      return c.json(await beads.list())
+      const beads = resolveWorkspace(workspaces, repo).beads
+      if (beads === null) return c.json({ error: `${repo} does not track issues in beads` }, 501)
+      return c.json(await beads.health())
     })
 
     .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
+      const beads = ws.beads
       if (beads === null) {
         return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
       }
@@ -965,6 +1013,18 @@ export function createApp({
       // channel for the credential, so the task detail doubles as its source.
       return c.json({ task, token: ws.store.token(id), questions: ws.store.openQuestions(id) })
     })
+
+    .get(
+      '/api/repos/:repo/tasks/:id/agent-log',
+      valid('param', RepoTaskIdParam),
+      valid('query', AgentLogQuery),
+      (c) => {
+        const { repo, id } = c.req.valid('param')
+        const ws = resolveWorkspace(workspaces, repo)
+        const { attempt, untilSeq, limit } = c.req.valid('query')
+        return c.json(ws.store.agentLog(id, attempt, untilSeq, limit))
+      },
+    )
 
     .post('/api/repos/:repo/tasks/:id/reclaim', valid('param', RepoTaskIdParam), async (c) => {
       const { repo, id } = c.req.valid('param')
@@ -1069,12 +1129,13 @@ export function createApp({
       if (task.prNumber === null) {
         return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
       }
-      if (ws.forge === null) {
+      if (ws.prForge === null) {
         return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
       }
+      const { driver, config } = ws.prForge(task.prUrl)
       // The reconcile writes events the dashboard already streams, so the
       // caller's live state picks up a merge/close without a page reload.
-      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
+      await reconcilePr(ws.store, driver, ws.tracker, ws.root, config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
     })
 
@@ -1089,9 +1150,15 @@ export function createApp({
       if (task.prNumber === null) {
         return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
       }
-      if (queueConflictResolution?.(repo, task.prNumber) !== true) {
+      if (queueConflictResolution?.(repo, task.prNumber, task.prUrl) !== true) {
         return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
       }
+      ws.store.append(task.id, {
+        type: 'task.state',
+        from: task.state,
+        to: 'pr_conflict_fixing',
+        reason: `Conflict resolution queued for PR #${task.prNumber}`,
+      })
       return c.json({ taskId: id, queued: true })
     })
 
@@ -1195,7 +1262,7 @@ export function createApp({
         // one who closes it. This is the one step that must not be best effort,
         // else the task retires with the PR still open on the forge.
         if (task.state === 'pr_flagged') {
-          if (ws.forge === null) {
+          if (ws.prForge === null) {
             return c.json(
               {
                 error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
@@ -1207,7 +1274,7 @@ export function createApp({
             return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
           }
           try {
-            await ws.forge.closePr(ws.root, task.prNumber, reason)
+            await ws.prForge(task.prUrl).driver.closePr(ws.root, task.prNumber, reason)
           } catch (err) {
             return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
           }
@@ -1338,7 +1405,13 @@ export function createApp({
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+        reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
+        forgeKind: ws.config.forge.kind,
+        forgeRemote: ws.config.forge.remote,
+        forgeRemotePinned: hasPinnedForgeRemote(ws.root),
+        remotes: gitRemotes(ws.root),
+        forgeCredentials: forgeTokenStates(ws.root),
       })
     })
 
@@ -1349,9 +1422,41 @@ export function createApp({
       (c) => {
         const { repo } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, epicCloseEnabled, ntfyTopic, ntfyServer, desktopFailureAlerts } =
-          c.req.valid('json')
+        const {
+          autoQueue,
+          epicCloseEnabled,
+          ntfyTopic,
+          ntfyServer,
+          desktopFailureAlerts,
+          reviewMaxRounds,
+          forgeKind,
+          forgeRemote,
+          forgeCredentials,
+        } = c.req.valid('json')
+        const remotes = gitRemotes(ws.root)
+        if (forgeRemote != null && !remotes.includes(forgeRemote)) {
+          return c.json({ error: `no git remote named ${forgeRemote}` }, 400)
+        }
+        const known = listForgeCredentials()
+        for (const kind of ForgeKind.options) {
+          const id = forgeCredentials?.[kind]
+          if (id != null && !known.some((cred) => cred.id === id && cred.kind === kind)) {
+            return c.json({ error: `unknown ${kind} credential ${id}` }, 400)
+          }
+        }
+        for (const kind of ForgeKind.options) {
+          const id = forgeCredentials?.[kind]
+          if (id !== undefined) pickForgeCredential(ws.root, kind, id)
+        }
         writeConfig(ws.root, {
+          ...(forgeKind === undefined && forgeRemote === undefined
+            ? {}
+            : {
+                forge: {
+                  ...(forgeKind === undefined ? {} : { kind: forgeKind }),
+                  remote: forgeRemote ?? null,
+                },
+              }),
           ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
           ...(epicCloseEnabled === undefined
             ? {}
@@ -1367,6 +1472,7 @@ export function createApp({
                   ...(desktopFailureAlerts === undefined ? {} : { desktopFailureAlerts }),
                 },
               }),
+          ...(reviewMaxRounds === undefined ? {} : { review: { maxRounds: reviewMaxRounds } }),
         })
         if (epicCloseEnabled !== undefined) {
           ws.config.watchers.epicClose.enabled = epicCloseEnabled
@@ -1375,6 +1481,16 @@ export function createApp({
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
         if (desktopFailureAlerts !== undefined) {
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
+        }
+        if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
+        if (
+          forgeKind !== undefined ||
+          forgeRemote !== undefined ||
+          forgeCredentials !== undefined
+        ) {
+          const { kind, remote } = loadConfig(ws.root).config.forge
+          ws.config.forge.kind = kind
+          ws.config.forge.remote = remote
         }
         if (autoQueue !== undefined) {
           ws.config.loop.autoQueue = autoQueue
@@ -1393,8 +1509,39 @@ export function createApp({
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+          reviewMaxRounds: ws.config.review.maxRounds,
+          forgeKind: ws.config.forge.kind,
+          forgeRemote: ws.config.forge.remote,
+          forgeRemotePinned: hasPinnedForgeRemote(ws.root),
+          remotes,
+          forgeCredentials: forgeTokenStates(ws.root),
         })
       },
+    )
+
+    .get('/api/forge-credentials', (c) => c.json({ credentials: listForgeCredentials() }))
+
+    .post('/api/forge-credentials', valid('json', ForgeCredentialCreateBody), (c) => {
+      const { kind, name, token, url } = c.req.valid('json')
+      return c.json(addForgeCredential(kind, name, token, url ?? null))
+    })
+
+    .patch(
+      '/api/forge-credentials/:id',
+      valid('param', ForgeCredentialParam),
+      valid('json', ForgeCredentialUpdateBody),
+      (c) => {
+        const credential = updateForgeCredential(c.req.valid('param').id, c.req.valid('json'))
+        return credential === null
+          ? c.json({ error: 'unknown credential' }, 404)
+          : c.json(credential)
+      },
+    )
+
+    .delete('/api/forge-credentials/:id', valid('param', ForgeCredentialParam), (c) =>
+      removeForgeCredential(c.req.valid('param').id)
+        ? c.json({ ok: true })
+        : c.json({ error: 'unknown credential' }, 404),
     )
 
     .post('/api/repos/:repo/settings/test-desktop', valid('param', RepoParam), async (c) => {
@@ -1475,7 +1622,12 @@ export function createApp({
       },
     )
 
-    .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
+    .get('/api/workers', async (c) =>
+      c.json({
+        workers: await fleetView(),
+        difficultyLevels: loadGlobalConfig().difficulty.levels,
+      }),
+    )
 
     .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
       const fleet = loadGlobalConfig().worker
@@ -1705,18 +1857,30 @@ export function createApp({
         }
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
-        const runner = new Runner({
-          store: ws.store,
-          tracker: ws.tracker,
-          harness: makeHarness(ws.config.harness.implement),
-          config: ws.config,
-          repoRoot: ws.root,
-          repoName: ws.name,
-          ...(ws.forge === null ? {} : { forge: ws.forge }),
-        })
-        const result = await runner.requestCommit(id, task.worktree)
-        if (!result.ok) return c.json({ error: result.error }, 500)
-        return c.json({ verb, sha: result.sha })
+        try {
+          const staged = await stageAndCommit(
+            exec,
+            task,
+            task.worktree,
+            CHECKPOINT_COMMIT_SUMMARY,
+            {
+              harness: ws.config.harness.implement.kind,
+              model: ws.config.harness.implement.model ?? null,
+              effort: ws.config.harness.implement.effort ?? null,
+            },
+          )
+          if (!staged.committed) {
+            return c.json({ error: 'nothing to commit; the worktree is clean' }, 500)
+          }
+          ws.store.append(id, {
+            type: 'commit.created',
+            sha: staged.sha,
+            subject: `[${task.id}] ${task.title}`,
+          })
+          return c.json({ verb, sha: staged.sha })
+        } catch (err) {
+          return c.json({ error: errMsg(err) }, 500)
+        }
       },
     )
 
@@ -1730,16 +1894,16 @@ export function createApp({
     .get('/api/repos/:repo/stream', valid('param', RepoParam), valid('query', StreamQuery), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const { taskId, sinceSeq } = c.req.valid('query')
+      const { taskId, sinceSeq, compact } = c.req.valid('query')
       // A browser resends the last id it saw on reconnect; that beats whatever
       // sinceSeq was baked into the EventSource url when it first connected.
       const resumed = Number(c.req.header('Last-Event-ID'))
-      const from = Number.isInteger(resumed) && resumed >= 0 ? resumed : sinceSeq
-      return eventStream(
-        c,
-        ws.store,
-        taskId === undefined ? { sinceSeq: from } : { taskId, sinceSeq: from },
-      )
+      const isResume = Number.isInteger(resumed) && resumed >= 0
+      const from = isResume ? resumed : sinceSeq
+      // The url still asks for compact on a resume, but the client counts on
+      // the log lines it missed since the first replay.
+      const opts = { sinceSeq: from, compact: compact && !isResume }
+      return eventStream(c, ws.store, taskId === undefined ? opts : { taskId, ...opts })
     })
 
     .get(
@@ -1751,31 +1915,6 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const { taskId } = c.req.valid('query')
         return c.json(ws.store.openQuestions(taskId))
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/run',
-      valid('param', RepoParam),
-      (c, next) => {
-        resolveWorkspace(workspaces, c.req.valid('param').repo)
-        return next()
-      },
-      valid('json', RunBody),
-      async (c) => {
-        const { repo } = c.req.valid('param')
-        const service = runnerFor(repo)
-        if (service === undefined) {
-          return c.json({ error: 'runner service is unavailable for this repository' }, 501)
-        }
-        const { taskId, workerId, model, effort } = c.req.valid('json')
-        const result = await service.start(taskId, {
-          ...(workerId === undefined ? {} : { workerId }),
-          ...(model === undefined ? {} : { model }),
-          ...(effort === undefined ? {} : { effort }),
-        })
-        if (!result.ok) return c.json({ error: result.error }, result.status)
-        return c.json({ repo, taskId: result.taskId, started: true }, 202)
       },
     )
 

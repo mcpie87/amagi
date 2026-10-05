@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -39,9 +39,11 @@ import {
   killTree,
   loadConfig,
   loadGlobalConfig,
+  prForgeRouter,
+  repoConfigPath,
   writeGlobalConfig,
 } from '@amagi/core'
-import { PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { hc } from 'hono/client'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -210,6 +212,34 @@ describe('GET /api/repos/:repo/tasks', () => {
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/tasks')).status).toBe(404)
   })
+
+  test('queueing conflict resolution updates the task state', async () => {
+    claim('bd-1')
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('bd-1', { type: 'task.state', from: null, to })
+    }
+    store.append('bd-1', {
+      type: 'pr.created',
+      url: 'https://example.com/demo/pull/7',
+      number: 7,
+    })
+    store.append('bd-1', { type: 'pr.status', mergeStatus: 'conflicted' })
+    store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
+    app = createApp({ workspaces: ws.workspaces, queueConflictResolution: () => true })
+
+    const response = await app.request('/api/repos/repo1/tasks/bd-1/resolve-conflicts', {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(200)
+    expect(store.task('bd-1')?.state).toBe('pr_conflict_fixing')
+  })
 })
 
 class FakeMergePrDriver implements PrDriver {
@@ -222,6 +252,9 @@ class FakeMergePrDriver implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
@@ -454,6 +487,16 @@ class FakeIssueTracker extends BeadsTracker {
     return [...this.issues.values()]
   }
 
+  override async openIds(): Promise<string[]> {
+    return [...this.issues.values()].filter((i) => i.status !== 'closed').map((i) => i.id)
+  }
+
+  override async openWithLabel(label: string): Promise<BeadsIssue[]> {
+    return [...this.issues.values()].filter(
+      (i) => i.status !== 'closed' && i.labels.includes(label),
+    )
+  }
+
   override async getIssue(id: string): Promise<BeadsIssue | null> {
     return this.issues.get(id) ?? null
   }
@@ -553,6 +596,28 @@ function issueApp(tracker: Tracker) {
   store = ws.store('repo1')
   return createApp({ workspaces: ws.workspaces })
 }
+
+test('GET /api/repos/:repo/issues?label= lists only open issues carrying the label', async () => {
+  const tracker = new FakeIssueTracker()
+  tracker.seed({ id: 'bd-human', labels: [HUMAN_ONLY_LABEL] })
+  tracker.seed({ id: 'bd-done', labels: [HUMAN_ONLY_LABEL], status: 'closed' })
+  tracker.seed({ id: 'bd-agent' })
+  app = issueApp(tracker)
+
+  const res = await app.request(`/api/repos/repo1/issues?label=${HUMAN_ONLY_LABEL}`)
+
+  expect(res.status).toBe(200)
+  expect(((await res.json()) as BeadsIssue[]).map((i) => i.id)).toEqual(['bd-human'])
+})
+
+test('GET /api/repos/:repo/beads measures bd before anything else has', async () => {
+  app = issueApp(new FakeIssueTracker())
+
+  const res = await app.request('/api/repos/repo1/beads')
+
+  expect(res.status).toBe(200)
+  expect(await res.json()).toMatchObject({ cached: false, samples: 1, lastGc: null })
+})
 
 describe('issue mutations', () => {
   test('PATCH /api/repos/:repo/issues/:id accepts a proposal into the ready queue', async () => {
@@ -1606,6 +1671,9 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     async getPr(): Promise<PrState> {
       return 'open'
     }
+    async getPrLabels(): Promise<string[]> {
+      return []
+    }
     async getMergeStatus() {
       return 'mergeable' as const
     }
@@ -1634,6 +1702,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('workspace missing')
     workspace.forge = forge
+    workspace.prForge = prForgeRouter(workspace.root, workspace.config, forge)
   }
 
   const flagged = (id: string, number: number) => {
@@ -1700,6 +1769,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('workspace missing')
     workspace.forge = null
+    workspace.prForge = null
     flagged('bd-1', 7)
     const res = await close('bd-1', 'close it')
     expect(res.status).toBe(501)
@@ -2174,7 +2244,13 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
       staleMaxParallel: false,
+      forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
+      forgeCredentials: expect.any(Object),
     })
   })
 
@@ -2205,6 +2281,12 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
+      forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
+      forgeCredentials: expect.any(Object),
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
@@ -2213,11 +2295,63 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
       staleMaxParallel: false,
+      forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
+      forgeCredentials: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
     expect(loadConfig(entry.path).config.loop.autoQueue).toBe(true)
+  })
+
+  test('PATCH picks the forge remote only among the repo remotes', async () => {
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    mkdirSync(entry.path, { recursive: true })
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: entry.path })
+    Bun.spawnSync(['git', 'remote', 'add', 'gitlab', 'git@gitlab.com:me/app.git'], {
+      cwd: entry.path,
+    })
+    expect((await patch('repo1', '{"forgeRemote":"nope"}')).status).toBe(400)
+    const res = await patch('repo1', '{"forgeRemote":"gitlab"}')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ forgeRemote: 'gitlab', remotes: ['gitlab'] })
+    expect(loadConfig(entry.path).config.forge.remote).toBe('gitlab')
+  })
+
+  test('PATCH switching the forge unpins the remote and matches it to the new forge', async () => {
+    const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    const savedState = process.env.XDG_STATE_HOME
+    // Credential URLs decide the forge host, so the operator's token store must not leak in.
+    process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), 'amagi-state-'))
+    try {
+      mkdirSync(entry.path, { recursive: true })
+      Bun.spawnSync(['git', 'init', '-q'], { cwd: entry.path })
+      Bun.spawnSync(['git', 'remote', 'add', 'origin', 'git@github.com:me/app.git'], {
+        cwd: entry.path,
+      })
+      Bun.spawnSync(['git', 'remote', 'add', 'lab', 'git@gitlab.com:me/app.git'], {
+        cwd: entry.path,
+      })
+      expect(await (await patch('repo1', '{"forgeRemote":"origin"}')).json()).toMatchObject({
+        forgeRemote: 'origin',
+        forgeRemotePinned: true,
+      })
+      expect(await (await patch('repo1', '{"forgeKind":"gitlab"}')).json()).toMatchObject({
+        forgeKind: 'gitlab',
+        forgeRemote: 'lab',
+        forgeRemotePinned: false,
+      })
+      expect(ws.workspaces.get('repo1')?.config.forge.remote).toBe('lab')
+    } finally {
+      if (savedState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = savedState
+    }
   })
 
   test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
@@ -2254,7 +2388,13 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
       staleMaxParallel: false,
+      forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
+      forgeCredentials: expect.any(Object),
     })
     const entry = ws.workspaces.list().find((e) => e.key === 'repo1')
     if (entry === undefined) throw new Error('repo1 missing from registry')
@@ -2283,6 +2423,12 @@ describe('repo settings endpoints', () => {
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
+      reviewMaxRounds: 3,
+      forgeKind: 'github',
+      forgeRemote: 'origin',
+      forgeRemotePinned: false,
+      remotes: expect.any(Array),
+      forgeCredentials: expect.any(Object),
     })
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
@@ -2316,6 +2462,17 @@ describe('repo settings endpoints', () => {
     })
   })
 
+  test('PATCH persists the maximum review rounds and updates the workspace config', async () => {
+    const res = await patch('repo1', JSON.stringify({ reviewMaxRounds: 5 }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ reviewMaxRounds: 5 })
+    expect(ws.workspaces.get('repo1')?.config.review.maxRounds).toBe(5)
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    expect(loadConfig(workspace.root).config.review.maxRounds).toBe(5)
+    expect((await patch('repo1', JSON.stringify({ reviewMaxRounds: 0 }))).status).toBe(400)
+  })
+
   test('test-ntfy sends to the saved topic and rejects an unset topic', async () => {
     const originalFetch = globalThis.fetch
     const requests: string[] = []
@@ -2334,6 +2491,72 @@ describe('repo settings endpoints', () => {
       expect(requests).toEqual(['https://ntfy.sh/saved-topic'])
     } finally {
       globalThis.fetch = originalFetch
+    }
+  })
+
+  test('PATCH switches the PR forge and picks shared credentials without exposing them', async () => {
+    const savedState = process.env.XDG_STATE_HOME
+    const tokenVars = ['GH_TOKEN', 'GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN']
+    const savedEnv = Object.fromEntries(tokenVars.map((name) => [name, process.env[name]]))
+    const state = mkdtempSync(join(tmpdir(), 'amagi-forge-state-'))
+    process.env.XDG_STATE_HOME = state
+    for (const name of tokenVars) delete process.env[name]
+    try {
+      const created = await app.request('/api/forge-credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'gitlab', name: 'bot', token: 'glpat-secret' }),
+      })
+      expect(created.status).toBe(200)
+      const bot = (await created.json()) as { id: string }
+      await app.request('/api/forge-credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'gitlab', name: 'other', token: 'glpat-other' }),
+      })
+      const res = await patch(
+        'repo1',
+        JSON.stringify({ forgeKind: 'gitlab', forgeCredentials: { gitlab: bot.id } }),
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body).toMatchObject({
+        forgeKind: 'gitlab',
+        forgeRemote: 'origin',
+        forgeRemotePinned: false,
+        remotes: expect.any(Array),
+        forgeCredentials: {
+          github: { credential: null, source: null },
+          gitlab: { credential: bot.id, source: 'picked' },
+        },
+      })
+      expect(JSON.stringify(body)).not.toContain('glpat-')
+      const listed = await (await app.request('/api/forge-credentials')).text()
+      expect(listed).toContain('bot')
+      expect(listed).not.toContain('glpat-')
+      const workspace = ws.workspaces.get('repo1')
+      if (workspace === null) throw new Error('repo1 missing')
+      expect(workspace.config.forge.kind).toBe('gitlab')
+      expect(loadConfig(workspace.root).config.forge.kind).toBe('gitlab')
+      expect(readFileSync(repoConfigPath(workspace.root), 'utf8')).not.toContain('glpat-')
+      expect(ws.workspaces.get('repo2')?.config.forge.kind).toBe('github')
+
+      expect((await patch('repo1', `{"forgeCredentials":{"github":"${bot.id}"}}`)).status).toBe(400)
+      expect(
+        (await app.request(`/api/forge-credentials/${bot.id}`, { method: 'DELETE' })).status,
+      ).toBe(200)
+      expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
+        forgeCredentials: { gitlab: { source: 'only' } },
+      })
+      expect((await patch('repo1', '{"forgeKind":"bitbucket"}')).status).toBe(400)
+    } finally {
+      for (const [name, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      if (savedState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = savedState
+      rmSync(state, { recursive: true, force: true })
     }
   })
 
@@ -2520,6 +2743,17 @@ describe('fleet endpoints', () => {
     expect((await send('PATCH', `/api/workers/${id}`, { roles: ['triage'] })).status).toBe(400)
   })
 
+  test('worker difficulty levels persist, a null takes every level again', async () => {
+    const { id } = await create({ name: 'Haiku', kind: 'claude', difficulties: ['low'] })
+    expect(loadGlobalConfig().worker[0]?.difficulties).toEqual(['low'])
+    const list = (await (await app.request('/api/workers')).json()) as {
+      difficultyLevels: string[]
+    }
+    expect(list.difficultyLevels).toEqual(['low', 'medium', 'high'])
+    expect((await send('PATCH', `/api/workers/${id}`, { difficulties: null })).status).toBe(200)
+    expect(loadGlobalConfig().worker[0]?.difficulties).toBeUndefined()
+  })
+
   test('an edit persists, a null clears a field, and a live run is left alone', async () => {
     const { id } = await create({ name: 'One', kind: 'claude', model: 'opus', seat: 'mine' })
     fleet = [
@@ -2618,6 +2852,7 @@ describe('fleet endpoints', () => {
         implement: { kind: 'claude', seat: 'old-seat' },
         definitions: { named: { kind: 'codex', seat: 'old-seat' } },
       },
+      review: { harness: { kind: 'codex', seat: 'old-seat' } },
     })
 
     expect(await (await app.request('/api/seat-names')).json()).toEqual({
@@ -2636,6 +2871,7 @@ describe('fleet endpoints', () => {
         implement: { seat: 'new-seat' },
         definitions: { named: { seat: 'new-seat' } },
       },
+      review: { harness: { seat: 'new-seat' } },
     })
     const occupancy = (await (await app.request('/api/seats')).json()) as {
       seats: { seat: string }[]
@@ -2650,6 +2886,7 @@ describe('fleet endpoints', () => {
     expect(config.watchers.mention.seat).toBeUndefined()
     expect(config.harness.implement.seat).toBeUndefined()
     expect(config.harness.definitions.named?.seat).toBeUndefined()
+    expect(config.review.harness?.seat).toBeUndefined()
 
     await send('PUT', '/api/seat-names', { seats: ['unused-seat'] })
     expect(await (await app.request('/api/seat-names')).json()).toEqual({
@@ -3240,61 +3477,6 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
     expect(res.status).toBe(500)
     const body = (await res.json()) as { error: string }
     expect(body.error).toContain('nothing to commit')
-  })
-})
-
-describe('POST /api/repos/:repo/run', () => {
-  test('dispatches the named worker through the runner service', async () => {
-    const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
-    ws = testWorkspaces(['repo1'])
-    app = createApp({
-      workspaces: ws.workspaces,
-      runnerRepo: 'repo1',
-      runner: {
-        status: async () => ({
-          name: 'repo1',
-          available: true,
-          capacity: 1,
-          busySeats: 0,
-          totalSeats: 1,
-          running: [],
-          startedAt: {},
-          resources: {},
-          tasks: {},
-          autoQueue: false,
-        }),
-        start: async (taskId, opts) => {
-          received.push({ taskId, opts })
-          return { ok: true, taskId: 'bd-1' }
-        },
-        stop: async () => ({ ok: true, taskId: 'bd-1' }),
-        retryNow: async () => ({ ok: true, taskId: 'bd-1' }),
-        fleetChanged: () => {},
-        setAutoQueue: () => {},
-      },
-    })
-    const res = await app.request('/api/repos/repo1/run', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{"workerId":"w-1"}',
-    })
-    expect(res.status).toBe(202)
-    expect(await res.json()).toEqual({ repo: 'repo1', taskId: 'bd-1', started: true })
-    expect(received).toEqual([{ taskId: undefined, opts: { workerId: 'w-1' } }])
-  })
-
-  test('404s for an unknown repo', async () => {
-    ws = testWorkspaces(['repo1'])
-    app = createApp({ workspaces: ws.workspaces })
-    expect(
-      (
-        await app.request('/api/repos/nope/run', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-        })
-      ).status,
-    ).toBe(404)
   })
 })
 

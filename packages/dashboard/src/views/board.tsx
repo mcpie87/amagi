@@ -1,6 +1,6 @@
 import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { TaskState } from '@amagi/core/events'
-import type { ProjectedTask } from '@amagi/core/view'
+import { type ProjectedTask, reviewBadge } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { Badge, mergeLabel } from '../badges.tsx'
 import { fmtRetryIn } from '../format.ts'
@@ -21,13 +21,19 @@ type KanbanColumn = {
   states: readonly TaskState[] | null
 }
 
-const KANBAN_COLUMNS: KanbanColumn[] = [
+export const KANBAN_COLUMNS: KanbanColumn[] = [
   { key: 'ready', title: 'Ready', accent: 'bg-zinc-600', states: null },
   {
     key: 'implementing',
     title: 'In progress',
     accent: 'bg-blue-600',
     states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks'],
+  },
+  {
+    key: 'reviewing',
+    title: 'Reviewing',
+    accent: 'bg-violet-600',
+    states: ['reviewing', 'fixing'],
   },
   {
     key: 'retrying',
@@ -47,11 +53,27 @@ const KANBAN_COLUMNS: KanbanColumn[] = [
     accent: 'bg-red-600',
     states: ['pr_merge_conflict'],
   },
+  {
+    key: 'pr_conflict_fixing',
+    title: 'Resolving PR conflicts',
+    accent: 'bg-violet-600',
+    states: ['pr_conflict_fixing'],
+  },
   { key: 'no_pr', title: 'No PR', accent: 'bg-amber-600', states: ['no_pr'] },
   { key: 'committed', title: 'Committed', accent: 'bg-cyan-600', states: ['committed'] },
-  { key: 'pr_open', title: 'PR open', accent: 'bg-sky-600', states: ['pr_open'] },
+  { key: 'pr_open', title: 'PR open', accent: 'bg-sky-600', states: ['pr_open', 'pr_flagged'] },
   { key: 'done', title: 'Done', accent: 'bg-emerald-600', states: ['done'] },
 ]
+
+const REVIEW_TONE = { ok: 'text-emerald-400', warn: 'text-amber-400', active: 'text-violet-400' }
+
+function ReviewLine({ task }: { task: ProjectedTask }) {
+  const badge = reviewBadge(task)
+  if (badge === null) return null
+  return (
+    <span className={`mt-1 block truncate text-xs ${REVIEW_TONE[badge.tone]}`}>{badge.text}</span>
+  )
+}
 
 /** One waiting task from the tracker's FCFS ready queue. */
 function ReadyCard({ task }: { task: TrackerTask }) {
@@ -154,6 +176,7 @@ export function QueueView() {
                               {task.lastError !== null && ` · ${task.lastError}`}
                             </span>
                           )}
+                          <ReviewLine task={task} />
                           {task.prMergeStatus !== null && task.prMergeStatus !== 'unknown' && (
                             <span
                               className={`mt-1 block truncate text-xs ${

@@ -18,6 +18,7 @@ export const TASK_STATES = [
   'pr_open',
   'pr_flagged',
   'pr_merge_conflict',
+  'pr_conflict_fixing',
   'retrying',
   'done',
   'no_pr',
@@ -52,7 +53,8 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
     isTerminal(state) ||
     state === 'pr_open' ||
     state === 'pr_flagged' ||
-    state === 'pr_merge_conflict'
+    state === 'pr_merge_conflict' ||
+    state === 'pr_conflict_fixing'
   )
     return false
   return !hasWorktree
@@ -79,7 +81,8 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
   pr_flagged: ['pr_open', 'pr_merge_conflict'],
-  pr_merge_conflict: ['pr_open'],
+  pr_merge_conflict: ['pr_conflict_fixing', 'pr_open'],
+  pr_conflict_fixing: ['pr_merge_conflict', 'pr_open'],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
@@ -216,6 +219,16 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
+  /** The repo's setupCmd began in a fresh worktree; the task stays claimed until it ends. */
+  z.object({ type: z.literal('setup.started'), command: z.string() }),
+  /** `output` is the tail of stdout and stderr, kept so a slow or failed setup can be diagnosed. */
+  z.object({
+    type: z.literal('setup.finished'),
+    command: z.string(),
+    exitCode: z.number().int(),
+    durationMs: z.number().int().nonnegative(),
+    output: z.string(),
+  }),
   z.object({
     type: z.literal('chat.message'),
     /** The operator's message to the worker; a chat run's answer streams as agent.stream. */
@@ -230,6 +243,8 @@ export const EventBody = z.discriminatedUnion('type', [
     model: z.string().nullable(),
     /** The reasoning effort the harness resolved at spawn, if known. */
     effort: z.string().nullable(),
+    /** Name of the fleet worker whose runner spawned the agent; unset for ad-hoc runs. */
+    worker: z.string().optional(),
     cwd: z.string(),
     resumed: z.boolean(),
     /** Unique watcher invocation key; task runs leave this unset. */
@@ -324,6 +339,8 @@ export const EventBody = z.discriminatedUnion('type', [
     unresolvedIds: z.array(z.string().min(1)),
     findings: z.array(Finding).optional(),
   }),
+  /** The run reached the review gate with no reviewer configured, so it went to commit unreviewed. */
+  z.object({ type: z.literal('review.skipped'), reason: z.string().min(1) }),
   z.object({
     type: z.literal('review.proposal-filed'),
     findingId: z.string().min(1),
