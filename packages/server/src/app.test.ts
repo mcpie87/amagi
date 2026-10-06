@@ -40,6 +40,7 @@ import {
   loadConfig,
   loadGlobalConfig,
   prForgeRouter,
+  RunService,
   repoConfigPath,
   writeGlobalConfig,
 } from '@amagi/core'
@@ -2846,6 +2847,18 @@ describe('fleet endpoints', () => {
       },
       review: { harness: { seat: 'new-seat' } },
     })
+    for (const entry of ws.workspaces.list()) {
+      expect(ws.workspaces.get(entry.key)?.config).toMatchObject({
+        seats: [{ name: 'new-seat', count: 2 }],
+        worker: [{ id, seat: 'new-seat' }],
+        watchers: { mention: { seat: 'new-seat' } },
+        harness: {
+          implement: { seat: 'new-seat' },
+          definitions: { named: { seat: 'new-seat' } },
+        },
+        review: { harness: { seat: 'new-seat' } },
+      })
+    }
     const occupancy = (await (await app.request('/api/seats')).json()) as {
       seats: { seat: string }[]
     }
@@ -2869,6 +2882,69 @@ describe('fleet endpoints', () => {
       seats: { seat: string }[]
     }
     expect(withUnused.seats.map(({ seat }) => seat)).toContain('unused-seat')
+  })
+
+  test('increasing seat capacity wakes cached runners onto the new seats', async () => {
+    await send('PUT', '/api/seat-names', { seats: [{ name: 'codex', count: 1 }] })
+    await create({ name: 'Codex', kind: 'codex', seat: 'codex', count: 2, enabled: true })
+    const seats = new Map([['codex', 'existing/task']])
+    const services = new Map<string, RunService>()
+    let claimCalls = 0
+    for (const entry of ws.workspaces.list()) {
+      const workspace = ws.workspaces.get(entry.key)
+      if (workspace === null) throw new Error('workspace missing')
+      const tracker = new FakeGateTracker()
+      tracker.claim = async () => {
+        claimCalls++
+        return null
+      }
+      workspace.tracker = tracker
+      services.set(
+        entry.key,
+        new RunService({
+          store: workspace.store,
+          tracker,
+          harness: {
+            kind: 'codex',
+            start: () => {
+              throw new Error('no ready tasks')
+            },
+            resume: () => {
+              throw new Error('no ready tasks')
+            },
+            listModels: async () => [],
+            listEfforts: async () => [],
+          },
+          config: workspace.config,
+          repoRoot: workspace.root,
+          repoName: entry.key,
+          seats,
+          autoQueue: true,
+          autoQueueIdleMs: 60_000,
+        }),
+      )
+    }
+    app = createApp({ workspaces: ws.workspaces, runnerForRepo: (repo) => services.get(repo) })
+    try {
+      await Bun.sleep(20)
+      expect(claimCalls).toBe(0)
+      const saved = await send('PUT', '/api/seat-names', { seats: [{ name: 'codex', count: 2 }] })
+      expect(saved.status).toBe(200)
+      const deadline = Date.now() + 1_000
+      while (claimCalls < 2 && Date.now() < deadline) await Bun.sleep(10)
+      expect(claimCalls).toBe(2)
+      for (const service of services.values()) {
+        const status = await service.status()
+        expect(status.capacity).toBe(2)
+        expect(status.fleet?.map(({ seat }) => seat)).toEqual(['codex-1', 'codex-2'])
+      }
+      const occupancy = (await (await app.request('/api/seats')).json()) as {
+        seats: { seat: string }[]
+      }
+      expect(occupancy.seats.map(({ seat }) => seat)).toEqual(['claude', 'codex-1', 'codex-2'])
+    } finally {
+      for (const service of services.values()) service.dispose()
+    }
   })
 
   test('participation flags persist, show on the repo list, and gate the served auto-queue', async () => {
@@ -2970,6 +3046,23 @@ describe('GET /api/seats', () => {
         },
         { seat: 'free-seat', state: 'free', holder: null, waiters: [], eligible: [] },
       ],
+    })
+  })
+
+  test('a run on the original seat stays visible after adding replicas', async () => {
+    writeGlobalConfig({ seats: [{ name: 'claude', count: 2 }] })
+    const occupancy = (await (await app.request('/api/seats')).json()) as {
+      seats: { seat: string; state: string; waiters: { taskId: string }[] }[]
+    }
+    expect(occupancy.seats.map(({ seat }) => seat)).toEqual([
+      'claude',
+      'claude-1',
+      'claude-2',
+      'free-seat',
+    ])
+    expect(occupancy.seats[0]).toMatchObject({
+      state: 'held',
+      waiters: [{ taskId: 'task-b' }],
     })
   })
 })

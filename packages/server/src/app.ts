@@ -16,6 +16,7 @@ import {
   expandWorkers,
   type GitIdentity,
   type LiveRun,
+  loadConfig,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
@@ -340,6 +341,17 @@ export function createApp({
           ? {}
           : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
+      for (const entry of workspaces.list()) {
+        const ws = workspaces.get(entry.key)
+        if (ws === null) continue
+        const { config } = loadConfig(ws.root)
+        ws.config.seats = config.seats
+        ws.config.worker = config.worker
+        ws.config.watchers = config.watchers
+        ws.config.harness = config.harness
+        ws.config.review = config.review
+        runnerFor(entry.key)?.fleetChanged()
+      }
       return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
 
@@ -366,17 +378,18 @@ export function createApp({
           configured.add(count === 1 ? name : `${name}-${slot}`)
       }
       const configuredNames = new Set(global.seats.map(({ name }) => name))
-      for (const worker of global.worker) {
-        const seat = workerSeat(worker)
-        if (!configuredNames.has(seat)) configured.add(seat)
+      for (const worker of expandWorkers(global.worker, global.seats)) {
+        configured.add(workerSeat(worker))
       }
       for (const entry of workspaces.list()) {
         const ws = workspaces.get(entry.key)
         if (ws === null) continue
-        configured.add(ws.config.harness.implement.seat ?? ws.config.harness.implement.kind)
+        const implementSeat = ws.config.harness.implement.seat ?? ws.config.harness.implement.kind
+        if (!configuredNames.has(implementSeat)) configured.add(implementSeat)
         for (const watcher of ['mention', 'prConflict'] as const) {
           const harness = watcherHarnessConfig(ws.config, watcher)
-          configured.add(harness.seat ?? harness.kind)
+          const seat = harness.seat ?? harness.kind
+          if (!configuredNames.has(seat)) configured.add(seat)
         }
       }
 
@@ -525,13 +538,15 @@ export function createApp({
       }
 
       return c.json({
-        seats: [...configured].sort().map((seat) => ({
-          seat,
-          state: holders.has(seat) ? 'held' : 'free',
-          holder: holders.get(seat) ?? null,
-          waiters: waiters.get(seat) ?? [],
-          eligible: eligible.get(seat) ?? [],
-        })),
+        seats: [...new Set([...configured, ...holders.keys(), ...waiters.keys()])]
+          .sort()
+          .map((seat) => ({
+            seat,
+            state: holders.has(seat) ? 'held' : 'free',
+            holder: holders.get(seat) ?? null,
+            waiters: waiters.get(seat) ?? [],
+            eligible: eligible.get(seat) ?? [],
+          })),
       })
     })
 
