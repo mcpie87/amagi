@@ -14,6 +14,7 @@ import { withHeadReflogBypassCheck } from './git-bypass.ts'
 import { cacheHome } from './paths.ts'
 import { type PrBodyMeta, taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
+import { withPrWriteLock } from './pr-write-lock.ts'
 import {
   classifyMentionPrompt,
   classifyMentionSystemPrompt,
@@ -672,7 +673,9 @@ export async function respondToMention(opts: RespondToMentionOptions): Promise<M
   const kind = await classifyMention(opts, p)
   switch (kind) {
     case 'fix-pr':
-      await respondToFix(opts, run, p)
+      await withPrWriteLock(opts.root, opts.config.forge.remote, opts.pr.headRefName, () =>
+        respondToFix(opts, run, p),
+      )
       return 'fix-pr'
     case 'explain':
       await respondToExplain(opts, run, p)

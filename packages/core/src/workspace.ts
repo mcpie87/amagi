@@ -85,7 +85,9 @@ export class Workspaces {
     if (workspace === null) return null
     const entry = this.list().find((candidate) => candidate.key === key)
     if (entry === undefined) return null
-    workspace.config.watchers = loadConfig(entry.path).config.watchers
+    const { config } = loadConfig(entry.path)
+    workspace.config.watchers = config.watchers
+    workspace.config.loop.autoRebase = config.loop.autoRebase
     return workspace
   }
 

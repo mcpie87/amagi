@@ -10,6 +10,7 @@ import {
   RepositorySettingsCard,
   useForgeCredentials,
 } from './repository-settings.tsx'
+import { send, Toggle } from './settings-ui.tsx'
 
 const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -71,6 +72,9 @@ export function SettingsView() {
   const [activeTab, setActiveTab] = useState<'general' | 'workers' | 'repositories'>('general')
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [autoRebase, setAutoRebase] = useState(false)
+  const [rebaseBusy, setRebaseBusy] = useState(false)
+  const [rebaseResult, setRebaseResult] = useState<string | null>(null)
   const [staleMaxParallel, setStaleMaxParallel] = useState(false)
   const [reviewMaxRounds, setReviewMaxRounds] = useState(3)
   const [reviewBusy, setReviewBusy] = useState(false)
@@ -96,12 +100,14 @@ export function SettingsView() {
     setLoaded(false)
     setNtfyError(null)
     setNtfySaved(false)
+    setRebaseResult(null)
     setDesktopResult(null)
     setNtfyTestResult(null)
     fetch(`${apiBase}/api/repos/${selected}/settings`)
       .then((res) =>
         res.ok
           ? (res.json() as Promise<{
+              autoRebase: boolean
               staleMaxParallel: boolean
               ntfyTopic: string | null
               ntfyServer: string
@@ -112,6 +118,7 @@ export function SettingsView() {
       )
       .then((body) => {
         if (!active) return
+        setAutoRebase(body?.autoRebase ?? false)
         setLoaded(true)
         setStaleMaxParallel(body?.staleMaxParallel ?? false)
         setNtfyTopic(body?.ntfyTopic ?? '')
@@ -267,6 +274,38 @@ export function SettingsView() {
         hidden={activeTab !== 'general'}
       >
         <Appearance />
+        {selected !== null && loaded && (
+          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+            <h2 className="mb-1 text-sm text-fg-muted">Automatic rebasing</h2>
+            <p className="mb-3 text-sm text-fg-faint">
+              Rebase idle Amagi PR branches onto the latest base for {selected}, across all forges.
+              Setup and checks must pass before pushing. Conflicts or failed checks stop the rebase.
+              Requires repository watchers to be enabled.
+            </p>
+            <Toggle
+              on={autoRebase}
+              label="Automatically rebase PR branches"
+              title="Persisted for this repository, disabled by default."
+              disabled={rebaseBusy}
+              onClick={() => {
+                const enabled = !autoRebase
+                setRebaseBusy(true)
+                setRebaseResult(null)
+                void send('PATCH', `/api/repos/${selected}/settings`, { autoRebase: enabled })
+                  .then((error) => {
+                    if (error === null) setAutoRebase(enabled)
+                    setRebaseResult(error ?? 'Saved')
+                  })
+                  .finally(() => setRebaseBusy(false))
+              }}
+            />
+            {rebaseResult !== null && (
+              <p role="status" className="mt-2 text-sm text-fg-faint">
+                {rebaseResult}
+              </p>
+            )}
+          </div>
+        )}
         {selected !== null && loaded && (
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">Review</h2>

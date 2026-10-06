@@ -135,7 +135,8 @@ function startRepoPollers(
       const forge = ws.forge
       const prForge = ws.prForge
       const mentionEnabled = forge !== null && ws.config.watchers.mention.enabled
-      const conflictEnabled = forge !== null && ws.config.watchers.prConflict.enabled
+      const conflictEnabled =
+        forge !== null && (ws.config.watchers.prConflict.enabled || ws.config.loop.autoRebase)
       const stallEnabled = ws.config.watchers.stall.enabled
       const epicCloseEnabled =
         ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled

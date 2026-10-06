@@ -70,6 +70,7 @@ export function createFleetRoutes({
       const ws = resolveWorkspace(workspaces, repo)
       return c.json({
         autoQueue: ws.config.loop.autoQueue,
+        autoRebase: ws.config.loop.autoRebase,
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
@@ -92,6 +93,7 @@ export function createFleetRoutes({
         const ws = resolveWorkspace(workspaces, repo)
         const {
           autoQueue,
+          autoRebase,
           ntfyTopic,
           ntfyServer,
           desktopFailureAlerts,
@@ -124,7 +126,14 @@ export function createFleetRoutes({
                   remote: forgeRemote ?? null,
                 },
               }),
-          ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
+          ...(autoQueue === undefined && autoRebase === undefined
+            ? {}
+            : {
+                loop: {
+                  ...(autoQueue === undefined ? {} : { autoQueue }),
+                  ...(autoRebase === undefined ? {} : { autoRebase }),
+                },
+              }),
           ...(ntfyTopic === undefined &&
           ntfyServer === undefined &&
           desktopFailureAlerts === undefined
@@ -138,6 +147,7 @@ export function createFleetRoutes({
               }),
           ...(reviewMaxRounds === undefined ? {} : { review: { maxRounds: reviewMaxRounds } }),
         })
+        if (autoRebase !== undefined) ws.config.loop.autoRebase = autoRebase
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
         if (desktopFailureAlerts !== undefined) {
@@ -164,6 +174,7 @@ export function createFleetRoutes({
         }
         return c.json({
           autoQueue: ws.config.loop.autoQueue,
+          autoRebase: ws.config.loop.autoRebase,
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,

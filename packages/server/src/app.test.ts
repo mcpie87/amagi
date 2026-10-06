@@ -2292,6 +2292,7 @@ describe('repo settings endpoints', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       autoQueue: false,
+      autoRebase: false,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2305,11 +2306,33 @@ describe('repo settings endpoints', () => {
     })
   })
 
+  test('PATCH persists automatic rebasing without overwriting auto-queue', async () => {
+    expect(
+      (await patch('repo1', JSON.stringify({ autoQueue: true, autoRebase: true }))).status,
+    ).toBe(200)
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    expect(workspace.config.loop.autoRebase).toBe(true)
+    expect(loadConfig(workspace.root).config.loop).toMatchObject({
+      autoQueue: true,
+      autoRebase: true,
+    })
+    expect((await patch('repo1', JSON.stringify({ autoRebase: false }))).status).toBe(200)
+    expect(loadConfig(workspace.root).config.loop).toMatchObject({
+      autoQueue: true,
+      autoRebase: false,
+    })
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
+      autoRebase: false,
+    })
+  })
+
   test('PATCH persists auto-queue and updates the workspace config', async () => {
     const res = await patch('repo1', '{"autoQueue":true}')
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       autoQueue: true,
+      autoRebase: false,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2322,6 +2345,7 @@ describe('repo settings endpoints', () => {
     })
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
+      autoRebase: false,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2413,6 +2437,7 @@ describe('repo settings endpoints', () => {
     expect(applied).toEqual([true])
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
+      autoRebase: false,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2446,6 +2471,7 @@ describe('repo settings endpoints', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       autoQueue: false,
+      autoRebase: false,
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,

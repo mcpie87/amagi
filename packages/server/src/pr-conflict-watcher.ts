@@ -12,6 +12,7 @@ import {
   forgeToken,
   gitTokenConfig,
   isConflicting,
+  loadLiveRuns,
   type MergeTreeVerdict,
   type makeHarness,
   mergeableToVerdict,
@@ -23,9 +24,11 @@ import {
   type PrForge,
   type PrInfo,
   type PrPriority,
+  pidAlive,
   prForgeRouter,
   type ResolveConflictResult,
   readConflictWatch,
+  rebasePr,
   recordMergeTreeObservation,
   resolveConflict,
   resolvePrPriorities,
@@ -92,10 +95,12 @@ export function startPrConflictWatcher({
   makeHarnessFn,
 }: PrConflictWatcherOptions): PrConflictWatcher {
   /** Cumulative across ticks, so the dashboard counters keep rising. */
+  let stopped = false
   let scanned = 0
   let conflicting = 0
   let resolved = 0
   /** Last seen PR head SHAs, so the per-tick fetch is skipped when none moved. */
+  const rebaseAttempts = new Map<string, string>()
   const lastPullHeads = new Map<string, Record<string, string>>()
   let runs = 0
   let failures = 0
@@ -329,7 +334,9 @@ export function startPrConflictWatcher({
     const statePath = conflictWatchPath(repoName)
     const state = readConflictWatch(statePath)
     const nextState: ConflictWatchState = {}
-    const conflicts = prs.filter((p) => isConflicting(p, forgeConfig.repo.baseBranch))
+    const conflicts = forgeConfig.watchers.prConflict.enabled
+      ? prs.filter((p) => isConflicting(p, forgeConfig.repo.baseBranch))
+      : []
     if (conflicts.length > 0) logEvent(`found ${conflicts.length} conflicting PR(s)`)
     const baseOid = conflicts.length > 0 ? await baseHeadOid(run, forge) : ''
     let resolvedNow = 0
@@ -349,6 +356,79 @@ export function startPrConflictWatcher({
         result: message,
         level,
       })
+    }
+    if (forgeConfig.loop.autoRebase) {
+      const candidates = prs.filter((pr) => {
+        const id = taskIdFromPrBranch(pr.headRefName)
+        const task = id === null ? null : store.task(id)
+        return (
+          task?.state === 'pr_open' &&
+          task.prUrl === pr.url &&
+          pr.baseRefName === forgeConfig.repo.baseBranch &&
+          pr.headRefOid !== null &&
+          !isConflicting(pr, forgeConfig.repo.baseBranch) &&
+          !queuedNow.has(stateKey(forge, pr.number))
+        )
+      })
+      if (candidates.length > 0) {
+        const { remote, kind } = forgeConfig.forge
+        const auth = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
+        await execOk(
+          run,
+          [
+            'git',
+            'fetch',
+            remote,
+            `+refs/heads/${forgeConfig.repo.baseBranch}:refs/remotes/${remote}/${forgeConfig.repo.baseBranch}`,
+          ],
+          {
+            cwd: root,
+            env: auth,
+          },
+        )
+        const base = (
+          await execOk(
+            run,
+            ['git', 'rev-parse', `refs/remotes/${remote}/${forgeConfig.repo.baseBranch}`],
+            { cwd: root },
+          )
+        ).trim()
+        for (const pr of candidates) {
+          const id = taskIdFromPrBranch(pr.headRefName)
+          const idle = () =>
+            !stopped &&
+            config.loop.autoRebase &&
+            id !== null &&
+            store.task(id)?.state === 'pr_open' &&
+            store.task(id)?.prUrl === pr.url &&
+            !store.activeChatAgents().some((agent) => agent.taskId === id) &&
+            !loadLiveRuns().some(
+              (live) => live.repoKey === repo && live.taskId === id && pidAlive(live.pid),
+            )
+          const key = stateKey(forge, pr.number)
+          const pair = `${pr.headRefOid}:${base}`
+          if (!idle() || rebaseAttempts.get(key) === pair) continue
+          rebaseAttempts.set(key, pair)
+          try {
+            const result = await rebasePr({
+              root,
+              pr,
+              baseOid: base,
+              config: forgeConfig,
+              idle,
+              exec: run,
+            })
+            if (result === 'busy') rebaseAttempts.delete(key)
+            if (result === 'rebased') {
+              recordPrLog(pr, 'rebased onto latest base; checks passed and branch pushed')
+            }
+          } catch (err) {
+            const message = `automatic rebase failed: ${errMsg(err)}`
+            recordPrLog(pr, message, 'error')
+            warnings.push(`#${pr.number}: ${message}`)
+          }
+        }
+      }
     }
     const resolutionPrs = [...conflicts]
     for (const pr of prs) {
@@ -632,6 +712,7 @@ export function startPrConflictWatcher({
       poller.trigger()
     },
     stop() {
+      stopped = true
       poller.stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },

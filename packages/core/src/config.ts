@@ -288,6 +288,7 @@ export const Config = z
          * Defaults off; the JSONL is the evidence for trusting either side.
          */
         mergeTreeCheck: z.boolean().default(false),
+        autoRebase: z.boolean().default(false),
         /**
          * How often the stall watcher scans in-progress tasks for a worker that
          * stopped heartbeating. Defaults to 5 minutes; cheap, since it only

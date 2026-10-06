@@ -127,6 +127,7 @@ export type ChatBody = z.infer<typeof ChatBody>
 export const SettingsBody = z
   .object({
     autoQueue: z.boolean().optional(),
+    autoRebase: z.boolean().optional(),
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),

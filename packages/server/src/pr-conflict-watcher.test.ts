@@ -231,6 +231,68 @@ const stateFile = (): Record<string, { headOid: string; baseOid?: string }> =>
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
+test('automatic rebasing is opt-in, skips active tasks and retries only after a head or base move', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', { type: 'pr.created', url: pr().url, number: 7 })
+  const driver = new FakePr()
+  driver.diff = 'diff --git a/x b/x\n'
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  const cfg = config()
+  let base = 'base1'
+  let rebaseCount = 0
+  const git = fakeExec()
+  const exec: Exec = async (cmd, opts) => {
+    if (cmd[1] === 'rev-parse' && cmd[2] === 'refs/remotes/origin/main') {
+      return { exitCode: 0, stdout: base, stderr: '' }
+    }
+    if (cmd[1] === 'rev-parse' && cmd[2] === `refs/remotes/origin/${pr().headRefName}`) {
+      return { exitCode: 0, stdout: driver.prs[0]?.headRefOid ?? '', stderr: '' }
+    }
+    if (cmd[1] === 'merge-base') return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd[1] === 'rebase' && cmd[2] !== '--abort') {
+      rebaseCount++
+      return { exitCode: 1, stdout: '', stderr: 'replay conflict' }
+    }
+    return git(cmd, opts)
+  }
+  start(
+    exec,
+    () =>
+      fakeHarness(() => {
+        throw new Error('unexpected agent')
+      }),
+    {
+      driver,
+      store,
+      config: cfg,
+    },
+  )
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(0)
+  cfg.loop.autoRebase = true
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(1)
+  expect(
+    store
+      .events({ limit: 1000 })
+      .some(
+        (action) =>
+          action.type === 'watcher.action' && action.result.includes('automatic rebase failed'),
+      ),
+  ).toBe(true)
+  base = 'base2'
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(2)
+  store.append('am-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
+  base = 'base3'
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(2)
+})
+
 test('lists open PRs, resolves only conflicting ones, and records counters', async () => {
   const store = new Store(openDatabase(':memory:'))
   let started = 0
