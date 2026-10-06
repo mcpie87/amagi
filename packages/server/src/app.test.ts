@@ -346,6 +346,58 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
     expect(body.prs.map((p) => p.number)).toEqual([1, 4])
   })
 
+  test.each([false, true])(
+    'includes attached GitLab PRs when selected forge fails: %s',
+    async (failSelected) => {
+      const workspace = ws.workspaces.get('repo1')
+      if (workspace === null) throw new Error('workspace missing')
+      const gitlab = new FakeMergePrDriver()
+      const ready: PrInfo = {
+        number: 7,
+        title: 'Ready',
+        body: '',
+        url: 'https://github.com/owner/repo/pull/7',
+        headRefName: 'amagi/am-1-ready',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        headRefOid: null,
+        createdAt: '',
+        updatedAt: '',
+        labels: [],
+      }
+      forge.open = [ready]
+      const url = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+      gitlab.open = [{ ...ready, url }]
+      workspace.prForge = (prUrl) =>
+        prUrl === null
+          ? { key: '', config: workspace.config, driver: forge }
+          : { key: 'gitlab:gitlab', config: workspace.config, driver: gitlab }
+      for (const id of ['am-1', 'am-2']) {
+        workspace.store.append(id, { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+        for (const to of [
+          'worktree_ready',
+          'implementing',
+          'checks',
+          'committed',
+          'pr_open',
+          'pr_merge_conflict',
+        ] as const) {
+          workspace.store.append(id, { type: 'task.state', from: null, to })
+        }
+        workspace.store.append(id, { type: 'pr.created', url, number: 7 })
+      }
+      if (failSelected)
+        forge.listOpenPrs = async () => {
+          throw new Error('selected forge unavailable')
+        }
+      const res = await app.request('/api/repos/repo1/mergeable-prs')
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { prs: PrInfo[] }
+      expect(body.prs.map((p) => p.url)).toEqual(failSelected ? [url] : [ready.url, url])
+    },
+  )
+
   test('404s for an unknown repo', async () => {
     expect((await app.request('/api/repos/nope/mergeable-prs')).status).toBe(404)
   })

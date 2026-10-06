@@ -605,10 +605,12 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
 
   const text = (value: unknown): string => (typeof value === 'string' ? value : '')
 
-  /** Maps GitLab's has_conflicts + merge_status onto the shared shape. */
+  /** Maps GitLab's conflict and mergeability fields onto the shared shape. */
   function mergeFields(item: Record<string, unknown>): PrMergeStatus {
-    if (item.has_conflicts === true) return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
-    if (item.merge_status === 'can_be_merged') {
+    if (item.has_conflicts === true || item.detailed_merge_status === 'conflict') {
+      return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+    }
+    if (item.detailed_merge_status === 'mergeable' || item.merge_status === 'can_be_merged') {
       return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
     }
     return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
@@ -633,7 +635,12 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
   async function openMrs(cwd: string, sourceBranch?: string): Promise<PrInfo[]> {
     const filter =
       sourceBranch === undefined ? '' : `&source_branch=${encodeURIComponent(sourceBranch)}`
-    return (await pages(cwd, `projects/:id/merge_requests?state=opened${filter}`)).map(toPrInfo)
+    return (
+      await pages(
+        cwd,
+        `projects/:id/merge_requests?state=opened&with_merge_status_recheck=true${filter}`,
+      )
+    ).map(toPrInfo)
   }
 
   async function postComment(cwd: string, number: number, body: string): Promise<void> {

@@ -109,7 +109,7 @@ export function startPrConflictWatcher({
     activity = { ...activity, log }
   }
   /** Round-robin cursor into the UNKNOWN PRs, so forced resolution cycles across them. */
-  let unknownCursor = 0
+  const unknownCursors = new Map<string, number>()
   /** Conflict-watch state keys queued for a manual resolution run. */
   const queuedPrs = new Set<string>()
   const counters = (): WorkerActivity['counters'] => [
@@ -140,9 +140,7 @@ export function startPrConflictWatcher({
    * Observation-only audit: for every open PR, compare the local
    * `git merge-tree` verdict against the forge's `mergeable` and append one row
    * per PR to the observation JSONL. Dispatch never reads these verdicts.
-   * UNKNOWN is a third bucket, never a divergence; up to two UNKNOWN PRs per
-   * tick are forced through the driver so the mergeability job resolves
-   * round-robin and coverage accrues without a tenfold call increase.
+   * UNKNOWN is a third bucket, never a divergence.
    */
   async function observeMergeTree(
     prs: PrInfo[],
@@ -158,25 +156,6 @@ export function startPrConflictWatcher({
         cwd: root,
         env: tokenCfg,
       })
-    }
-    const forced = new Map<number, string>()
-    const unknown = prs.filter((p) => p.mergeable === 'UNKNOWN')
-    if (unknown.length > 0) {
-      const start = unknownCursor % unknown.length
-      for (let i = 0; i < 2 && i < unknown.length; i++) {
-        const p = unknown[(start + i) % unknown.length]
-        if (p === undefined) continue
-        const status = await forge.driver.getMergeStatus(root, p.number)
-        forced.set(
-          p.number,
-          status === 'conflicted'
-            ? 'CONFLICTING'
-            : status === 'mergeable'
-              ? 'MERGEABLE'
-              : 'UNKNOWN',
-        )
-      }
-      unknownCursor += 2
     }
     const logPath = mergeTreeLogPath(repoName)
     for (const p of prs) {
@@ -205,7 +184,7 @@ export function startPrConflictWatcher({
         console.warn(`merge-tree #${p.number}: ${errMsg(err)}`)
         continue
       }
-      const github = mergeableToVerdict(forced.get(p.number) ?? p.mergeable)
+      const github = mergeableToVerdict(p.mergeable)
       recordMergeTreeObservation(logPath, {
         pr: p.number,
         headOid: p.headRefOid ?? '',
@@ -314,7 +293,30 @@ export function startPrConflictWatcher({
       ...(exec === undefined ? {} : { exec }),
     })
     lastPullHeads.set(forge.key, heads.heads)
-    const prs = await forgeDriver.listOpenPrs(root)
+    const prs = (await forgeDriver.listOpenPrs(root)).map((pr) => ({ ...pr }))
+    const unknown = prs.filter((p) => p.mergeable === 'UNKNOWN')
+    if (unknown.length > 0) {
+      const cursor = unknownCursors.get(forge.key) ?? 0
+      const start = cursor % unknown.length
+      for (let i = 0; i < 2 && i < unknown.length; i++) {
+        const p = unknown[(start + i) % unknown.length]
+        if (p === undefined) continue
+        try {
+          const status = await forgeDriver.getMergeStatus(root, p.number)
+          p.mergeable =
+            status === 'conflicted'
+              ? 'CONFLICTING'
+              : status === 'mergeable'
+                ? 'MERGEABLE'
+                : 'UNKNOWN'
+          p.mergeStateStatus =
+            status === 'conflicted' ? 'DIRTY' : status === 'mergeable' ? 'CLEAN' : 'UNKNOWN'
+        } catch (err) {
+          logEvent(`PR #${p.number}: merge status refresh failed: ${errMsg(err)}`, 'error')
+        }
+      }
+      unknownCursors.set(forge.key, cursor + 2)
+    }
     if (forgeConfig.loop.mergeTreeCheck) {
       // Observation never blocks dispatch: a failed audit is logged and skipped.
       try {
@@ -556,12 +558,27 @@ export function startPrConflictWatcher({
       let conflictingNow = 0
       let resolvedNow = 0
       const warnings: string[] = []
+      const scanErrors: string[] = []
       for (const forge of forgesToScan()) {
-        const result = await scanForge(forge, run, runId, queuedNow)
-        scannedNow += result.scanned
-        conflictingNow += result.conflicting
-        resolvedNow += result.resolvedNow
-        warnings.push(...result.warnings)
+        try {
+          const result = await scanForge(forge, run, runId, queuedNow)
+          scannedNow += result.scanned
+          conflictingNow += result.conflicting
+          resolvedNow += result.resolvedNow
+          warnings.push(...result.warnings)
+        } catch (err) {
+          const message = `${forge.config.forge.kind}:${forge.config.forge.remote}: ${errMsg(err)}`
+          scanErrors.push(message)
+          logEvent(`forge scan failed: ${message}`, 'error')
+        }
+      }
+      if (scanErrors.length > 0) {
+        failures++
+        next.ok = false
+        next.error = scanErrors.join('; ')
+        next.failures = failures
+        next.successes = runs - failures
+        warnings.push(...scanErrors)
       }
       scanned = scannedNow
       conflicting = conflictingNow

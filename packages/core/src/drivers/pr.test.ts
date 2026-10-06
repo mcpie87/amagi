@@ -764,8 +764,8 @@ describe('gitlabPr', () => {
     expect(prs[0]).toEqual(prInfo({ number: 1, url: mr().web_url }))
     expect(prs[100]).toMatchObject({ number: 101, mergeable: 'CONFLICTING' })
     expect(calls.map((c) => c[2])).toEqual([
-      'projects/:id/merge_requests?state=opened&per_page=100&page=1',
-      'projects/:id/merge_requests?state=opened&per_page=100&page=2',
+      'projects/:id/merge_requests?state=opened&with_merge_status_recheck=true&per_page=100&page=1',
+      'projects/:id/merge_requests?state=opened&with_merge_status_recheck=true&per_page=100&page=2',
     ])
   })
 
@@ -779,6 +779,17 @@ describe('gitlabPr', () => {
     reply.has_conflicts = true
     expect(await driver.getPr('/repo', 7)).toBe('closed')
     expect(await driver.getMergeStatus('/repo', 7)).toBe('conflicted')
+  })
+
+  test('reads modern GitLab merge status when legacy fields are absent', async () => {
+    const reply = { detailed_merge_status: 'conflict', has_conflicts: false }
+    const { exec } = fake((c) => (c[0] === 'glab' ? ok(JSON.stringify(reply)) : undefined))
+    const driver = makePrDriver('gitlab', 'gitlab', exec)
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('conflicted')
+    reply.detailed_merge_status = 'mergeable'
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('mergeable')
+    reply.detailed_merge_status = 'checking'
+    expect(await driver.getMergeStatus('/repo', 7)).toBe('unknown')
   })
 
   test('collects notes as comments, skipping system notes', async () => {

@@ -162,7 +162,10 @@ describe('remote pinning', () => {
     git('remote', 'add', 'origin', 'git@github.com:me/app.git')
     git('remote', 'add', 'gitlab', 'git@gitlab.example.com:group/app.git')
     expect(ghEnv(repo, 'origin').GH_REPO).toBe('github.com/me/app')
-    expect(glabEnv(repo, 'gitlab').GLAB_REMOTE_ALIAS).toBe('gitlab')
+    expect(glabEnv(repo, 'gitlab')).toMatchObject({
+      REMOTE_ALIAS: 'gitlab',
+      GLAB_REMOTE_ALIAS: 'gitlab',
+    })
     expect(teaRepoArgs(repo, 'gitlab')).toEqual(['--login', 'amagi', '--repo', 'group/app'])
     expect(teaRepoArgs(repo, 'missing')).toEqual([])
   })

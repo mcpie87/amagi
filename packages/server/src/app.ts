@@ -21,6 +21,9 @@ import {
   loadWatcherSeats,
   makeHarness,
   type Notifier,
+  PR_TASK_STATES,
+  type PrForge,
+  type PrInfo,
   pidAlive,
   type Question,
   type RegistryEntry,
@@ -688,9 +691,25 @@ export function createApp({
       if (ws.forge === null) {
         return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
       }
-      // The driver reports the forge's own flags (gh wording on both drivers),
-      // so one filter is all it takes to find the PRs that can merge now.
-      const open = await ws.forge.listOpenPrs(ws.root)
+      const forges = new Map<string, PrForge>()
+      if (ws.prForge !== null) {
+        const selected = ws.prForge(null)
+        forges.set(selected.key, selected)
+        for (const task of ws.store.tasks({ states: PR_TASK_STATES })) {
+          const attached = ws.prForge(task.prUrl)
+          forges.set(attached.key, attached)
+        }
+      }
+      const drivers = forges.size === 0 ? [ws.forge] : [...forges.values()].map((f) => f.driver)
+      const results = await Promise.allSettled(drivers.map((driver) => driver.listOpenPrs(ws.root)))
+      const open: PrInfo[] = []
+      for (const result of results) {
+        if (result.status === 'fulfilled') open.push(...result.value)
+        else console.warn(`mergeable PR refresh: ${errMsg(result.reason)}`)
+      }
+      if (results.every((result) => result.status === 'rejected')) {
+        throw new Error('mergeable PR refresh failed on every forge')
+      }
       return c.json({
         prs: open.filter((p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN'),
       })

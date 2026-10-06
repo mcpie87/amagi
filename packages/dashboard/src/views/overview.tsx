@@ -285,7 +285,7 @@ function MergeablePrsPanel() {
       ) : (
         <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {prs.map((p) => (
-            <li key={p.number} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+            <li key={p.url} className="flex items-center gap-3 px-4 py-2.5 text-sm">
               <a
                 href={p.url}
                 target="_blank"

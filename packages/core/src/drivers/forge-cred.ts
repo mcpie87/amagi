@@ -389,7 +389,7 @@ export function glabConfigDir(): string {
 /**
  * Env for a glab subprocess: the repo's GitLab token and an Amagi-owned
  * GLAB_CONFIG_DIR, set even without a token so glab fails closed.
- * GLAB_REMOTE_ALIAS pins glab to `remote` instead of its own remote-name
+ * REMOTE_ALIAS and GLAB_REMOTE_ALIAS pin glab to `remote` instead of its remote-name
  * preference. A credential URL sends API calls there instead of to the
  * remote's host.
  */
@@ -399,6 +399,8 @@ export function glabEnv(cwd: string, remote: string): Record<string, string> {
   const env: Record<string, string> = {
     GLAB_CONFIG_DIR: dir,
     GLAB_NO_PROMPT: 'true',
+    // glab 1.x reads REMOTE_ALIAS; 2.x prefers GLAB_REMOTE_ALIAS.
+    REMOTE_ALIAS: remote,
     GLAB_REMOTE_ALIAS: remote,
   }
   const token = forgeToken('gitlab', cwd)

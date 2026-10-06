@@ -53,7 +53,7 @@ function fakeExec(baseOid: () => string = () => 'base1'): Exec {
       return { exitCode: 0, stdout: `${baseOid()}\trefs/heads/main\n`, stderr: '' }
     }
     if (cmd.includes('MERGE_HEAD')) return { exitCode: 0, stdout: 'merge-head', stderr: '' }
-    if (cmd.includes('origin/main^{commit}'))
+    if (cmd.some((arg) => arg.endsWith('/main^{commit}')))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) {
@@ -466,6 +466,85 @@ test('a task PR left on the previously configured forge is scanned and resolved 
   expect(Object.keys(stateFile())).toEqual(['github:origin#7'])
 })
 
+test('GitLab task conflicts are resolved even when the selected forge scan fails', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of [
+    'worktree_ready',
+    'implementing',
+    'checks',
+    'committed',
+    'pr_open',
+    'pr_merge_conflict',
+  ] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  const url = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  store.append('am-1', { type: 'pr.created', url, number: 7 })
+  const primary = new FakePr()
+  primary.listOpenPrs = async () => {
+    throw new Error('selected forge unavailable')
+  }
+  const gitlab = new FakePr()
+  gitlab.prs = [pr({ url, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })]
+  gitlab.mergeStatus = 'conflicted'
+  const cfg = config()
+  const gitlabConfig = {
+    ...cfg,
+    forge: { ...cfg.forge, kind: 'gitlab' as const, remote: 'gitlab' },
+  }
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver: primary,
+    store,
+    config: cfg,
+    forgeFor: (prUrl) =>
+      prUrl === null
+        ? { key: PRIMARY_FORGE, config: cfg, driver: primary }
+        : { key: 'gitlab:gitlab', config: gitlabConfig, driver: gitlab },
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+  expect(gitlab.mergeStatusCalls).toContain(7)
+  expect(counter(w, 'scanned')).toBe(1)
+  expect(counter(w, 'conflicting')).toBe(1)
+  expect(w.activity().ok).toBe(false)
+  expect(w.activity().error).toContain('selected forge unavailable')
+  expect(Object.keys(stateFile())).toEqual(['gitlab:gitlab#7'])
+})
+
+test('UNKNOWN status refresh cycles independently on every task forge', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  const url = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  store.append('am-1', { type: 'pr.created', url, number: 7 })
+  const primary = new FakePr()
+  const gitlab = new FakePr()
+  for (const driver of [primary, gitlab]) {
+    driver.prs = [7, 8, 9, 10].map((number) =>
+      pr({ number, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }),
+    )
+    driver.mergeStatus = 'unknown'
+  }
+  const cfg = config()
+  const w = start(fakeExec(), () => fakeHarness(() => {}), {
+    driver: primary,
+    store,
+    forgeFor: (prUrl) =>
+      prUrl === null
+        ? { key: PRIMARY_FORGE, config: cfg, driver: primary }
+        : { key: 'gitlab:gitlab', config: cfg, driver: gitlab },
+  })
+  await Bun.sleep(60)
+  w.stop()
+  for (const driver of [primary, gitlab]) {
+    expect([...new Set(driver.mergeStatusCalls)].sort((a, b) => a - b)).toEqual([7, 8, 9, 10])
+  }
+})
+
 test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
   const driver = new FakePr()
   driver.prs = [pr()]
@@ -679,7 +758,7 @@ test('records merge-tree observations and divergences when the flag is on', asyn
         ? { exitCode: 1, stdout: '', stderr: '' }
         : { exitCode: 0, stdout: '', stderr: '' }
     }
-    if (cmd.includes('origin/main^{commit}'))
+    if (cmd.some((arg) => arg.endsWith('/main^{commit}')))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
@@ -707,7 +786,7 @@ test('records merge-tree observations and divergences when the flag is on', asyn
 test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', async () => {
   const exec: Exec = async (cmd) => {
     if (cmd.includes('merge-tree')) return { exitCode: 0, stdout: '', stderr: '' }
-    if (cmd.includes('origin/main^{commit}'))
+    if (cmd.some((arg) => arg.endsWith('/main^{commit}')))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
