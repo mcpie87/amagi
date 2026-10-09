@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
@@ -895,6 +895,47 @@ describe('Runner.runOnce', () => {
     expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
     expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
+  })
+
+  test('review fix replies go through a git-excluded worktree dir that never reaches the commit', async () => {
+    let worktree = ''
+    let replyPath = ''
+    const fixer = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          worktree = cwd
+          replyPath =
+            prompt.match(/Write only a JSON array of FindingReply objects to ([^\s]+)/)?.[1] ?? ''
+          writeFileSync(
+            replyPath,
+            JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]),
+          )
+          writeFileSync(join(cwd, '.amagi-tmp', 'stray.txt'), 'left behind\n')
+        },
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      reviewConfig(),
+      new FakePr(),
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding]), '[]']),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(replyPath).toBe(join(worktree, '.amagi-tmp', basename(replyPath)))
+    expect(existsSync(join(worktree, '.amagi-tmp'))).toBe(false)
+    const committed = await execOk(exec, ['git', 'ls-tree', '-r', '--name-only', 'HEAD'], {
+      cwd: worktree,
+    })
+    expect(committed).toContain('hello.txt')
+    expect(committed).not.toContain('.amagi-tmp')
+    const excludes = readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8').split('\n')
+    expect(excludes.filter((line) => line === '/.amagi-tmp/')).toHaveLength(1)
   })
 
   test('retries a transient failure during a review fix and completes the round', async () => {
