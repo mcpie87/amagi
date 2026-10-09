@@ -125,7 +125,8 @@ describe('ClaudeHarness argv', () => {
 
   test('always asks for the streaming json dialect', () => {
     const argv = new ClaudeHarness().argv(base, null)
-    expect(argv.slice(0, 4)).toEqual(['claude', '-p', 'do the thing'].concat(['--output-format']))
+    expect(argv.slice(0, 3)).toEqual(['claude', '-p', '--output-format'])
+    expect(argv).not.toContain(base.prompt)
     expect(argv).toContain('stream-json')
     expect(argv).toContain('--verbose')
   })
@@ -192,6 +193,25 @@ describe('ClaudeHarness argv', () => {
 })
 
 describe('ClaudeHarness process', () => {
+  test('pipes prompts larger than the argv limit through stdin', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'claude-stdin-'))
+    const bin = join(dir, 'claude')
+    const captured = join(dir, 'prompt')
+    const prompt = 'x'.repeat(140_000)
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ncat > '${captured}'\nprintf '%s\\n' '{"type":"result","subtype":"success","result":"ok"}'\n`,
+    )
+    chmodSync(bin, 0o755)
+    try {
+      const proc = new ClaudeHarness({ bin }).start({ cwd: dir, prompt })
+      await proc.done
+      expect(readFileSync(captured, 'utf8')).toBe(prompt)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a run that produces no json still resolves with the exit code', async () => {
     const harness = new ClaudeHarness({ bin: 'false' })
     const proc = harness.start({ cwd: process.cwd(), prompt: 'x' })

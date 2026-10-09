@@ -212,7 +212,7 @@ export class ClaudeHarness implements Harness {
   }
 
   argv(opts: AgentStartOptions, sessionId: string | null): string[] {
-    const argv = [this.bin, '-p', opts.prompt, '--output-format', 'stream-json', '--verbose']
+    const argv = [this.bin, '-p', '--output-format', 'stream-json', '--verbose']
 
     if (sessionId !== null) argv.push('--resume', sessionId)
     if (opts.model) argv.push('--model', opts.model)
@@ -254,6 +254,7 @@ export class ClaudeHarness implements Harness {
       env: opts.effort ? { CLAUDE_EFFORT: opts.effort } : {},
       model: () => translator.model,
       effort: opts.effort ?? this.defaultEffort,
+      stdin: opts.prompt,
     })
   }
 }
