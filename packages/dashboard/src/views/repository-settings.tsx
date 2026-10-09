@@ -531,10 +531,18 @@ function NewTokenForm({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <form
+      aria-label={`New ${label} token`}
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!busy && name.trim() !== '' && token.trim() !== '') void submit()
+      }}
+      className="flex flex-wrap items-center gap-2"
+    >
       <input
         type="text"
         aria-label={`${label} token name`}
+        disabled={busy}
         value={name}
         onChange={(event) => setName(event.currentTarget.value)}
         placeholder="Name"
@@ -544,6 +552,7 @@ function NewTokenForm({
         type="password"
         autoComplete="off"
         aria-label={`${label} token`}
+        disabled={busy}
         value={token}
         onChange={(event) => setToken(event.currentTarget.value)}
         placeholder="Paste token"
@@ -553,6 +562,7 @@ function NewTokenForm({
         <input
           type="url"
           aria-label={`${label} server URL`}
+          disabled={busy}
           value={url}
           onChange={(event) => setUrl(event.currentTarget.value)}
           placeholder={`${urlPlaceholder} (empty: from origin)`}
@@ -560,20 +570,23 @@ function NewTokenForm({
         />
       )}
       <button
-        type="button"
+        type="submit"
         disabled={busy || name.trim() === '' || token.trim() === ''}
-        onClick={() => void submit()}
         className={secondary}
       >
-        Add
+        {busy ? 'Saving…' : 'Save token'}
       </button>
       {onCancel !== undefined && (
         <button type="button" disabled={busy} onClick={onCancel} className={secondary}>
           Cancel
         </button>
       )}
-      {error !== null && <span className="text-sm text-red-ink">{error}</span>}
-    </div>
+      {error !== null && (
+        <span role="alert" className="text-sm text-red-ink">
+          {error}
+        </span>
+      )}
+    </form>
   )
 }
 
@@ -665,6 +678,8 @@ export function ForgeCredentials({
   credentials: ForgeCredential[]
   onChanged: () => void
 }) {
+  const [adding, setAdding] = useState<ForgeKind | null>(null)
+
   return (
     <div className={`${card} mt-4`}>
       <h2 className="mb-1 text-sm text-fg-muted">Forge tokens</h2>
@@ -674,7 +689,20 @@ export function ForgeCredentials({
       </p>
       {FORGES.map(({ kind, label }) => (
         <div key={kind} className="mt-3">
-          <h3 className="text-sm text-fg-strong">{label}</h3>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm text-fg-strong">{label}</h3>
+            <button
+              type="button"
+              aria-label={`Add ${label} token`}
+              aria-expanded={adding === kind}
+              aria-controls={`new-forge-token-${kind}`}
+              disabled={adding !== null}
+              onClick={() => setAdding(kind)}
+              className={secondary}
+            >
+              Add
+            </button>
+          </div>
           <ul className="divide-y divide-line">
             {credentials
               .filter((credential) => credential.kind === kind)
@@ -682,7 +710,18 @@ export function ForgeCredentials({
                 <CredentialRow key={credential.id} credential={credential} onChanged={onChanged} />
               ))}
           </ul>
-          <NewTokenForm kind={kind} onCreated={onChanged} />
+          {adding === kind && (
+            <div id={`new-forge-token-${kind}`} className="mt-3">
+              <NewTokenForm
+                kind={kind}
+                onCancel={() => setAdding(null)}
+                onCreated={() => {
+                  setAdding(null)
+                  onChanged()
+                }}
+              />
+            </div>
+          )}
         </div>
       ))}
     </div>
