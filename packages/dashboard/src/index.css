@@ -136,36 +136,52 @@
 }
 
 .diff-code .hljs-comment,
-.diff-code .hljs-quote {
+.diff-code .hljs-quote,
+.summary-markdown .hljs-comment,
+.summary-markdown .hljs-quote {
   color: var(--color-fg-faint);
 }
 
 .diff-code .hljs-keyword,
 .diff-code .hljs-selector-tag,
-.diff-code .hljs-literal {
+.diff-code .hljs-literal,
+.summary-markdown .hljs-keyword,
+.summary-markdown .hljs-selector-tag,
+.summary-markdown .hljs-literal {
   color: var(--color-violet-ink);
 }
 
 .diff-code .hljs-string,
 .diff-code .hljs-regexp,
-.diff-code .hljs-addition {
+.diff-code .hljs-addition,
+.summary-markdown .hljs-string,
+.summary-markdown .hljs-regexp,
+.summary-markdown .hljs-addition {
   color: var(--color-emerald-ink);
 }
 
 .diff-code .hljs-number,
 .diff-code .hljs-built_in,
-.diff-code .hljs-attr {
+.diff-code .hljs-attr,
+.summary-markdown .hljs-number,
+.summary-markdown .hljs-built_in,
+.summary-markdown .hljs-attr {
   color: var(--color-amber-ink);
 }
 
 .diff-code .hljs-title,
 .diff-code .hljs-title.function_,
-.diff-code .hljs-title.class_ {
+.diff-code .hljs-title.class_,
+.summary-markdown .hljs-title,
+.summary-markdown .hljs-title.function_,
+.summary-markdown .hljs-title.class_ {
   color: var(--color-sky-ink);
 }
 
 .diff-code .hljs-meta,
-.diff-code .hljs-attribute {
+.diff-code .hljs-attribute,
+.summary-markdown .hljs-meta,
+.summary-markdown .hljs-attribute {
   color: var(--color-cyan-ink);
 }
 

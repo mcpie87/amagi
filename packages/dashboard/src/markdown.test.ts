@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { isSafeUrl, renderMarkdown } from './markdown.tsx'
+import { isSafeUrl, loadLanguage, renderMarkdown } from './markdown.tsx'
 
 describe('renderMarkdown', () => {
   test('drops javascript:, data: and other non-allowlisted link targets, keeping the text', () => {
@@ -48,6 +48,23 @@ describe('renderMarkdown', () => {
 
   test('still escapes raw HTML', () => {
     expect(renderMarkdown('<img src=x onerror=alert(1)>')).not.toContain('<img')
+  })
+
+  test('highlights fenced code once its language has loaded, and escapes its content', async () => {
+    await loadLanguage('ts')
+    const html = renderMarkdown('```ts\nconst a = "<b>"\n```')
+    expect(html).toContain('<span class="hljs-keyword">const</span>')
+    expect(html).toContain('&lt;b&gt;')
+    expect(html).not.toContain('<b>')
+  })
+
+  test('leaves fenced code in an unknown language unhighlighted', () => {
+    expect(renderMarkdown('```nope\nx < y\n```')).toBe(
+      '<pre><code class="language-nope">x &lt; y\n</code></pre>\n',
+    )
+    expect(renderMarkdown('```constructor\nx\n```')).toBe(
+      '<pre><code class="language-constructor">x\n</code></pre>\n',
+    )
   })
 })
 
