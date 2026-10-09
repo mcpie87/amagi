@@ -16,6 +16,8 @@ export type ServeOptions = {
   host: string
   port: number
   notify?: Notifier[] | undefined
+  /** Called once per distinct reason a repo's runner cannot start, not on every retry. */
+  onRunnerUnavailable?: (repo: string, detail: string) => void
   gatePollIntervalMs?: number
   prPollIntervalMs?: number
   mentionWatchIntervalMs?: number
@@ -309,6 +311,7 @@ export function serve({
   host,
   port,
   notify,
+  onRunnerUnavailable,
   gatePollIntervalMs,
   prPollIntervalMs,
   mentionWatchIntervalMs,
@@ -324,6 +327,7 @@ export function serve({
 }: ServeOptions) {
   const runners = new Map<string, RunServiceApi>()
   const runnerAutoQueue = new Map<string, boolean>()
+  const runnerErrors = new Map<string, string>()
   const syncRunners = () => {
     const entries = workspaces.list()
     const keys = new Set(entries.map((entry) => entry.key))
@@ -332,6 +336,7 @@ export function serve({
       service.dispose?.()
       runners.delete(key)
       runnerAutoQueue.delete(key)
+      runnerErrors.delete(key)
     }
     for (const entry of entries) {
       if (runners.has(entry.key)) {
@@ -352,9 +357,15 @@ export function serve({
           const service = runnerFactory(workspace)
           runners.set(entry.key, service)
           runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
+          runnerErrors.delete(entry.key)
         }
       } catch (err) {
-        console.warn(`runner for ${entry.key} unavailable: ${errMsg(err)}`)
+        const detail = errMsg(err)
+        if (runnerErrors.get(entry.key) !== detail) {
+          runnerErrors.set(entry.key, detail)
+          console.warn(`runner for ${entry.key} unavailable: ${detail}`)
+          onRunnerUnavailable?.(entry.key, detail)
+        }
       }
     }
   }

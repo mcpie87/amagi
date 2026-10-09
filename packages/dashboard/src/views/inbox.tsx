@@ -3,7 +3,7 @@ import { type ProjectedTask, tasksNeedingAttention } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
-import { useDashboard } from '../store.tsx'
+import { repoBlockers, useDashboard } from '../store.tsx'
 import { EmptyState } from '../ui.tsx'
 import type { Issue } from './issue-model.ts'
 import { RunList } from './overview.tsx'
@@ -13,7 +13,8 @@ import { AnswerBox, CloseButtons } from './task-actions.tsx'
 const humanIssuesByRepo = new Map<string, Issue[]>()
 
 export function InboxView() {
-  const { state, selected } = useDashboard()
+  const { state, selected, selectRepo, repos } = useDashboard()
+  const blocked = (repos ?? []).filter((repo) => repoBlockers(repo).length > 0)
   const attention = tasksNeedingAttention(state)
   const [humanIssues, setHumanIssues] = useState<Issue[]>(
     () => (selected === null ? undefined : humanIssuesByRepo.get(selected)) ?? [],
@@ -63,7 +64,8 @@ export function InboxView() {
       <div className="mb-5">
         <h1 className="text-xl font-semibold">Inbox</h1>
         <p className="text-sm text-fg-faint">
-          {questions.length > 0 ||
+          {blocked.length > 0 ||
+          questions.length > 0 ||
           attention.length > 0 ||
           humanIssues.length > 0 ||
           humanIssuesLoading ||
@@ -72,6 +74,39 @@ export function InboxView() {
             : 'Nothing needs you right now.'}
         </p>
       </div>
+
+      {blocked.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-ink">
+            Blocked repositories ({blocked.length})
+          </h2>
+          <ul className="space-y-2">
+            {blocked.map((repo) => (
+              <li
+                key={repo.key}
+                className="rounded-lg border border-red-edge bg-red-soft px-4 py-3"
+              >
+                <p className="font-medium">{repo.name} will not run work</p>
+                <ul className="mt-1 space-y-0.5 text-sm text-fg-muted">
+                  {repoBlockers(repo).map((check) => (
+                    <li key={check.name}>
+                      {check.name}
+                      {check.detail ? `: ${check.detail}` : ''}
+                    </li>
+                  ))}
+                </ul>
+                <Link
+                  to="/settings"
+                  onClick={() => selectRepo(repo.key)}
+                  className="mt-1 inline-block text-sm underline"
+                >
+                  Open settings
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {questions.length > 0 && (
         <div className="mb-6">
@@ -162,7 +197,8 @@ export function InboxView() {
           </div>
         )}
 
-      {questions.length === 0 &&
+      {blocked.length === 0 &&
+        questions.length === 0 &&
         attention.length === 0 &&
         humanIssues.length === 0 &&
         !humanIssuesLoading &&

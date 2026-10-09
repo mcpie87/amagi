@@ -1,3 +1,4 @@
+import { tasksNeedingAttention } from '@amagi/core/view'
 import { Link, Outlet, useNavigate } from '@tanstack/react-router'
 import {
   type FormEvent,
@@ -7,7 +8,15 @@ import {
   useRef,
   useState,
 } from 'react'
-import { type RepoInfo, RunnerProvider, useConnection, useDashboard, useRunner } from './store.tsx'
+import logo from './assets/logo.png'
+import {
+  type RepoInfo,
+  RunnerProvider,
+  repoBlockers,
+  useConnection,
+  useDashboard,
+  useRunner,
+} from './store.tsx'
 import { Icon, type IconName } from './ui.tsx'
 
 function ConnectionStatus() {
@@ -200,7 +209,44 @@ function CommandPalette() {
 }
 
 function readyOk(repo: RepoInfo): boolean {
-  return repo.ready.every((d) => d.ok)
+  return repoBlockers(repo).length === 0
+}
+
+/**
+ * What needs the operator right now: every blocked repo, plus the selected
+ * repo's open questions and stuck tasks (only that repo's stream is loaded).
+ */
+function useAttentionCount(): number {
+  const { repos, state } = useDashboard()
+  const blocked = (repos ?? []).filter((repo) => !readyOk(repo)).length
+  const questions = Object.values(state.questions).filter((q) => q.resolvedAt === null).length
+  return blocked + questions + tasksNeedingAttention(state).length
+}
+
+function BlockedBanner() {
+  const { repos, selected } = useDashboard()
+  const repo = repos?.find((r) => r.key === selected)
+  if (repo === undefined) return null
+  const blockers = repoBlockers(repo)
+  if (blockers.length === 0) return null
+  return (
+    <div role="alert" className="border-b border-red-edge bg-red-soft px-4 py-3 sm:px-6">
+      <div className="mx-auto max-w-6xl text-sm text-red-ink">
+        <p className="font-semibold">{repo.name} is blocked and will not run work.</p>
+        <ul className="mt-1 space-y-0.5">
+          {blockers.map((check) => (
+            <li key={check.name}>
+              {check.name}
+              {check.detail ? `: ${check.detail}` : ''}
+            </li>
+          ))}
+        </ul>
+        <Link to="/settings" className="mt-1 inline-block underline">
+          Open settings
+        </Link>
+      </div>
+    </div>
+  )
 }
 
 function AddRepoForm() {
@@ -292,18 +338,16 @@ const NAV_ITEMS: {
 
 function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => void }) {
   const { repos, selected, selectRepo } = useDashboard()
+  const attention = useAttentionCount()
   const [adding, setAdding] = useState(false)
 
   return (
     <aside className={`sidebar ${navOpen ? 'is-open' : ''}`}>
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex items-center gap-2 px-5 py-4">
-          <Link to="/" onClick={onNavigate} className="text-lg font-semibold tracking-tight">
-            amagi
+        <div className="flex items-center justify-center px-5 py-4">
+          <Link to="/" onClick={onNavigate}>
+            <img src={logo} alt="amagi" className="h-8 w-auto" />
           </Link>
-          <span className="rounded bg-raised px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted">
-            control room
-          </span>
         </div>
         <nav className="flex-1 overflow-y-auto px-3">
           {NAV_ITEMS.map((item) => (
@@ -316,6 +360,15 @@ function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => 
             >
               <Icon name={item.icon} size={17} />
               {item.label}
+              {item.to === '/inbox' && attention > 0 && (
+                <span
+                  role="status"
+                  aria-label={`${attention} items need attention`}
+                  className="ml-auto rounded-full bg-red-ink px-1.5 text-xs font-semibold text-surface"
+                >
+                  {attention}
+                </span>
+              )}
             </Link>
           ))}
         </nav>
@@ -363,6 +416,7 @@ function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => 
 
 export function RootLayout() {
   const { repos } = useDashboard()
+  const attention = useAttentionCount()
   const [idleNotice, setIdleNotice] = useState<{ title: string; body: string } | null>(null)
   const [desktopFailure, setDesktopFailure] = useState<{ title: string; body: string } | null>(null)
   const [navOpen, setNavOpen] = useState(false)
@@ -393,6 +447,11 @@ export function RootLayout() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [navOpen, closeNav])
+
+  useEffect(() => {
+    document.title =
+      attention > 0 ? `(${attention}) amagi · Agent workspace` : 'amagi · Agent workspace'
+  }, [attention])
 
   useEffect(() => {
     const onIdleNotification = (event: Event) => {
@@ -470,6 +529,7 @@ export function RootLayout() {
               </div>
             </div>
           </header>
+          <BlockedBanner />
           <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
             {repos === null ? (
               <p className="text-fg-faint">loading repositories...</p>
