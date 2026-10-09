@@ -75,8 +75,8 @@ function RunnerIndicator() {
 
 /**
  * The search workspace command palette: a native dialog listing tasks and
- * pages matching the query. Escape closes it natively; Enter or a click jumps
- * to the highlighted entry.
+ * pages matching the query. Escape, a backdrop click or the input losing focus
+ * closes it; Enter or a click jumps to the highlighted entry.
  */
 function CommandPalette() {
   const { state, selected } = useDashboard()
@@ -186,6 +186,10 @@ function CommandPalette() {
         onClick={(event) => {
           if (event.target === dialogRef.current) close()
         }}
+        onMouseDown={(event) => {
+          // Keeps focus in the input so clicks inside do not trip its blur close.
+          if (event.target !== inputRef.current) event.preventDefault()
+        }}
         className="command-palette"
       >
         <div className="command-input-row">
@@ -198,6 +202,12 @@ function CommandPalette() {
               setIndex(0)
             }}
             onKeyDown={onKeyDown}
+            onBlur={(event) => {
+              // Vimium-style extensions swallow Escape in an input and only blur it.
+              const target = event.relatedTarget
+              const inside = target instanceof Node && dialogRef.current?.contains(target)
+              if (!inside && document.hasFocus()) close()
+            }}
             placeholder={selected === null ? 'search pages…' : 'search tasks and pages…'}
             className="command-input"
           />
