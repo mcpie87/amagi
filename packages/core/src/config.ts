@@ -166,6 +166,7 @@ export function resolveWorkerHarness(
 
 /** Resolves the assigned reviewer profile, when an enabled reviewer is configured. */
 export function reviewerWorkerConfig(config: Config): Config['harness']['implement'] | undefined {
+  if (!config.review.enabled) return undefined
   const worker = expandWorkers(config.worker, config.seats).find(
     (candidate) => candidate.enabled && candidate.roles.includes('review'),
   )
@@ -428,6 +429,7 @@ export const Config = z
     if (
       config.review.enabled &&
       config.review.harness === undefined &&
+      reviewerWorkerConfig(config) === undefined &&
       defaultReviewerKind(config.harness.implement.kind) === undefined
     ) {
       ctx.addIssue({
@@ -472,16 +474,10 @@ export function reviewerHarnessConfig(config: Config): Config['harness']['implem
   return HarnessConfig.parse({ kind })
 }
 
-/**
- * The reviewer for a run, or undefined when review is off. An enabled fleet
- * worker with the review role turns review on and wins over [review.harness];
- * without one, review.enabled decides.
- */
+/** The repository must enable review; an enabled fleet reviewer wins over [review.harness]. */
 export function activeReviewerConfig(config: Config): Config['harness']['implement'] | undefined {
-  return (
-    reviewerWorkerConfig(config) ??
-    (config.review.enabled ? reviewerHarnessConfig(config) : undefined)
-  )
+  if (!config.review.enabled) return undefined
+  return reviewerWorkerConfig(config) ?? reviewerHarnessConfig(config)
 }
 
 export type AgentWatcherKind = 'mention' | 'prConflict'

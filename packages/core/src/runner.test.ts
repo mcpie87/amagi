@@ -930,26 +930,30 @@ describe('Runner.runOnce', () => {
     expect(states(TASK.id)).toContain('fixing')
   })
 
-  test('an enabled fleet reviewer turns review on without review.enabled', async () => {
-    const reviewer = new ReviewHarness(['[]'])
-    await makeRunner(
-      new FakeTracker([TASK]),
-      new FakeHarness([writesAFile]),
-      config({
-        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
-        worker: [
-          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
-        ],
-      }),
-      new FakePr(),
-      exec,
-      undefined,
-      reviewer,
-    ).runOnce()
+  test.each([false, true])(
+    'fleet reviewer runs only when repository review is enabled: %s',
+    async (enabled) => {
+      const reviewer = new ReviewHarness(['[]'])
+      await makeRunner(
+        new FakeTracker([TASK]),
+        new FakeHarness([writesAFile]),
+        config({
+          harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+          review: { enabled },
+          worker: [
+            { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
+          ],
+        }),
+        new FakePr(),
+        exec,
+        undefined,
+        reviewer,
+      ).runOnce()
 
-    expect(reviewer.calls).toHaveLength(1)
-    expect(types(TASK.id)).toContain('review.finished')
-  })
+      expect(reviewer.calls).toHaveLength(enabled ? 1 : 0)
+      expect(types(TASK.id)).toContain(enabled ? 'review.finished' : 'review.skipped')
+    },
+  )
 
   test('skips review with no fleet reviewer and review.enabled unset', async () => {
     const reviewer = new ReviewHarness(['[]'])

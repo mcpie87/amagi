@@ -1220,7 +1220,7 @@ export class Runner {
     } else {
       this.deps.store.append(task.id, {
         type: 'review.skipped',
-        reason: 'no enabled fleet worker has the Review role and review.enabled is off',
+        reason: 'review.enabled is off for this repository',
       })
     }
 

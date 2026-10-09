@@ -23,3 +23,7 @@ autoQueue = true
 [notify]
 ntfyServer = "https://ntfy.sh"
 ntfyTopic = "amagi-chise"
+
+[review]
+enabled = true
+maxRounds = 3

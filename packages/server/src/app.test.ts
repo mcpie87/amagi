@@ -2367,6 +2367,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
@@ -2407,6 +2408,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
       forgeRemote: 'origin',
@@ -2420,6 +2422,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
@@ -2512,6 +2515,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
@@ -2546,6 +2550,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
       forgeRemote: 'origin',
@@ -2583,6 +2588,47 @@ describe('repo settings endpoints', () => {
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
       desktopFailureAlerts: true,
     })
+  })
+
+  test('PATCH persists review enablement independently for each repository', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    workspace.config.review.harness = {
+      kind: 'codex',
+      permissions: 'workspace-write',
+      extraArgs: [],
+    }
+    writeConfig(workspace.root, { review: { harness: { kind: 'codex' } } })
+    const res = await patch('repo1', JSON.stringify({ reviewEnabled: true, reviewMaxRounds: 5 }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ reviewEnabled: true, reviewMaxRounds: 5 })
+    expect(workspace.config.review.enabled).toBe(true)
+    expect(loadConfig(workspace.root).config.review).toMatchObject({ enabled: true, maxRounds: 5 })
+    expect(ws.workspaces.get('repo2')?.config.review.enabled).toBe(false)
+    expect((await patch('repo1', JSON.stringify({ reviewEnabled: false }))).status).toBe(200)
+    expect(loadConfig(workspace.root).config.review).toMatchObject({ enabled: false, maxRounds: 5 })
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
+      reviewEnabled: false,
+    })
+    expect((await patch('repo1', JSON.stringify({ reviewEnabled: 'true' }))).status).toBe(400)
+  })
+
+  test('PATCH rejects enabling review when no reviewer is available', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    workspace.config.worker = []
+    workspace.config.review.harness = undefined
+    const previousPath = process.env.PATH
+    try {
+      process.env.PATH = workspace.root
+      const res = await patch('repo1', JSON.stringify({ reviewEnabled: true }))
+      expect(res.status).toBe(400)
+      expect(workspace.config.review.enabled).toBe(false)
+      expect(loadConfig(workspace.root).config.review.enabled).toBe(false)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
   })
 
   test('PATCH persists the maximum review rounds and updates the workspace config', async () => {

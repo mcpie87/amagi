@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  activeReviewerConfig,
   Config,
   expandWorkers,
   hasPinnedForgeRemote,
@@ -231,6 +232,28 @@ describe('loadConfig', () => {
     expect(reviewerHarnessConfig(config)).toMatchObject({ kind: 'codex' })
     writeRepo('[review]\nenabled = true\n')
     expect(loadRepoConfig().config.review.enabled).toBe(true)
+  })
+
+  test('repository review switch gates fleet reviewers and overrides global defaults', () => {
+    process.env.PATH = home
+    writeGlobal(`
+[review]
+enabled = true
+[[worker]]
+id = "reviewer"
+name = "Reviewer"
+kind = "codex"
+model = "review-model"
+roles = ["review"]
+enabled = true
+`)
+    writeRepo('[review]\nenabled = false\n')
+    expect(activeReviewerConfig(loadRepoConfig().config)).toBeUndefined()
+    writeRepo('[review]\nenabled = true\n')
+    expect(activeReviewerConfig(loadRepoConfig().config)).toMatchObject({
+      kind: 'codex',
+      model: 'review-model',
+    })
   })
 
   test('enabled review requires an explicit or installed reviewer harness', () => {

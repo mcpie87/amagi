@@ -104,6 +104,104 @@ export function RepositoryParticipation({
   )
 }
 
+function RepositoryReview({ repo }: { repo: Pick<Repo, 'key'> }) {
+  const [reviewEnabled, setReviewEnabled] = useState(false)
+  const [reviewMaxRounds, setReviewMaxRounds] = useState(3)
+  const [loaded, setLoaded] = useState(false)
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewResult, setReviewResult] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    fetch(`${apiBase}/api/repos/${repo.key}/settings`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as { reviewEnabled: boolean; reviewMaxRounds: number }
+      })
+      .then((body) => {
+        if (!active) return
+        setReviewEnabled(body.reviewEnabled)
+        setReviewMaxRounds(body.reviewMaxRounds)
+        setLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (active) setReviewResult(err instanceof Error ? err.message : String(err))
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const save = async (enabled: boolean) => {
+    setReviewBusy(true)
+    setReviewResult(null)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/settings`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reviewEnabled: enabled, reviewMaxRounds }),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const body = (await response.json()) as { reviewEnabled: boolean; reviewMaxRounds: number }
+      setReviewEnabled(body.reviewEnabled)
+      setReviewMaxRounds(body.reviewMaxRounds)
+      setReviewResult('Saved')
+    } catch (err) {
+      setReviewResult(err instanceof Error ? err.message : String(err))
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
+  return (
+    <div className={card}>
+      <h2 className="mb-1 text-sm text-fg-muted">Review</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Enable automated review for this repository. An enabled fleet worker with the Review role
+        supplies the reviewer. Changes apply to new tasks.
+      </p>
+      {!loaded && reviewResult === null && <p className="text-sm text-fg-faint">Loading…</p>}
+      {loaded && (
+        <>
+          <Toggle
+            on={reviewEnabled}
+            label="Review tasks"
+            title="Enable automated review for this repository, disabled by default."
+            disabled={reviewBusy || !Number.isInteger(reviewMaxRounds) || reviewMaxRounds < 1}
+            onClick={() => void save(!reviewEnabled)}
+          />
+          <label htmlFor="review-max-rounds" className="mb-1 mt-3 block text-sm text-fg-muted">
+            Maximum review rounds
+          </label>
+          <input
+            id="review-max-rounds"
+            type="number"
+            min={1}
+            step={1}
+            value={reviewMaxRounds}
+            disabled={reviewBusy}
+            onChange={(event) => setReviewMaxRounds(Number(event.currentTarget.value))}
+            className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+          />
+          <button
+            type="button"
+            disabled={reviewBusy || !Number.isInteger(reviewMaxRounds) || reviewMaxRounds < 1}
+            onClick={() => void save(reviewEnabled)}
+            className={`${secondary} mt-3`}
+          >
+            {reviewBusy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      )}
+      {reviewResult !== null && (
+        <p role="status" className="mt-2 text-sm text-fg-faint">
+          {reviewResult}
+        </p>
+      )}
+    </div>
+  )
+}
+
 type CheckCommands = { format: string; lint: string; test: string }
 
 function RepositoryChecks({ repo, onChanged }: { repo: Pick<Repo, 'key'>; onChanged: () => void }) {
@@ -799,6 +897,7 @@ export function RepositorySettingsCard({
   return (
     <div className="mt-6 space-y-4">
       <RepositoryParticipation repo={repo} onChanged={onChanged} />
+      <RepositoryReview key={repo.key} repo={repo} />
       <RepositoryChecks key={repo.key} repo={repo} onChanged={onChanged} />
       <RepositoryForge
         key={repo.key}

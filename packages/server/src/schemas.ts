@@ -149,6 +149,7 @@ export const SettingsBody = z
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),
+    reviewEnabled: z.boolean().optional(),
     reviewMaxRounds: z.number().int().min(1).optional(),
     forgeKind: ForgeKind.optional(),
     /**
