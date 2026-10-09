@@ -1963,12 +1963,13 @@ export class Runner {
       opts.model ?? implement.model ?? null,
       opts.seat ?? implement.seat,
     )
+    const retryState =
+      phase === 'fix review' ? 'fixing' : role === 'review' ? 'reviewing' : 'implementing'
 
     for (let attempt = 1; ; attempt++) {
       const waitingOnUsageHold = readUsageHold(holdKey) !== null
       const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
-      if (waitingOnUsageHold && !this.isCancelled(taskId))
-        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+      if (waitingOnUsageHold && !this.isCancelled(taskId)) this.transition(taskId, retryState)
       let run: Awaited<ReturnType<Runner['runAgent']>>
       try {
         run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
@@ -2016,7 +2017,7 @@ export class Runner {
         this.peakContext = 0
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
-        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+        if (retryState !== 'fixing') this.transition(taskId, retryState)
         releaseProbe?.()
         continue
       }
@@ -2086,7 +2087,7 @@ export class Runner {
         await Bun.sleep(Math.min(100, deadline - Date.now()))
       }
       if (lease?.isLost) throw new LeaseLostError(taskId)
-      if (role !== 'review') this.transition(taskId, 'implementing')
+      if (role !== 'review') this.transition(taskId, retryState)
     }
   }
 
