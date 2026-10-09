@@ -136,6 +136,24 @@ export const ChatBody = z.object({
 })
 export type ChatBody = z.infer<typeof ChatBody>
 
+export const ChatPageBody = z.object({
+  conversationId: z.string().uuid(),
+  harness: HarnessKind,
+  model: z.string().trim().min(1).optional(),
+  effort: z.string().trim().min(1).optional(),
+  message: z.string().trim().min(1).max(4000),
+  history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().max(50_000),
+      }),
+    )
+    .max(50)
+    .refine((history) => history.reduce((size, item) => size + item.content.length, 0) <= 200_000),
+})
+export type ChatPageBody = z.infer<typeof ChatPageBody>
+
 export const ChecksBody = z.strictObject({
   format: z.string().trim().min(1),
   lint: z.string().trim().min(1),

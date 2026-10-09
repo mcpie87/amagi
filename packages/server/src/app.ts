@@ -48,6 +48,7 @@ import type { Harness } from '@amagi/core/drivers/types'
 import type { Context } from 'hono'
 import { Hono } from 'hono'
 import { routePath } from 'hono/route'
+import { createChatRoutes } from './chat-routes.ts'
 import { createFleetRoutes } from './fleet-routes.ts'
 import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
@@ -296,6 +297,14 @@ export function createApp({
     })
 
     .route('/', createIssueRoutes(workspaces))
+
+    .route(
+      '/',
+      createChatRoutes({
+        workspaces,
+        harnessFor: (ws, config) => chatHarnessFor?.(ws) ?? makeHarness(config),
+      }),
+    )
 
     .get('/api/diagnostics/requests', valid('query', TimingQuery), (c) =>
       c.json(timings.snapshot(c.req.valid('query'))),

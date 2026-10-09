@@ -701,3 +701,36 @@ textarea::placeholder {
   margin: 10px 0;
   border-color: var(--color-line);
 }
+/* Chat replies read as prose, so they run larger than the 13px summaries. */
+.chat-reply .summary-markdown {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--color-fg-strong);
+}
+.chat-reply .summary-markdown p,
+.chat-reply .summary-markdown ul,
+.chat-reply .summary-markdown ol {
+  margin: 12px 0;
+}
+.chat-reply .summary-markdown pre {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.chat-reply .summary-markdown h1 {
+  font-size: 20px;
+}
+.chat-reply .summary-markdown h2 {
+  font-size: 18px;
+}
+.chat-reply .summary-markdown h3 {
+  font-size: 16px;
+}
+.chat-reply .summary-markdown h1,
+.chat-reply .summary-markdown h2,
+.chat-reply .summary-markdown h3 {
+  margin: 20px 0 8px;
+}

@@ -98,6 +98,7 @@ function CommandPalette() {
           .slice(0, 8)
   const pages = [
     { to: '/', label: 'Overview' },
+    { to: '/chat', label: 'Chat' },
     { to: '/issues', label: 'Tasks' },
     { to: '/inbox', label: 'Inbox' },
     { to: '/activity', label: 'Activity' },
@@ -310,6 +311,7 @@ function AddRepoForm() {
 const NAV_ITEMS: {
   to:
     | '/'
+    | '/chat'
     | '/board'
     | '/issues'
     | '/inbox'
@@ -324,6 +326,7 @@ const NAV_ITEMS: {
   icon: IconName
 }[] = [
   { to: '/', label: 'Overview', icon: 'overview' },
+  { to: '/chat', label: 'Chat', icon: 'chat' },
   { to: '/board', label: 'Board', icon: 'board' },
   { to: '/issues', label: 'Tasks', icon: 'tasks' },
   { to: '/inbox', label: 'Inbox', icon: 'inbox' },

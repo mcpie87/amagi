@@ -3,6 +3,7 @@ import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
 import { QueueView } from './views/board.tsx'
+import { ChatView } from './views/chat.tsx'
 import { DiagnosticsView } from './views/diagnostics.tsx'
 import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
@@ -18,6 +19,11 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   component: OverviewView,
+})
+const chatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/chat',
+  component: ChatView,
 })
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -88,6 +94,7 @@ export const gitCommitRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  chatRoute,
   boardRoute,
   issuesRoute,
   inboxRoute,
