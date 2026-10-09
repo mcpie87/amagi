@@ -67,7 +67,7 @@ export function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
             key={m.id}
             className={`max-w-[85%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm ${
               m.role === 'user'
-                ? 'ml-auto bg-sky-600 text-on-solid'
+                ? 'ml-auto bg-accent text-on-solid'
                 : 'mr-auto border border-line-strong bg-raised text-fg'
             }`}
           >
@@ -93,7 +93,7 @@ export function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
           <button
             type="submit"
             disabled={responding || text.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             Send
           </button>

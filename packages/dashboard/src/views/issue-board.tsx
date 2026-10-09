@@ -13,9 +13,9 @@ const columnHeader: Record<Issue['status'], string> = {
 
 const columnDot: Record<Issue['status'], string> = {
   open: 'bg-fg-faint',
-  in_progress: 'bg-blue-500',
-  blocked: 'bg-red-500',
-  closed: 'bg-emerald-500',
+  in_progress: 'bg-blue-ink',
+  blocked: 'bg-red-ink',
+  closed: 'bg-emerald-ink',
 }
 
 type IssuesViewMode = 'kanban' | 'list'
@@ -70,7 +70,7 @@ export function IssueBoard({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search tasks…"
-            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent"
           />
           <span className="text-sm text-fg-faint">
             {searched.length} {searched.length === 1 ? 'task' : 'tasks'}
@@ -115,7 +115,7 @@ export function IssueBoard({
             <button
               type="button"
               onClick={onCreate}
-              className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
+              className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90"
             >
               New task
             </button>

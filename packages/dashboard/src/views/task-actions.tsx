@@ -80,7 +80,7 @@ export function AnswerBox({
   }
 
   if (submitted) {
-    return <p className="mt-2 text-sm text-emerald-400">answered</p>
+    return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   return (
@@ -110,7 +110,7 @@ export function AnswerBox({
         <button
           type="submit"
           disabled={busy || text.trim() === ''}
-          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
+          className="rounded bg-amber-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           Answer
         </button>
@@ -334,7 +334,7 @@ function CloseButton({
               <button
                 type="submit"
                 disabled={busy || (reason === '__other' && custom.trim() === '')}
-                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+                className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
               >
                 Mark done
               </button>
@@ -529,7 +529,7 @@ export function AttemptSwitcher({
           onClick={() => onSelect(n === current ? null : n)}
           className={`rounded-t px-3 py-1.5 text-sm ${
             viewing === n
-              ? 'border-b-2 border-sky-500 text-fg-strong'
+              ? 'border-b-2 border-accent text-fg-strong'
               : 'text-fg-muted hover:text-fg'
           }`}
         >

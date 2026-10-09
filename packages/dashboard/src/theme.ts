@@ -6,7 +6,7 @@ export type Theme = 'light' | 'dark'
 const STORAGE_KEY = 'amagi:theme'
 const LIGHT_QUERY = '(prefers-color-scheme: light)'
 // the browser chrome tint, kept in step with --color-app in index.css
-const THEME_COLOR: Record<Theme, string> = { dark: '#0e0e11', light: '#f7f7f8' }
+const THEME_COLOR: Record<Theme, string> = { dark: '#282828', light: '#fdf6e3' }
 
 function readPref(): ThemePref {
   try {

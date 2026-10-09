@@ -10,7 +10,7 @@ type ProfileOptions = {
 
 const input = 'w-full rounded border border-line-strong bg-sunken px-3 py-2 text-sm text-fg-strong'
 const primary =
-  'rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50'
+  'rounded bg-accent px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50'
 
 function ProfileForm({
   initial,

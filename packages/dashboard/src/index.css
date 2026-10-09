@@ -1,80 +1,90 @@
 @import "tailwindcss";
 
-/* Every color in the dashboard resolves through these tokens: the Tailwind
-   utilities in the tsx (bg-surface, text-fg-muted, ring-red-edge) and the
-   plain CSS below read the same variables, so a theme swap cannot leave one
-   of them behind. Dark is the baseline; the light block further down only
-   restates what differs. */
+/* Dark is Gruvbox Dark. The light block below uses Solarized Light. */
 @theme {
-  --color-app: #0e0e11;
-  --color-sidebar: #09090b;
-  --color-sunken: #09090b;
-  --color-surface: #18181b;
-  --color-raised: #27272a;
-  --color-raised-strong: #3f3f46;
-  --color-line: #27272a;
-  --color-line-strong: #3f3f46;
+  --color-app: #282828;
+  --color-sidebar: #1d2021;
+  --color-sunken: #1d2021;
+  --color-surface: #282828;
+  --color-raised: #3c3836;
+  --color-raised-strong: #504945;
+  --color-line: #3c3836;
+  --color-line-strong: #504945;
 
-  --color-fg-strong: #fafafa;
-  --color-fg: #e4e4e7;
-  --color-fg-muted: #a1a1aa;
-  --color-fg-faint: #71717a;
-  --color-fg-dim: #52525b;
-  /* label on a filled accent button, dark in both themes */
-  --color-on-solid: #09090b;
-  --color-accent: #0ea5e9;
+  --color-fg-strong: #fbf1c7;
+  --color-fg: #ebdbb2;
+  --color-fg-muted: #d5c4a1;
+  --color-fg-faint: #bdae93;
+  --color-fg-dim: #928374;
+  --color-on-solid: #282828;
+  --color-accent: #fabd2f;
 
-  --color-neutral-soft: rgb(113 113 122 / 0.15);
-  --color-neutral-edge: rgb(113 113 122 / 0.3);
-  --color-neutral-ink: #d4d4d8;
+  --color-neutral-soft: rgb(146 131 116 / 0.15);
+  --color-neutral-edge: rgb(146 131 116 / 0.3);
+  --color-neutral-ink: #d5c4a1;
 
-  --color-sky-soft: rgb(14 165 233 / 0.15);
-  --color-sky-edge: rgb(14 165 233 / 0.3);
-  --color-sky-ink: #7dd3fc;
+  --color-sky-soft: rgb(142 192 124 / 0.15);
+  --color-sky-edge: rgb(142 192 124 / 0.3);
+  --color-sky-ink: #8ec07c;
 
-  --color-blue-soft: rgb(59 130 246 / 0.15);
-  --color-blue-edge: rgb(59 130 246 / 0.3);
-  --color-blue-ink: #93c5fd;
+  --color-blue-soft: rgb(131 165 152 / 0.15);
+  --color-blue-edge: rgb(131 165 152 / 0.3);
+  --color-blue-ink: #83a598;
 
-  --color-amber-soft: rgb(245 158 11 / 0.15);
-  --color-amber-soft-hover: rgb(245 158 11 / 0.28);
-  --color-amber-edge: rgb(245 158 11 / 0.3);
-  --color-amber-ink: #fcd34d;
+  --color-amber-soft: rgb(250 189 47 / 0.15);
+  --color-amber-soft-hover: rgb(250 189 47 / 0.28);
+  --color-amber-edge: rgb(250 189 47 / 0.3);
+  --color-amber-ink: #fabd2f;
 
-  --color-violet-soft: rgb(139 92 246 / 0.15);
-  --color-violet-edge: rgb(139 92 246 / 0.3);
-  --color-violet-ink: #c4b5fd;
+  --color-violet-soft: rgb(211 134 155 / 0.15);
+  --color-violet-edge: rgb(211 134 155 / 0.3);
+  --color-violet-ink: #d3869b;
 
-  --color-cyan-soft: rgb(6 182 212 / 0.15);
-  --color-cyan-edge: rgb(6 182 212 / 0.3);
-  --color-cyan-ink: #67e8f9;
+  --color-cyan-soft: rgb(142 192 124 / 0.15);
+  --color-cyan-edge: rgb(142 192 124 / 0.3);
+  --color-cyan-ink: #8ec07c;
 
-  --color-orange-soft: rgb(249 115 22 / 0.15);
-  --color-orange-soft-hover: rgb(249 115 22 / 0.28);
-  --color-orange-edge: rgb(249 115 22 / 0.3);
-  --color-orange-ink: #fdba74;
+  --color-orange-soft: rgb(254 128 25 / 0.15);
+  --color-orange-soft-hover: rgb(254 128 25 / 0.28);
+  --color-orange-edge: rgb(254 128 25 / 0.3);
+  --color-orange-ink: #fe8019;
 
-  --color-emerald-soft: rgb(16 185 129 / 0.15);
-  --color-emerald-soft-hover: rgb(16 185 129 / 0.28);
-  --color-emerald-edge: rgb(16 185 129 / 0.3);
-  --color-emerald-ink: #6ee7b7;
+  --color-emerald-soft: rgb(184 187 38 / 0.15);
+  --color-emerald-soft-hover: rgb(184 187 38 / 0.28);
+  --color-emerald-edge: rgb(184 187 38 / 0.3);
+  --color-emerald-ink: #b8bb26;
 
-  --color-red-soft: rgb(239 68 68 / 0.15);
-  --color-red-soft-hover: rgb(239 68 68 / 0.28);
-  --color-red-edge: rgb(239 68 68 / 0.3);
-  --color-red-ink: #fca5a5;
+  --color-red-soft: rgb(251 73 52 / 0.15);
+  --color-red-soft-hover: rgb(251 73 52 / 0.28);
+  --color-red-edge: rgb(251 73 52 / 0.3);
+  --color-red-ink: #fb4934;
 
-  --color-teal-soft: rgb(20 184 166 / 0.15);
-  --color-teal-edge: rgb(20 184 166 / 0.3);
-  --color-teal-ink: #5eead4;
+  --color-teal-soft: rgb(142 192 124 / 0.15);
+  --color-teal-edge: rgb(142 192 124 / 0.3);
+  --color-teal-ink: #8ec07c;
+
+  /* Names the shadcn components in components/ui read; they alias the tokens above. */
+  --color-background: var(--color-app);
+  --color-foreground: var(--color-fg);
+  --color-muted-foreground: var(--color-fg-muted);
+  --color-primary: var(--color-fg-strong);
+  --color-primary-foreground: var(--color-on-solid);
+  --color-border: var(--color-line);
+  --color-input: var(--color-line-strong);
+  --color-ring: var(--color-fg-dim);
+  --color-sidebar-foreground: var(--color-fg);
+  --color-sidebar-accent: var(--color-raised);
+  --color-sidebar-accent-foreground: var(--color-fg-strong);
+  --color-sidebar-border: var(--color-line);
+  --color-sidebar-ring: var(--color-fg-dim);
 }
 
 :root {
   color-scheme: dark;
-  --selection-bg: #075985;
-  --selection-fg: #f0f9ff;
-  --code-bg: rgb(0 0 0 / 0.35);
-  --shadow-color: rgb(0 0 0 / 0.5);
+  --selection-bg: #504945;
+  --selection-fg: #fbf1c7;
+  --code-bg: rgb(29 32 33 / 0.7);
+  --shadow-color: rgb(29 32 33 / 0.5);
   /* Covers the 36px mobile menu button plus py-3 and the bottom border. */
   --app-header-height: 4rem;
 }
@@ -83,44 +93,62 @@
    unlayered override here wins regardless of the theme layer's order. */
 :root[data-theme="light"] {
   color-scheme: light;
-  --color-app: #f7f7f8;
-  --color-sidebar: #ffffff;
-  --color-sunken: #f4f4f5;
-  --color-surface: #ffffff;
-  --color-raised: #e4e4e7;
-  --color-raised-strong: #d4d4d8;
-  --color-line: #e4e4e7;
-  --color-line-strong: #d4d4d8;
+  --color-app: #fdf6e3;
+  --color-sidebar: #eee8d5;
+  --color-sunken: #eee8d5;
+  --color-surface: #fdf6e3;
+  --color-raised: #eee8d5;
+  --color-raised-strong: #d6cfba;
+  --color-line: #eee8d5;
+  --color-line-strong: #d6cfba;
 
-  --color-fg-strong: #09090b;
-  --color-fg: #27272a;
-  --color-fg-muted: #52525b;
-  --color-fg-faint: #71717a;
-  --color-fg-dim: #a1a1aa;
-  --color-accent: #0284c7;
+  --color-fg-strong: #073642;
+  --color-fg: #586e75;
+  --color-fg-muted: #657b83;
+  --color-fg-faint: #839496;
+  --color-fg-dim: #93a1a1;
+  --color-on-solid: #fdf6e3;
+  --color-accent: #268bd2;
 
-  --color-neutral-soft: rgb(113 113 122 / 0.12);
-  --color-neutral-ink: #3f3f46;
-  --color-sky-ink: #0369a1;
-  --color-blue-ink: #1d4ed8;
-  --color-amber-soft: rgb(245 158 11 / 0.18);
-  --color-amber-soft-hover: rgb(245 158 11 / 0.3);
-  --color-amber-ink: #b45309;
-  --color-violet-ink: #6d28d9;
-  --color-cyan-ink: #0e7490;
-  --color-orange-soft: rgb(249 115 22 / 0.18);
-  --color-orange-soft-hover: rgb(249 115 22 / 0.3);
-  --color-orange-ink: #c2410c;
-  --color-emerald-soft-hover: rgb(16 185 129 / 0.25);
-  --color-emerald-ink: #047857;
-  --color-red-soft-hover: rgb(239 68 68 / 0.25);
-  --color-red-ink: #b91c1c;
-  --color-teal-ink: #0f766e;
+  --color-neutral-soft: rgb(147 161 161 / 0.14);
+  --color-neutral-edge: rgb(147 161 161 / 0.35);
+  --color-neutral-ink: #586e75;
+  --color-sky-soft: rgb(42 161 152 / 0.14);
+  --color-sky-edge: rgb(42 161 152 / 0.35);
+  --color-sky-ink: #2aa198;
+  --color-blue-soft: rgb(38 139 210 / 0.14);
+  --color-blue-edge: rgb(38 139 210 / 0.35);
+  --color-blue-ink: #268bd2;
+  --color-amber-soft: rgb(181 137 0 / 0.14);
+  --color-amber-soft-hover: rgb(181 137 0 / 0.25);
+  --color-amber-edge: rgb(181 137 0 / 0.35);
+  --color-amber-ink: #b58900;
+  --color-violet-soft: rgb(108 113 196 / 0.14);
+  --color-violet-edge: rgb(108 113 196 / 0.35);
+  --color-violet-ink: #6c71c4;
+  --color-cyan-soft: rgb(42 161 152 / 0.14);
+  --color-cyan-edge: rgb(42 161 152 / 0.35);
+  --color-cyan-ink: #2aa198;
+  --color-orange-soft: rgb(203 75 22 / 0.14);
+  --color-orange-soft-hover: rgb(203 75 22 / 0.25);
+  --color-orange-edge: rgb(203 75 22 / 0.35);
+  --color-orange-ink: #cb4b16;
+  --color-emerald-soft: rgb(133 153 0 / 0.14);
+  --color-emerald-soft-hover: rgb(133 153 0 / 0.25);
+  --color-emerald-edge: rgb(133 153 0 / 0.35);
+  --color-emerald-ink: #859900;
+  --color-red-soft: rgb(220 50 47 / 0.14);
+  --color-red-soft-hover: rgb(220 50 47 / 0.25);
+  --color-red-edge: rgb(220 50 47 / 0.35);
+  --color-red-ink: #dc322f;
+  --color-teal-soft: rgb(42 161 152 / 0.14);
+  --color-teal-edge: rgb(42 161 152 / 0.35);
+  --color-teal-ink: #2aa198;
 
-  --selection-bg: #bae6fd;
-  --selection-fg: #082f49;
-  --code-bg: rgb(24 24 27 / 0.06);
-  --shadow-color: rgb(24 24 27 / 0.16);
+  --selection-bg: #eee8d5;
+  --selection-fg: #002b36;
+  --code-bg: rgb(238 232 213 / 0.8);
+  --shadow-color: rgb(0 43 54 / 0.16);
 }
 
 .diff-added {
@@ -265,19 +293,19 @@ textarea::placeholder {
   height: 8px;
   border-radius: 9999px;
 }
-.connection-dot.bg-emerald-500 {
-  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
+.connection-dot.bg-emerald-ink {
+  box-shadow: 0 0 0 0 var(--color-emerald-edge);
   animation: connection-pulse 2s infinite;
 }
 @keyframes connection-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+    box-shadow: 0 0 0 0 var(--color-emerald-edge);
   }
   70% {
-    box-shadow: 0 0 0 5px rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 5px transparent;
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
 }
 
@@ -298,38 +326,6 @@ textarea::placeholder {
   z-index: 30;
   background: color-mix(in srgb, var(--color-app) 85%, transparent);
   backdrop-filter: blur(8px);
-}
-
-.sidebar {
-  position: sticky;
-  top: 0;
-  display: flex;
-  flex-direction: column;
-  width: 200px;
-  flex-shrink: 0;
-  height: 100vh;
-  border-right: 1px solid var(--color-line);
-  background: var(--color-sidebar);
-}
-
-.nav-link {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  margin: 2px 0;
-  border-radius: 8px;
-  color: var(--color-fg-muted);
-  font-size: 14px;
-}
-.nav-link:hover {
-  color: var(--color-fg);
-  background: var(--color-surface);
-}
-.nav-link.is-active {
-  color: var(--color-fg-strong);
-  background: var(--color-raised);
-  font-weight: 500;
 }
 
 .workspace {
@@ -357,26 +353,6 @@ textarea::placeholder {
 @media (max-width: 767px) {
   .mobile-menu-button {
     display: inline-flex;
-  }
-  .sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    z-index: 60;
-    transform: translateX(-100%);
-    visibility: hidden;
-    /* visibility flips immediately on open (so it can take focus at once) but
-       stays visible through the slide-out on close, which needs the delay */
-    transition:
-      transform 0.2s ease,
-      visibility 0s linear 0.2s;
-    box-shadow: 12px 0 32px var(--shadow-color);
-  }
-  .sidebar.is-open {
-    transform: translateX(0);
-    visibility: visible;
-    transition:
-      transform 0.2s ease,
-      visibility 0s;
   }
 }
 

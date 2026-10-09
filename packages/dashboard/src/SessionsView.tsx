@@ -86,7 +86,7 @@ function Scorecard() {
               onClick={() => setSpan(w.label)}
               className={`rounded-full px-3 py-1 text-xs ring-1 ring-inset ${
                 span === w.label
-                  ? 'bg-sky-500/15 text-sky-700 ring-sky-500/40 dark:text-sky-300'
+                  ? 'bg-sky-soft text-sky-ink ring-sky-edge'
                   : 'bg-surface text-fg-muted ring-line hover:text-fg'
               }`}
             >
@@ -210,7 +210,7 @@ export function SessionsView() {
               }}
               className={`rounded-full px-3 py-1 text-xs ring-1 ring-inset ${
                 enabled
-                  ? 'bg-sky-500/15 text-sky-700 ring-sky-500/40 dark:text-sky-300'
+                  ? 'bg-sky-soft text-sky-ink ring-sky-edge'
                   : 'bg-surface text-fg-muted ring-line hover:text-fg'
               }`}
             >

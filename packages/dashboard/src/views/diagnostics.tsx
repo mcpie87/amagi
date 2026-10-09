@@ -52,7 +52,7 @@ function filterQuery(filters: Filters): string {
 }
 
 const inputClass =
-  'rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600'
+  'rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent'
 
 function useTimings(paused: boolean, query: string): TimingSnapshot | null | 'error' {
   const [snapshot, setSnapshot] = useState<TimingSnapshot | null | 'error'>(null)

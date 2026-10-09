@@ -194,7 +194,7 @@ function IssueFormModal({
           <button
             type="submit"
             disabled={busy || title.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             {mode === 'create' ? 'Create task' : 'Save changes'}
           </button>
@@ -431,7 +431,7 @@ function ProposalCard({
           type="button"
           disabled={busy}
           onClick={() => void submit('accept')}
-          className="rounded bg-emerald-700 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
+          className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           {busy ? 'Saving…' : 'Accept'}
         </button>
@@ -441,7 +441,7 @@ function ProposalCard({
               type="button"
               disabled={busy || reason.trim() === ''}
               onClick={() => void submit('dismiss')}
-              className="rounded bg-red-700 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
+              className="rounded bg-red-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
             >
               {busy ? 'Saving…' : 'Confirm dismissal'}
             </button>

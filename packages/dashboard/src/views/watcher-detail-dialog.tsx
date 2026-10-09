@@ -152,7 +152,7 @@ export function WatcherDetailDialog({
               onClick={() => setActiveTab('history')}
               className={`rounded-t px-3 py-1.5 text-sm ${
                 activeTab === 'history'
-                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  ? 'border-b-2 border-accent text-fg-strong'
                   : 'text-fg-muted hover:text-fg'
               }`}
             >
@@ -164,7 +164,7 @@ export function WatcherDetailDialog({
               onClick={() => setActiveTab('log')}
               className={`rounded-t px-3 py-1.5 text-sm ${
                 activeTab === 'log'
-                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  ? 'border-b-2 border-accent text-fg-strong'
                   : 'text-fg-muted hover:text-fg'
               }`}
             >

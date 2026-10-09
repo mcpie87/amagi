@@ -297,7 +297,7 @@ export function OverviewView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search runs…"
-            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent"
           />
         </div>
       </div>

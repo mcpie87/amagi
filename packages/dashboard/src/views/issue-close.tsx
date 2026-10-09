@@ -73,7 +73,7 @@ export function IssueCloseButton({
         type="button"
         disabled={busy}
         onClick={() => setOpen(true)}
-        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+        className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
       >
         {buttonText}
       </button>
@@ -133,7 +133,7 @@ export function IssueCloseButton({
               <button
                 type="submit"
                 disabled={busy || (reason === '__other' && custom.trim() === '')}
-                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+                className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
               >
                 {busy ? 'Closing…' : buttonText}
               </button>

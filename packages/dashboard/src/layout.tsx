@@ -1,5 +1,6 @@
 import { tasksNeedingAttention } from '@amagi/core/view'
-import { Link, Outlet, useNavigate } from '@tanstack/react-router'
+import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router'
+import { FolderGit2, Moon, Sun } from 'lucide-react'
 import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,6 +10,21 @@ import {
   useState,
 } from 'react'
 import logo from './assets/logo.png'
+import { Button } from './components/ui/button.tsx'
+import {
+  Sidebar as ShadcnSidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuBadge,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+  useSidebar,
+} from './components/ui/sidebar.tsx'
 import {
   type RepoInfo,
   RunnerProvider,
@@ -17,6 +33,7 @@ import {
   useDashboard,
   useRunner,
 } from './store.tsx'
+import { setThemePref, useTheme } from './theme.ts'
 import { Icon, type IconName } from './ui.tsx'
 
 function ConnectionStatus() {
@@ -29,9 +46,9 @@ function ConnectionStatus() {
         : 'Connecting'
   const tone =
     connection === 'connected'
-      ? 'bg-emerald-500'
+      ? 'bg-emerald-ink'
       : connection === 'reconnecting'
-        ? 'bg-amber-500'
+        ? 'bg-amber-ink'
         : 'bg-fg-faint'
   return (
     <span className="connection-status" title="live connection to the amagi server">
@@ -283,7 +300,7 @@ function AddRepoForm() {
         <button
           type="submit"
           disabled={busy || path.trim() === ''}
-          className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-on-solid disabled:opacity-50"
+          className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
         >
           Add repository
         </button>
@@ -339,66 +356,110 @@ const NAV_ITEMS: {
   { to: '/manual', label: 'Manual', icon: 'book' },
 ]
 
-function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => void }) {
-  const { repos, selected, selectRepo } = useDashboard()
-  const attention = useAttentionCount()
-  const [adding, setAdding] = useState(false)
+function ThemeToggle() {
+  const theme = useTheme()
+  const nextTheme = theme === 'dark' ? 'light' : 'dark'
+  const label = `Switch to ${nextTheme} theme`
 
   return (
-    <aside className={`sidebar ${navOpen ? 'is-open' : ''}`}>
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex items-center justify-center px-5 py-4">
-          <Link to="/" onClick={onNavigate}>
-            <img src={logo} alt="amagi" className="h-8 w-auto" />
-          </Link>
-        </div>
-        <nav className="flex-1 overflow-y-auto px-3">
-          {NAV_ITEMS.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              onClick={onNavigate}
-              activeProps={{ className: 'nav-link is-active' }}
-              inactiveProps={{ className: 'nav-link' }}
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      aria-label={label}
+      title={label}
+      onClick={() => setThemePref(nextTheme)}
+      className="size-8 shrink-0 group-data-[collapsible=icon]:hidden"
+    >
+      {theme === 'dark' ? <Sun /> : <Moon />}
+    </Button>
+  )
+}
+
+function AppSidebar() {
+  const { repos, selected, selectRepo } = useDashboard()
+  const selectedRepo = repos?.find((repo) => repo.key === selected)
+  const attention = useAttentionCount()
+  const [adding, setAdding] = useState(false)
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const { isMobile, setOpenMobile } = useSidebar()
+  const onNavigate = () => {
+    if (isMobile) setOpenMobile(false)
+  }
+
+  return (
+    <ShadcnSidebar collapsible="icon">
+      <SidebarHeader className="h-14 flex-row items-center gap-1.5 px-2 py-2">
+        <SidebarTrigger
+          aria-label="Toggle sidebar"
+          title="Toggle sidebar"
+          className="size-8 shrink-0"
+        />
+        <Link
+          to="/"
+          onClick={onNavigate}
+          className="min-w-0 flex-1 group-data-[collapsible=icon]:hidden"
+        >
+          <img src={logo} alt="amagi" className="h-7 w-auto" />
+        </Link>
+        <ThemeToggle />
+      </SidebarHeader>
+      <SidebarContent>
+        <SidebarGroup className="px-2 py-0">
+          <SidebarMenu>
+            {NAV_ITEMS.map((item) => (
+              <SidebarMenuItem key={item.to}>
+                <SidebarMenuButton asChild isActive={pathname === item.to} tooltip={item.label}>
+                  <Link to={item.to} onClick={onNavigate}>
+                    <Icon name={item.icon} size={17} />
+                    <span>{item.label}</span>
+                  </Link>
+                </SidebarMenuButton>
+                {item.to === '/inbox' && attention > 0 && (
+                  <SidebarMenuBadge
+                    role="status"
+                    aria-label={`${attention} items need attention`}
+                    className="rounded-full bg-red-ink text-surface"
+                  >
+                    {attention}
+                  </SidebarMenuBadge>
+                )}
+              </SidebarMenuItem>
+            ))}
+          </SidebarMenu>
+        </SidebarGroup>
+      </SidebarContent>
+      <SidebarFooter className="border-t border-sidebar-border p-2">
+        {repos !== null && repos.length > 0 && (
+          <div className="relative mb-2 group-data-[collapsible=icon]:mb-0">
+            <label
+              htmlFor="repo-select"
+              className="mb-1 block text-[10px] uppercase tracking-wider text-fg-faint group-data-[collapsible=icon]:hidden"
             >
-              <Icon name={item.icon} size={17} />
-              {item.label}
-              {item.to === '/inbox' && attention > 0 && (
-                <span
-                  role="status"
-                  aria-label={`${attention} items need attention`}
-                  className="ml-auto rounded-full bg-red-ink px-1.5 text-xs font-semibold text-surface"
-                >
-                  {attention}
-                </span>
-              )}
-            </Link>
-          ))}
-        </nav>
-        <div className="border-t border-line p-3">
-          {repos !== null && repos.length > 0 && (
-            <div className="mb-2">
-              <label
-                htmlFor="repo-select"
-                className="mb-1 block text-[10px] uppercase tracking-wider text-fg-faint"
-              >
-                Repository
-              </label>
-              <select
-                id="repo-select"
-                value={selected ?? ''}
-                onChange={(e) => selectRepo(e.target.value)}
-                className="w-full rounded border border-line-strong bg-surface px-2 py-1 text-sm"
-              >
-                {repos.map((repo) => (
-                  <option key={repo.key} value={repo.key}>
-                    {readyOk(repo) ? '' : '! '}
-                    {repo.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+              Repository
+            </label>
+            <FolderGit2
+              aria-hidden="true"
+              className="hidden size-8 p-2 text-sidebar-foreground group-data-[collapsible=icon]:block"
+            />
+            <select
+              id="repo-select"
+              aria-label="Repository"
+              title={`Repository: ${selectedRepo?.name ?? 'select one'}`}
+              value={selected ?? ''}
+              onChange={(e) => selectRepo(e.target.value)}
+              className="w-full rounded border border-line-strong bg-surface px-2 py-1 text-sm group-data-[collapsible=icon]:absolute group-data-[collapsible=icon]:inset-0 group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:cursor-pointer group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:focus-visible:ring-2"
+            >
+              {repos.map((repo) => (
+                <option key={repo.key} value={repo.key}>
+                  {readyOk(repo) ? '' : '! '}
+                  {repo.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div className="group-data-[collapsible=icon]:hidden">
           <button
             type="button"
             onClick={() => setAdding((v) => !v)}
@@ -412,44 +473,18 @@ function Sidebar({ navOpen, onNavigate }: { navOpen: boolean; onNavigate: () => 
             </div>
           )}
         </div>
-      </div>
-    </aside>
+      </SidebarFooter>
+    </ShadcnSidebar>
   )
 }
 
 export function RootLayout() {
   const { repos } = useDashboard()
   const attention = useAttentionCount()
+  // Chat renders a full-bleed sidebar that must sit flush against the nav, so it drops the column cap.
+  const fullBleed = useRouterState({ select: (state) => state.location.pathname === '/chat' })
   const [idleNotice, setIdleNotice] = useState<{ title: string; body: string } | null>(null)
   const [desktopFailure, setDesktopFailure] = useState<{ title: string; body: string } | null>(null)
-  const [navOpen, setNavOpen] = useState(false)
-  const sidebarRef = useRef<HTMLDivElement>(null)
-  const openButtonRef = useRef<HTMLButtonElement>(null)
-  const firstRender = useRef(true)
-
-  const openNav = () => setNavOpen(true)
-  const closeNav = useCallback(() => setNavOpen(false), [])
-
-  // Move focus into the open navigation (and back to its trigger on close)
-  // only after the DOM has committed the is-open state and the inert flag has
-  // been released, so the target is actually focusable.
-  useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false
-      return
-    }
-    if (navOpen) sidebarRef.current?.querySelector('a')?.focus()
-    else openButtonRef.current?.focus()
-  }, [navOpen])
-
-  useEffect(() => {
-    if (!navOpen) return
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') closeNav()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [navOpen, closeNav])
 
   useEffect(() => {
     document.title =
@@ -477,7 +512,7 @@ export function RootLayout() {
 
   return (
     <RunnerProvider>
-      <div className="app-shell">
+      <SidebarProvider className="app-shell">
         {idleNotice !== null && (
           <div
             role="status"
@@ -510,21 +545,15 @@ export function RootLayout() {
             </button>
           </div>
         )}
-        <div ref={sidebarRef}>
-          <Sidebar navOpen={navOpen} onNavigate={() => setNavOpen(false)} />
-        </div>
-        <div className="workspace" inert={navOpen}>
+        <AppSidebar />
+        <div className="workspace">
           <header className="app-header border-b border-line px-4 py-3 sm:px-6">
             <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
-              <button
-                ref={openButtonRef}
-                type="button"
+              <SidebarTrigger
                 aria-label="Open navigation"
+                title="Open navigation"
                 className="mobile-menu-button"
-                onClick={() => (navOpen ? closeNav() : openNav())}
-              >
-                <Icon name="menu" size={20} />
-              </button>
+              />
               <div className="ml-auto flex items-center gap-3">
                 <ConnectionStatus />
                 <RunnerIndicator />
@@ -533,7 +562,9 @@ export function RootLayout() {
             </div>
           </header>
           <BlockedBanner />
-          <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6">
+          <main
+            className={`mx-auto w-full flex-1 px-4 py-6 sm:px-6${fullBleed ? '' : ' max-w-6xl'}`}
+          >
             {repos === null ? (
               <p className="text-fg-faint">loading repositories...</p>
             ) : repos.length === 0 ? (
@@ -552,7 +583,7 @@ export function RootLayout() {
             )}
           </main>
         </div>
-      </div>
+      </SidebarProvider>
     </RunnerProvider>
   )
 }

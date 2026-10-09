@@ -8,6 +8,20 @@ import {
   useState,
 } from 'react'
 import { apiBase } from '../api.ts'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuAction,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from '../components/ui/sidebar.tsx'
 import { Markdown } from '../markdown.tsx'
 import { useDashboard } from '../store.tsx'
 import { Icon } from '../ui.tsx'
@@ -534,85 +548,69 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
   }
 
   return (
-    <section className="-mx-4 -my-6 flex h-[calc(100dvh-var(--app-header-height))] overflow-hidden bg-app sm:-mx-6">
-      <aside className="hidden w-64 shrink-0 flex-col border-r border-line bg-sidebar md:flex">
-        <div className="p-2">
-          <button
-            type="button"
-            onClick={createThread}
-            disabled={options === null || options.harnesses.length === 0}
-            className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-fg hover:bg-surface disabled:opacity-50"
-          >
-            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent text-on-solid">
-              <Icon name="plus" size={14} />
-            </span>
-            New chat
-          </button>
-        </div>
-        <nav aria-label="Conversations" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {groups.map((group) => (
-            <div key={group.label} className="mt-3">
-              <p className="px-2.5 pb-1 text-[11px] font-medium text-fg-faint">{group.label}</p>
-              {group.threads.map((thread) => (
-                <div
-                  key={thread.id}
-                  className={`group flex items-center rounded-lg ${thread.id === activeId ? 'bg-raised text-fg-strong' : 'text-fg-muted hover:bg-surface hover:text-fg'}`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => selectThread(thread.id)}
-                    aria-current={thread.id === activeId ? 'page' : undefined}
-                    className="min-w-0 flex-1 truncate px-2.5 py-1.5 text-left text-[13px]"
-                    title={thread.title}
-                  >
-                    {thread.title}
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Delete ${thread.title}`}
-                    title="Delete"
-                    onClick={() => deleteThread(thread.id)}
-                    className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-faint opacity-0 hover:bg-raised-strong hover:text-fg focus-visible:opacity-100 group-hover:opacity-100"
-                  >
-                    <Icon name="close" size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ))}
+    <SidebarProvider className="-mx-4 -my-6 h-[calc(100dvh-var(--app-header-height))] min-h-0 overflow-hidden bg-app sm:-mx-6">
+      <Sidebar>
+        <SidebarHeader>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                onClick={createThread}
+                disabled={options === null || options.harnesses.length === 0}
+              >
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-on-solid">
+                  <Icon name="plus" size={12} />
+                </span>
+                New chat
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarHeader>
+        <SidebarContent>
           {groups.length === 0 && (
-            <p className="mt-3 px-2.5 text-xs leading-5 text-fg-faint">
+            <p className="px-3 text-xs leading-5 text-fg-faint">
               Your conversations will appear here.
             </p>
           )}
-        </nav>
-        <div className="truncate border-t border-line px-4 py-2.5 text-[11px] text-fg-faint">
-          {repo ?? 'No repository selected'}
-        </div>
-      </aside>
+          {groups.map((group) => (
+            <SidebarGroup key={group.label}>
+              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+              <SidebarMenu>
+                {group.threads.map((thread) => (
+                  <SidebarMenuItem key={thread.id}>
+                    <SidebarMenuButton
+                      isActive={thread.id === activeId}
+                      onClick={() => selectThread(thread.id)}
+                      title={thread.title}
+                    >
+                      <span>{thread.title}</span>
+                    </SidebarMenuButton>
+                    <SidebarMenuAction
+                      showOnHover
+                      aria-label={`Delete ${thread.title}`}
+                      title="Delete"
+                      onClick={() => deleteThread(thread.id)}
+                    >
+                      <Icon name="close" size={13} />
+                    </SidebarMenuAction>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroup>
+          ))}
+        </SidebarContent>
+        <SidebarFooter>
+          <p className="truncate px-2 text-[11px] text-fg-faint">
+            {repo ?? 'No repository selected'}
+          </p>
+        </SidebarFooter>
+      </Sidebar>
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-3 px-4 sm:px-6">
+          <SidebarTrigger />
           <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
             {isEmpty ? '' : activeThread?.title}
           </h1>
-          {history.length > 0 && (
-            <select
-              aria-label="Conversation"
-              value={isEmpty ? '' : (activeId ?? '')}
-              onChange={(event) =>
-                event.target.value === '' ? createThread() : selectThread(event.target.value)
-              }
-              className="max-w-44 rounded-lg border border-line-strong bg-surface px-2 py-1 text-xs text-fg md:hidden"
-            >
-              <option value="">New chat</option>
-              {history.map((thread) => (
-                <option key={thread.id} value={thread.id}>
-                  {thread.title}
-                </option>
-              ))}
-            </select>
-          )}
         </header>
 
         <div className="relative flex min-h-0 flex-1 flex-col">
@@ -707,7 +705,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
                 maxLength={4000}
                 aria-label="Message"
                 placeholder={isEmpty ? 'How can I help you today?' : 'Reply…'}
-                className="block max-h-60 w-full resize-none border-0 bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 text-fg-strong outline-none placeholder:text-fg-faint focus-visible:outline-none"
+                className="block max-h-60 w-full resize-none border-0 bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 text-fg-strong outline-none placeholder:text-fg-faint focus-visible:outline-none!"
               />
               <div className="flex items-center gap-2 px-2.5 pt-1 pb-2.5">
                 {activeThread !== undefined && options !== null && (
@@ -766,6 +764,6 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
           </div>
         )}
       </div>
-    </section>
+    </SidebarProvider>
   )
 }
