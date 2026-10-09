@@ -234,10 +234,11 @@ function githubPr(exec: Exec, forgeRemote: string): PrDriver {
       return out.split('\n').filter((name) => name !== '')
     },
     async listOpenPrs(cwd) {
-      const out = await execOk(exec, ['gh', 'pr', 'list', '--state', 'open', '--json', GH_FIELDS], {
-        cwd,
-        env: ghEnv(cwd, forgeRemote),
-      })
+      const out = await execOk(
+        exec,
+        ['gh', 'pr', 'list', '--state', 'open', '--limit', '1000', '--json', GH_FIELDS],
+        { cwd, env: ghEnv(cwd, forgeRemote) },
+      )
       const raw = JSON.parse(out) as Array<
         Omit<PrInfo, 'labels'> & { labels?: Array<{ name?: string }> }
       >
