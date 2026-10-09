@@ -13,6 +13,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { refreshSession } from './api.ts'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
@@ -224,7 +225,11 @@ function RepoStream({
       pending.push(event)
       frame ??= requestAnimationFrame(flush)
     }
-    source.addEventListener('open', () => setConnection('connected'))
+    source.addEventListener('open', () => {
+      // Each (re)connect may follow a server restart with a new secret.
+      void refreshSession()
+      setConnection('connected')
+    })
     source.addEventListener('error', () => setConnection('reconnecting'))
     source.addEventListener('replayed', (event: MessageEvent) => {
       replayedRef.current = Number(event.data)

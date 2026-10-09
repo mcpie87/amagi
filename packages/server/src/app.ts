@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import {
   accessSync,
   constants as fsConstants,
@@ -47,7 +48,17 @@ import {
 import type { Harness } from '@amagi/core/drivers/types'
 import type { Context } from 'hono'
 import { Hono } from 'hono'
+import { getCookie, setCookie } from 'hono/cookie'
 import { routePath } from 'hono/route'
+import {
+  AGENT_ROUTE,
+  hostAllowed,
+  originMatchesHost,
+  SAFE_METHODS,
+  SESSION_COOKIE,
+  SESSION_HEADER,
+  sameSecret,
+} from './access.ts'
 import { createChatRoutes } from './chat-routes.ts'
 import { createFleetRoutes } from './fleet-routes.ts'
 import { createIssueRoutes } from './issues-routes.ts'
@@ -87,6 +98,10 @@ export type ServerDeps = {
   chatHarnessFor?: (ws: Workspace) => Harness
   /** Shared with `serve` so its event-loop monitor lands in the same snapshot. */
   timings?: RequestTimings
+  /** The bind host; a Host header naming it is accepted besides loopback. */
+  host?: string
+  /** The operator secret; generated per server when unset. */
+  secret?: string
 }
 
 const SLOW_REQUEST_MS = 1000
@@ -124,11 +139,20 @@ function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
 }
 
 /**
- * The agent carries AMAGI_TASK_TOKEN in its environment; a question is bound
- * to the task that spawned it, so one agent cannot answer for another.
+ * The operator's secret, from the session header (CLI and TUI) or the dashboard
+ * cookie. A cookie is ambient, so it also needs a same-origin Origin: a page on
+ * another port of localhost carries it and must not pass.
  */
-const authorized = (c: Context, store: Store, id: string): boolean =>
-  c.req.header('X-Amagi-Token') === store.token(id)
+const operatorSession = (c: Context, secret: string): boolean => {
+  const header = c.req.header(SESSION_HEADER)
+  if (header !== undefined) return sameSecret(header, secret)
+  const cookie = getCookie(c, SESSION_COOKIE)
+  return (
+    cookie !== undefined &&
+    sameSecret(cookie, secret) &&
+    originMatchesHost(c.req.header('origin'), c.req.header('host') ?? new URL(c.req.url).host)
+  )
+}
 
 /**
  * Best effort: a notifier (e.g. a missing notify-send) must never break the
@@ -208,7 +232,11 @@ export function createApp({
   liveRuns,
   chatHarnessFor,
   timings = new RequestTimings(),
+  host,
+  secret = randomBytes(32).toString('hex'),
 }: ServerDeps) {
+  const authorized = (c: Context, store: Store, id: string): boolean =>
+    operatorSession(c, secret) || c.req.header('X-Amagi-Token') === store.token(id)
   // One ChatService per workspace, so the in-flight guard survives requests.
   const chats = new Map<string, ChatService>()
   const chatFor = (ws: Workspace): ChatService => {
@@ -268,6 +296,13 @@ export function createApp({
     return { global, seats }
   }
   return new Hono()
+    .use('*', async (c, next) => {
+      // A DNS-rebinding page arrives under its own hostname; refuse it before anything runs.
+      if (!hostAllowed(c.req.header('host') ?? new URL(c.req.url).host, host)) {
+        return c.json({ error: 'host not allowed' }, 403)
+      }
+      await next()
+    })
     .use('/api/*', async (c, next) => {
       const start = performance.now()
       await next()
@@ -294,6 +329,20 @@ export function createApp({
           `slow request ${sample.method} ${sample.path} ${Math.round(ms)}ms (${sample.source})`,
         )
       }
+    })
+
+    .get('/api/session', (c) => {
+      setCookie(c, SESSION_COOKIE, secret, { httpOnly: true, sameSite: 'Strict', path: '/' })
+      return c.json({ secret })
+    })
+
+    .use('/api/*', async (c, next) => {
+      if (SAFE_METHODS.has(c.req.method) || operatorSession(c, secret)) return next()
+      // An agent's per-task token is checked by the handler itself, so it only gets through here.
+      if (AGENT_ROUTE.test(c.req.path) && c.req.header('X-Amagi-Token') !== undefined) {
+        return next()
+      }
+      return c.json({ error: 'operator session required' }, 401)
     })
 
     .route('/', createIssueRoutes(workspaces))

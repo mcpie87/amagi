@@ -1,6 +1,7 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
 import { BeadsTracker, errMsg, loadLiveRuns, RequestTimings } from '@amagi/core'
+import { hostAllowed } from './access.ts'
 import { createApp } from './app.ts'
 import { startBeadsGcPoller } from './beads-gc-poller.ts'
 import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
@@ -394,6 +395,7 @@ export function serve({
   const stopLoopWatch = timings.watchEventLoop()
   const app = createApp({
     workspaces,
+    host,
     notify,
     timings,
     runner,
@@ -408,6 +410,10 @@ export function serve({
     hostname: host,
     port,
     async fetch(req) {
+      // Static assets are refused too: the index page is what a rebinding page would read.
+      if (!hostAllowed(req.headers.get('host') ?? new URL(req.url).host, host)) {
+        return new Response('host not allowed', { status: 403 })
+      }
       if (staticDir !== undefined && !new URL(req.url).pathname.startsWith('/api')) {
         return staticAsset(staticDir, new URL(req.url).pathname)
       }

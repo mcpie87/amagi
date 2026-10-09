@@ -1,5 +1,5 @@
 import type { Store } from '@amagi/core'
-import { fetchTaskToken, submitAnswer } from '@amagi/tui/answer'
+import { fetchOperatorSecret, submitAnswer } from '@amagi/tui/answer'
 
 export async function answerQuestion(
   baseUrl: string,
@@ -11,8 +11,8 @@ export async function answerQuestion(
   const question = store.question(questionId)
   if (!question) return { kind: 'error', message: `unknown question ${questionId}` }
 
-  const token = await fetchTaskToken(baseUrl, repo, question.taskId)
-  if (!token) return { kind: 'error', message: `could not get task token for ${question.taskId}` }
+  const secret = await fetchOperatorSecret(baseUrl)
+  if (!secret) return { kind: 'error', message: 'could not get the operator secret from amagi' }
 
-  return submitAnswer(baseUrl, repo, question.taskId, questionId, token, answer)
+  return submitAnswer(baseUrl, repo, question.taskId, questionId, secret, answer)
 }
