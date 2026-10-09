@@ -305,7 +305,13 @@ export function createApp({
       const since = Date.now() - windowMs
       const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
+        let ws: Workspace | null
+        // A repo with an invalid config (e.g. undeclared checks) must not fail the whole rate view.
+        try {
+          ws = workspaces.get(entry.key)
+        } catch {
+          continue
+        }
         if (ws === null) continue
         for (const event of ws.store.eventsSince(since)) {
           if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue

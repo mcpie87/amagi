@@ -390,23 +390,30 @@ function ProposalsInbox({
     void refresh
     let active = true
     setError(null)
-    Promise.all(
-      repos.map(async (repo) => {
+    // A repo whose config does not load already reports it in its readiness checks.
+    const loadable = repos.filter((repo) =>
+      repo.ready.every((check) => check.name !== 'config' || check.ok),
+    )
+    void Promise.allSettled(
+      loadable.map(async (repo) => {
         const response = await fetch(`${apiBase}/api/repos/${repo.key}/issues`)
         if (!response.ok)
-          throw new Error((await response.json()).error ?? `HTTP ${response.status}`)
+          throw new Error(
+            `${repo.name}: ${(await response.json()).error ?? `HTTP ${response.status}`}`,
+          )
         const issues = (await response.json()) as Issue[]
         return issues
           .filter((issue) => issue.status !== 'closed' && issue.labels.includes(PROPOSED_LABEL))
           .map((issue) => ({ ...issue, repo }))
       }),
-    )
-      .then((lists) => {
-        if (active) setProposals(lists.flat())
-      })
-      .catch((err: unknown) => {
-        if (active) setError(errMsg(err))
-      })
+    ).then((results) => {
+      if (!active) return
+      setProposals(results.flatMap((result) => (result.status === 'fulfilled' ? result.value : [])))
+      const failures = results.flatMap((result) =>
+        result.status === 'rejected' ? [errMsg(result.reason)] : [],
+      )
+      setError(failures.length > 0 ? failures.join('; ') : null)
+    })
     return () => {
       active = false
     }

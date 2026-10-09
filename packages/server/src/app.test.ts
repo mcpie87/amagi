@@ -3284,6 +3284,29 @@ describe('GET /api/seats', () => {
     )
   })
 
+  test('usage rates skip a repo whose config cannot load', async () => {
+    const repos = ws.workspaces.list()
+    const dir = dirname(repos[0]?.path ?? '')
+    mkdirSync(join(dir, 'broken', '.amagi'), { recursive: true })
+    writeFileSync(join(dir, 'broken', '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    saveRegistry(
+      [
+        ...repos,
+        {
+          key: 'broken',
+          name: 'broken',
+          path: join(dir, 'broken'),
+          workers: true,
+          watchers: true,
+          gitIdentity: null,
+        },
+      ],
+      join(dir, 'registry.json'),
+    )
+    const res = await app.request('/api/usage-rates')
+    expect(res.status).toBe(200)
+  })
+
   test('a run on the original seat stays visible after adding replicas', async () => {
     writeGlobalConfig({ seats: [{ name: 'claude', count: 2 }] })
     const occupancy = (await (await app.request('/api/seats')).json()) as {
