@@ -28,6 +28,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarRail,
   SidebarTrigger,
 } from '../components/ui/sidebar.tsx'
 import { Markdown } from '../markdown.tsx'
@@ -1190,6 +1191,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
             {repo ?? 'No repository selected'}
           </p>
         </SidebarFooter>
+        <SidebarRail />
       </Sidebar>
 
       <SidebarTrigger

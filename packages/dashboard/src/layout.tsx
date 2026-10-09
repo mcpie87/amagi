@@ -23,6 +23,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarRail,
   SidebarTrigger,
   useSidebar,
 } from './components/ui/sidebar.tsx'
@@ -563,6 +564,7 @@ function AppSidebar() {
           )}
         </div>
       </SidebarFooter>
+      <SidebarRail />
     </ShadcnSidebar>
   )
 }
