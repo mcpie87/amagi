@@ -399,8 +399,7 @@ export class CodexHarness implements Harness {
 
     if (opts.outputSchema) argv.push('--output-schema', opts.outputSchema)
 
-    argv.push(...(opts.extraArgs ?? []))
-    argv.push(opts.prompt)
+    argv.push(...(opts.extraArgs ?? []), '-')
     return argv
   }
 
@@ -417,6 +416,7 @@ export class CodexHarness implements Harness {
         // is all the harness knows.
         model: () => opts.model ?? null,
         effort: opts.effort ?? null,
+        stdin: opts.prompt,
       },
     )
   }
