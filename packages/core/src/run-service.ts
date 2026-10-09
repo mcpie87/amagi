@@ -261,6 +261,7 @@ export class RunService implements RunServiceApi {
   private async autoQueuePoll(): Promise<void> {
     if (this.autoQueuePolling) return
     this.autoQueuePolling = true
+    let backoff = this.autoQueueIdleMs
     try {
       if (!this.autoQueue || this.stopped) return
       const result = await this.start()
@@ -278,9 +279,11 @@ export class RunService implements RunServiceApi {
           console.warn(`idle notification failed: ${String(err)}`)
         }
       }
-      const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
-      if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
+      backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
+    } catch (err) {
+      console.warn(`auto-queue poll failed: ${String(err)}`)
     } finally {
+      if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
       this.autoQueuePolling = false
     }
   }
