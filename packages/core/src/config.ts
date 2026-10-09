@@ -12,6 +12,14 @@ export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'gitlab', 'forgejo'])
 
+export const ProfileConfig = z.object({
+  profile_name: z.string().trim().min(1),
+  harness: HarnessKind,
+  model: z.string().trim().min(1),
+  effort: z.string().trim().min(1),
+})
+export type ProfileConfig = z.infer<typeof ProfileConfig>
+
 export const DifficultyConfig = z.object({
   /**
    * Master switch: when off, no LLM pass runs at task creation and no claim is
@@ -185,6 +193,14 @@ const MentionWatcherConfig = AgentWatcherConfig.extend({
 
 export const Config = z
   .object({
+    profiles: z
+      .array(ProfileConfig)
+      .refine(
+        (profiles) =>
+          new Set(profiles.map(({ profile_name }) => profile_name)).size === profiles.length,
+        { message: 'profile names must be unique' },
+      )
+      .default([]),
     /** Named credential seats offered by the dashboard fleet editor. */
     seats: z
       .array(SeatConfig)
@@ -576,6 +592,11 @@ export function loadConfig(repoRoot: string): LoadedConfig {
     throw new Error(`${globalConfigPath()}: [checks] belongs in the repo config`)
   }
   const repoToml = readToml(repoConfigPath(repoRoot))
+  if ('profiles' in repoToml) {
+    throw new Error(
+      `${repoConfigPath(repoRoot)}: [[profiles]] belongs in the global config (${globalConfigPath()}), not a repo config`,
+    )
+  }
   if ('worker' in repoToml) {
     throw new Error(
       `${repoConfigPath(repoRoot)}: [[worker]] belongs in the global config (${globalConfigPath()}), not a repo config`,

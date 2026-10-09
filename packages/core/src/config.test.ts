@@ -20,6 +20,7 @@ import {
   loadGlobalConfig,
   migrateFleet,
   newWorkerId,
+  type ProfileConfig,
   reviewerHarnessConfig,
   severityAtOrAbove,
   watcherHarnessConfig,
@@ -415,6 +416,33 @@ describe('writeConfig', () => {
     writeConfig(repo, { loop: { autoQueue: true } })
     expect(readFileSync(join(repo, '.amagi', 'config.toml'), 'utf8')).toContain('autoQueue = true')
     expect(() => loadConfig(repo)).toThrow(/must declare non-empty format, lint, test/)
+  })
+})
+
+describe('execution profiles', () => {
+  const profiles: ProfileConfig[] = [
+    { profile_name: 'Careful', harness: 'codex', model: 'custom-model', effort: 'high' },
+  ]
+
+  test('defaults to no profiles and round-trips global profiles into repository config', () => {
+    expect(loadGlobalConfig().profiles).toEqual([])
+    writeGlobalConfig({ profiles })
+    expect(loadGlobalConfig().profiles).toEqual(profiles)
+    expect(loadRepoConfig().config.profiles).toEqual(profiles)
+  })
+
+  test('rejects invalid profiles loaded from global TOML', () => {
+    writeGlobalConfig({ profiles: [profiles[0], profiles[0]] })
+    expect(() => loadGlobalConfig()).toThrow(/profile names must be unique/)
+    writeGlobalConfig({ profiles: [{ ...profiles[0], effort: ' ' }] })
+    expect(() => loadGlobalConfig()).toThrow(/effort/)
+  })
+
+  test('rejects repository-local profiles', () => {
+    writeRepo(
+      '[[profiles]]\nprofile_name = "Local"\nharness = "claude"\nmodel = "opus"\neffort = "high"\n',
+    )
+    expect(() => loadConfig(repo)).toThrow(/\[\[profiles\]\] belongs in the global config/)
   })
 })
 

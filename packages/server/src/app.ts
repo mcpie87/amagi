@@ -16,6 +16,8 @@ import {
   expandTilde,
   expandWorkers,
   type GitIdentity,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
   type LiveRun,
   loadConfig,
   loadGlobalConfig,
@@ -51,6 +53,7 @@ import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
+  ProfilesUpdateBody,
   QuestionQuery,
   RepoCommitParam,
   RepoParam,
@@ -323,6 +326,20 @@ export function createApp({
         }
       }
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
+    .get('/api/profiles', (c) =>
+      c.json({
+        profiles: loadGlobalConfig().profiles,
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+      }),
+    )
+
+    .put('/api/profiles', valid('json', ProfilesUpdateBody), (c) => {
+      const { profiles } = c.req.valid('json')
+      writeGlobalConfig({ profiles })
+      return c.json({ profiles })
     })
 
     .get('/api/seat-names', (c) => {

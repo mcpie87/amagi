@@ -1,4 +1,4 @@
-import { ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
+import { Config, ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -263,6 +263,8 @@ export const SeatNamesUpdateBody = z
     message: 'seat names must be unique',
   })
 export type SeatNamesUpdateBody = z.infer<typeof SeatNamesUpdateBody>
+
+export const ProfilesUpdateBody = z.object({ profiles: Config.shape.profiles.unwrap() })
 
 export const ParticipationBody = z
   .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })

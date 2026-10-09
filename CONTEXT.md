@@ -6,6 +6,10 @@ An orchestrator that turns tracker issues into pull requests: it leases a task, 
 
 ### Actors
 
+**Execution profile**:
+A named combination of harness, model and reasoning effort, shortened to profile. A profile describes how an agent runs, independently of its credential seat.
+_Avoid_: worker, seat, harness definition
+
 **Worker**:
 A named, configured lane in the fleet, carrying one harness, model, effort and seat. A worker is a definition that outlives the runners it spawns, and it has at most one agent alive at a time.
 _Avoid_: slot, runner, thread

@@ -5,6 +5,7 @@ import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
 import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
 import { FleetWorkersSettings } from './fleet.tsx'
+import { ProfilesSettings } from './profiles-settings.tsx'
 import {
   ForgeCredentials,
   RepositorySettingsCard,
@@ -69,7 +70,9 @@ function Appearance() {
 
 export function SettingsView() {
   const { repos, refreshRepos, selected } = useDashboard()
-  const [activeTab, setActiveTab] = useState<'general' | 'workers' | 'repositories'>('general')
+  const [activeTab, setActiveTab] = useState<'general' | 'profiles' | 'workers' | 'repositories'>(
+    'general',
+  )
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [autoRebase, setAutoRebase] = useState(false)
@@ -216,6 +219,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General'],
+            ['profiles', 'Profiles'],
             ['workers', 'Workers'],
             ['repositories', 'Repositories'],
           ] as const
@@ -388,6 +392,14 @@ export function SettingsView() {
             </p>
           )
         )}
+      </div>
+      <div
+        id="settings-panel-profiles"
+        role="tabpanel"
+        aria-labelledby="settings-tab-profiles"
+        hidden={activeTab !== 'profiles'}
+      >
+        <ProfilesSettings />
       </div>
       <div
         id="settings-panel-workers"
