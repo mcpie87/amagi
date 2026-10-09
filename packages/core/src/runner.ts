@@ -2192,13 +2192,13 @@ export class Runner {
             return null
           }
           if (action === 'rebase') {
-            const rebased = await this.updateFromBase(cwd)
-            if (!rebased) {
-              this.transition(
-                task.id,
-                'needs_human',
-                'project checks still failing; updating the worktree to the latest base failed',
-              )
+            const result = await this.updateFromBase(cwd)
+            if (result !== 'updated') {
+              const reason =
+                result === 'autostash-conflict'
+                  ? 'project checks still failing; local changes conflicted while updating the worktree to the latest base'
+                  : 'project checks still failing; updating the worktree to the latest base failed'
+              this.transition(task.id, 'needs_human', reason)
               return null
             }
           }
@@ -2294,10 +2294,9 @@ export class Runner {
    * Brings the worktree up to date with the latest base branch, preserving the
    * agent's uncommitted changes. A stale worktree (checks that pass on a fresh
    * base, or a recipe the base added after this worktree was created) is the
-   * usual reason checks fail that a fresh base would pass. False when anything
-   * fails (network, conflicts), leaving the worktree untouched.
+   * usual reason checks fail that a fresh base would pass.
    */
-  private async updateFromBase(cwd: string): Promise<boolean> {
+  private async updateFromBase(cwd: string): Promise<'updated' | 'failed' | 'autostash-conflict'> {
     const { config } = this.deps
     const tokenCfg = await gitTokenConfig(
       this.exec,
@@ -2309,27 +2308,24 @@ export class Runner {
       cwd,
       env: tokenCfg,
     })
-    if (fetch.exitCode !== 0) return false
-
-    const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
-    const stashed =
-      dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
-    if (dirty && !stashed) return false
+    if (fetch.exitCode !== 0) return 'failed'
 
     const rebase = await this.exec(
-      ['git', 'rebase', `${config.forge.remote}/${config.repo.baseBranch}`],
+      ['git', 'rebase', '--autostash', `${config.forge.remote}/${config.repo.baseBranch}`],
       { cwd },
     )
+    if (
+      /(?:applying autostash resulted in conflicts|local changes are stashed, however applying them\s+resulted in conflicts)/i.test(
+        `${rebase.stdout}\n${rebase.stderr}`,
+      )
+    ) {
+      return 'autostash-conflict'
+    }
     if (rebase.exitCode !== 0) {
       await this.exec(['git', 'rebase', '--abort'], { cwd })
-      if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
-      return false
+      return 'failed'
     }
-    if (stashed) {
-      const pop = await this.exec(['git', 'stash', 'pop'], { cwd })
-      if (pop.exitCode !== 0) return false
-    }
-    return true
+    return 'updated'
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */
