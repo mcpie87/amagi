@@ -1135,9 +1135,9 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   }
 
   return (
-    <SidebarProvider className="-mx-4 -my-6 h-[calc(100dvh-var(--app-header-height))] min-h-0 overflow-hidden bg-app sm:-mx-6">
-      <Sidebar collapsible="icon">
-        <SidebarHeader>
+    <SidebarProvider className="relative -mx-4 -my-6 h-[100dvh] min-h-0 overflow-hidden bg-app sm:-mx-6">
+      <Sidebar collapsible="offcanvas">
+        <SidebarHeader className="pl-12">
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -1192,10 +1192,15 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
         </SidebarFooter>
       </Sidebar>
 
+      <SidebarTrigger
+        aria-label="Toggle chat sidebar"
+        title="Toggle chat sidebar"
+        className="absolute left-2 top-2.5 z-30"
+      />
+
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-3 px-4 sm:px-6">
-          <SidebarTrigger />
-          <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
+          <h1 className="ml-20 min-w-0 flex-1 truncate text-sm font-medium text-fg md:ml-10">
             {isEmpty ? '' : activeThread?.title}
           </h1>
           {activeTaskId !== undefined && (

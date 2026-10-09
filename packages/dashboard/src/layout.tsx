@@ -1,6 +1,7 @@
 import { tasksNeedingAttention } from '@amagi/core/view'
 import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router'
-import { FolderGit2, Moon, Sun } from 'lucide-react'
+import { ChevronRight, FolderGit2, Moon, Sun } from 'lucide-react'
+import { Popover as PopoverPrimitive } from 'radix-ui'
 import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -36,40 +37,109 @@ import {
 import { setThemePref, useTheme } from './theme.ts'
 import { Icon, type IconName } from './ui.tsx'
 
-function ConnectionStatus() {
+function WorkspaceStatus() {
   const connection = useConnection()
-  const label =
+  const { status } = useRunner()
+  const connectionLabel =
     connection === 'connected'
       ? 'Live updates'
       : connection === 'reconnecting'
         ? 'Reconnecting'
         : 'Connecting'
+  const shortConnectionLabel = connection === 'connected' ? 'Live' : connectionLabel
   const tone =
     connection === 'connected'
       ? 'bg-emerald-ink'
       : connection === 'reconnecting'
         ? 'bg-amber-ink'
         : 'bg-fg-faint'
-  return (
-    <span className="connection-status" title="live connection to the amagi server">
-      <span className={`connection-dot ${tone}`} />
-      {label}
-    </span>
-  )
-}
+  const seatSummary =
+    status === null ? 'Runner unknown' : `${status.busySeats}/${status.totalSeats} seats`
 
-function RunnerIndicator() {
-  const { status } = useRunner()
-  if (status === null) {
-    return <span className="runner-status">runner: unknown</span>
-  }
   return (
-    <span
-      className="runner-status"
-      title={status.running.length > 0 ? `running: ${status.running.join(', ')}` : 'idle'}
-    >
-      runner: {status.busySeats}/{status.totalSeats} seats · {status.available ? 'free' : 'busy'}
-    </span>
+    <PopoverPrimitive.Root>
+      <PopoverPrimitive.Trigger asChild>
+        <button
+          type="button"
+          aria-label={`${connectionLabel}; ${seatSummary}. Show status details.`}
+          className="flex h-7 w-full items-center gap-2 rounded-full border border-sidebar-border bg-sidebar-accent/50 px-2.5 text-left text-[10px] font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-2"
+        >
+          <span className={`connection-dot size-2 shrink-0 ${tone}`} />
+          <span className="group-data-[collapsible=icon]:hidden">{shortConnectionLabel}</span>
+          <span
+            aria-hidden="true"
+            className="text-sidebar-foreground/40 group-data-[collapsible=icon]:hidden"
+          >
+            ·
+          </span>
+          <span className="min-w-0 truncate group-data-[collapsible=icon]:hidden">
+            {seatSummary}
+          </span>
+          <ChevronRight
+            aria-hidden="true"
+            className="ml-auto size-3 shrink-0 text-sidebar-foreground/50 group-data-[collapsible=icon]:hidden"
+          />
+        </button>
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal>
+        <PopoverPrimitive.Content
+          side="right"
+          align="start"
+          sideOffset={8}
+          className="z-50 w-72 space-y-3 rounded-lg border border-line bg-surface p-3 text-xs text-fg shadow-xl"
+        >
+          <div className="flex items-center gap-2">
+            <span className={`connection-dot size-2 shrink-0 ${tone}`} />
+            <div>
+              <p className="font-medium">{connectionLabel}</p>
+              <p className="text-fg-muted">Connection to the amagi server</p>
+            </div>
+          </div>
+          {status === null ? (
+            <p className="border-t border-line pt-2 text-fg-muted">Runner status unavailable.</p>
+          ) : (
+            <div className="space-y-2 border-t border-line pt-2">
+              <div className="flex justify-between gap-3">
+                <span className="text-fg-muted">Runner</span>
+                <span className="truncate font-medium">{status.name}</span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-fg-muted">Seats</span>
+                <span className="font-medium">
+                  {status.busySeats}/{status.totalSeats} busy ·{' '}
+                  {status.available ? 'available' : 'busy'}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-fg-muted">Auto queue</span>
+                <span className="font-medium">{status.autoQueue ? 'On' : 'Off'}</span>
+              </div>
+              <div>
+                <p className="mb-1 text-fg-muted">Running work</p>
+                {status.running.length === 0 ? (
+                  <p className="text-fg-muted">No active runs.</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {status.running.map((taskId) => {
+                      const task = status.tasks[taskId]
+                      return (
+                        <li key={taskId} className="min-w-0">
+                          <p className="truncate font-medium">{task?.title ?? taskId}</p>
+                          <p className="truncate text-fg-muted">
+                            {taskId}
+                            {task?.workerName ? ` · ${task.workerName}` : ''}
+                          </p>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
   )
 }
 
@@ -170,13 +240,14 @@ function CommandPalette() {
     <>
       <button
         type="button"
-        aria-label="Search workspace"
+        aria-label="Search"
+        title="Search"
         onClick={open}
-        className="inline-flex items-center gap-2 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-muted hover:border-line-strong hover:text-fg"
+        className="flex h-9 w-full items-center gap-2 rounded-md border border-line-strong bg-surface px-2 text-sm text-fg-muted hover:border-line-strong hover:text-fg group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-2"
       >
         <Icon name="search" size={15} />
-        <span className="hidden sm:inline">Search workspace</span>
-        <kbd className="hidden rounded border border-line-strong px-1 font-mono text-[10px] sm:inline">
+        <span className="group-data-[collapsible=icon]:hidden">Search</span>
+        <kbd className="ml-auto rounded border border-line-strong px-1 font-mono text-[10px] group-data-[collapsible=icon]:hidden">
           ⌘K
         </kbd>
       </button>
@@ -403,20 +474,24 @@ function AppSidebar() {
 
   return (
     <ShadcnSidebar collapsible="icon">
-      <SidebarHeader className="h-14 flex-row items-center gap-1.5 px-2 py-2">
-        <SidebarTrigger
-          aria-label="Toggle sidebar"
-          title="Toggle sidebar"
-          className="size-8 shrink-0"
-        />
-        <Link
-          to="/"
-          onClick={onNavigate}
-          className="min-w-0 flex-1 group-data-[collapsible=icon]:hidden"
-        >
-          <img src={logo} alt="amagi" className="h-7 w-auto" />
-        </Link>
-        <ThemeToggle />
+      <SidebarHeader className="px-2 py-2">
+        <div className="flex h-10 items-center gap-1.5">
+          <SidebarTrigger
+            aria-label="Toggle sidebar"
+            title="Toggle sidebar"
+            className="size-8 shrink-0"
+          />
+          <Link
+            to="/"
+            onClick={onNavigate}
+            className="flex h-full min-w-0 flex-1 items-center justify-center group-data-[collapsible=icon]:hidden"
+          >
+            <img src={logo} alt="amagi" className="block h-7 w-auto" />
+          </Link>
+          <ThemeToggle />
+        </div>
+        <CommandPalette />
+        <WorkspaceStatus />
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup className="px-2 py-0">
@@ -561,23 +636,14 @@ export function RootLayout() {
         )}
         <AppSidebar />
         <div className="workspace">
-          <header className="app-header border-b border-line px-4 py-3 sm:px-6">
-            <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
-              <SidebarTrigger
-                aria-label="Open navigation"
-                title="Open navigation"
-                className="mobile-menu-button"
-              />
-              <div className="ml-auto flex items-center gap-3">
-                <ConnectionStatus />
-                <RunnerIndicator />
-                <CommandPalette />
-              </div>
-            </div>
-          </header>
+          <SidebarTrigger
+            aria-label="Open navigation"
+            title="Open navigation"
+            className={`mobile-menu-button fixed top-3 z-40 ${fullBleed ? 'left-14' : 'left-3'}`}
+          />
           <BlockedBanner />
           <main
-            className={`mx-auto w-full flex-1 px-4 py-6 sm:px-6${fullBleed ? '' : ' max-w-6xl'}`}
+            className={`mx-auto w-full flex-1 px-4 py-6 sm:px-6${fullBleed ? '' : ' pt-16 md:pt-6 max-w-6xl'}`}
           >
             {repos === null ? (
               <p className="text-fg-faint">loading repositories...</p>
