@@ -2136,13 +2136,20 @@ describe('Runner.runOnce', () => {
     expect(states(TASK.id)).toContain('retrying')
   })
 
-  test('a usage limit parks the task and records a shared hold past the retry budget', async () => {
+  test('a Codex usage-limit stream error parks the task with a shared hold', async () => {
+    const message = Array(4)
+      .fill(
+        'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:05 PM.',
+      )
+      .join('\n')
     const harness = new FakeHarness([
       {
+        events: [{ kind: 'error', message }],
         outcome: {
           ok: false,
           exitCode: 1,
-          stderr: "You've hit your usage limit, resets at 23:59",
+          stderr: '',
+          summary: null,
           sessionId: 'sess-1',
         },
       },
@@ -2160,6 +2167,7 @@ describe('Runner.runOnce', () => {
     await waitFor(() => store.task(TASK.id)?.state === 'retrying')
     expect(stateReason(TASK.id)).toContain('fake+sonnet usage limit hold until')
     expect(readUsageHold(usageHoldKey('fake', 'sonnet'))?.reason).toContain('usage limit')
+    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'retry.scheduled')).toBe(true)
     expect(harness.calls).toHaveLength(1)
     runner.cancel()
     expect((await pending)?.state).toBe('cancelled')
