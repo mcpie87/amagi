@@ -13,126 +13,6 @@ import { EmptyState, Icon } from '../ui.tsx'
 import { CloseButtons } from './task-actions.tsx'
 import { WorkersPanel } from './workers.tsx'
 
-function RunButton() {
-  const { start, options } = useRunner()
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-  const harnesses = options?.harnesses ?? []
-  const [harness, setHarness] = useState('')
-  const [model, setModel] = useState('')
-  const [customModel, setCustomModel] = useState('')
-  const [effort, setEffort] = useState('')
-
-  const selected = harnesses.find((h) => h.name === harness)
-  const kind = selected?.kind
-  const models = kind === undefined ? [] : (options?.models[kind] ?? [])
-  const efforts = kind === undefined ? [] : (options?.efforts[kind] ?? [])
-
-  const switchHarness = (value: string) => {
-    setHarness(value)
-    setModel('')
-    setCustomModel('')
-    setEffort('')
-  }
-
-  const run = async () => {
-    setBusy(true)
-    setMessage(null)
-    const effectiveModel = model === 'custom' ? customModel.trim() : model
-    const res = await start(undefined, {
-      ...(harness === '' ? {} : { harness }),
-      ...(effectiveModel === '' ? {} : { model: effectiveModel }),
-      ...(effort === '' ? {} : { effort }),
-    })
-    setBusy(false)
-    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
-  }
-
-  const field = 'rounded border border-line-strong bg-sunken px-2 py-1 text-sm text-fg-strong'
-  const label = 'mb-0.5 block text-xs text-fg-muted'
-
-  return (
-    <div className="flex flex-wrap items-end gap-2">
-      {message !== null && <span className="self-center text-sm text-fg-muted">{message}</span>}
-      <div>
-        <label className={label} htmlFor="run-harness">
-          Harness
-        </label>
-        <select
-          id="run-harness"
-          value={harness}
-          onChange={(e) => switchHarness(e.target.value)}
-          className={field}
-        >
-          <option value="">default ({options?.default?.kind ?? 'config'})</option>
-          {harnesses.map((h) => (
-            <option key={h.name} value={h.name}>
-              {h.name}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div>
-        <label className={label} htmlFor="run-model">
-          Model
-        </label>
-        <select
-          id="run-model"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className={field}
-        >
-          <option value="">
-            {selected?.model === undefined ? 'default (harness)' : `default (${selected.model})`}
-          </option>
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-          <option value="custom">(custom model)</option>
-        </select>
-        {model === 'custom' && (
-          <input
-            value={customModel}
-            onChange={(e) => setCustomModel(e.target.value)}
-            placeholder="model id"
-            className={`${field} mt-1 block w-full`}
-          />
-        )}
-      </div>
-      <div>
-        <label className={label} htmlFor="run-effort">
-          Effort
-        </label>
-        <select
-          id="run-effort"
-          value={effort}
-          onChange={(e) => setEffort(e.target.value)}
-          className={field}
-        >
-          <option value="">
-            {selected?.effort === undefined ? 'default (harness)' : `default (${selected.effort})`}
-          </option>
-          {efforts.map((e) => (
-            <option key={e} value={e}>
-              {e}
-            </option>
-          ))}
-        </select>
-      </div>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={run}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-      >
-        Run next
-      </button>
-    </div>
-  )
-}
-
 const metricTone = {
   red: { box: 'border-red-edge bg-red-soft', value: 'text-red-ink' },
   amber: { box: 'border-amber-edge bg-amber-soft', value: 'text-amber-ink' },
@@ -419,7 +299,6 @@ export function OverviewView() {
             placeholder="Search runs…"
             className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
           />
-          {selected !== null && <RunButton />}
         </div>
       </div>
 
