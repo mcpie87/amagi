@@ -33,6 +33,7 @@ type ChatThread = {
   updatedAt: number
   harness: string
   model: string
+  customModel?: boolean
   effort: string
   messages: ChatMessage[]
 }
@@ -108,13 +109,14 @@ function newThread(options: ChatOptions): ChatThread | null {
     updatedAt: Date.now(),
     harness: harness.kind,
     model: harness.model ?? '',
+    customModel: false,
     effort: harness.effort ?? '',
     messages: [],
   }
 }
 
-const pillClass =
-  'h-8 min-w-0 rounded-lg border border-transparent bg-transparent px-2 text-xs text-fg-muted hover:bg-raised hover:text-fg focus-visible:border-line-strong focus-visible:outline-none disabled:opacity-50'
+const pickerItemClass =
+  'flex min-h-9 w-full items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-left text-sm text-fg hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink'
 
 function ChatOptionsBar({
   thread,
@@ -128,67 +130,257 @@ function ChatOptionsBar({
   onChange: (patch: Partial<ChatThread>) => void
 }) {
   const id = useId()
+  const [open, setOpen] = useState(false)
+  const [effortOpen, setEffortOpen] = useState(false)
+  const [harnessOpen, setHarnessOpen] = useState(false)
+  const pickerRef = useRef<HTMLDivElement>(null)
+  const modelButtonRef = useRef<HTMLButtonElement>(null)
+  const harnessPickerRef = useRef<HTMLDivElement>(null)
+  const harnessButtonRef = useRef<HTMLButtonElement>(null)
   const harness = options.harnesses.find((item) => item.kind === thread.harness)
   const models = [...new Set([...(options.models[thread.harness] ?? []), harness?.model])].filter(
     (model): model is string => model !== undefined,
   )
+  const customModel = thread.customModel ?? (thread.model !== '' && !models.includes(thread.model))
+  const modelLabel = customModel
+    ? thread.model || 'Custom model'
+    : thread.model || harness?.model || 'Default model'
   const efforts = [
-    ...new Set([...(options.efforts[thread.harness] ?? []), harness?.effort]),
-  ].filter((effort): effort is string => effort !== undefined)
+    ...new Set([...(options.efforts[thread.harness] ?? []), harness?.effort, thread.effort]),
+  ].filter((effort): effort is string => effort !== undefined && effort !== '')
+  const effortLabel = thread.effort || 'Default effort'
+
+  useEffect(() => {
+    if (!open && !harnessOpen) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node) {
+        if (!pickerRef.current?.contains(event.target)) {
+          setOpen(false)
+          setEffortOpen(false)
+        }
+        if (!harnessPickerRef.current?.contains(event.target)) setHarnessOpen(false)
+      }
+    }
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (harnessOpen) harnessButtonRef.current?.focus()
+        else modelButtonRef.current?.focus()
+        setOpen(false)
+        setEffortOpen(false)
+        setHarnessOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open, harnessOpen])
+
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false)
+      setEffortOpen(false)
+      setHarnessOpen(false)
+    }
+  }, [disabled])
+
+  const selectHarness = (kind: string) => {
+    const next = options.harnesses.find((item) => item.kind === kind)
+    onChange({
+      harness: kind,
+      model: next?.model ?? '',
+      customModel: false,
+      effort: next?.effort ?? '',
+    })
+    setHarnessOpen(false)
+    harnessButtonRef.current?.focus()
+  }
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-0.5">
-      <select
-        aria-label="Harness"
-        title="Harness"
-        value={thread.harness}
-        disabled={disabled}
-        onChange={(event) => {
-          const next = options.harnesses.find((item) => item.kind === event.target.value)
-          onChange({
-            harness: event.target.value,
-            model: next?.model ?? '',
-            effort: next?.effort ?? '',
-          })
-        }}
-        className={`${pillClass} font-medium text-fg`}
-      >
-        {options.harnesses.map((item) => (
-          <option key={item.kind} value={item.kind}>
-            {harnessLabel(item.kind)}
-          </option>
-        ))}
-      </select>
-      <input
-        aria-label="Model"
-        title="Model"
-        list={`${id}-models`}
-        value={thread.model}
-        disabled={disabled}
-        placeholder="Default model"
-        onChange={(event) => onChange({ model: event.target.value })}
-        className={`${pillClass} w-36 font-mono placeholder:text-fg-faint`}
-      />
-      <datalist id={`${id}-models`}>
-        {models.map((model) => (
-          <option key={model} value={model} />
-        ))}
-      </datalist>
-      <input
-        aria-label="Effort"
-        title="Effort"
-        list={`${id}-efforts`}
-        value={thread.effort}
-        disabled={disabled}
-        placeholder="Default effort"
-        onChange={(event) => onChange({ effort: event.target.value })}
-        className={`${pillClass} w-28 placeholder:text-fg-faint`}
-      />
-      <datalist id={`${id}-efforts`}>
-        {efforts.map((effort) => (
-          <option key={effort} value={effort} />
-        ))}
-      </datalist>
+      <div ref={harnessPickerRef} className="relative">
+        <button
+          type="button"
+          ref={harnessButtonRef}
+          aria-label="Harness"
+          aria-expanded={harnessOpen}
+          aria-controls={`${id}-harnesses`}
+          title="Harness"
+          disabled={disabled}
+          onClick={() => {
+            setOpen(false)
+            setEffortOpen(false)
+            setHarnessOpen(!harnessOpen)
+          }}
+          className="flex h-8 items-center gap-2 rounded-lg px-2 text-xs font-medium text-fg-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink disabled:opacity-50"
+        >
+          {harnessLabel(thread.harness)}
+          <span aria-hidden="true" className="text-fg-faint">
+            ⌄
+          </span>
+        </button>
+        {harnessOpen && (
+          <div
+            id={`${id}-harnesses`}
+            className="absolute bottom-full left-0 z-50 mb-2 w-44 rounded-xl border border-line bg-surface p-2 shadow-xl"
+          >
+            {options.harnesses.map((item) => (
+              <button
+                key={item.kind}
+                type="button"
+                aria-pressed={thread.harness === item.kind}
+                onClick={() => selectHarness(item.kind)}
+                className={pickerItemClass}
+              >
+                <span>{harnessLabel(item.kind)}</span>
+                {thread.harness === item.kind && <span aria-hidden="true">✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div ref={pickerRef} className="relative">
+        <button
+          type="button"
+          ref={modelButtonRef}
+          aria-label={`Model ${modelLabel}, effort ${effortLabel}`}
+          aria-expanded={open}
+          aria-controls={`${id}-picker`}
+          disabled={disabled}
+          onClick={() => {
+            setOpen(!open)
+            setEffortOpen(false)
+          }}
+          className="flex h-8 min-w-0 max-w-64 items-center gap-2 rounded-lg px-2 text-xs text-fg-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink disabled:opacity-50"
+        >
+          <span className="max-w-40 truncate font-medium text-fg">{modelLabel}</span>
+          <span className="shrink-0 text-fg-faint">{effortLabel}</span>
+          <span aria-hidden="true" className="text-fg-faint">
+            ⌄
+          </span>
+        </button>
+        {open && (
+          <div
+            id={`${id}-picker`}
+            className="absolute bottom-full left-0 z-50 mb-2 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-surface p-2 shadow-xl"
+          >
+            <div className="max-h-56 overflow-y-auto">
+              <button
+                type="button"
+                aria-pressed={!customModel && thread.model === ''}
+                onClick={() => {
+                  onChange({ model: '', customModel: false })
+                  setOpen(false)
+                }}
+                className={pickerItemClass}
+              >
+                <span>Default model</span>
+                {!customModel && thread.model === '' && <span aria-hidden="true">✓</span>}
+              </button>
+              {models.map((model) => (
+                <button
+                  key={model}
+                  type="button"
+                  aria-pressed={!customModel && thread.model === model}
+                  onClick={() => {
+                    onChange({ model, customModel: false })
+                    setOpen(false)
+                  }}
+                  className={pickerItemClass}
+                >
+                  <span className="truncate">{model}</span>
+                  {!customModel && thread.model === model && <span aria-hidden="true">✓</span>}
+                </button>
+              ))}
+            </div>
+            <div className="my-1.5 border-t border-line" />
+            <button
+              type="button"
+              aria-pressed={customModel}
+              onClick={() => {
+                setEffortOpen(false)
+                onChange({ model: customModel ? thread.model : '', customModel: true })
+              }}
+              className={pickerItemClass}
+            >
+              <span>{customModel ? 'Custom model' : 'Custom model…'}</span>
+              {customModel && <span aria-hidden="true">✓</span>}
+            </button>
+            {customModel && (
+              <input
+                aria-label="Custom model"
+                title="Custom model"
+                value={thread.model}
+                disabled={disabled}
+                placeholder="Enter model ID"
+                onChange={(event) => onChange({ model: event.target.value, customModel: true })}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
+                  event.preventDefault()
+                  setEffortOpen(false)
+                  setOpen(false)
+                  modelButtonRef.current?.focus()
+                }}
+                className="mt-1 h-9 w-full rounded-lg border border-line-strong bg-sunken px-2.5 text-sm font-mono text-fg outline-none placeholder:text-fg-faint focus-visible:border-sky-ink"
+              />
+            )}
+            <div className="my-1.5 border-t border-line" />
+            <div className="relative">
+              <button
+                type="button"
+                aria-expanded={effortOpen}
+                aria-controls={`${id}-efforts`}
+                onClick={() => setEffortOpen(!effortOpen)}
+                className={`${pickerItemClass} ${effortOpen ? 'bg-surface-muted' : ''}`}
+              >
+                <span>Effort</span>
+                <span className="flex items-center gap-2 text-fg-muted">
+                  {effortLabel}
+                  <span aria-hidden="true">›</span>
+                </span>
+              </button>
+              {effortOpen && (
+                <div
+                  id={`${id}-efforts`}
+                  className="absolute right-0 bottom-full z-[60] mb-1 w-60 max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-surface p-2 shadow-xl sm:bottom-0 sm:left-full sm:right-auto sm:mb-0 sm:ml-1"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={thread.effort === ''}
+                    onClick={() => {
+                      onChange({ effort: '' })
+                      setEffortOpen(false)
+                      setOpen(false)
+                    }}
+                    className={pickerItemClass}
+                  >
+                    <span>Default effort</span>
+                    {thread.effort === '' && <span aria-hidden="true">✓</span>}
+                  </button>
+                  {efforts.map((effort) => (
+                    <button
+                      key={effort}
+                      type="button"
+                      aria-pressed={thread.effort === effort}
+                      onClick={() => {
+                        onChange({ effort })
+                        setEffortOpen(false)
+                        setOpen(false)
+                      }}
+                      className={pickerItemClass}
+                    >
+                      <span className="capitalize">{effort}</span>
+                      {thread.effort === effort && <span aria-hidden="true">✓</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
