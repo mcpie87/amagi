@@ -1,3 +1,7 @@
+import type { StoredEvent } from '@amagi/core/events'
+import { taskEvents } from '@amagi/core/view'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { SquarePen } from 'lucide-react'
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -7,7 +11,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import { SquarePen } from 'lucide-react'
 import { apiBase } from '../api.ts'
 import logoGlyph from '../assets/logo-glyph.png'
 import {
@@ -25,6 +28,7 @@ import {
   SidebarTrigger,
 } from '../components/ui/sidebar.tsx'
 import { Markdown } from '../markdown.tsx'
+import { chatRoute } from '../routes.tsx'
 import { useDashboard } from '../store.tsx'
 import { Icon } from '../ui.tsx'
 
@@ -38,6 +42,10 @@ type ChatThread = {
   customModel?: boolean
   effort: string
   messages: ChatMessage[]
+  /** Binds the thread to a task: the agent works in its worktree and asks amagi for git writes. */
+  taskId?: string
+  /** The harness session a task thread resumes on its next message. */
+  sessionId?: string
 }
 type ChatOptions = {
   harnesses: { kind: string; model?: string; effort?: string }[]
@@ -443,6 +451,75 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
+type GitRequest = Extract<StoredEvent, { type: 'git.request' }>
+
+const GIT_REQUEST_LABELS: Record<GitRequest['verb'], string> = {
+  pr: 'push the branch and open a pull request',
+  push: 'push to the pull request',
+  comment: 'post a comment',
+  close: 'close the task',
+}
+
+/** Git requests the task's agent made that the operator has not decided yet. */
+function pendingGitRequests(events: readonly StoredEvent[]): GitRequest[] {
+  const decided = new Set(
+    events.flatMap((event) => (event.type === 'git.request.decided' ? [event.requestId] : [])),
+  )
+  return events.filter(
+    (event): event is GitRequest => event.type === 'git.request' && !decided.has(event.requestId),
+  )
+}
+
+function GitRequestCard({
+  request,
+  disabled,
+  onDecide,
+}: {
+  request: GitRequest
+  disabled: boolean
+  onDecide: (approve: boolean) => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const decide = async (approve: boolean) => {
+    setBusy(true)
+    try {
+      await onDecide(approve)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="rounded-xl border border-amber-edge bg-amber-soft px-4 py-3">
+      <p className="text-sm text-fg-strong">
+        The agent asks amagi to <strong>{GIT_REQUEST_LABELS[request.verb]}</strong>.
+      </p>
+      {request.message !== undefined && (
+        <div className="chat-reply mt-2 rounded-lg bg-surface px-3 py-2 text-sm">
+          <Markdown text={request.message} />
+        </div>
+      )}
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={disabled || busy}
+          onClick={() => void decide(true)}
+          className="rounded-lg bg-accent px-3 py-1.5 text-sm text-on-solid hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? 'Working…' : 'Approve'}
+        </button>
+        <button
+          type="button"
+          disabled={disabled || busy}
+          onClick={() => void decide(false)}
+          className="rounded-lg border border-line-strong px-3 py-1.5 text-sm text-fg-muted hover:bg-surface hover:text-fg disabled:opacity-50"
+        >
+          Decline
+        </button>
+      </div>
+    </div>
+  )
+}
+
 const SUGGESTIONS = ['Summarize this repository', 'Explain a file', 'Help me debug an issue']
 
 export function ChatView() {
@@ -452,6 +529,13 @@ export function ChatView() {
 
 // Keyed by repo: threads load from that repo's storage on mount, so a stale write can't cross repos.
 function ChatWorkspace({ repo }: { repo: string | null }) {
+  const { state, resyncStream } = useDashboard()
+  const { triage: triageTarget } = useSearch({ from: chatRoute.id })
+  const navigate = useNavigate()
+  // StrictMode replays effects; one click must start exactly one triage.
+  const startedTriage = useRef<string | null>(null)
+  // The send handler is recreated each render; effects call the latest one.
+  const sendRef = useRef<(thread: ChatThread, message: string) => Promise<void>>(async () => {})
   const [threads, setThreads] = useState<ChatThread[]>(() =>
     repo === null ? [] : readThreads(repo),
   )
@@ -471,6 +555,9 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
   const activeMessages = activeThread?.messages ?? []
   const lastMessage = activeMessages.at(-1)
   const isEmpty = activeMessages.length === 0
+  const activeTaskId = activeThread?.taskId
+  const pendingRequests =
+    activeTaskId === undefined ? [] : pendingGitRequests(taskEvents(state, activeTaskId))
   const needsThread = options !== null && activeThread === undefined
   const history = threads
     .filter((thread) => thread.messages.length > 0)
@@ -516,14 +603,40 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     }
   }, [repo, threads])
 
-  // Like claude.ai, the page opens on a fresh draft; it only enters history once sent.
+  // The task page's full triage button lands here with ?triage=<id>: open a
+  // thread bound to the task and send the opening request. The param is
+  // dropped so a reload does not start a second conversation.
   useEffect(() => {
-    if (!needsThread || options === null) return
+    if (triageTarget === undefined || repo === null || options === null) return
+    if (startedTriage.current === triageTarget) return
+    startedTriage.current = triageTarget
+    void navigate({ to: '/chat', search: {}, replace: true })
+    const draft = newThread(options)
+    if (draft === null) return
+    const thread: ChatThread = {
+      ...draft,
+      title: `Full triage: ${triageTarget}`,
+      taskId: triageTarget,
+    }
+    setThreads((current) => [thread, ...current])
+    stickToBottom.current = true
+    setActiveId(thread.id)
+    setError(null)
+    void sendRef.current(
+      thread,
+      `Perform a full triage of ${triageTarget}: triage it, implement it, check and review your work, then land it through amagi git requests.`,
+    )
+  }, [triageTarget, repo, options, navigate])
+
+  // Like claude.ai, the page opens on a fresh draft; it only enters history once sent.
+  // A pending ?triage= opens its own thread in the same commit; a draft would steal focus.
+  useEffect(() => {
+    if (!needsThread || options === null || triageTarget !== undefined) return
     const thread = newThread(options)
     if (thread === null) return
     setThreads((current) => [thread, ...current])
     setActiveId(thread.id)
-  }, [needsThread, options])
+  }, [needsThread, options, triageTarget])
 
   useEffect(() => {
     if (activeId !== null) textareaRef.current?.focus()
@@ -610,24 +723,21 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     )
   }
 
-  const send = async (event: FormEvent) => {
+  const send = (event: FormEvent) => {
     event.preventDefault()
     const message = text.trim()
-    if (
-      message === '' ||
-      sending ||
-      repo === null ||
-      activeThread === undefined ||
-      options === null
-    )
-      return
+    if (message === '' || activeThread === undefined) return
     setText('')
+    void sendMessage(activeThread, message)
+  }
+
+  const sendMessage = async (thread: ChatThread, message: string) => {
+    if (sending || repo === null) return
     setError(null)
     setActivity('Thinking…')
     setSending(true)
     stickToBottom.current = true
     setShowJump(false)
-    const thread = activeThread
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', content: message }
     const assistantMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -663,6 +773,8 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
           harness: thread.harness,
           ...(thread.model.trim() === '' ? {} : { model: thread.model.trim() }),
           ...(thread.effort.trim() === '' ? {} : { effort: thread.effort.trim() }),
+          ...(thread.taskId === undefined ? {} : { taskId: thread.taskId }),
+          ...(thread.sessionId === undefined ? {} : { sessionId: thread.sessionId }),
           message,
           history,
         }),
@@ -683,19 +795,32 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
             kind?: string
             text?: string
             message?: string
+            name?: string
           }
           if (agentEvent.kind === 'text' && typeof agentEvent.text === 'string') {
             setActivity(null)
             appendAssistantText(thread.id, assistantMessage.id, agentEvent.text)
           } else if (agentEvent.kind === 'status' && typeof agentEvent.message === 'string') {
             setActivity(agentEvent.message)
+          } else if (agentEvent.kind === 'tool_use' && typeof agentEvent.name === 'string') {
+            setActivity(`Using ${agentEvent.name}…`)
           }
         } else if (packet.event === 'error') {
           const detail = JSON.parse(packet.data) as { error?: string }
           setError(detail.error ?? 'chat run failed')
         } else if (packet.event === 'done') {
-          const result = JSON.parse(packet.data) as { ok?: boolean; error?: string }
+          const result = JSON.parse(packet.data) as {
+            ok?: boolean
+            error?: string
+            sessionId?: string | null
+          }
           if (result.ok === false) setError(result.error ?? 'chat run failed')
+          const sessionId = result.sessionId
+          if (thread.taskId !== undefined && typeof sessionId === 'string') {
+            setThreads((current) =>
+              current.map((item) => (item.id === thread.id ? { ...item, sessionId } : item)),
+            )
+          }
         }
       }
       while (true) {
@@ -736,6 +861,39 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
         setSending(false)
         setActivity(null)
       }
+      // A task turn may have asked for git writes; a stale event stream would hide the cards.
+      if (thread.taskId !== undefined) resyncStream()
+    }
+  }
+  sendRef.current = sendMessage
+
+  const decideGitRequest = async (thread: ChatThread, request: GitRequest, approve: boolean) => {
+    if (repo === null || thread.taskId === undefined) return
+    setError(null)
+    try {
+      const res = await fetch(
+        `${apiBase}/api/repos/${encodeURIComponent(repo)}/tasks/${encodeURIComponent(thread.taskId)}/git-requests/${encodeURIComponent(request.requestId)}/decision`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ approve }),
+        },
+      )
+      const body = (await res.json().catch(() => null)) as {
+        result?: string
+        error?: string
+      } | null
+      resyncStream()
+      if (!res.ok || body?.result === undefined) {
+        setError(body?.error ?? `HTTP ${res.status}`)
+        return
+      }
+      await sendMessage(
+        thread,
+        `amagi: the operator ${approve ? 'approved' : 'declined'} \`${request.verb}\`. Result: ${body.result}`,
+      )
+    } catch {
+      setError('could not reach the amagi server')
     }
   }
 
@@ -810,6 +968,15 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
           <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
             {isEmpty ? '' : activeThread?.title}
           </h1>
+          {activeTaskId !== undefined && (
+            <Link
+              to="/tasks/$id"
+              params={{ id: activeTaskId }}
+              className="shrink-0 text-xs text-sky-ink hover:underline"
+            >
+              Open task {activeTaskId}
+            </Link>
+          )}
         </header>
 
         <div className="relative flex min-h-0 flex-1 flex-col">
@@ -863,6 +1030,15 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
                     </article>
                   )
                 })}
+                {activeThread !== undefined &&
+                  pendingRequests.map((request) => (
+                    <GitRequestCard
+                      key={request.requestId}
+                      request={request}
+                      disabled={sending}
+                      onDecide={(approve) => decideGitRequest(activeThread, request, approve)}
+                    />
+                  ))}
               </div>
             </div>
           )}
@@ -909,7 +1085,8 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
                   <ChatOptionsBar
                     thread={activeThread}
                     options={options}
-                    disabled={sending}
+                    // A task thread resumes one harness session, which cannot change harness.
+                    disabled={sending || activeThread.sessionId !== undefined}
                     onChange={updateActive}
                   />
                 )}

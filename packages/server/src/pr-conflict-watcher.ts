@@ -447,6 +447,11 @@ export function startPrConflictWatcher({
       const seen = state[key]
       const taskId = taskIdFromPrBranch(pr.headRefName)
       const task = taskId === null ? null : store.task(taskId)
+      // The operator's chat holds the task and resolves its conflicts itself.
+      if (task?.state === 'chatting') {
+        if (seen !== undefined) nextState[key] = seen
+        continue
+      }
       if (isConflict && task !== null && task.prMergeStatus !== 'conflicted') {
         store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
       }

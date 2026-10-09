@@ -38,6 +38,11 @@ export const RepoCommitParam = z.object({
   repo: z.string().min(1),
   hash: z.string().regex(/^[0-9a-f]{7,40}$/i),
 })
+export const RepoGitRequestParam = z.object({
+  repo: z.string().min(1),
+  id: z.string().min(1),
+  requestId: z.string().min(1),
+})
 export const RepoQuestionParam = z.object({
   repo: z.string().min(1),
   id: z.string().min(1),
@@ -122,13 +127,17 @@ export type AnswerBody = z.infer<typeof AnswerBody>
  * prose and never interprets anything outside this set; an unknown verb is
  * rejected as a 400 before any work happens.
  */
-export const GitRequestVerb = z.enum(['commit'])
+export const GitRequestVerb = z.enum(['commit', 'merge-base', 'pr', 'push', 'comment', 'close'])
 export type GitRequestVerb = z.infer<typeof GitRequestVerb>
 
 export const GitRequestBody = z.object({
   verb: GitRequestVerb,
+  /** Commit body, comment text or close reason; content passed through, never interpreted. */
+  message: z.string().trim().min(1).max(20_000).optional(),
 })
 export type GitRequestBody = z.infer<typeof GitRequestBody>
+
+export const GitDecisionBody = z.object({ approve: z.boolean() })
 
 /** A message from the operator to the worker behind a parked task. */
 export const ChatBody = z.object({
@@ -142,6 +151,10 @@ export const ChatPageBody = z.object({
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
   message: z.string().trim().min(1).max(4000),
+  /** Binds the conversation to a task: the agent works in its worktree and may request git writes. */
+  taskId: z.string().min(1).optional(),
+  /** The harness session a task conversation resumes, as the previous turn's done event reported it. */
+  sessionId: z.string().min(1).optional(),
   history: z
     .array(
       z.object({

@@ -1,5 +1,6 @@
-import { canReset, isTerminal, type TaskState } from '@amagi/core/events'
+import { canChatTask, canReset, isTerminal, type TaskState } from '@amagi/core/events'
 import type { ProjectedQuestion } from '@amagi/core/view'
+import { Link } from '@tanstack/react-router'
 import { type FormEvent, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard, useRunner } from '../store.tsx'
@@ -681,6 +682,20 @@ export function ResolveConflictsButton({
         </p>
       )}
     </div>
+  )
+}
+
+/** Opens the chat page on a conversation with an agent that carries the task end to end. */
+export function FullTriageButton({ taskId, state }: { taskId: string; state: TaskState | null }) {
+  if (!canChatTask(state)) return null
+  return (
+    <Link
+      to="/chat"
+      search={{ triage: taskId }}
+      className="rounded border border-sky-edge bg-sky-soft px-3 py-1 text-sm text-sky-ink hover:opacity-85"
+    >
+      Perform Full Triage
+    </Link>
   )
 }
 

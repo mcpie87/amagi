@@ -27,7 +27,7 @@ export const KANBAN_COLUMNS: KanbanColumn[] = [
     key: 'implementing',
     title: 'In progress',
     accent: 'bg-blue-ink',
-    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks'],
+    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks', 'chatting'],
   },
   {
     key: 'reviewing',

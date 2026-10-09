@@ -1,9 +1,16 @@
+import { mkdirSync } from 'node:fs'
 import {
+  type AgentStartOptions,
+  errMsg,
+  exec,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   type Harness,
+  holdTaskForChat,
   makeHarness,
   resolveHarnessKind,
+  runStateDir,
+  taskChatSystemPrompt,
   type Workspace,
   type Workspaces,
 } from '@amagi/core'
@@ -61,6 +68,11 @@ export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
       const ws = resolveWorkspace(workspaces, repo)
       const key = `${repo}/${body.conversationId}`
       if (busy.has(key)) return c.json({ error: 'this conversation is already responding' }, 409)
+      // Two conversations on one task would share its worktree.
+      const taskKey = body.taskId === undefined ? null : `${repo}/task/${body.taskId}`
+      if (taskKey !== null && busy.has(taskKey)) {
+        return c.json({ error: `an agent is already responding on ${body.taskId}` }, 409)
+      }
 
       const config = {
         ...resolveHarnessKind(ws.config, body.harness),
@@ -70,23 +82,78 @@ export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
 
       const harness = harnessFor?.(ws, config) ?? makeHarness(config)
       busy.add(key)
+      if (taskKey !== null) busy.add(taskKey)
       return streamSSE(c, async (stream) => {
         let proc: ReturnType<Harness['start']> | undefined
         stream.onAbort(() => {
           if (proc !== undefined) void proc.kill()
         })
         try {
-          proc = harness.start({
-            cwd: ws.root,
-            prompt: transcript(body.history, body.message),
-            systemPrompt: SYSTEM_PROMPT,
+          const shared = {
             model: config.model,
             effort: config.effort,
-            permissions: 'read-only',
             ...(config.seat === undefined ? {} : { seat: config.seat }),
             ...(config.allowedTools === undefined ? {} : { allowedTools: config.allowedTools }),
             extraArgs: config.extraArgs,
-          })
+          }
+          let opts: AgentStartOptions = {
+            ...shared,
+            cwd: ws.root,
+            prompt: transcript(body.history, body.message),
+            systemPrompt: SYSTEM_PROMPT,
+            permissions: 'read-only',
+          }
+          if (body.taskId !== undefined) {
+            await stream.writeSSE({
+              event: 'agent',
+              data: JSON.stringify({ kind: 'status', message: 'Preparing the task worktree…' }),
+            })
+            const hold = await holdTaskForChat(
+              {
+                store: ws.store,
+                tracker: ws.tracker,
+                config: ws.config,
+                repoRoot: ws.root,
+                repoName: ws.name,
+                exec,
+              },
+              body.taskId,
+            )
+            if (!hold.ok) throw new Error(hold.error)
+            const { format, lint, test, commands } = ws.config.checks
+            const runState = runStateDir(body.taskId)
+            mkdirSync(runState, { recursive: true })
+            opts = {
+              ...shared,
+              cwd: hold.cwd,
+              // A resumed session already holds the conversation.
+              prompt:
+                body.sessionId === undefined
+                  ? transcript(body.history, body.message)
+                  : body.message,
+              systemPrompt: taskChatSystemPrompt({
+                task: hold.task,
+                worktree: hold.cwd,
+                branch: hold.branch,
+                baseBranch: ws.config.repo.baseBranch,
+                checks: [format, lint, test, ...commands].filter(
+                  (command): command is string => command !== null && command !== '',
+                ),
+                prUrl: hold.prUrl,
+              }),
+              permissions: config.permissions,
+              env: {
+                AMAGI_TASK_TOKEN: ws.store.token(body.taskId),
+                AMAGI_WORKTREE: hold.cwd,
+                AMAGI_REPO_ROOT: ws.root,
+                AMAGI_RUN_STATE: runState,
+              },
+            }
+          }
+          proc =
+            body.taskId !== undefined && body.sessionId !== undefined
+              ? harness.resume(body.sessionId, opts)
+              : harness.start(opts)
           for await (const event of proc.events()) {
             if (stream.aborted) break
             await stream.writeSSE({ event: 'agent', data: JSON.stringify(event) })
@@ -98,16 +165,17 @@ export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
               data: JSON.stringify({
                 ok: outcome.ok,
                 error: outcome.ok ? undefined : (outcome.summary ?? outcome.stderr),
+                sessionId: outcome.sessionId,
               }),
             })
           }
         } catch (err) {
           if (!stream.aborted) {
-            const message = err instanceof Error ? err.message : String(err)
-            await stream.writeSSE({ event: 'error', data: JSON.stringify({ error: message }) })
+            await stream.writeSSE({ event: 'error', data: JSON.stringify({ error: errMsg(err) }) })
           }
         } finally {
           busy.delete(key)
+          if (taskKey !== null) busy.delete(taskKey)
         }
       })
     })

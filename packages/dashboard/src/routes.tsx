@@ -20,9 +20,11 @@ const indexRoute = createRoute({
   path: '/',
   component: OverviewView,
 })
-const chatRoute = createRoute({
+export const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/chat',
+  validateSearch: (search: Record<string, unknown>): { triage?: string } =>
+    typeof search.triage === 'string' ? { triage: search.triage } : {},
   component: ChatView,
 })
 const boardRoute = createRoute({

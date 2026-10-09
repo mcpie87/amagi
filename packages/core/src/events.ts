@@ -20,6 +20,7 @@ export const TASK_STATES = [
   'pr_merge_conflict',
   'pr_conflict_fixing',
   'retrying',
+  'chatting',
   'done',
   'no_pr',
   'needs_human',
@@ -48,7 +49,8 @@ export function isTerminal(state: TaskState): boolean {
  * (the tracker issue is closed) nor a task with a live PR, which would dangle.
  */
 export function canReset(state: TaskState, hasWorktree: boolean): boolean {
-  if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr') return true
+  if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr' || state === 'chatting')
+    return true
   if (
     isTerminal(state) ||
     state === 'pr_open' ||
@@ -61,6 +63,25 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
 }
 
 /**
+ * Whether the operator may drive a task from the chat page in `state` (null
+ * when the task never ran): any task no worker or watcher is running, short of
+ * a closed one. A chat on an unrun, parked or conflicted task holds it in
+ * `chatting`; one on an open PR leaves it there.
+ */
+export function canChatTask(state: TaskState | null): boolean {
+  return (
+    state === null ||
+    state === 'needs_human' ||
+    state === 'no_pr' ||
+    state === 'cancelled' ||
+    state === 'chatting' ||
+    state === 'pr_open' ||
+    state === 'pr_flagged' ||
+    state === 'pr_merge_conflict'
+  )
+}
+
+/**
  * Any state may fall to a terminal state, so those edges are implicit rather
  * than listed here. Only forward progress is enumerated; the operator-settled
  * exits of the parked/stopped states are special-cased in canTransition, not
@@ -68,7 +89,7 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
  */
 const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   queued: ['worktree_ready'],
-  claimed: ['worktree_ready'],
+  claimed: ['worktree_ready', 'chatting'],
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
   awaiting_answer: ['implementing'],
@@ -81,8 +102,11 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
   pr_flagged: ['pr_open', 'pr_merge_conflict'],
-  pr_merge_conflict: ['pr_conflict_fixing', 'pr_open'],
+  pr_merge_conflict: ['pr_conflict_fixing', 'pr_open', 'chatting'],
   pr_conflict_fixing: ['pr_merge_conflict', 'pr_open'],
+  // The operator's chat holds the task until an approved push puts the PR back
+  // under the watchers.
+  chatting: ['pr_open'],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
@@ -364,6 +388,24 @@ export const EventBody = z.discriminatedUnion('type', [
    * `<sha> <reflog subject>` (e.g. `"abc123 reset: moving to HEAD"` for a stash).
    */
   z.object({ type: z.literal('git.bypassed'), entries: z.array(z.string()) }),
+  /**
+   * A chat agent asked for an outward-facing git write (push, PR, comment,
+   * close). It waits for the operator, who approves or declines it in the chat.
+   */
+  z.object({
+    type: z.literal('git.request'),
+    requestId: z.string(),
+    verb: z.enum(['pr', 'push', 'comment', 'close']),
+    /** The comment body or close reason the agent supplied. */
+    message: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('git.request.decided'),
+    requestId: z.string(),
+    approved: z.boolean(),
+    /** What the orchestrator did, or why it failed, as told back to the agent. */
+    result: z.string(),
+  }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),

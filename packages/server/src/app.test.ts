@@ -3781,9 +3781,32 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
 
   test('rejects an unknown verb as a 400 before any git write', async () => {
     writeFileSync(join(wt, 'hello.txt'), 'hi\n')
-    const res = await request('bd-1', 'push', store.token('bd-1'))
+    const res = await request('bd-1', 'rebase', store.token('bd-1'))
     expect(res.status).toBe(400)
     expect(git(wt, ['status', '--porcelain']).stdout.trim()).not.toBe('')
+  })
+
+  test('an outward-facing verb waits for the operator instead of running', async () => {
+    const res = await request('bd-1', 'push', store.token('bd-1'))
+    expect(res.status).toBe(202)
+    const body = (await res.json()) as { requestId: string }
+    const asked = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'git.request')
+    expect(asked?.type === 'git.request' ? asked.requestId : null).toBe(body.requestId)
+  })
+
+  test('a declined request is told back and cannot be decided again', async () => {
+    const asked = await request('bd-1', 'pr', store.token('bd-1'))
+    const { requestId } = (await asked.json()) as { requestId: string }
+    const decide = () =>
+      app.request(`/api/repos/repo1/tasks/bd-1/git-requests/${requestId}/decision`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ approve: false }),
+      })
+    const first = await decide()
+    expect(first.status).toBe(200)
+    expect(((await first.json()) as { result: string }).result).toBe('the operator declined pr')
+    expect((await decide()).status).toBe(409)
   })
 
   test('a missing token is a 401', async () => {

@@ -73,7 +73,7 @@ test('an unknown verb is rejected before any git write', async () => {
   const res = await fetch(`${baseUrl}/api/repos/repo1/tasks/am-bd1/git-requests`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'X-Amagi-Token': store.token('am-bd1') },
-    body: JSON.stringify({ verb: 'push' }),
+    body: JSON.stringify({ verb: 'rebase' }),
   })
   expect(res.status).toBe(400)
   expect(git(wt, ['status', '--porcelain']).stdout.trim()).not.toBe('')
