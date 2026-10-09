@@ -710,6 +710,53 @@ describe('Runner.runOnce', () => {
       loop,
     })
 
+  test('parks when a preflight command cannot run before starting the agent', async () => {
+    const commands: string[] = []
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { format: 'just fmt', lint: 'just lint' } }),
+      undefined,
+      async (cmd, opts) => {
+        if (cmd[0] === 'sh' && cmd[1] === '-c') {
+          const command = cmd[2] ?? ''
+          commands.push(command)
+          return command === 'just fmt'
+            ? { exitCode: 0, stdout: '', stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: 'error: Recipe `lint` not found.' }
+        }
+        return exec(cmd, opts)
+      },
+    ).runOnce()
+
+    expect(commands).toEqual(['just fmt', 'just lint'])
+    expect(harness.calls).toHaveLength(0)
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('preflight failed before implementation: just lint')
+    expect(types(TASK.id)).not.toContain('agent.started')
+    const finished = store
+      .events({ taskId: TASK.id })
+      .find((event) => event.type === 'checks.finished')
+    expect(finished?.type === 'checks.finished' && finished.results).toEqual([
+      { command: 'just fmt', exitCode: 0, output: '' },
+      { command: 'just lint', exitCode: 1, output: 'error: Recipe `lint` not found.' },
+    ])
+  })
+
+  test('does not start the agent when base lint already fails', async () => {
+    const harness = new FakeHarness([writesAFile])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { format: 'true', lint: 'false' } }),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(harness.calls).toHaveLength(0)
+    expect(stateReason(TASK.id)).toContain('preflight failed before implementation: false')
+  })
+
   test('a replaced claim stops the old runner before its next state transition', async () => {
     const harness = new FakeHarness([
       {
@@ -2005,6 +2052,7 @@ describe('Runner.runOnce', () => {
       { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n') },
       { effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'good\n') },
     ])
+    let baseLint = true
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
@@ -2015,6 +2063,14 @@ describe('Runner.runOnce', () => {
           lint: 'grep -q good flag',
         },
       }),
+      undefined,
+      async (cmd, opts) => {
+        if (baseLint && cmd[0] === 'sh' && cmd[2] === 'grep -q good flag') {
+          baseLint = false
+          return { exitCode: 0, stdout: '', stderr: '' }
+        }
+        return exec(cmd, opts)
+      },
     ).runOnce()
 
     expect(result?.state).toBe('pr_open')
