@@ -3034,6 +3034,17 @@ describe('fleet endpoints', () => {
     expect(withUnused.seats.map(({ seat }) => seat)).toContain('unused-seat')
   })
 
+  test('saving seats skips a repo whose config cannot load', async () => {
+    const entry = ws.workspaces.list().find((repo) => repo.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing')
+    writeFileSync(join(entry.path, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    ws.workspaces.close()
+    const saved = await send('PUT', '/api/seat-names', { seats: [{ name: 'codex', count: 2 }] })
+    expect(saved.status).toBe(200)
+    expect(loadGlobalConfig().seats).toEqual([{ name: 'codex', count: 2 }])
+    expect(ws.workspaces.get('repo2')?.config.seats).toEqual([{ name: 'codex', count: 2 }])
+  })
+
   test('increasing seat capacity wakes cached runners onto the new seats', async () => {
     await send('PUT', '/api/seat-names', { seats: [{ name: 'codex', count: 1 }] })
     await create({ name: 'Codex', kind: 'codex', seat: 'codex', count: 2, enabled: true })

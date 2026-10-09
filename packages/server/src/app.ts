@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   ChatService,
+  type Config,
   claimGate,
   errMsg,
   expandTilde,
@@ -345,9 +346,17 @@ export function createApp({
           : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
-        const { config } = loadConfig(ws.root)
+        let ws: Workspace | null
+        let config: Config
+        // A repo with an invalid config (e.g. undeclared checks) must not fail a global save.
+        try {
+          ws = workspaces.get(entry.key)
+          if (ws === null) continue
+          config = loadConfig(ws.root).config
+        } catch (err) {
+          console.warn(`seat save: skipping ${entry.key}: ${errMsg(err)}`)
+          continue
+        }
         ws.config.seats = config.seats
         ws.config.worker = config.worker
         ws.config.watchers = config.watchers
