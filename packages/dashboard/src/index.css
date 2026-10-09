@@ -350,6 +350,15 @@ textarea::placeholder {
   min-height: 100vh;
 }
 
+@media (min-width: 768px) {
+  .app-shell > [data-slot="sidebar"] {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    height: 100svh;
+  }
+}
+
 .app-header {
   position: sticky;
   top: 0;
