@@ -641,6 +641,10 @@ function CredentialRow({
     onChanged()
   }
 
+  const remove = () => {
+    if (window.confirm(`Delete token ${credential.name}?`)) void run('DELETE')
+  }
+
   return (
     <li className="py-2">
       <div className="flex flex-wrap items-center gap-3">
@@ -695,12 +699,7 @@ function CredentialRow({
                 </button>
               </>
             )}
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void run('DELETE')}
-              className={secondary}
-            >
+            <button type="button" disabled={busy} onClick={remove} className={secondary}>
               Delete
             </button>
           </div>
