@@ -75,6 +75,8 @@
   --selection-fg: #f0f9ff;
   --code-bg: rgb(0 0 0 / 0.35);
   --shadow-color: rgb(0 0 0 / 0.5);
+  /* Covers the 36px mobile menu button plus py-3 and the bottom border. */
+  --app-header-height: 4rem;
 }
 
 /* Light theme. Tailwind emits the tokens above inside its theme layer, so an
@@ -165,6 +167,10 @@
 .diff-code .hljs-meta,
 .diff-code .hljs-attribute {
   color: var(--color-cyan-ink);
+}
+
+html {
+  scroll-padding-top: calc(var(--app-header-height) + 1rem);
 }
 
 body {
