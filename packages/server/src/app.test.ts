@@ -2812,6 +2812,7 @@ describe('fleet endpoints', () => {
       {
         id,
         name: 'One',
+        roles: ['implement'],
         kind: 'claude',
         model: null,
         effort: null,
@@ -2846,6 +2847,7 @@ describe('fleet endpoints', () => {
       {
         id,
         name: 'One',
+        roles: ['implement'],
         kind: 'claude',
         model: null,
         effort: null,

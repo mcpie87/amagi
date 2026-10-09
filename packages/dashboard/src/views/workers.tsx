@@ -36,6 +36,7 @@ function WorkerSlot({
   now,
   resource,
   taskInfo,
+  reviewWorker,
   state,
   selected,
 }: {
@@ -46,6 +47,7 @@ function WorkerSlot({
   now: number
   resource?: RunnerResource | undefined
   taskInfo?: RunnerTask | undefined
+  reviewWorker?: FleetWorkerStatus | undefined
   state: DashboardState
   selected: string | null
 }) {
@@ -74,12 +76,17 @@ function WorkerSlot({
     )
   }
   const agent = currentAgentFor(state, taskId)
+  const reviewing = agent?.role === 'review'
   const title = taskInfo?.title ?? task?.title ?? taskId
   // The runner's per-task identity is authoritative for what is actually
   // running (rss/cpu arrive the same way); the SSE projection only fills in
   // when the polled status has not caught up.
-  const agentLabel = taskInfo?.harness ?? agent?.harness ?? worker?.kind ?? 'unknown'
-  const modelLabel = taskInfo?.model ?? agent?.model ?? 'unknown'
+  const agentLabel = reviewing
+    ? (agent?.harness ?? 'unknown')
+    : (taskInfo?.harness ?? agent?.harness ?? worker?.kind ?? 'unknown')
+  const modelLabel = (reviewing ? agent?.model : taskInfo?.model) ?? agent?.model ?? 'unknown'
+  const effortLabel =
+    (reviewing ? agent?.effort : taskInfo?.effort) ?? agent?.effort ?? worker?.effort ?? 'unknown'
   const usage = currentUsageFor(state, taskId)
   const health = runHealth(state, taskId, now)
   const nearLimit = runHealthNearLimit(health)
@@ -99,7 +106,9 @@ function WorkerSlot({
             : 'running'}
         </span>
         <span className="font-medium text-fg">
-          {worker?.name ?? taskInfo?.workerName ?? 'Ad hoc run'}
+          {reviewing
+            ? (reviewWorker?.name ?? 'Reviewer')
+            : (worker?.name ?? taskInfo?.workerName ?? 'Ad hoc run')}
         </span>
         {nearLimit && (
           <span
@@ -121,10 +130,11 @@ function WorkerSlot({
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
         <span>
-          harness: {worker === null ? agentLabel : `${worker.kind}-#${worker.displaySlot}`}
+          harness:{' '}
+          {reviewing || worker === null ? agentLabel : `${worker.kind}-#${worker.displaySlot}`}
         </span>
         <span>model: {modelLabel}</span>
-        <span>effort: {taskInfo?.effort ?? agent?.effort ?? worker?.effort ?? 'unknown'}</span>
+        <span>effort: {effortLabel}</span>
         <span>seat: {taskInfo?.seat ?? worker?.seat ?? agent?.seat ?? agentLabel}</span>
         <span>
           ctx: {usage === null ? 'unknown' : fmtTokens(usage.inputTokens + usage.outputTokens)}
@@ -145,7 +155,7 @@ function WorkerSlot({
 }
 
 /**
- * One row per configured worker plus any ad-hoc foreground run. Worker profile
+ * One row per running worker plus any ad-hoc foreground run. Worker profile
  * and runtime data both come from the selected repo's runner status; the
  * summary strip aggregates resource use over live agent trees.
  */
@@ -246,11 +256,12 @@ export function WorkersPanel() {
         <span>procs: {total.processes}</span>
       </div>
       <div className="space-y-2">
-        {status.fleet?.map((worker) => {
+        {status.fleet?.flatMap((worker) => {
           const taskId =
             worker.taskId ??
             running.find((id) => status.tasks?.[id]?.workerId === worker.id) ??
             null
+          if (taskId === null) return []
           return (
             <WorkerSlot
               key={worker.id}
@@ -260,6 +271,9 @@ export function WorkersPanel() {
               now={now}
               resource={taskId === null ? undefined : status.resources[taskId]}
               taskInfo={taskId === null ? undefined : status.tasks?.[taskId]}
+              reviewWorker={status.fleet?.find(
+                (candidate) => candidate.enabled && candidate.roles.includes('review'),
+              )}
               state={state}
               selected={selected}
             />
@@ -282,13 +296,16 @@ export function WorkersPanel() {
               now={now}
               resource={status.resources[taskId]}
               taskInfo={status.tasks?.[taskId]}
+              reviewWorker={status.fleet?.find(
+                (candidate) => candidate.enabled && candidate.roles.includes('review'),
+              )}
               state={state}
               selected={selected}
             />
           ))}
-        {(status.fleet?.length ?? 0) === 0 && running.length === 0 && (
+        {running.length === 0 && (
           <div className="rounded-lg border border-line bg-surface/60 px-4 py-3 text-sm text-fg-dim">
-            No workers configured
+            No agents running
           </div>
         )}
       </div>
