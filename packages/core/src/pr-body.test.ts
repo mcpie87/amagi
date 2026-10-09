@@ -96,6 +96,26 @@ describe('backtickFileRefs', () => {
 })
 
 describe('formatPrBody', () => {
+  test('quotes usage-limit diagnostics while preserving surrounding prose and Markdown', () => {
+    const diagnostic =
+      'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:05 PM.'
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description: `Context\n\nWe hit this while running the task:\n\n${diagnostic}\n\nThe run can continue after credits are available.\n\n> Existing quote\n\n\`\`\`\nexisting output\n\`\`\``,
+      },
+      [],
+    )
+
+    expect(body).toContain(`We hit this while running the task:\n\n> ${diagnostic}`)
+    expect(body).toContain('The run can continue after credits are available.')
+    expect(body).toContain('> Existing quote')
+    expect(body).toContain('```\nexisting output\n```')
+    expect(body).toContain('https://chatgpt.com/explore/pro')
+    expect(body).toContain('https://chatgpt.com/codex/settings/usage')
+    expect(body).not.toContain('https://`chatgpt.com`')
+  })
+
   test('renders the title, task, description and changes in markdown with emojis', () => {
     const body = formatPrBody(TASK, [
       { path: 'hello.txt', additions: 1, deletions: 0 },
