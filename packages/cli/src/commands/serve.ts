@@ -8,6 +8,7 @@ import {
   migrateFleet,
   RunService,
   repoRoot,
+  requestTimingsPath,
   Workspaces,
 } from '@amagi/core'
 import { portInUse, serve, streamClientCount } from '@amagi/server'
@@ -73,6 +74,7 @@ export const serveCommand = defineCommand({
       host: config.server.host,
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
+      timingsPath: requestTimingsPath(),
       runnerFactory: (ws) => {
         return new RunService({
           store: ws.store,

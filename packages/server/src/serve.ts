@@ -1,6 +1,6 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { BeadsTracker, errMsg, loadLiveRuns } from '@amagi/core'
+import { BeadsTracker, errMsg, loadLiveRuns, RequestTimings } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startBeadsGcPoller } from './beads-gc-poller.ts'
 import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
@@ -26,6 +26,8 @@ export type ServeOptions = {
   repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
+  /** SQLite file holding API request timings; in memory when unset. */
+  timingsPath?: string
   /** Builds a runner from each registered workspace, including repos added live. */
   runnerFactory?: (workspace: Workspace) => RunServiceApi
   /** Legacy single-runner injection for server tests and embedders. */
@@ -315,6 +317,7 @@ export function serve({
   epicCloseIntervalMs,
   repoPollerSupervisorIntervalMs,
   staticDir,
+  timingsPath,
   runner,
   runnerRepo,
   runnerFactory,
@@ -376,9 +379,12 @@ export function serve({
       ? {}
       : { supervisorIntervalMs: repoPollerSupervisorIntervalMs }),
   })
+  const timings = new RequestTimings(timingsPath)
+  const stopLoopWatch = timings.watchEventLoop()
   const app = createApp({
     workspaces,
     notify,
+    timings,
     runner,
     runnerRepo,
     runnerForRepo,
@@ -403,11 +409,13 @@ export function serve({
     url: server.url,
     stop(closeActiveConnections?: boolean): Promise<void> {
       repoPollers.stop()
+      stopLoopWatch()
       if (runnerSupervisor !== null) clearInterval(runnerSupervisor)
       for (const service of runners.values()) service.dispose?.()
       runners.clear()
       if (runnerFactory === undefined) runner?.dispose?.()
-      return server.stop(closeActiveConnections)
+      // In-flight requests still record their timing until the server stops.
+      return server.stop(closeActiveConnections).finally(() => timings.close())
     },
   }
 }

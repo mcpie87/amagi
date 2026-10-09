@@ -3,6 +3,7 @@ import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
 import { QueueView } from './views/board.tsx'
+import { DiagnosticsView } from './views/diagnostics.tsx'
 import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
 import { IssuesView } from './views/issues.tsx'
@@ -47,6 +48,11 @@ const sessionsRoute = createRoute({
   path: '/sessions',
   component: SessionsView,
 })
+const diagnosticsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/diagnostics',
+  component: DiagnosticsView,
+})
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings',
@@ -88,6 +94,7 @@ const routeTree = rootRoute.addChildren([
   activityRoute,
   sessionsRoute,
   settingsRoute,
+  diagnosticsRoute,
   seatsRoute,
   manualRoute,
   taskRoute,

@@ -28,7 +28,9 @@ import {
   pidAlive,
   type Question,
   type RegistryEntry,
+  RequestTimings,
   type RunServiceApi,
+  requestSource,
   type Store,
   type Tracker,
   Triage,
@@ -43,6 +45,7 @@ import {
 import type { Harness } from '@amagi/core/drivers/types'
 import type { Context } from 'hono'
 import { Hono } from 'hono'
+import { routePath } from 'hono/route'
 import { createFleetRoutes } from './fleet-routes.ts'
 import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
@@ -54,6 +57,7 @@ import {
   RepoRegisterBody,
   SeatNamesUpdateBody,
   StreamQuery,
+  TimingQuery,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
 import { createTaskRoutes } from './task-routes.ts'
@@ -77,7 +81,11 @@ export type ServerDeps = {
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
+  /** Shared with `serve` so its event-loop monitor lands in the same snapshot. */
+  timings?: RequestTimings
 }
+
+const SLOW_REQUEST_MS = 1000
 
 function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
   if (identity === null) return null
@@ -195,6 +203,7 @@ export function createApp({
   queueConflictResolution,
   liveRuns,
   chatHarnessFor,
+  timings = new RequestTimings(),
 }: ServerDeps) {
   // One ChatService per workspace, so the in-flight guard survives requests.
   const chats = new Map<string, ChatService>()
@@ -255,7 +264,39 @@ export function createApp({
     return { global, seats }
   }
   return new Hono()
+    .use('/api/*', async (c, next) => {
+      const start = performance.now()
+      await next()
+      if (c.req.path.startsWith('/api/diagnostics/')) return
+      const ms = performance.now() - start
+      const route = routePath(c, -1)
+      const referer = c.req.header('referer') ?? null
+      const userAgent = c.req.header('user-agent') ?? null
+      const sample = {
+        at: Date.now(),
+        method: c.req.method,
+        route: route === '/api/*' ? '(no route)' : route,
+        path: c.req.path,
+        query: new URL(c.req.url).search.slice(1),
+        source: requestSource(referer ?? undefined, userAgent ?? undefined),
+        referer,
+        userAgent,
+        status: c.res.status,
+        ms,
+      }
+      timings.record(sample)
+      if (ms >= SLOW_REQUEST_MS) {
+        console.warn(
+          `slow request ${sample.method} ${sample.path} ${Math.round(ms)}ms (${sample.source})`,
+        )
+      }
+    })
+
     .route('/', createIssueRoutes(workspaces))
+
+    .get('/api/diagnostics/requests', valid('query', TimingQuery), (c) =>
+      c.json(timings.snapshot(c.req.valid('query'))),
+    )
 
     .get('/api/health', (c) => c.json({ ok: true }))
 

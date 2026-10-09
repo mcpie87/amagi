@@ -14,6 +14,18 @@ export const TaskListQuery = z.object({
 })
 export type TaskListQuery = z.infer<typeof TaskListQuery>
 
+/** Narrows the diagnostics request snapshot; see `TimingFilter`. */
+export const TimingQuery = z.object({
+  request: z.string().optional(),
+  source: z.string().optional(),
+  method: z.string().optional(),
+  route: z.string().optional(),
+  from: z.coerce.number().int().min(0).optional(),
+  to: z.coerce.number().int().min(0).optional(),
+  minMs: z.coerce.number().min(0).optional(),
+  maxMs: z.coerce.number().min(0).optional(),
+})
+
 /** With a label, the issue list holds only the open issues carrying it. */
 export const IssueListQuery = z.object({ label: z.string().min(1).optional() })
 

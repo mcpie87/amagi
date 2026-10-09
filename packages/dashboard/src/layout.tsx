@@ -272,6 +272,7 @@ const NAV_ITEMS: {
     | '/sessions'
     | '/seats'
     | '/settings'
+    | '/diagnostics'
     | '/manual'
   label: string
   icon: IconName
@@ -285,6 +286,7 @@ const NAV_ITEMS: {
   { to: '/sessions', label: 'Sessions', icon: 'sessions' },
   { to: '/seats', label: 'Seats', icon: 'agent' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
+  { to: '/diagnostics', label: 'Diagnostics', icon: 'gauge' },
   { to: '/manual', label: 'Manual', icon: 'book' },
 ]
 
