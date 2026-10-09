@@ -521,7 +521,7 @@ export function startPrConflictWatcher({
           to: settledState,
           reason: result.ok
             ? `Conflict resolution completed for PR #${pr.number}`
-            : `PR #${pr.number} remains conflicted after resolution attempt`,
+            : `PR #${pr.number} remains conflicted after resolution attempt: ${result.message}`,
         })
       }
       if (isConflict) {

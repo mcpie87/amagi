@@ -568,6 +568,9 @@ test('GitLab task conflicts are resolved even when the selected forge scan fails
   await Bun.sleep(60)
   expect(started).toBe(1)
   expect(gitlab.mergeStatusCalls).toContain(7)
+  expect(store.task('am-1')?.statusReason).toBe(
+    'PR #7 remains conflicted after resolution attempt: pushed; the forge reports conflicted',
+  )
   expect(counter(w, 'scanned')).toBe(1)
   expect(counter(w, 'conflicting')).toBe(1)
   expect(w.activity().ok).toBe(false)

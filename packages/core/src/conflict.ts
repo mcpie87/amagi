@@ -252,6 +252,7 @@ export async function resolveConflict(
       const harness = mk(harnessConfig)
       log('info', `resolving (dispatch ${iteration}/${opts.config.loop.conflictMaxIterations})`)
       log('info', `agent: ${harness.kind} (${wt.branch})`)
+      let agentError: string | undefined
       const outcome = await withHeadReflogBypassCheck(
         wt.path,
         run,
@@ -270,8 +271,10 @@ export async function resolveConflict(
           const onEvent = (event: import('./events.ts').AgentEvent): void => {
             if (event.kind === 'tool_use') log('info', `[tool] ${event.name}`)
             else if (event.kind === 'text' && event.text.trim()) log('agent', event.text)
-            else if (event.kind === 'error') log('error', event.message)
-            else if (event.kind === 'status') log('info', event.message)
+            else if (event.kind === 'error') {
+              agentError = event.message
+              log('error', event.message)
+            } else if (event.kind === 'status') log('info', event.message)
           }
           if (opts.store === undefined) {
             for await (const event of proc.events()) onEvent(event)
@@ -293,7 +296,7 @@ export async function resolveConflict(
         true,
       )
       if (!outcome.ok) {
-        const message = `agent failed: ${agentFailure(outcome)}`
+        const message = `agent failed: ${agentError || agentFailure(outcome)}`
         log('error', message)
         rmSync(verdictPath, { force: true })
         return { ok: false, message, iteration }

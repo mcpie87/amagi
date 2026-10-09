@@ -7,6 +7,7 @@ import { Config } from './config.ts'
 import { type ConflictLogLevel, resolveConflict, stageResolved } from './conflict.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type { AgentOutcome, AgentStartOptions, Harness } from './drivers/types.ts'
+import type { AgentEvent } from './events.ts'
 import { type Exec, type ExecResult, exec as realExec } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
 import { openDatabase } from './store/db.ts'
@@ -108,11 +109,10 @@ const conflicted = (c: Call): ExecResult | undefined => {
   return undefined
 }
 
-const emptyEvents = async function* (): AsyncGenerator<never> {}
-
 function fakeHarness(
   over: Partial<AgentOutcome> = {},
   onStart?: (opts: AgentStartOptions) => void,
+  events: AgentEvent[] = [],
 ): Harness {
   const outcome: AgentOutcome = {
     exitCode: 0,
@@ -125,7 +125,9 @@ function fakeHarness(
   }
   const process = {
     pid: -1,
-    events: () => emptyEvents(),
+    events: async function* () {
+      yield* events
+    },
     done: Promise.resolve(outcome),
     kill: async () => {},
     model: null,
@@ -416,6 +418,27 @@ describe('resolveConflict', () => {
 
     expect(result.ok).toBe(false)
     expect(result.message).toContain('model overloaded')
+    expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('reports the streamed agent error instead of incidental stderr', async () => {
+    const { exec, calls } = fake(conflicted)
+    const message = 'The configured model is not supported with this account.'
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () =>
+        fakeHarness({ ok: false, stderr: 'Reading additional input from stdin...' }, undefined, [
+          { kind: 'error', message },
+        ]),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toBe(`agent failed: ${message}`)
     expect(calls.some((c) => c.includes('push'))).toBe(false)
   })
 
