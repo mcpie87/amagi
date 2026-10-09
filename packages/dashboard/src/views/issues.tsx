@@ -7,6 +7,7 @@ import { Markdown } from '../markdown.tsx'
 import { issuesRoute } from '../routes.tsx'
 import { type RepoInfo, useDashboard } from '../store.tsx'
 import { IssueBoard } from './issue-board.tsx'
+import { IssueCloseButton } from './issue-close.tsx'
 import { EpicDetailView, IssueDetailView } from './issue-details.tsx'
 import type { Issue } from './issue-model.ts'
 
@@ -18,16 +19,6 @@ type EligibleEpic = {
   totalChildren: number
   closedChildren: number
 }
-
-/** Preset close reasons offered for an epic; '__other' falls back to free text. */
-const EPIC_CLOSE_REASONS = [
-  'completed',
-  'superseded / duplicate',
-  'abandoned',
-  'merged into another epic',
-  'out of scope',
-  '__other',
-]
 
 function IssueFormModal({
   repo,
@@ -213,133 +204,6 @@ function IssueFormModal({
   )
 }
 
-type EpicCloseAction = 'manual' | 'done'
-
-function EpicCloseButton({
-  repo,
-  epic,
-  onClosed,
-  action,
-}: {
-  repo: string
-  epic: Pick<EligibleEpic, 'id' | 'title'>
-  onClosed: () => void
-  action: EpicCloseAction
-}) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
-  const [reason, setReason] = useState<string>(EPIC_CLOSE_REASONS[0] ?? 'completed')
-  const [custom, setCustom] = useState('')
-
-  const close = async (finalReason: string) => {
-    if (finalReason === '') return
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await fetch(`${apiBase}/api/repos/${repo}/issues/${epic.id}/close`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: finalReason }),
-      })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-      else {
-        onClosed()
-        setOpen(false)
-      }
-    } catch {
-      setError('could not reach the amagi server')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const input =
-    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
-  const label = 'mb-1 block text-sm text-fg-muted'
-  const buttonText = action === 'manual' ? 'Close' : 'Mark done'
-  const heading = action === 'manual' ? `Close ${epic.id}` : `Mark ${epic.id} done`
-  const reasonId = `epic-${action}-reason-${epic.id}`
-  const customId = `epic-${action}-custom-${epic.id}`
-
-  return (
-    <div className={action === 'manual' ? 'ml-auto' : undefined}>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => setOpen(true)}
-        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
-      >
-        {buttonText}
-      </button>
-      {error !== null && !open && <p className="mt-1 text-sm text-red-ink">{error}</p>}
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              void close(reason === '__other' ? custom.trim() : reason)
-            }}
-            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
-          >
-            <h2 className="mb-3 text-lg font-semibold">{heading}</h2>
-            <div className="space-y-3">
-              <p className="text-sm text-fg-muted">{epic.title}</p>
-              <div>
-                <label className={label} htmlFor={reasonId}>
-                  Reason for closing
-                </label>
-                <select
-                  id={reasonId}
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  className={input}
-                >
-                  {EPIC_CLOSE_REASONS.map((r) => (
-                    <option key={r} value={r}>
-                      {r === '__other' ? 'Other...' : r}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {reason === '__other' && (
-                <div>
-                  <label className={label} htmlFor={customId}>
-                    Custom reason
-                  </label>
-                  <input
-                    id={customId}
-                    value={custom}
-                    onChange={(e) => setCustom(e.target.value)}
-                    className={input}
-                  />
-                </div>
-              )}
-              {error !== null && <p className="text-sm text-red-ink">{error}</p>}
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={busy || (reason === '__other' && custom.trim() === '')}
-                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {busy ? 'Closing…' : buttonText}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-    </div>
-  )
-}
-
 /** Manual fallback for a finished epic when automatic closure is disabled. */
 function CloseEpicButton({
   repo,
@@ -350,7 +214,7 @@ function CloseEpicButton({
   epic: EligibleEpic
   onClosed: () => void
 }) {
-  return <EpicCloseButton repo={repo} epic={epic} onClosed={onClosed} action="manual" />
+  return <IssueCloseButton repo={repo} issue={epic} onClosed={onClosed} action="manual" />
 }
 
 function MarkEpicDoneButton({
@@ -362,7 +226,7 @@ function MarkEpicDoneButton({
   epic: Pick<EligibleEpic, 'id' | 'title'>
   onClosed: () => void
 }) {
-  return <EpicCloseButton repo={repo} epic={epic} onClosed={onClosed} action="done" />
+  return <IssueCloseButton repo={repo} issue={epic} onClosed={onClosed} action="done" />
 }
 
 type Proposal = Issue & { repo: RepoInfo }
@@ -684,6 +548,7 @@ export function IssuesView() {
           id={selectedId}
           refresh={refresh}
           back={backToList}
+          onClosed={saved}
           onEdit={(issue) => setForm({ mode: 'edit', issue })}
           actions={
             selected !== null &&
@@ -729,6 +594,7 @@ export function IssuesView() {
             <MarkEpicDoneButton repo={selected} epic={selectedEpic} onClosed={saved} />
           ) : null
         }
+        onClosed={saved}
         onOpenIssue={openIssue}
       />
     )
