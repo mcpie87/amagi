@@ -201,8 +201,15 @@ describe('resolveConflict', () => {
     cfg.watchers.prConflict.model = 'conflict-model'
     cfg.watchers.prConflict.effort = 'high'
     cfg.watchers.prConflict.seat = 'conflict-seat'
+    cfg.checks = { format: 'format', lint: 'lint', test: 'test', commands: ['extra'] }
     let startedWith: Config['harness']['implement'] | undefined
+    let startedPrompt = ''
+    let formatted = false
+    let stagedFormatted = false
     const { exec, calls } = fake((c) => {
+      if (c[0] === 'sh' && c[2] === 'format') formatted = true
+      if (c[1] === 'add') stagedFormatted = formatted
+      if (c[1] === 'commit' && !stagedFormatted) return fail('formatter changes were not staged')
       if (c.includes('MERGE_HEAD')) return ok('merge-head')
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
@@ -229,13 +236,16 @@ describe('resolveConflict', () => {
       makeHarnessFn: (cfg) => {
         started.push(cfg.kind)
         startedWith = cfg
-        return fakeHarness()
+        return fakeHarness({}, (opts) => {
+          startedPrompt = opts.prompt
+        })
       },
       onLog: (level, text) => logs.push({ level, text }),
       onGitBypassed: (entries) => bypassed.push(entries),
     })
 
     expect(result.ok).toBe(true)
+    expect(stagedFormatted).toBe(true)
     expect(started).toEqual(['opencode'])
     expect(startedWith).toMatchObject({
       kind: 'opencode',
@@ -243,6 +253,7 @@ describe('resolveConflict', () => {
       effort: 'high',
       seat: 'conflict-seat',
     })
+    expect(startedPrompt).toContain('- format\n- lint\n- test\n- extra')
     expect(calls).toContainEqual([
       'git',
       'push',
@@ -252,6 +263,29 @@ describe('resolveConflict', () => {
     expect(driver.calls).toContain(7)
     expect(logs.some((l) => l.level === 'ok' && l.text.includes('mergeable'))).toBe(true)
     expect(bypassed).toEqual([])
+  })
+
+  test('does not push a conflict fix when lint fails', async () => {
+    const cfg = config()
+    cfg.checks.lint = 'lint'
+    const { exec, calls } = fake((c) => {
+      if (c[0] === 'sh' && c[2] === 'lint') return fail('lint failed')
+      return conflicted(c)
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: cfg,
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => fakeHarness(),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('lint failed')
+    expect(calls.some((call) => call[1] === 'push')).toBe(false)
+    expect(calls.some((call) => call[1] === 'commit')).toBe(false)
   })
 
   test('blocks an empty merge diff regardless of the agent verdict', async () => {
