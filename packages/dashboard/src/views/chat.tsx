@@ -234,7 +234,14 @@ const SUGGESTIONS = ['Summarize this repository', 'Explain a file', 'Help me deb
 
 export function ChatView() {
   const { selected: repo } = useDashboard()
-  const [threads, setThreads] = useState<ChatThread[]>([])
+  return <ChatWorkspace key={repo ?? ''} repo={repo} />
+}
+
+// Keyed by repo: threads load from that repo's storage on mount, so a stale write can't cross repos.
+function ChatWorkspace({ repo }: { repo: string | null }) {
+  const [threads, setThreads] = useState<ChatThread[]>(() =>
+    repo === null ? [] : readThreads(repo),
+  )
   const [activeId, setActiveId] = useState<string | null>(null)
   const [options, setOptions] = useState<ChatOptions | null>(null)
   const [text, setText] = useState('')
@@ -242,7 +249,6 @@ export function ChatView() {
   const [activity, setActivity] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showJump, setShowJump] = useState(false)
-  const loadedRepo = useRef<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -263,17 +269,6 @@ export function ChatView() {
     if (group?.label === label) group.threads.push(thread)
     else groups.push({ label, threads: [thread] })
   }
-
-  useEffect(() => {
-    loadedRepo.current = repo
-    abortRef.current?.abort()
-    setSending(false)
-    setOptions(null)
-    setText('')
-    setError(null)
-    setActiveId(null)
-    setThreads(repo === null ? [] : readThreads(repo))
-  }, [repo])
 
   useEffect(() => {
     if (repo === null) return
@@ -297,7 +292,7 @@ export function ChatView() {
   useEffect(() => () => abortRef.current?.abort(), [])
 
   useEffect(() => {
-    if (repo === null || loadedRepo.current !== repo) return
+    if (repo === null) return
     try {
       localStorage.setItem(
         storageKey(repo),
