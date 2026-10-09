@@ -96,13 +96,21 @@ function CommandPalette() {
 
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      const dialog = dialogRef.current
+      if (
+        dialog?.open &&
+        (event.key === 'Escape' || event.key === 'Esc' || event.code === 'Escape')
+      ) {
+        event.preventDefault()
+        event.stopPropagation()
+        dialog.close()
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         open()
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [open])
 
   const q = query.trim().toLowerCase()
@@ -172,15 +180,11 @@ function CommandPalette() {
           ⌘K
         </kbd>
       </button>
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: Escape handles keyboard dismissal for the native dialog. */}
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: The window key handler dismisses the dialog. */}
       <dialog
         ref={dialogRef}
         onClick={(event) => {
           if (event.target === dialogRef.current) close()
-        }}
-        onCancel={(event) => {
-          event.preventDefault()
-          close()
         }}
         className="command-palette"
       >
