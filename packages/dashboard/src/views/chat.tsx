@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react'
 import { apiBase } from '../api.ts'
+import logoGlyph from '../assets/logo-glyph.png'
 import {
   Sidebar,
   SidebarContent,
@@ -808,10 +809,8 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
         <div className="relative flex min-h-0 flex-1 flex-col">
           {isEmpty ? (
             <div className="flex flex-1 flex-col items-center justify-end px-4 pb-8 text-center">
-              <h2 className="flex items-center gap-3 text-3xl font-normal tracking-tight text-fg-strong">
-                <span aria-hidden="true" className="text-accent">
-                  ✳
-                </span>
+              <img src={logoGlyph} alt="Amagi" className="mb-5 h-12 w-auto" />
+              <h2 className="text-3xl font-normal tracking-tight text-fg-strong">
                 What can I help with?
               </h2>
               <p className="mt-2 max-w-md text-sm text-fg-faint">
