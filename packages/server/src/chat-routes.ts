@@ -92,7 +92,8 @@ export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
           const shared = {
             model: config.model,
             effort: config.effort,
-            ...(config.seat === undefined ? {} : { seat: config.seat }),
+            // Chats bypass seats; only the host-wide process cap can queue them.
+            seat: null,
             ...(config.allowedTools === undefined ? {} : { allowedTools: config.allowedTools }),
             extraArgs: config.extraArgs,
           }

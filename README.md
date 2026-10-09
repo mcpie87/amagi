@@ -255,10 +255,14 @@ automatically is the global **Auto queue** setting (`loop.autoQueue`), not a
 per-worker one.
 
 A seat names the credential an agent uses. Amagi guarantees that at most one
-agent is live on a seat at a time, even when different workers, watchers, or a
-chat reply request it. A worker without an explicit seat uses its harness kind
-as the seat name. Enabled worker replicas can run up to their assigned seat's
-slot capacity; workers assigned to the same slot take turns.
+worker or watcher agent is live on a seat at a time. A worker without an
+explicit seat uses its harness kind as the seat name. Enabled worker replicas
+can run up to their assigned seat's slot capacity; workers assigned to the same
+slot take turns. Chat replies ignore seats.
+
+Separately, `harness.maxProcesses` caps how many agent processes run at once
+across every amagi on the host, chats included; a launch past the cap waits for
+one to exit.
 
 Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
 override them in a repo's `.amagi/config.toml` when needed. The `mention`,
@@ -284,6 +288,7 @@ below gives the schema and defaults.
 | `seats[]` | table array | `[]` | Named credential seats, configured with `[[seats]]`; existing string entries remain one-slot seats. |
 | `seats[].name` | string | required | Stable seat identifier referenced by `worker[].seat`. |
 | `seats[].count` | integer | `1` | Number of concurrent slots provided by the credential seat. |
+| `harness.maxProcesses` | integer | `5` | Global-only hard cap (1 to 64) on agent processes running at once on the host: workers, watchers and chats. Editable from the dashboard fleet page. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
 | `watchers.mention.allowedAuthors` | string[] | `[]` | Exact forge usernames whose mentions may trigger responses. Empty or omitted disables mention-triggered responses. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |

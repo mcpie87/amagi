@@ -34,6 +34,7 @@ import {
   type RunServiceApi,
   requestSource,
   type Store,
+  setHarnessProcessCap,
   type Tracker,
   Triage,
   type WorkerActivity,
@@ -54,6 +55,7 @@ import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
+  ProcessCapUpdateBody,
   ProfilesUpdateBody,
   QuestionQuery,
   RepoCommitParam,
@@ -349,6 +351,17 @@ export function createApp({
       const { profiles } = c.req.valid('json')
       writeGlobalConfig({ profiles })
       return c.json({ profiles })
+    })
+
+    .get('/api/harness-process-cap', (c) =>
+      c.json({ maxProcesses: loadGlobalConfig().harness.maxProcesses }),
+    )
+
+    .put('/api/harness-process-cap', valid('json', ProcessCapUpdateBody), (c) => {
+      const { maxProcesses } = c.req.valid('json')
+      writeGlobalConfig({ harness: { maxProcesses } })
+      setHarnessProcessCap(maxProcesses)
+      return c.json({ maxProcesses })
     })
 
     .get('/api/seat-names', (c) => {

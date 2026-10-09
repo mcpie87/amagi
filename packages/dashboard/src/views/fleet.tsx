@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useRunner } from '../store.tsx'
-import { SeatsSettings } from './seats-settings.tsx'
+import { ProcessCapSettings, SeatsSettings } from './seats-settings.tsx'
 import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
 const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
@@ -696,6 +696,8 @@ export function FleetWorkersSettings() {
       </div>
 
       <SeatsSettings onSaved={refreshSeats} />
+
+      <ProcessCapSettings />
 
       {watchers !== null && (
         <div className="mt-6">

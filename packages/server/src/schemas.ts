@@ -1,4 +1,11 @@
-import { Config, ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
+import {
+  Config,
+  ForgeKind,
+  HarnessKind,
+  MAX_HARNESS_PROCESSES,
+  TaskState,
+  WorkerRole,
+} from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -294,6 +301,10 @@ export const SeatNamesUpdateBody = z
     message: 'seat names must be unique',
   })
 export type SeatNamesUpdateBody = z.infer<typeof SeatNamesUpdateBody>
+
+export const ProcessCapUpdateBody = z.object({
+  maxProcesses: z.number().int().min(1).max(MAX_HARNESS_PROCESSES),
+})
 
 export const ProfilesUpdateBody = z.object({ profiles: Config.shape.profiles.unwrap() })
 
