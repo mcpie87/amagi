@@ -49,6 +49,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Inspect the base with read-only commands such as `git show <base>:<path>` and `git diff <base>`; do not use `git stash`.',
     '- Follow the conventions already present in the code you are changing.',
+    '- Do not edit check tooling to make checks pass: justfiles, package scripts,',
+    '  lint or typecheck config, and check scripts. Dependency changes are allowed.',
     ...(checks.length > 0
       ? [
           '- When you finish, the orchestrator runs these checks in order as a mandatory',
@@ -211,9 +213,13 @@ export function answerPrompt(question: string, answer: string): string {
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
-  return ['The project checks failed on your changes. Fix them, then stop.', '', ...blocks].join(
-    '\n',
-  )
+  return [
+    'The project checks failed on your changes. Fix them, then stop.',
+    'Do not edit check tooling to make checks pass. Restore changes to justfiles,',
+    'package scripts, lint or typecheck config, and check scripts.',
+    '',
+    ...blocks,
+  ].join('\n')
 }
 
 /** Body of a commit made before the agent has reported what it did. */

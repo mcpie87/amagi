@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as z from 'zod'
+import { changedCheckTooling } from './check-tooling.ts'
 import { stageAndCommit } from './commit.ts'
 import { activeReviewerConfig, type Config, reviewerHarnessConfig } from './config.ts'
 import { type ClaimWorker, claimEligible } from './difficulty.ts'
@@ -2094,6 +2095,29 @@ export class Runner {
   }
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
+    let changedTooling: string[]
+    try {
+      const { forge, repo } = this.deps.config
+      const base = await diffBase(this.exec, cwd, forge.remote, repo.baseBranch)
+      changedTooling = await changedCheckTooling(cwd, this.exec, base)
+    } catch (error) {
+      return [
+        {
+          command: 'amagi check-tooling guard',
+          exitCode: 1,
+          output: errMsg(error),
+        },
+      ]
+    }
+    if (changedTooling.length > 0) {
+      return [
+        {
+          command: 'amagi check-tooling guard',
+          exitCode: 1,
+          output: `check tooling files changed in the task worktree:\n${changedTooling.join('\n')}`,
+        },
+      ]
+    }
     const results: CheckResult[] = []
     for (const command of this.checkCommands()) {
       const r = await this.exec(['sh', '-c', command], { cwd })
