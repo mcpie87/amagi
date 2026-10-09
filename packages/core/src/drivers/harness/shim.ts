@@ -231,7 +231,10 @@ read_only() {
       ;;
     remote)
       case "\${1:-}" in
-        ''|-v|--verbose|get-url|show) return 0 ;;
+        -v|--verbose) shift ;;
+      esac
+      case "\${1:-}" in
+        ''|get-url|show) return 0 ;;
       esac
       ;;
     config)
