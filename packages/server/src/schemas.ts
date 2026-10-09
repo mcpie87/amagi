@@ -201,6 +201,7 @@ export const ChatPageBody = z.object({
   conversationId: z.string().uuid(),
   harness: HarnessKind,
   model: z.string().trim().min(1).optional(),
+  customModel: z.boolean().optional(),
   effort: z.string().trim().min(1).optional(),
   message: z.string().trim().min(1).max(4000),
   /** Binds the conversation to a task: the agent works in its worktree and may request git writes. */
@@ -218,6 +219,33 @@ export const ChatPageBody = z.object({
     .refine((history) => history.reduce((size, item) => size + item.content.length, 0) <= 200_000),
 })
 export type ChatPageBody = z.infer<typeof ChatPageBody>
+
+export const RepoChatIdParam = z.object({ repo: z.string().min(1), id: z.string().uuid() })
+
+export const ChatConversationBody = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    harness: HarnessKind,
+    model: z.string().max(500),
+    customModel: z.boolean().optional(),
+    effort: z.string().max(100),
+    taskId: z.string().min(1).optional(),
+    sessionId: z.string().min(1).optional(),
+    messages: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          role: z.enum(['user', 'assistant']),
+          content: z.string().max(100_000),
+        }),
+      )
+      .max(500)
+      .refine(
+        (messages) => messages.reduce((size, item) => size + item.content.length, 0) <= 1_000_000,
+      ),
+  })
+  .strict()
+export type ChatConversationBody = z.infer<typeof ChatConversationBody>
 
 export const ChecksBody = z.strictObject({
   format: z.string().trim().min(1),

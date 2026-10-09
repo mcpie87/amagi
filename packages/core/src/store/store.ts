@@ -169,6 +169,21 @@ function upsert(db: Database, table: string, key: string, row: Row): void {
 
 export type Listener = (event: StoredEvent) => void
 
+export type ChatConversation = {
+  id: string
+  title: string
+  harness: string
+  model: string
+  customModel?: boolean
+  effort: string
+  messages: { id: string; role: 'user' | 'assistant'; content: string }[]
+  taskId?: string
+  sessionId?: string
+  updatedAt: number
+}
+
+export type NewChatConversation = Omit<ChatConversation, 'updatedAt'>
+
 /**
  * Event log is the source of truth; `tasks` and `questions` are projections
  * maintained in the same transaction as the append. Anything derived must go
@@ -492,6 +507,36 @@ export class Store {
   question(id: string): ProjectedQuestion | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null
+  }
+
+  chatConversation(id: string): ChatConversation | null {
+    const row = this.db
+      .query('select body, updated_at from chat_conversations where id = ?')
+      .get(id) as { body: string; updated_at: number } | null
+    return row === null
+      ? null
+      : { ...(JSON.parse(row.body) as NewChatConversation), updatedAt: row.updated_at }
+  }
+
+  saveChatConversation(conversation: NewChatConversation): ChatConversation {
+    const updatedAt = Date.now()
+    this.db
+      .query(
+        `insert into chat_conversations (id, body, updated_at) values (?, ?, ?)
+         on conflict(id) do update set body = excluded.body, updated_at = excluded.updated_at`,
+      )
+      .run(conversation.id, JSON.stringify(conversation), updatedAt)
+    return { ...conversation, updatedAt }
+  }
+
+  createChatConversation(conversation: NewChatConversation): ChatConversation {
+    const updatedAt = Date.now()
+    this.db
+      .query('insert or ignore into chat_conversations (id, body, updated_at) values (?, ?, ?)')
+      .run(conversation.id, JSON.stringify(conversation), updatedAt)
+    const created = this.chatConversation(conversation.id)
+    if (created === null) throw new Error(`could not create chat session ${conversation.id}`)
+    return created
   }
 
   /**

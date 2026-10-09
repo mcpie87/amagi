@@ -46,6 +46,8 @@ type ChatThread = {
   taskId?: string
   /** The harness session a task thread resumes on its next message. */
   sessionId?: string
+  /** This thread is stored on the server and kept in the page URL. */
+  shared?: boolean
 }
 type ChatOptions = {
   harnesses: { kind: string; model?: string; effort?: string }[]
@@ -79,6 +81,45 @@ function readThreads(repo: string): ChatThread[] {
 function chatTitle(message: string): string {
   const title = message.replace(/\s+/g, ' ').trim()
   return title.length > 48 ? `${title.slice(0, 48)}…` : title || 'New chat'
+}
+
+function conversationBody(thread: ChatThread) {
+  return {
+    title: thread.title,
+    harness: thread.harness,
+    model: thread.model,
+    ...(thread.customModel === undefined ? {} : { customModel: thread.customModel }),
+    effort: thread.effort,
+    ...(thread.taskId === undefined ? {} : { taskId: thread.taskId }),
+    ...(thread.sessionId === undefined ? {} : { sessionId: thread.sessionId }),
+    messages: thread.messages,
+  }
+}
+
+function sameChatThread(a: ChatThread, b: ChatThread): boolean {
+  return (
+    a.title === b.title &&
+    a.harness === b.harness &&
+    a.model === b.model &&
+    a.customModel === b.customModel &&
+    a.effort === b.effort &&
+    a.taskId === b.taskId &&
+    a.sessionId === b.sessionId &&
+    a.messages.length === b.messages.length &&
+    a.messages.every((message, index) => {
+      const other = b.messages[index]
+      return other !== undefined && message.role === other.role && message.content === other.content
+    })
+  )
+}
+
+function sameChatSettings(a: ChatThread, b: ChatThread): boolean {
+  return (
+    a.harness === b.harness &&
+    a.model === b.model &&
+    a.customModel === b.customModel &&
+    a.effort === b.effort
+  )
 }
 
 function harnessLabel(kind: string): string {
@@ -523,12 +564,28 @@ function GitRequestCard({
 const SUGGESTIONS = ['Summarize this repository', 'Explain a file', 'Help me debug an issue']
 
 export function ChatView() {
-  const { selected: repo } = useDashboard()
-  return <ChatWorkspace key={repo ?? ''} repo={repo} />
+  const { selected, repos, selectRepo } = useDashboard()
+  const { repo: linkedRepo, chat, thread: legacyThread } = useSearch({ from: chatRoute.id })
+  const thread = chat ?? legacyThread
+  useEffect(() => {
+    if (linkedRepo !== undefined && repos?.some((repo) => repo.key === linkedRepo)) {
+      selectRepo(linkedRepo)
+    }
+  }, [linkedRepo, repos, selectRepo])
+
+  if (
+    linkedRepo !== undefined &&
+    repos !== null &&
+    !repos.some((repo) => repo.key === linkedRepo)
+  ) {
+    return <p className="p-6 text-sm text-fg-muted">Repository “{linkedRepo}” is unavailable.</p>
+  }
+  const repo = linkedRepo ?? selected
+  return <ChatWorkspace key={repo ?? ''} repo={repo} threadTarget={thread} />
 }
 
 // Keyed by repo: threads load from that repo's storage on mount, so a stale write can't cross repos.
-function ChatWorkspace({ repo }: { repo: string | null }) {
+function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarget?: string }) {
   const { state, resyncStream } = useDashboard()
   const { triage: triageTarget } = useSearch({ from: chatRoute.id })
   const navigate = useNavigate()
@@ -540,12 +597,15 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     repo === null ? [] : readThreads(repo),
   )
   const [activeId, setActiveId] = useState<string | null>(null)
+  const activeIdRef = useRef<string | null>(null)
   const [options, setOptions] = useState<ChatOptions | null>(null)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [activity, setActivity] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showJump, setShowJump] = useState(false)
+  const [sharedLoaded, setSharedLoaded] = useState<string | null>(null)
+  const sharedSnapshots = useRef(new Map<string, ChatThread>())
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -558,7 +618,8 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
   const activeTaskId = activeThread?.taskId
   const pendingRequests =
     activeTaskId === undefined ? [] : pendingGitRequests(taskEvents(state, activeTaskId))
-  const needsThread = options !== null && activeThread === undefined
+  const needsThread = options !== null && activeThread === undefined && threadTarget === undefined
+  const loadingShared = threadTarget !== undefined && sharedLoaded !== threadTarget
   const history = threads
     .filter((thread) => thread.messages.length > 0)
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -603,6 +664,91 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     }
   }, [repo, threads])
 
+  useEffect(() => {
+    if (repo === null || threadTarget === undefined) return
+    let active = true
+    const load = () => {
+      fetch(
+        `${apiBase}/api/repos/${encodeURIComponent(repo)}/chat/${encodeURIComponent(threadTarget)}`,
+      )
+        .then(async (res) => {
+          if (!res.ok)
+            throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`)
+          return (await res.json()) as ChatThread
+        })
+        .then((thread) => {
+          if (!active) return
+          const sharedThread = { ...thread, shared: true }
+          sharedSnapshots.current.set(thread.id, sharedThread)
+          setThreads((current) => [
+            sharedThread,
+            ...current.filter((item) => item.id !== sharedThread.id),
+          ])
+          activeIdRef.current = thread.id
+          setActiveId(thread.id)
+          setError(null)
+          void navigate({ to: '/chat', search: { repo, chat: thread.id }, replace: true })
+        })
+        .catch((err: unknown) => {
+          if (active) setError(err instanceof Error ? err.message : 'could not load chat session')
+        })
+        .finally(() => {
+          if (active) setSharedLoaded(threadTarget)
+        })
+    }
+    setSharedLoaded(null)
+    load()
+    return () => {
+      active = false
+    }
+  }, [repo, threadTarget, navigate])
+
+  useEffect(() => {
+    if (
+      repo === null ||
+      threadTarget === undefined ||
+      activeId !== threadTarget ||
+      sending ||
+      sharedLoaded !== threadTarget
+    ) {
+      return
+    }
+    const timer = window.setInterval(() => {
+      fetch(
+        `${apiBase}/api/repos/${encodeURIComponent(repo)}/chat/${encodeURIComponent(threadTarget)}`,
+      )
+        .then((res) => (res.ok ? (res.json() as Promise<ChatThread>) : null))
+        .then((thread) => {
+          if (thread === null) return
+          const sharedThread = { ...thread, shared: true }
+          const previousSnapshot = sharedSnapshots.current.get(sharedThread.id)
+          setThreads((current) =>
+            current.map((item) => {
+              if (item.id !== sharedThread.id) return item
+              const preserveLocalSettings =
+                previousSnapshot !== undefined && !sameChatSettings(item, previousSnapshot)
+              const merged: ChatThread = preserveLocalSettings
+                ? {
+                    ...sharedThread,
+                    harness: item.harness,
+                    model: item.model,
+                    effort: item.effort,
+                  }
+                : sharedThread
+              if (preserveLocalSettings) {
+                if (item.customModel === undefined) delete merged.customModel
+                else merged.customModel = item.customModel
+              }
+              return sameChatThread(item, merged) ? item : merged
+            }),
+          )
+          sharedSnapshots.current.set(sharedThread.id, sharedThread)
+        })
+        .catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [repo, threadTarget, activeId, sending, sharedLoaded])
+
   // The task page's full triage button lands here with ?triage=<id>: open a
   // thread bound to the task and send the opening request. The param is
   // dropped so a reload does not start a second conversation.
@@ -620,6 +766,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     }
     setThreads((current) => [thread, ...current])
     stickToBottom.current = true
+    activeIdRef.current = thread.id
     setActiveId(thread.id)
     setError(null)
     void sendRef.current(
@@ -635,6 +782,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     const thread = newThread(options)
     if (thread === null) return
     setThreads((current) => [thread, ...current])
+    activeIdRef.current = thread.id
     setActiveId(thread.id)
   }, [needsThread, options, triageTarget])
 
@@ -672,11 +820,43 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }
 
-  const selectThread = (id: string) => {
+  const selectThread = (thread: ChatThread) => {
+    const id = thread.id
     stickToBottom.current = true
     setShowJump(false)
+    activeIdRef.current = id
     setActiveId(id)
     setError(null)
+    if (repo === null) {
+      void navigate({ to: '/chat', search: {}, replace: true })
+      return
+    }
+    if (thread.shared) {
+      void navigate({ to: '/chat', search: { repo, chat: id }, replace: true })
+      return
+    }
+    void fetch(`${apiBase}/api/repos/${encodeURIComponent(repo)}/chat/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(conversationBody(thread)),
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null
+          throw new Error(body?.error ?? `HTTP ${response.status}`)
+        }
+        const stored = { ...((await response.json()) as ChatThread), shared: true }
+        sharedSnapshots.current.set(id, stored)
+        setThreads((current) =>
+          current.map((item) => (item.id === id ? { ...stored, shared: true } : item)),
+        )
+        if (activeIdRef.current === id) {
+          void navigate({ to: '/chat', search: { repo, chat: id }, replace: true })
+        }
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : 'could not store chat session')
+      })
   }
 
   const updateActive = (patch: Partial<ChatThread>) => {
@@ -697,12 +877,16 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
     const thread = newThread(options)
     if (thread === null) return
     setThreads((current) => [thread, ...current])
-    selectThread(thread.id)
+    selectThread(thread)
   }
 
   const deleteThread = (id: string) => {
     setThreads((current) => current.filter((thread) => thread.id !== id))
-    if (activeId === id) setActiveId(null)
+    if (activeId === id) {
+      activeIdRef.current = null
+      setActiveId(null)
+      void navigate({ to: '/chat', search: repo === null ? {} : { repo }, replace: true })
+    }
   }
 
   const appendAssistantText = (threadId: string, messageId: string, chunk: string) => {
@@ -772,6 +956,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
           conversationId: thread.id,
           harness: thread.harness,
           ...(thread.model.trim() === '' ? {} : { model: thread.model.trim() }),
+          ...(thread.customModel === undefined ? {} : { customModel: thread.customModel }),
           ...(thread.effort.trim() === '' ? {} : { effort: thread.effort.trim() }),
           ...(thread.taskId === undefined ? {} : { taskId: thread.taskId }),
           ...(thread.sessionId === undefined ? {} : { sessionId: thread.sessionId }),
@@ -782,6 +967,13 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as { error?: string } | null
         throw new Error(body?.error ?? `HTTP ${response.status}`)
+      }
+      setThreads((current) =>
+        current.map((item) => (item.id === thread.id ? { ...item, shared: true } : item)),
+      )
+      sharedSnapshots.current.set(thread.id, { ...thread, shared: true })
+      if (activeIdRef.current === thread.id) {
+        void navigate({ to: '/chat', search: { repo, chat: thread.id }, replace: true })
       }
       if (response.body === null) throw new Error('chat response has no stream')
       const reader = response.body.getReader()
@@ -936,7 +1128,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
                   <SidebarMenuItem key={thread.id}>
                     <SidebarMenuButton
                       isActive={thread.id === activeId}
-                      onClick={() => selectThread(thread.id)}
+                      onClick={() => selectThread(thread)}
                       title={thread.title}
                     >
                       <span>{thread.title}</span>
@@ -983,13 +1175,19 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
           {isEmpty ? (
             <div className="flex flex-1 flex-col items-center justify-end px-4 pb-8 text-center">
               <img src={logoGlyph} alt="Amagi" className="mb-5 h-12 w-auto" />
-              <h2 className="text-3xl font-normal tracking-tight text-fg-strong">
-                What can I help with?
-              </h2>
-              <p className="mt-2 max-w-md text-sm text-fg-faint">
-                Ask anything about {repo ?? 'this repository'}. The assistant can read it but not
-                change it.
-              </p>
+              {loadingShared ? (
+                <h2 className="text-lg font-medium text-fg-strong">Opening chat…</h2>
+              ) : (
+                <>
+                  <h2 className="text-3xl font-normal tracking-tight text-fg-strong">
+                    What can I help with?
+                  </h2>
+                  <p className="mt-2 max-w-md text-sm text-fg-faint">
+                    Ask anything about {repo ?? 'this repository'}. The assistant can read it but
+                    not change it.
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
@@ -1073,7 +1271,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
                 value={text}
                 onChange={(event) => setText(event.target.value)}
                 onKeyDown={onComposerKeyDown}
-                disabled={activeThread === undefined || options === null}
+                disabled={activeThread === undefined || options === null || loadingShared}
                 rows={1}
                 maxLength={4000}
                 aria-label="Message"
