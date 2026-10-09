@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
@@ -897,26 +897,104 @@ describe('Runner.runOnce', () => {
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
   })
 
-  test('an enabled fleet reviewer turns review on without review.enabled', async () => {
-    const reviewer = new ReviewHarness(['[]'])
-    await makeRunner(
+  test('review fix replies go through a git-excluded worktree dir that never reaches the commit', async () => {
+    let worktree = ''
+    let replyPath = ''
+    const fixer = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          worktree = cwd
+          replyPath =
+            prompt.match(/Write only a JSON array of FindingReply objects to ([^\s]+)/)?.[1] ?? ''
+          writeFileSync(
+            replyPath,
+            JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]),
+          )
+          writeFileSync(join(cwd, '.amagi-tmp', 'stray.txt'), 'left behind\n')
+        },
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const result = await makeRunner(
       new FakeTracker([TASK]),
-      new FakeHarness([writesAFile]),
-      config({
-        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
-        worker: [
-          { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
-        ],
-      }),
+      fixer,
+      reviewConfig(),
       new FakePr(),
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding]), '[]']),
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(replyPath).toBe(join(worktree, '.amagi-tmp', basename(replyPath)))
+    expect(existsSync(join(worktree, '.amagi-tmp'))).toBe(false)
+    const committed = await execOk(exec, ['git', 'ls-tree', '-r', '--name-only', 'HEAD'], {
+      cwd: worktree,
+    })
+    expect(committed).toContain('hello.txt')
+    expect(committed).not.toContain('.amagi-tmp')
+    const excludes = readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8').split('\n')
+    expect(excludes.filter((line) => line === '/.amagi-tmp/')).toHaveLength(1)
+  })
+
+  test('retries a transient failure during a review fix and completes the round', async () => {
+    const fixer = new FakeHarness([
+      writesAFile,
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      {
+        effect: (_cwd, prompt) => {
+          const path = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (path === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(path, JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]))
+        },
+      },
+    ])
+    const reviewer = new ReviewHarness([JSON.stringify([finding]), '[]'])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      reviewConfig({}, { retryBaseMs: 0, retryMaxMs: 0 }),
+      undefined,
       exec,
       undefined,
       reviewer,
     ).runOnce()
 
-    expect(reviewer.calls).toHaveLength(1)
-    expect(types(TASK.id)).toContain('review.finished')
+    expect(result?.state).toBe('pr_open')
+    expect(fixer.calls).toHaveLength(3)
+    expect(fixer.calls[2]?.resumeFrom).toBe('sess-1')
+    expect(types(TASK.id)).toContain('review.fixed')
+    expect(states(TASK.id)).toContain('retrying')
+    expect(states(TASK.id)).toContain('fixing')
   })
+
+  test.each([false, true])(
+    'fleet reviewer runs only when repository review is enabled: %s',
+    async (enabled) => {
+      const reviewer = new ReviewHarness(['[]'])
+      await makeRunner(
+        new FakeTracker([TASK]),
+        new FakeHarness([writesAFile]),
+        config({
+          harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+          review: { enabled },
+          worker: [
+            { id: 'reviewer', name: 'Reviewer', kind: 'codex', roles: ['review'], enabled: true },
+          ],
+        }),
+        new FakePr(),
+        exec,
+        undefined,
+        reviewer,
+      ).runOnce()
+
+      expect(reviewer.calls).toHaveLength(enabled ? 1 : 0)
+      expect(types(TASK.id)).toContain(enabled ? 'review.finished' : 'review.skipped')
+    },
+  )
 
   test('skips review with no fleet reviewer and review.enabled unset', async () => {
     const reviewer = new ReviewHarness(['[]'])

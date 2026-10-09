@@ -37,6 +37,7 @@ import {
   AttemptSwitcher,
   CloseButtons,
   FileAsErrorButton,
+  FullTriageButton,
   RecheckPrButton,
   ReclaimButton,
   ResetButton,
@@ -588,6 +589,11 @@ export function TaskDetailView() {
           &larr; overview
         </Link>
         <p className="mt-4 text-fg-faint">No events yet for {id}.</p>
+        {selected !== null && (
+          <div className="mt-3">
+            <FullTriageButton taskId={id} state={null} />
+          </div>
+        )}
       </section>
     )
   }
@@ -655,6 +661,7 @@ export function TaskDetailView() {
         {selected !== null && !past && (
           <ResolveConflictsButton repo={selected} taskId={task.id} state={task.state} />
         )}
+        {selected !== null && !past && <FullTriageButton taskId={task.id} state={task.state} />}
         {selected !== null && !past && (
           <CloseButtons repo={selected} taskId={task.id} state={task.state} />
         )}
@@ -779,7 +786,7 @@ export function TaskDetailView() {
                 onClick={() => setTab(t.key)}
                 className={`rounded-t px-3 py-1.5 text-sm ${
                   tab === t.key
-                    ? 'border-b-2 border-sky-500 text-fg-strong'
+                    ? 'border-b-2 border-accent text-fg-strong'
                     : 'text-fg-muted hover:text-fg'
                 }`}
               >

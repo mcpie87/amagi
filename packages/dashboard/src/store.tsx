@@ -28,6 +28,11 @@ export type RepoInfo = {
   ready: { name: string; ok: boolean; detail?: string }[]
 }
 
+/** Failed readiness checks: a repo with any of these cannot run work and needs the operator. */
+export function repoBlockers(repo: RepoInfo): RepoInfo['ready'] {
+  return repo.ready.filter((check) => !check.ok)
+}
+
 export type DashboardValue = {
   repos: RepoInfo[] | null
   selected: string | null
@@ -101,6 +106,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(refreshRepos, [refreshRepos])
+
+  // A repo can break (config edited, remote changed) while the dashboard is open.
+  useEffect(() => {
+    const timer = window.setInterval(refreshRepos, 15_000)
+    return () => window.clearInterval(timer)
+  }, [refreshRepos])
 
   const selectRepo = useCallback((key: string) => {
     setSelected(key)

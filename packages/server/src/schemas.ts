@@ -1,4 +1,4 @@
-import { ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
+import { Config, ForgeKind, HarnessKind, TaskState, WorkerRole } from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -37,6 +37,11 @@ export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string(
 export const RepoCommitParam = z.object({
   repo: z.string().min(1),
   hash: z.string().regex(/^[0-9a-f]{7,40}$/i),
+})
+export const RepoGitRequestParam = z.object({
+  repo: z.string().min(1),
+  id: z.string().min(1),
+  requestId: z.string().min(1),
 })
 export const RepoQuestionParam = z.object({
   repo: z.string().min(1),
@@ -122,19 +127,45 @@ export type AnswerBody = z.infer<typeof AnswerBody>
  * prose and never interprets anything outside this set; an unknown verb is
  * rejected as a 400 before any work happens.
  */
-export const GitRequestVerb = z.enum(['commit'])
+export const GitRequestVerb = z.enum(['commit', 'merge-base', 'pr', 'push', 'comment', 'close'])
 export type GitRequestVerb = z.infer<typeof GitRequestVerb>
 
 export const GitRequestBody = z.object({
   verb: GitRequestVerb,
+  /** Commit body, comment text or close reason; content passed through, never interpreted. */
+  message: z.string().trim().min(1).max(20_000).optional(),
 })
 export type GitRequestBody = z.infer<typeof GitRequestBody>
+
+export const GitDecisionBody = z.object({ approve: z.boolean() })
 
 /** A message from the operator to the worker behind a parked task. */
 export const ChatBody = z.object({
   message: z.string().trim().min(1).max(4000),
 })
 export type ChatBody = z.infer<typeof ChatBody>
+
+export const ChatPageBody = z.object({
+  conversationId: z.string().uuid(),
+  harness: HarnessKind,
+  model: z.string().trim().min(1).optional(),
+  effort: z.string().trim().min(1).optional(),
+  message: z.string().trim().min(1).max(4000),
+  /** Binds the conversation to a task: the agent works in its worktree and may request git writes. */
+  taskId: z.string().min(1).optional(),
+  /** The harness session a task conversation resumes, as the previous turn's done event reported it. */
+  sessionId: z.string().min(1).optional(),
+  history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().max(50_000),
+      }),
+    )
+    .max(50)
+    .refine((history) => history.reduce((size, item) => size + item.content.length, 0) <= 200_000),
+})
+export type ChatPageBody = z.infer<typeof ChatPageBody>
 
 export const ChecksBody = z.strictObject({
   format: z.string().trim().min(1),
@@ -149,6 +180,7 @@ export const SettingsBody = z
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),
+    reviewEnabled: z.boolean().optional(),
     reviewMaxRounds: z.number().int().min(1).optional(),
     forgeKind: ForgeKind.optional(),
     /**
@@ -262,6 +294,8 @@ export const SeatNamesUpdateBody = z
     message: 'seat names must be unique',
   })
 export type SeatNamesUpdateBody = z.infer<typeof SeatNamesUpdateBody>
+
+export const ProfilesUpdateBody = z.object({ profiles: Config.shape.profiles.unwrap() })
 
 export const ParticipationBody = z
   .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })

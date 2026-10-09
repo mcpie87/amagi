@@ -518,7 +518,11 @@ export class RunService implements RunServiceApi {
       store,
       tracker,
       harness,
-      config: { ...config, harness: { ...config.harness, implement } },
+      config: {
+        ...config,
+        review: { ...config.review },
+        harness: { ...config.harness, implement },
+      },
       reviewerConfig,
       ...(reviewerConfig === undefined ? {} : { reviewerHarness: makeHarnessFn(reviewerConfig) }),
       repoRoot,

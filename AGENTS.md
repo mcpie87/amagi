@@ -18,6 +18,8 @@ just check                             # lint + typecheck + dashboard build + al
 
 `serve.test.ts` needs `packages/dashboard/dist`: run `just build-dashboard` first if it fails on missing files. `just fresh-check` wipes `node_modules`; it is a merge gate, do not run it while iterating.
 
+In an interactive session on the main checkout, see a UI change in the operator's running `just serve`: the dashboard on :5173 hot-reloads and the server restarts on save (`bun --watch`). Drive it with the `claude-in-chrome` skill. Start no second `serve`: it would lease real tasks.
+
 ## Layout
 
 - `packages/core/src`: everything that does work.

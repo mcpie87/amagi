@@ -2384,6 +2384,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
@@ -2424,6 +2425,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
       forgeRemote: 'origin',
@@ -2437,6 +2439,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
@@ -2529,6 +2532,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       staleMaxParallel: false,
       forgeKind: 'github',
@@ -2563,6 +2567,7 @@ describe('repo settings endpoints', () => {
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
+      reviewEnabled: false,
       reviewMaxRounds: 3,
       forgeKind: 'github',
       forgeRemote: 'origin',
@@ -2600,6 +2605,47 @@ describe('repo settings endpoints', () => {
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
       desktopFailureAlerts: true,
     })
+  })
+
+  test('PATCH persists review enablement independently for each repository', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    workspace.config.review.harness = {
+      kind: 'codex',
+      permissions: 'workspace-write',
+      extraArgs: [],
+    }
+    writeConfig(workspace.root, { review: { harness: { kind: 'codex' } } })
+    const res = await patch('repo1', JSON.stringify({ reviewEnabled: true, reviewMaxRounds: 5 }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ reviewEnabled: true, reviewMaxRounds: 5 })
+    expect(workspace.config.review.enabled).toBe(true)
+    expect(loadConfig(workspace.root).config.review).toMatchObject({ enabled: true, maxRounds: 5 })
+    expect(ws.workspaces.get('repo2')?.config.review.enabled).toBe(false)
+    expect((await patch('repo1', JSON.stringify({ reviewEnabled: false }))).status).toBe(200)
+    expect(loadConfig(workspace.root).config.review).toMatchObject({ enabled: false, maxRounds: 5 })
+    expect(await (await app.request('/api/repos/repo1/settings')).json()).toMatchObject({
+      reviewEnabled: false,
+    })
+    expect((await patch('repo1', JSON.stringify({ reviewEnabled: 'true' }))).status).toBe(400)
+  })
+
+  test('PATCH rejects enabling review when no reviewer is available', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    workspace.config.worker = []
+    workspace.config.review.harness = undefined
+    const previousPath = process.env.PATH
+    try {
+      process.env.PATH = workspace.root
+      const res = await patch('repo1', JSON.stringify({ reviewEnabled: true }))
+      expect(res.status).toBe(400)
+      expect(workspace.config.review.enabled).toBe(false)
+      expect(loadConfig(workspace.root).config.review.enabled).toBe(false)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
   })
 
   test('PATCH persists the maximum review rounds and updates the workspace config', async () => {
@@ -3255,6 +3301,29 @@ describe('GET /api/seats', () => {
     )
   })
 
+  test('usage rates skip a repo whose config cannot load', async () => {
+    const repos = ws.workspaces.list()
+    const dir = dirname(repos[0]?.path ?? '')
+    mkdirSync(join(dir, 'broken', '.amagi'), { recursive: true })
+    writeFileSync(join(dir, 'broken', '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    saveRegistry(
+      [
+        ...repos,
+        {
+          key: 'broken',
+          name: 'broken',
+          path: join(dir, 'broken'),
+          workers: true,
+          watchers: true,
+          gitIdentity: null,
+        },
+      ],
+      join(dir, 'registry.json'),
+    )
+    const res = await app.request('/api/usage-rates')
+    expect(res.status).toBe(200)
+  })
+
   test('a run on the original seat stays visible after adding replicas', async () => {
     writeGlobalConfig({ seats: [{ name: 'claude', count: 2 }] })
     const occupancy = (await (await app.request('/api/seats')).json()) as {
@@ -3728,9 +3797,32 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
 
   test('rejects an unknown verb as a 400 before any git write', async () => {
     writeFileSync(join(wt, 'hello.txt'), 'hi\n')
-    const res = await request('bd-1', 'push', store.token('bd-1'))
+    const res = await request('bd-1', 'rebase', store.token('bd-1'))
     expect(res.status).toBe(400)
     expect(git(wt, ['status', '--porcelain']).stdout.trim()).not.toBe('')
+  })
+
+  test('an outward-facing verb waits for the operator instead of running', async () => {
+    const res = await request('bd-1', 'push', store.token('bd-1'))
+    expect(res.status).toBe(202)
+    const body = (await res.json()) as { requestId: string }
+    const asked = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'git.request')
+    expect(asked?.type === 'git.request' ? asked.requestId : null).toBe(body.requestId)
+  })
+
+  test('a declined request is told back and cannot be decided again', async () => {
+    const asked = await request('bd-1', 'pr', store.token('bd-1'))
+    const { requestId } = (await asked.json()) as { requestId: string }
+    const decide = () =>
+      app.request(`/api/repos/repo1/tasks/bd-1/git-requests/${requestId}/decision`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ approve: false }),
+      })
+    const first = await decide()
+    expect(first.status).toBe(200)
+    expect(((await first.json()) as { result: string }).result).toBe('the operator declined pr')
+    expect((await decide()).status).toBe(409)
   })
 
   test('a missing token is a 401', async () => {

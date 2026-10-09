@@ -1,10 +1,139 @@
-import type { RequestSample, RouteTiming, TimingSnapshot } from '@amagi/core/request-timings'
+import type {
+  RequestSample,
+  RouteTiming,
+  SourceTiming,
+  TimingSnapshot,
+} from '@amagi/core/request-timings'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { fmtAgo } from '../format.ts'
 import { EmptyState, Time } from '../ui.tsx'
 
 const POLL_MS = 3000
+
+type SortState = { column: string; direction: 'asc' | 'desc' }
+type SortValue = number | string
+
+function sortedRows<T>(
+  rows: readonly T[],
+  sort: SortState | null,
+  value: (row: T, column: string) => SortValue,
+): T[] {
+  if (sort === null) return [...rows]
+  const direction = sort.direction === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    const left = value(a, sort.column)
+    const right = value(b, sort.column)
+    const comparison =
+      typeof left === 'number' && typeof right === 'number'
+        ? left - right
+        : String(left).localeCompare(String(right), undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          })
+    return comparison * direction
+  })
+}
+
+function toggleSort(sort: SortState | null, column: string): SortState {
+  return {
+    column,
+    direction: sort?.column === column && sort.direction === 'asc' ? 'desc' : 'asc',
+  }
+}
+
+function SortHeader({
+  column,
+  label,
+  sort,
+  onSort,
+  className = 'px-4 py-2 font-medium',
+}: {
+  column: string
+  label: string
+  sort: SortState | null
+  onSort: (column: string) => void
+  className?: string
+}) {
+  return (
+    <th
+      className={className}
+      aria-sort={
+        sort?.column === column ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'
+      }
+    >
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className="inline-flex cursor-pointer items-center gap-1 font-medium hover:text-fg-strong"
+      >
+        {label}
+        <span aria-hidden="true" className="text-[10px]">
+          {sort?.column === column ? (sort.direction === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </button>
+    </th>
+  )
+}
+
+function sampleSortValue(sample: RequestSample, column: string): SortValue {
+  switch (column) {
+    case 'at':
+      return sample.at
+    case 'request':
+      return `${sample.method} ${sample.path}${sample.query === '' ? '' : `?${sample.query}`}`
+    case 'source':
+      return sample.source
+    case 'status':
+      return sample.status
+    case 'duration':
+      return sample.ms
+    default:
+      return ''
+  }
+}
+
+function routeSortValue(route: RouteTiming, column: string): SortValue {
+  switch (column) {
+    case 'route':
+      return `${route.method} ${route.route}`
+    case 'calls':
+      return route.count
+    case 'errors':
+      return route.errors
+    case 'avg':
+      return route.avgMs
+    case 'p50':
+      return route.p50Ms
+    case 'p95':
+      return route.p95Ms
+    case 'max':
+      return route.maxMs
+    case 'total':
+      return route.totalMs
+    default:
+      return ''
+  }
+}
+
+function sourceSortValue(source: SourceTiming, column: string): SortValue {
+  switch (column) {
+    case 'source':
+      return source.source
+    case 'calls':
+      return source.count
+    case 'errors':
+      return source.errors
+    case 'avg':
+      return source.avgMs
+    case 'total':
+      return source.totalMs
+    case 'last':
+      return source.lastAt
+    default:
+      return ''
+  }
+}
 
 function fmtMs(ms: number): string {
   if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
@@ -52,7 +181,7 @@ function filterQuery(filters: Filters): string {
 }
 
 const inputClass =
-  'rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600'
+  'rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent'
 
 function useTimings(paused: boolean, query: string): TimingSnapshot | null | 'error' {
   const [snapshot, setSnapshot] = useState<TimingSnapshot | null | 'error'>(null)
@@ -97,6 +226,9 @@ function SampleTable({
   samples: RequestSample[]
   onSelect: (sample: RequestSample) => void
 }) {
+  const [sort, setSort] = useState<SortState | null>(null)
+  const rows = sortedRows(samples, sort, sampleSortValue)
+  const onSort = (column: string) => setSort((current) => toggleSort(current, column))
   return (
     <section className="mt-6">
       <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">{title}</h2>
@@ -104,15 +236,27 @@ function SampleTable({
         <table className="w-full text-sm">
           <thead className="border-b border-line text-left text-xs text-fg-faint">
             <tr>
-              <th className="px-4 py-2 font-medium">At</th>
-              <th className="px-4 py-2 font-medium">Request</th>
-              <th className="px-4 py-2 font-medium">Source</th>
-              <th className="px-4 py-2 text-right font-medium">Status</th>
-              <th className="px-4 py-2 text-right font-medium">Duration</th>
+              <SortHeader column="at" label="At" sort={sort} onSort={onSort} />
+              <SortHeader column="request" label="Request" sort={sort} onSort={onSort} />
+              <SortHeader column="source" label="Source" sort={sort} onSort={onSort} />
+              <SortHeader
+                column="status"
+                label="Status"
+                sort={sort}
+                onSort={onSort}
+                className="px-4 py-2 text-right font-medium"
+              />
+              <SortHeader
+                column="duration"
+                label="Duration"
+                sort={sort}
+                onSort={onSort}
+                className="px-4 py-2 text-right font-medium"
+              />
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {samples.map((s) => (
+            {rows.map((s) => (
               <tr key={s.id} onClick={() => onSelect(s)} className="cursor-pointer hover:bg-raised">
                 <td className="whitespace-nowrap px-4 py-2 text-xs text-fg-muted">
                   <Time ts={s.at} />
@@ -318,6 +462,12 @@ function RouteDetailDialog({
   params.set('route', selected.route)
   const snapshot = useTimings(paused, params.toString())
   const timing = snapshot === null || snapshot === 'error' ? undefined : snapshot.routes[0]
+  const [sourceSort, setSourceSort] = useState<SortState | null>(null)
+  const callers =
+    snapshot === null || snapshot === 'error'
+      ? []
+      : sortedRows(snapshot.sources, sourceSort, sourceSortValue)
+  const onSourceSort = (column: string) => setSourceSort((current) => toggleSort(current, column))
   return (
     <Modal title={`${selected.method} ${selected.route}`} wide onClose={onClose}>
       {snapshot === 'error' ? (
@@ -376,15 +526,44 @@ function RouteDetailDialog({
               <table className="w-full text-sm">
                 <thead className="border-b border-line text-left text-xs text-fg-faint">
                   <tr>
-                    <th className="px-4 py-2 font-medium">Source</th>
-                    <th className="px-4 py-2 text-right font-medium">Calls</th>
-                    <th className="px-4 py-2 text-right font-medium">5xx</th>
-                    <th className="px-4 py-2 text-right font-medium">Avg</th>
-                    <th className="px-4 py-2 text-right font-medium">Total</th>
+                    <SortHeader
+                      column="source"
+                      label="Source"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                    />
+                    <SortHeader
+                      column="calls"
+                      label="Calls"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
+                    <SortHeader
+                      column="errors"
+                      label="5xx"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
+                    <SortHeader
+                      column="avg"
+                      label="Avg"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
+                    <SortHeader
+                      column="total"
+                      label="Total"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
-                  {snapshot.sources.map((s) => (
+                  {callers.map((s) => (
                     <tr key={s.source}>
                       <td className="break-all px-4 py-2 font-mono text-xs">{s.source}</td>
                       <td className="px-4 py-2 text-right tabular-nums">{s.count}</td>
@@ -419,8 +598,20 @@ export function DiagnosticsView() {
   const [advanced, setAdvanced] = useState(false)
   const [selected, setSelected] = useState<RequestSample | null>(null)
   const [selectedRoute, setSelectedRoute] = useState<RouteKey | null>(null)
+  const [routeSort, setRouteSort] = useState<SortState | null>(null)
+  const [sourceSort, setSourceSort] = useState<SortState | null>(null)
   const query = filterQuery(filters)
   const snapshot = useTimings(paused, query)
+  const routes =
+    snapshot === null || snapshot === 'error'
+      ? []
+      : sortedRows(snapshot.routes, routeSort, routeSortValue)
+  const sources =
+    snapshot === null || snapshot === 'error'
+      ? []
+      : sortedRows(snapshot.sources, sourceSort, sourceSortValue)
+  const onRouteSort = (column: string) => setRouteSort((current) => toggleSort(current, column))
+  const onSourceSort = (column: string) => setSourceSort((current) => toggleSort(current, column))
   const requestRoute =
     selected === null || snapshot === null || snapshot === 'error'
       ? null
@@ -581,24 +772,71 @@ export function DiagnosticsView() {
               )}
               <section className="mt-6">
                 <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                  By route, most total time first
+                  By route
                 </h2>
                 <div className="overflow-x-auto rounded-lg border border-line bg-surface">
                   <table className="w-full text-sm">
                     <thead className="border-b border-line text-left text-xs text-fg-faint">
                       <tr>
-                        <th className="px-4 py-2 font-medium">Route</th>
-                        <th className="px-4 py-2 text-right font-medium">Calls</th>
-                        <th className="px-4 py-2 text-right font-medium">5xx</th>
-                        <th className="px-4 py-2 text-right font-medium">Avg</th>
-                        <th className="px-4 py-2 text-right font-medium">p50</th>
-                        <th className="px-4 py-2 text-right font-medium">p95</th>
-                        <th className="px-4 py-2 text-right font-medium">Max</th>
-                        <th className="px-4 py-2 text-right font-medium">Total</th>
+                        <SortHeader
+                          column="route"
+                          label="Route"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                        />
+                        <SortHeader
+                          column="calls"
+                          label="Calls"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="errors"
+                          label="5xx"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="avg"
+                          label="Avg"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="p50"
+                          label="p50"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="p95"
+                          label="p95"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="max"
+                          label="Max"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="total"
+                          label="Total"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-line">
-                      {snapshot.routes.map((r) => (
+                      {routes.map((r) => (
                         <tr
                           key={`${r.method} ${r.route}`}
                           onClick={() => setSelectedRoute(r)}
@@ -648,22 +886,57 @@ export function DiagnosticsView() {
               </section>
               <section className="mt-6">
                 <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                  By source, most total time first
+                  By source
                 </h2>
                 <div className="overflow-x-auto rounded-lg border border-line bg-surface">
                   <table className="w-full text-sm">
                     <thead className="border-b border-line text-left text-xs text-fg-faint">
                       <tr>
-                        <th className="px-4 py-2 font-medium">Source</th>
-                        <th className="px-4 py-2 text-right font-medium">Calls</th>
-                        <th className="px-4 py-2 text-right font-medium">5xx</th>
-                        <th className="px-4 py-2 text-right font-medium">Avg</th>
-                        <th className="px-4 py-2 text-right font-medium">Total</th>
-                        <th className="px-4 py-2 text-right font-medium">Last</th>
+                        <SortHeader
+                          column="source"
+                          label="Source"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                        />
+                        <SortHeader
+                          column="calls"
+                          label="Calls"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="errors"
+                          label="5xx"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="avg"
+                          label="Avg"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="total"
+                          label="Total"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="last"
+                          label="Last"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-line">
-                      {snapshot.sources.map((s) => (
+                      {sources.map((s) => (
                         <tr key={s.source}>
                           <td className="break-all px-4 py-2 font-mono text-xs">{s.source}</td>
                           <td className="px-4 py-2 text-right tabular-nums">{s.count}</td>

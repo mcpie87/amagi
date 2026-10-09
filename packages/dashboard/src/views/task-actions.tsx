@@ -1,6 +1,7 @@
-import { canReset, isTerminal, type TaskState } from '@amagi/core/events'
+import { canChatTask, canReset, isTerminal, type TaskState } from '@amagi/core/events'
 import type { ProjectedQuestion } from '@amagi/core/view'
-import { type FormEvent, useState } from 'react'
+import { Link } from '@tanstack/react-router'
+import { type FormEvent, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard, useRunner } from '../store.tsx'
 import { Icon } from '../ui.tsx'
@@ -23,13 +24,29 @@ export function AnswerBox({
   taskId: string
   question: ProjectedQuestion
 }) {
+  const [token, setToken] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitted, setSubmitted] = useState(false)
 
+  useEffect(() => {
+    let alive = true
+    fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ token?: string }>) : null))
+      .then((body) => {
+        if (alive) setToken(body?.token ?? null)
+      })
+      .catch(() => {
+        if (alive) setToken(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [repo, taskId])
+
   const send = async (answer: string) => {
-    if (answer.trim() === '' || busy) return
+    if (token === null || answer.trim() === '' || busy) return
     setBusy(true)
     setError(null)
     try {
@@ -37,7 +54,7 @@ export function AnswerBox({
         `${apiBase}/api/repos/${repo}/tasks/${taskId}/questions/${question.id}/answer`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
           body: JSON.stringify({ answer, via: 'web' }),
         },
       )
@@ -55,12 +72,16 @@ export function AnswerBox({
     void send(text)
   }
 
+  if (token === null) {
+    return <p className="mt-2 text-sm text-fg-faint">answer box unavailable</p>
+  }
+
   if (submitted) {
     return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   if (submitted) {
-    return <p className="mt-2 text-sm text-emerald-400">answered</p>
+    return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   return (
@@ -90,7 +111,7 @@ export function AnswerBox({
         <button
           type="submit"
           disabled={busy || text.trim() === ''}
-          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
+          className="rounded bg-amber-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           Answer
         </button>
@@ -314,7 +335,7 @@ function CloseButton({
               <button
                 type="submit"
                 disabled={busy || (reason === '__other' && custom.trim() === '')}
-                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+                className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
               >
                 Mark done
               </button>
@@ -509,7 +530,7 @@ export function AttemptSwitcher({
           onClick={() => onSelect(n === current ? null : n)}
           className={`rounded-t px-3 py-1.5 text-sm ${
             viewing === n
-              ? 'border-b-2 border-sky-500 text-fg-strong'
+              ? 'border-b-2 border-accent text-fg-strong'
               : 'text-fg-muted hover:text-fg'
           }`}
         >
@@ -661,6 +682,20 @@ export function ResolveConflictsButton({
         </p>
       )}
     </div>
+  )
+}
+
+/** Opens the chat page on a conversation with an agent that carries the task end to end. */
+export function FullTriageButton({ taskId, state }: { taskId: string; state: TaskState | null }) {
+  if (!canChatTask(state)) return null
+  return (
+    <Link
+      to="/chat"
+      search={{ triage: taskId }}
+      className="rounded border border-sky-edge bg-sky-soft px-3 py-1 text-sm text-sky-ink hover:opacity-85"
+    >
+      Perform Full Triage
+    </Link>
   )
 }
 

@@ -10,6 +10,7 @@
       // Themes before first paint, so a light-theme reload never flashes dark.
       // Mirrors src/theme.ts; change both together.
       ;(() => {
+        const root = document.documentElement
         let theme = 'dark'
         try {
           const stored = localStorage.getItem('amagi:theme')
@@ -22,10 +23,33 @@
         } catch {
           // storage unavailable, keep the dark baseline
         }
-        document.documentElement.dataset.theme = theme
-        if (theme === 'light') {
-          document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#f7f7f8')
+        root.dataset.theme = theme
+        let appColor = theme === 'light' ? '#fdf6e3' : '#282828'
+        try {
+          const selected = localStorage.getItem('amagi:theme-selection')
+          const themes = JSON.parse(localStorage.getItem('amagi:custom-themes') ?? '[]')
+          const custom = Array.isArray(themes)
+            ? themes.find((entry) => entry?.id === selected)
+            : null
+          const colors = custom?.variants?.[theme]
+          if (colors && typeof colors === 'object') {
+            root.dataset.customTheme = 'true'
+            root.style.colorScheme = theme
+            for (const [name, value] of Object.entries(colors)) {
+              if (/^[a-z-]+$/.test(name) && /^#[\da-f]{6}$/i.test(value)) {
+                root.style.setProperty(`--color-${name}`, value)
+              }
+            }
+            if (/^#[\da-f]{6}$/i.test(colors.app)) appColor = colors.app
+            root.style.setProperty(
+              '--shadow-color',
+              `color-mix(in srgb, var(--color-app) ${theme === 'dark' ? 50 : 16}%, transparent)`,
+            )
+          }
+        } catch {
+          // Ignore invalid or unavailable stored custom themes.
         }
+        document.querySelector('meta[name="theme-color"]')?.setAttribute('content', appColor)
       })()
     </script>
   </head>

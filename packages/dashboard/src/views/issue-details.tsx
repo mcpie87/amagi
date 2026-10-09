@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { DetailRow, PILL } from '../badges.tsx'
 import { Markdown } from '../markdown.tsx'
+import { IssueCloseButton } from './issue-close.tsx'
 import { Blockers, Unblocks } from './issue-dependencies.tsx'
 import { fetchIssue, type Issue } from './issue-model.ts'
 
@@ -151,6 +152,7 @@ export function IssueDetailView({
   back,
   actions,
   onEdit,
+  onClosed,
 }: {
   repo: string | null
   id: string
@@ -158,6 +160,7 @@ export function IssueDetailView({
   back: ReactNode
   actions?: ReactNode
   onEdit: (issue: Issue) => void
+  onClosed: () => void
 }) {
   const { issue, error } = useIssueDetail(repo, id, refresh)
 
@@ -189,7 +192,15 @@ export function IssueDetailView({
               Edit
             </button>
           )}
-          {actions}
+          {repo !== null && selectedIssue.status !== 'closed' && (
+            <IssueCloseButton
+              key={selectedIssue.id}
+              repo={repo}
+              issue={selectedIssue}
+              onClosed={onClosed}
+            />
+          )}
+          {selectedIssue.status !== 'closed' && actions}
         </>
       }
     />
@@ -204,6 +215,7 @@ export function EpicDetailView({
   back,
   actions,
   onOpenIssue,
+  onClosed,
 }: {
   repo: string | null
   id: string
@@ -218,6 +230,7 @@ export function EpicDetailView({
   back: ReactNode
   actions?: ReactNode
   onOpenIssue: (id: string) => void
+  onClosed: () => void
 }) {
   const { issue, error: detailError } = useIssueDetail(repo, id, refresh)
   const [children, setChildren] = useState<Issue[]>([])
@@ -281,7 +294,19 @@ export function EpicDetailView({
       childrenError={childrenError}
       loading={loading}
       back={back}
-      actions={actions}
+      actions={
+        <>
+          {repo !== null && selectedIssue !== null && selectedIssue.status !== 'closed' && (
+            <IssueCloseButton
+              key={selectedIssue.id}
+              repo={repo}
+              issue={selectedIssue}
+              onClosed={onClosed}
+            />
+          )}
+          {actions}
+        </>
+      }
       onOpenIssue={onOpenIssue}
     />
   )

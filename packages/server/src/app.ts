@@ -17,6 +17,8 @@ import {
   expandTilde,
   expandWorkers,
   type GitIdentity,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
   type LiveRun,
   loadConfig,
   loadGlobalConfig,
@@ -57,11 +59,13 @@ import {
   SESSION_HEADER,
   sameSecret,
 } from './access.ts'
+import { createChatRoutes } from './chat-routes.ts'
 import { createFleetRoutes } from './fleet-routes.ts'
 import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
+  ProfilesUpdateBody,
   QuestionQuery,
   RepoCommitParam,
   RepoParam,
@@ -343,6 +347,14 @@ export function createApp({
 
     .route('/', createIssueRoutes(workspaces))
 
+    .route(
+      '/',
+      createChatRoutes({
+        workspaces,
+        harnessFor: (ws, config) => chatHarnessFor?.(ws) ?? makeHarness(config),
+      }),
+    )
+
     .get('/api/diagnostics/requests', valid('query', TimingQuery), (c) =>
       c.json(timings.snapshot(c.req.valid('query'))),
     )
@@ -354,7 +366,13 @@ export function createApp({
       const since = Date.now() - windowMs
       const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
+        let ws: Workspace | null
+        // A repo with an invalid config (e.g. undeclared checks) must not fail the whole rate view.
+        try {
+          ws = workspaces.get(entry.key)
+        } catch {
+          continue
+        }
         if (ws === null) continue
         for (const event of ws.store.eventsSince(since)) {
           if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue
@@ -366,6 +384,20 @@ export function createApp({
         }
       }
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
+    .get('/api/profiles', (c) =>
+      c.json({
+        profiles: loadGlobalConfig().profiles,
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+      }),
+    )
+
+    .put('/api/profiles', valid('json', ProfilesUpdateBody), (c) => {
+      const { profiles } = c.req.valid('json')
+      writeGlobalConfig({ profiles })
+      return c.json({ profiles })
     })
 
     .get('/api/seat-names', (c) => {

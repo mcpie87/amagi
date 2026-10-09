@@ -22,50 +22,50 @@ type KanbanColumn = {
 }
 
 export const KANBAN_COLUMNS: KanbanColumn[] = [
-  { key: 'ready', title: 'Ready', accent: 'bg-zinc-600', states: null },
+  { key: 'ready', title: 'Ready', accent: 'bg-neutral-ink', states: null },
   {
     key: 'implementing',
     title: 'In progress',
-    accent: 'bg-blue-600',
-    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks'],
+    accent: 'bg-blue-ink',
+    states: ['claimed', 'worktree_ready', 'implementing', 'awaiting_answer', 'checks', 'chatting'],
   },
   {
     key: 'reviewing',
     title: 'Reviewing',
-    accent: 'bg-violet-600',
+    accent: 'bg-violet-ink',
     states: ['reviewing', 'fixing'],
   },
   {
     key: 'retrying',
     title: 'Retrying',
-    accent: 'bg-orange-600',
+    accent: 'bg-orange-ink',
     states: ['retrying'],
   },
   {
     key: 'needs_human',
     title: 'Needs human',
-    accent: 'bg-red-600',
+    accent: 'bg-red-ink',
     states: ['needs_human', 'abandoned', 'cancelled'],
   },
   {
     key: 'pr_merge_conflict',
     title: 'PR conflicts',
-    accent: 'bg-red-600',
+    accent: 'bg-red-ink',
     states: ['pr_merge_conflict'],
   },
   {
     key: 'pr_conflict_fixing',
     title: 'Resolving PR conflicts',
-    accent: 'bg-violet-600',
+    accent: 'bg-violet-ink',
     states: ['pr_conflict_fixing'],
   },
-  { key: 'no_pr', title: 'No PR', accent: 'bg-amber-600', states: ['no_pr'] },
-  { key: 'committed', title: 'Committed', accent: 'bg-cyan-600', states: ['committed'] },
-  { key: 'pr_open', title: 'PR open', accent: 'bg-sky-600', states: ['pr_open', 'pr_flagged'] },
-  { key: 'done', title: 'Done', accent: 'bg-emerald-600', states: ['done'] },
+  { key: 'no_pr', title: 'No PR', accent: 'bg-amber-ink', states: ['no_pr'] },
+  { key: 'committed', title: 'Committed', accent: 'bg-cyan-ink', states: ['committed'] },
+  { key: 'pr_open', title: 'PR open', accent: 'bg-sky-ink', states: ['pr_open', 'pr_flagged'] },
+  { key: 'done', title: 'Done', accent: 'bg-emerald-ink', states: ['done'] },
 ]
 
-const REVIEW_TONE = { ok: 'text-emerald-400', warn: 'text-amber-400', active: 'text-violet-400' }
+const REVIEW_TONE = { ok: 'text-emerald-ink', warn: 'text-amber-ink', active: 'text-violet-ink' }
 
 function ReviewLine({ task }: { task: ProjectedTask }) {
   const badge = reviewBadge(task)
@@ -78,10 +78,10 @@ function ReviewLine({ task }: { task: ProjectedTask }) {
 /** One waiting task from the tracker's FCFS ready queue. */
 function ReadyCard({ task }: { task: TrackerTask }) {
   return (
-    <div className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2">
-      <span className="block text-xs text-zinc-500">{task.id}</span>
+    <div className="rounded border border-line-strong bg-sunken px-3 py-2">
+      <span className="block text-xs text-fg-faint">{task.id}</span>
       <span className="mt-0.5 block break-words font-medium leading-snug">{task.title}</span>
-      <span className="mt-1 block text-xs text-zinc-500">
+      <span className="mt-1 block text-xs text-fg-faint">
         {[task.priority === null ? null : `P${task.priority}`, task.type]
           .filter(Boolean)
           .join(' · ') || '\u00a0'}
@@ -95,11 +95,11 @@ function QueuedCard({ task }: { task: ProjectedTask }) {
     <Link
       to="/tasks/$id"
       params={{ id: task.id }}
-      className="block rounded border border-zinc-800 bg-zinc-950 px-3 py-2 hover:bg-zinc-800"
+      className="block rounded border border-line-strong bg-sunken px-3 py-2 hover:bg-raised"
     >
       <span className="flex items-center gap-1">
         <Badge state={task.state} />
-        <span className="text-xs text-zinc-500">{task.id}</span>
+        <span className="text-xs text-fg-faint">{task.id}</span>
       </span>
       <span className="mt-1 block break-words font-medium leading-snug">{task.title}</span>
     </Link>
@@ -129,15 +129,15 @@ export function QueueView() {
           return (
             <div
               key={column.key}
-              className="flex min-w-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900"
+              className="flex min-w-0 flex-col rounded-lg border border-line-strong bg-surface"
             >
-              <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2">
+              <div className="flex items-center justify-between gap-2 border-b border-line-strong px-3 py-2">
                 <span
-                  className={`truncate rounded px-2 py-0.5 text-xs font-medium text-white ${column.accent}`}
+                  className={`truncate rounded px-2 py-0.5 text-xs font-medium text-on-solid ${column.accent}`}
                 >
                   {column.title}
                 </span>
-                <span className="text-xs text-zinc-500">{tasks.length}</span>
+                <span className="text-xs text-fg-faint">{tasks.length}</span>
               </div>
               <ul className="flex flex-col gap-2 p-2">
                 {column.states === null
@@ -153,23 +153,23 @@ export function QueueView() {
                         <Link
                           to="/tasks/$id"
                           params={{ id: task.id }}
-                          className="block rounded border border-zinc-800 bg-zinc-950 px-3 py-2 hover:bg-zinc-800"
+                          className="block rounded border border-line-strong bg-sunken px-3 py-2 hover:bg-raised"
                         >
                           <span className="flex items-center gap-1">
                             <Badge state={task.state} />
-                            <span className="text-xs text-zinc-500">{task.id}</span>
+                            <span className="text-xs text-fg-faint">{task.id}</span>
                           </span>
                           <span className="mt-1 block break-words font-medium leading-snug">
                             {task.title}
                           </span>
                           {task.statusReason !== null &&
                             (column.key === 'needs_human' || column.key === 'no_pr') && (
-                              <span className="mt-1 block truncate text-xs text-zinc-400">
+                              <span className="mt-1 block truncate text-xs text-fg-muted">
                                 {task.statusReason}
                               </span>
                             )}
                           {column.key === 'retrying' && (
-                            <span className="mt-1 block truncate text-xs text-orange-300">
+                            <span className="mt-1 block truncate text-xs text-orange-ink">
                               {task.retryAt !== null
                                 ? `retries in ${fmtRetryIn(task.retryAt)}`
                                 : 'retry pending'}
@@ -181,8 +181,8 @@ export function QueueView() {
                             <span
                               className={`mt-1 block truncate text-xs ${
                                 task.prMergeStatus === 'conflicted'
-                                  ? 'text-red-400'
-                                  : 'text-emerald-400'
+                                  ? 'text-red-ink'
+                                  : 'text-emerald-ink'
                               }`}
                             >
                               PR {mergeLabel[task.prMergeStatus]}
@@ -198,7 +198,7 @@ export function QueueView() {
                     </li>
                   ))}
                 {tasks.length === 0 && (
-                  <li className="px-1 py-2 text-xs text-zinc-600">Nothing here.</li>
+                  <li className="px-1 py-2 text-xs text-fg-dim">Nothing here.</li>
                 )}
               </ul>
             </div>

@@ -226,7 +226,7 @@ function Modal({
           <button
             type="submit"
             disabled={busy || !canSubmit}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             {submitLabel}
           </button>
@@ -672,7 +672,7 @@ export function FleetWorkersSettings() {
             type="button"
             onClick={() => setEditing('new')}
             disabled={workers === null}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             Add worker
           </button>
