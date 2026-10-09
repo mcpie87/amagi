@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { PrDriver, ProjectedTask, RunServiceApi } from '@amagi/core'
 import { writeConfig } from '@amagi/core'
 import { portInUse, serve } from './serve.ts'
@@ -101,6 +103,29 @@ test('registry participation flags gate auto-queue and reconcile pollers live', 
   expect(
     ((await (await fetch(endpoint)).json()) as { workers: { name: string }[] }).workers,
   ).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'stall-watcher' })]))
+})
+
+test('runner supervisor skips repos with invalid configs', () => {
+  ws = testWorkspaces(['broken', 'healthy'])
+  const broken = ws.workspaces.list().find((entry) => entry.key === 'broken')
+  if (broken === undefined) throw new Error('broken repo missing')
+  writeFileSync(join(broken.path, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "main"\n')
+  for (const entry of ws.workspaces.list())
+    ws.workspaces.updateParticipation(entry.key, { workers: true, watchers: false })
+  ws.workspaces.close()
+  const created: string[] = []
+
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runnerFactory: (workspace) => {
+      created.push(workspace.key)
+      return {} as RunServiceApi
+    },
+  })
+
+  expect(created).toEqual(['healthy'])
 })
 
 test('watcher enable switches reconcile from config on the next supervisor scan', async () => {
