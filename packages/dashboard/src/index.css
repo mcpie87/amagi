@@ -151,6 +151,36 @@
   --shadow-color: rgb(0 43 54 / 0.16);
 }
 
+:root[data-custom-theme="true"] {
+  --color-neutral-soft: color-mix(in srgb, var(--color-neutral-ink) 15%, transparent);
+  --color-neutral-edge: color-mix(in srgb, var(--color-neutral-ink) 30%, transparent);
+  --color-sky-soft: color-mix(in srgb, var(--color-sky-ink) 15%, transparent);
+  --color-sky-edge: color-mix(in srgb, var(--color-sky-ink) 30%, transparent);
+  --color-blue-soft: color-mix(in srgb, var(--color-blue-ink) 15%, transparent);
+  --color-blue-edge: color-mix(in srgb, var(--color-blue-ink) 30%, transparent);
+  --color-amber-soft: color-mix(in srgb, var(--color-amber-ink) 15%, transparent);
+  --color-amber-soft-hover: color-mix(in srgb, var(--color-amber-ink) 28%, transparent);
+  --color-amber-edge: color-mix(in srgb, var(--color-amber-ink) 30%, transparent);
+  --color-violet-soft: color-mix(in srgb, var(--color-violet-ink) 15%, transparent);
+  --color-violet-edge: color-mix(in srgb, var(--color-violet-ink) 30%, transparent);
+  --color-cyan-soft: color-mix(in srgb, var(--color-cyan-ink) 15%, transparent);
+  --color-cyan-edge: color-mix(in srgb, var(--color-cyan-ink) 30%, transparent);
+  --color-orange-soft: color-mix(in srgb, var(--color-orange-ink) 15%, transparent);
+  --color-orange-soft-hover: color-mix(in srgb, var(--color-orange-ink) 28%, transparent);
+  --color-orange-edge: color-mix(in srgb, var(--color-orange-ink) 30%, transparent);
+  --color-emerald-soft: color-mix(in srgb, var(--color-emerald-ink) 15%, transparent);
+  --color-emerald-soft-hover: color-mix(in srgb, var(--color-emerald-ink) 28%, transparent);
+  --color-emerald-edge: color-mix(in srgb, var(--color-emerald-ink) 30%, transparent);
+  --color-red-soft: color-mix(in srgb, var(--color-red-ink) 15%, transparent);
+  --color-red-soft-hover: color-mix(in srgb, var(--color-red-ink) 28%, transparent);
+  --color-red-edge: color-mix(in srgb, var(--color-red-ink) 30%, transparent);
+  --color-teal-soft: color-mix(in srgb, var(--color-teal-ink) 15%, transparent);
+  --color-teal-edge: color-mix(in srgb, var(--color-teal-ink) 30%, transparent);
+  --selection-bg: var(--color-raised);
+  --selection-fg: var(--color-fg-strong);
+  --code-bg: color-mix(in srgb, var(--color-sunken) 80%, transparent);
+}
+
 .diff-added {
   background: var(--color-emerald-soft);
 }

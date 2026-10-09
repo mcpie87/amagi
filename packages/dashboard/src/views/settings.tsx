@@ -1,9 +1,26 @@
-import { useEffect, useState } from 'react'
+import { type ChangeEvent, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
 import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
 import { useDashboard } from '../store.tsx'
-import { setThemePref, type ThemePref, useTheme, useThemePref } from '../theme.ts'
+import {
+  addTheme,
+  createCustomTheme,
+  deleteSelectedTheme,
+  getSelectedThemeForExport,
+  renameSelectedTheme,
+  setSelectedTheme,
+  setThemePref,
+  type ThemePref,
+  updateThemeColor,
+  useAppearance,
+} from '../theme.ts'
+import {
+  exportBase24Theme,
+  exportDtcgTheme,
+  parseThemeImport,
+  THEME_COLOR_ROLES,
+} from '../theme-colors.ts'
 import { FleetWorkersSettings } from './fleet.tsx'
 import { ProfilesSettings } from './profiles-settings.tsx'
 import {
@@ -20,35 +37,270 @@ const THEME_OPTIONS: { value: ThemePref; label: string }[] = [
 ]
 
 function Appearance() {
-  const pref = useThemePref()
-  const theme = useTheme()
+  const appearance = useAppearance()
   const dateFormat = useDateFormatPref()
+  const [url, setUrl] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
+  const [importResult, setImportResult] = useState<string | null>(null)
+  const selectedTheme = appearance.themes.find(({ id }) => id === appearance.selectedThemeId)
+  const [themeName, setThemeName] = useState(() => selectedTheme?.name ?? '')
+  const colors = appearance.colors
+
+  const importText = (text: string, source?: string) => {
+    const theme = parseThemeImport(text, 'imported', source)
+    addTheme(theme)
+    setThemeName(theme.name)
+    setImportResult(`Imported ${theme.name}`)
+  }
+
+  const importFromUrl = async () => {
+    setImportBusy(true)
+    setImportResult(null)
+    try {
+      let parsedUrl = new URL(url.trim())
+      const githubFile = parsedUrl.href.match(
+        /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/,
+      )
+      if (githubFile) {
+        parsedUrl = new URL(
+          `https://raw.githubusercontent.com/${githubFile[1]}/${githubFile[2]}/${githubFile[3]}/${githubFile[4]}`,
+        )
+      }
+      if (parsedUrl.protocol !== 'https:') throw new Error('Use an HTTPS raw file URL')
+      const response = await fetch(parsedUrl, {
+        mode: 'cors',
+        credentials: 'omit',
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`)
+      if (Number(response.headers.get('content-length')) > 512_000) {
+        throw new Error('Theme file is larger than 512 KB')
+      }
+      const text = await response.text()
+      importText(text, parsedUrl.href)
+    } catch (error) {
+      setImportResult(error instanceof Error ? error.message : String(error))
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (!file) return
+    setImportResult(null)
+    try {
+      importText(await file.text(), file.name)
+    } catch (error) {
+      setImportResult(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const downloadTheme = (format: 'dtcg' | 'base24') => {
+    const theme = getSelectedThemeForExport()
+    const baseName = theme.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+    const content =
+      format === 'dtcg' ? exportDtcgTheme(theme) : exportBase24Theme(theme, appearance.mode)
+    const extension = format === 'dtcg' ? 'tokens.json' : `${appearance.mode}.yaml`
+    const type = format === 'dtcg' ? 'application/json' : 'text/yaml'
+    const objectUrl = URL.createObjectURL(new Blob([content], { type }))
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = `${baseName || 'amagi-theme'}.${extension}`
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+  }
 
   return (
-    <div className="mt-6 rounded-lg border border-line bg-surface p-4">
-      <h2 className="mb-1 text-sm text-fg-muted">Theme</h2>
-      <p className="mb-3 text-sm text-fg-faint">
-        Stored in this browser only.
-        {pref === 'system' ? ` System follows your OS appearance, currently ${theme}.` : ''}
-      </p>
-      <div className="inline-flex gap-1 rounded border border-line-strong p-1">
-        {THEME_OPTIONS.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={pref === option.value}
-            onClick={() => setThemePref(option.value)}
-            className={`rounded px-3 py-1 text-sm ${
-              pref === option.value
-                ? 'bg-raised text-fg-strong'
-                : 'text-fg-muted hover:bg-raised hover:text-fg'
-            }`}
-          >
-            {option.label}
-          </button>
-        ))}
+    <div className="mt-6 space-y-4">
+      <div className="rounded-lg border border-line bg-surface p-4">
+        <h2 className="mb-1 text-sm text-fg-muted">Color mode</h2>
+        <p className="mb-3 text-sm text-fg-faint">
+          {appearance.modePref === 'system'
+            ? `Following your OS appearance, currently ${appearance.mode}.`
+            : `Using ${appearance.mode} mode.`}
+        </p>
+        <div className="inline-flex gap-1 rounded border border-line-strong p-1">
+          {THEME_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={appearance.modePref === option.value}
+              onClick={() => setThemePref(option.value)}
+              className={`rounded px-3 py-1 text-sm ${
+                appearance.modePref === option.value
+                  ? 'bg-raised text-fg-strong'
+                  : 'text-fg-muted hover:bg-raised hover:text-fg'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="mt-5">
+
+      <div className="rounded-lg border border-line bg-surface p-4">
+        <h2 className="mb-1 text-sm text-fg-muted">Color theme</h2>
+        <p className="mb-3 text-sm text-fg-faint">
+          Theme choices and custom colors are stored in this browser.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label="Color theme"
+            value={appearance.selectedThemeId}
+            onChange={(event) => {
+              const id = event.currentTarget.value
+              setThemeName(appearance.themes.find((theme) => theme.id === id)?.name ?? '')
+              setSelectedTheme(id)
+            }}
+            className="min-w-52 rounded border border-line-strong bg-app px-3 py-2 text-sm text-fg"
+          >
+            <option value="default">Default: Gruvbox dark / Solarized light</option>
+            {appearance.themes.map((theme) => (
+              <option key={theme.id} value={theme.id}>
+                {theme.name}
+              </option>
+            ))}
+          </select>
+          {appearance.selectedThemeId === 'default' ? (
+            <button
+              type="button"
+              onClick={() => {
+                createCustomTheme()
+                setThemeName('Custom theme')
+              }}
+              className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-fg hover:bg-raised"
+            >
+              Customize default
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={deleteSelectedTheme}
+              className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-red-ink hover:bg-raised"
+            >
+              Delete theme
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => downloadTheme('dtcg')}
+            className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-fg hover:bg-raised"
+          >
+            Export DTCG JSON
+          </button>
+          <button
+            type="button"
+            onClick={() => downloadTheme('base24')}
+            className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-fg hover:bg-raised"
+          >
+            Export Base24 YAML
+          </button>
+        </div>
+
+        {selectedTheme !== undefined && colors !== null && (
+          <div className="mt-4 border-t border-line pt-4">
+            <label htmlFor="theme-name" className="mb-1 block text-sm text-fg-muted">
+              Theme name
+            </label>
+            <input
+              id="theme-name"
+              type="text"
+              value={themeName}
+              onChange={(event) => {
+                const nextName = event.currentTarget.value
+                setThemeName(nextName)
+                if (nextName.trim() !== '') renameSelectedTheme(nextName)
+              }}
+              className="mb-4 w-full rounded border border-line-strong bg-app px-3 py-2 text-sm text-fg"
+            />
+            {[...new Set(THEME_COLOR_ROLES.map(({ group }) => group))].map((group) => (
+              <fieldset key={group} className="mb-4">
+                <legend className="mb-2 text-sm text-fg-muted">{group}</legend>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {THEME_COLOR_ROLES.filter((role) => role.group === group).map(
+                    ({ key, label }) => (
+                      <label
+                        key={key}
+                        className="flex items-center justify-between gap-3 text-sm text-fg"
+                      >
+                        <span>{label}</span>
+                        <input
+                          aria-label={label}
+                          type="color"
+                          value={colors[key]}
+                          onChange={(event) =>
+                            updateThemeColor(appearance.mode, key, event.currentTarget.value)
+                          }
+                          className="h-8 w-12 cursor-pointer rounded border border-line-strong bg-app p-1"
+                        />
+                      </label>
+                    ),
+                  )}
+                </div>
+              </fieldset>
+            ))}
+            <p className="text-xs text-fg-faint">
+              Editing the {appearance.mode} variant. Light and dark colors are saved separately.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-line bg-surface p-4">
+        <h2 className="mb-1 text-sm text-fg-muted">Import a theme</h2>
+        <p className="mb-3 text-sm text-fg-faint">
+          Import Base16 or Base24 YAML from a raw repository URL, or Amagi DTCG JSON. GitHub file
+          links are converted to raw URLs. Single-variant imports use Amagi defaults for the other
+          mode.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <input
+            aria-label="Raw theme URL"
+            type="url"
+            value={url}
+            onChange={(event) => setUrl(event.currentTarget.value)}
+            placeholder="https://raw.githubusercontent.com/.../theme.yaml"
+            className="min-w-64 flex-1 rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+          />
+          <button
+            type="button"
+            disabled={importBusy || url.trim() === ''}
+            onClick={() => void importFromUrl()}
+            className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-fg hover:bg-raised disabled:opacity-50"
+          >
+            {importBusy ? 'Importing…' : 'Import URL'}
+          </button>
+          <label className="cursor-pointer rounded border border-line-strong bg-surface px-3 py-2 text-sm text-fg hover:bg-raised">
+            Import file
+            <input
+              type="file"
+              accept=".json,.yaml,.yml,application/json,text/yaml,text/x-yaml"
+              onChange={(event) => void importFile(event)}
+              className="sr-only"
+            />
+          </label>
+        </div>
+        <p className="mt-2 text-xs text-fg-faint">
+          Example:{' '}
+          <code>
+            curl -fsSL
+            https://raw.githubusercontent.com/tinted-theming/schemes/spec-0.11/base16/ayu-mirage.yaml
+            -o ayu-mirage.yaml
+          </code>
+        </p>
+        {importResult !== null && (
+          <p role="status" className="mt-2 text-sm text-fg-muted">
+            {importResult}
+          </p>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-line bg-surface p-4">
         <label htmlFor="date-format" className="mb-1 block text-sm text-fg-muted">
           Date format
         </label>
@@ -70,9 +322,9 @@ function Appearance() {
 
 export function SettingsView() {
   const { repos, refreshRepos, selected } = useDashboard()
-  const [activeTab, setActiveTab] = useState<'general' | 'profiles' | 'workers' | 'repositories'>(
-    'general',
-  )
+  const [activeTab, setActiveTab] = useState<
+    'general' | 'appearance' | 'profiles' | 'workers' | 'repositories'
+  >('general')
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [autoRebase, setAutoRebase] = useState(false)
@@ -219,6 +471,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General'],
+            ['appearance', 'Appearance'],
             ['profiles', 'Profiles'],
             ['workers', 'Workers'],
             ['repositories', 'Repositories'],
@@ -243,12 +496,19 @@ export function SettingsView() {
         ))}
       </div>
       <div
+        id="settings-panel-appearance"
+        role="tabpanel"
+        aria-labelledby="settings-tab-appearance"
+        hidden={activeTab !== 'appearance'}
+      >
+        <Appearance />
+      </div>
+      <div
         id="settings-panel-general"
         role="tabpanel"
         aria-labelledby="settings-tab-general"
         hidden={activeTab !== 'general'}
       >
-        <Appearance />
         {selected !== null && loaded && (
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">Automatic rebasing</h2>
