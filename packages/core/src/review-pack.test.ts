@@ -26,6 +26,11 @@ beforeEach(() => {
   temp = mkdtempSync(join(import.meta.dir, '.review-pack-test-'))
   repo = join(temp, 'repo')
   mkdirSync(repo)
+  writePackFile(
+    repo,
+    '.amagi/config.toml',
+    '[checks]\nformat = "true"\nlint = "true"\ntest = "true"\n',
+  )
   previousConfigHome = process.env.XDG_CONFIG_HOME
   process.env.XDG_CONFIG_HOME = join(temp, 'config')
 })
@@ -126,7 +131,12 @@ describe('reviewPrompt', () => {
       '.amagi/review/lenses/security.md',
       '---\nmatch: ["**/*.ts"]\n---\nSecurity lens body',
     )
-    writePackFile(repo, '.amagi/config.toml', '[review]\nlenses = ["security"]\n')
+    writePackFile(
+      repo,
+      '.amagi/config.toml',
+      '[review]\nlenses = ["security"]\n\n' +
+        '[checks]\nformat = "true"\nlint = "true"\ntest = "true"\n',
+    )
     expect(prompt(['src/index.ts'])).not.toContain('Security lens body')
   })
 

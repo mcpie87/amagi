@@ -15,6 +15,11 @@ beforeEach(() => {
   repo = join(dir, 'repo')
   mkdirSync(repo, { recursive: true })
   Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
+  mkdirSync(join(repo, '.amagi'), { recursive: true })
+  writeFileSync(
+    join(repo, '.amagi', 'config.toml'),
+    '[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n',
+  )
   process.env.XDG_STATE_HOME = dir
   process.env.XDG_CONFIG_HOME = join(dir, 'config')
 })
@@ -37,7 +42,7 @@ const entry = (): RegistryEntry => ({
 })
 
 describe('diagnoseRepo', () => {
-  test('reports a healthy repo with defaults', async () => {
+  test('reports a healthy repo with declared checks', async () => {
     const checks = await diagnoseRepo(entry())
     const d = (name: string) => checks.find((c) => c.name === name)
     expect(d('git root')?.ok).toBe(true)
@@ -45,8 +50,15 @@ describe('diagnoseRepo', () => {
     expect(d('tracker beads')).toBeDefined()
     expect(d('forge github')).toBeDefined()
     expect(d('worktree root')?.ok).toBe(true)
-    // the mandatory format+lint gate is on by default
+    // All three project checks must be declared for the repo to be ready.
     expect(d('checks')?.ok).toBe(true)
+  })
+
+  test('reports missing project checks as a config error', async () => {
+    writeFileSync(join(repo, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "main"\n')
+    const config = (await diagnoseRepo(entry())).find((check) => check.name === 'config')
+    expect(config?.ok).toBe(false)
+    expect(config?.detail).toContain('must declare non-empty format, lint, test')
   })
 
   test('flags a forge remote that points at another forge', async () => {
@@ -54,7 +66,8 @@ describe('diagnoseRepo', () => {
     mkdirSync(join(repo, '.amagi'), { recursive: true })
     writeFileSync(
       join(repo, '.amagi', 'config.toml'),
-      '[forge]\nkind = "gitlab"\nremote = "origin"\n',
+      '[forge]\nkind = "gitlab"\nremote = "origin"\n\n' +
+        '[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n',
     )
     const remote = (await diagnoseRepo(entry())).find((c) => c.name === 'forge remote')
     expect(remote).toMatchObject({
@@ -75,7 +88,8 @@ describe('diagnoseRepo', () => {
     mkdirSync(join(repo, '.amagi'), { recursive: true })
     writeFileSync(
       join(repo, '.amagi', 'config.toml'),
-      '[checks]\ncommands = ["just check"]\n\n[repo]\nworktreeRoot = "~/amagi-wt"\n',
+      '[checks]\nformat = "just fmt"\nlint = "just lint"\ntest = "just test"\n' +
+        'commands = ["just check"]\n\n[repo]\nworktreeRoot = "~/amagi-wt"\n',
     )
     const checks = await diagnoseRepo(entry())
     const d = (name: string) => checks.find((c) => c.name === name)
@@ -87,7 +101,8 @@ describe('diagnoseRepo', () => {
     mkdirSync(join(repo, '.amagi'), { recursive: true })
     writeFileSync(
       join(repo, '.amagi', 'config.toml'),
-      '[harness.implement]\nkind = "claude"\nbin = "amagi-no-such-harness"\n',
+      '[harness.implement]\nkind = "claude"\nbin = "amagi-no-such-harness"\n\n' +
+        '[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n',
     )
     const harness = (await diagnoseRepo(entry())).filter((c) => c.name.startsWith('harness '))
     expect(harness).toEqual([
@@ -107,7 +122,8 @@ describe('diagnoseRepo', () => {
     mkdirSync(join(repo, '.amagi'), { recursive: true })
     writeFileSync(
       join(repo, '.amagi', 'config.toml'),
-      `[harness.implement]\nkind = "claude"\nbin = "${wrapper}"\n`,
+      `[harness.implement]\nkind = "claude"\nbin = "${wrapper}"\n\n` +
+        '[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n',
     )
     const check = (await diagnoseRepo(entry())).find((c) => c.name === `harness ${wrapper}`)
     expect(check).toEqual({ name: `harness ${wrapper}`, ok: true, detail: wrapper })

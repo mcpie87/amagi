@@ -399,13 +399,12 @@ export const Config = z
     checks: z
       .object({
         commands: z.array(z.string()).default([]),
-        /**
-         * Mandatory pre-commit gate, run before `commands`: the auto-fix formatter
-         * (writes the worktree) and the read-only lint check. Null disables a
-         * step; both default on so a PR can never be pushed unformatted.
-         */
-        format: z.string().nullable().default('just fmt'),
-        lint: z.string().nullable().default('just lint'),
+        /** Repository formatter. It runs before lint, tests, and extra commands. */
+        format: z.string().nullable().default(null),
+        /** Repository lint check. It runs after format and before tests. */
+        lint: z.string().nullable().default(null),
+        /** Repository test check. It runs after format and lint. */
+        test: z.string().nullable().default(null),
       })
       .prefault({}),
     difficulty: DifficultyConfig.prefault({}),
@@ -571,13 +570,26 @@ export function hasPinnedForgeRemote(repoRoot: string): boolean {
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
+  const globalToml = readToml(globalConfigPath())
+  if ('checks' in globalToml) {
+    throw new Error(`${globalConfigPath()}: [checks] belongs in the repo config`)
+  }
   const repoToml = readToml(repoConfigPath(repoRoot))
   if ('worker' in repoToml) {
     throw new Error(
       `${repoConfigPath(repoRoot)}: [[worker]] belongs in the global config (${globalConfigPath()}), not a repo config`,
     )
   }
-  const merged = deepMerge(readToml(globalConfigPath()), repoToml)
+  const repoChecks = isPlainObject(repoToml.checks) ? repoToml.checks : {}
+  const missingChecks = ['format', 'lint', 'test'].filter(
+    (name) => typeof repoChecks[name] !== 'string' || repoChecks[name].trim() === '',
+  )
+  if (missingChecks.length > 0) {
+    throw new Error(
+      `${repoConfigPath(repoRoot)}: [checks] must declare non-empty ${missingChecks.join(', ')}`,
+    )
+  }
+  const merged = deepMerge(globalToml, repoToml)
 
   const parsed = Config.safeParse(merged)
   if (!parsed.success) {
@@ -600,6 +612,9 @@ export function loadConfig(repoRoot: string): LoadedConfig {
 export function loadGlobalConfig(): Config {
   const path = globalConfigPath()
   const merged = existsSync(path) ? readToml(path) : {}
+  if ('checks' in merged) {
+    throw new Error(`${path}: [checks] belongs in the repo config`)
+  }
   const parsed = Config.safeParse(merged)
   if (!parsed.success) {
     throw new Error(`invalid amagi config (${path}):\n${z.prettifyError(parsed.error)}`)
