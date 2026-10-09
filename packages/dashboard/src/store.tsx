@@ -345,17 +345,17 @@ export type RunnerApi = {
 
 /** Per-launch overrides, matching RunBody. Omitted fields use config defaults. */
 export type RunOptions = {
-  harness?: string
+  workerId?: string
   model?: string
   effort?: string
 }
 
 export type RunOptionsInfo = {
-  harnesses: { name: string; kind: string; model?: string; effort?: string }[]
+  harnesses: { name: string; workerId: string; kind: string; model?: string; effort?: string }[]
   models: Record<string, string[]>
   efforts: Record<string, string[]>
-  /** The configured default harness (config.harness.implement), for labeling. */
-  default: { kind: string; model?: string; effort?: string } | null
+  /** ID of the configured default worker, or null when none is enabled. */
+  default: string | null
 }
 
 const RunnerContext = createContext<RunnerApi>({
@@ -425,7 +425,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           ...(taskId === undefined ? {} : { taskId }),
-          ...(opts?.harness === undefined ? {} : { harness: opts.harness }),
+          ...(opts?.workerId === undefined ? {} : { workerId: opts.workerId }),
           ...(opts?.model === undefined ? {} : { model: opts.model }),
           ...(opts?.effort === undefined ? {} : { effort: opts.effort }),
         }),

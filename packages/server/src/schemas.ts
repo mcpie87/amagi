@@ -87,12 +87,14 @@ export type AskBody = z.infer<typeof AskBody>
 /**
  * Empty body launches the next ready task; an optional workerId selects its worker.
  */
-export const RunBody = z.object({
-  taskId: z.string().min(1).optional(),
-  workerId: z.string().min(1).optional(),
-  model: z.string().min(1).optional(),
-  effort: z.string().min(1).optional(),
-})
+export const RunBody = z
+  .object({
+    taskId: z.string().min(1).optional(),
+    workerId: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    effort: z.string().min(1).optional(),
+  })
+  .strict()
 export type RunBody = z.infer<typeof RunBody>
 
 export const TaskIdParam = z.object({ id: z.string().min(1) })
