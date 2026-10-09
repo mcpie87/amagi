@@ -104,6 +104,112 @@ export function RepositoryParticipation({
   )
 }
 
+type CheckCommands = { format: string; lint: string; test: string }
+
+function RepositoryChecks({ repo, onChanged }: { repo: Pick<Repo, 'key'>; onChanged: () => void }) {
+  const [checks, setChecks] = useState<CheckCommands>({ format: '', lint: '', test: '' })
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    fetch(`${apiBase}/api/repos/${repo.key}/checks`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return (await response.json()) as Record<keyof CheckCommands, string | null>
+      })
+      .then((body) => {
+        if (!active) return
+        setChecks({ format: body.format ?? '', lint: body.lint ?? '', test: body.test ?? '' })
+        setLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : String(err))
+      })
+    return () => {
+      active = false
+    }
+  }, [repo.key])
+
+  const save = async () => {
+    setBusy(true)
+    setError(null)
+    setSaved(false)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/checks`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(checks),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      setChecks((await response.json()) as CheckCommands)
+      setSaved(true)
+      onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className={card}>
+      <h2 className="mb-1 text-sm text-fg-muted">Project checks</h2>
+      <p className="mb-3 text-sm text-fg-faint">
+        Required shell commands in this repository's .amagi/config.toml. Run in order: format, lint,
+        test, then any extra check commands. Use true to explicitly skip a check.
+      </p>
+      {!loaded && error === null && <p className="text-sm text-fg-faint">Loading…</p>}
+      {loaded && (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            void save()
+          }}
+        >
+          <fieldset disabled={busy} className="space-y-3">
+            <legend className="sr-only">Project check commands</legend>
+            {(['format', 'lint', 'test'] as const).map((name) => (
+              <label key={name} className="block text-sm text-fg-muted">
+                {name === 'format' ? 'Format' : name === 'lint' ? 'Lint' : 'Test'}
+                <input
+                  type="text"
+                  required
+                  value={checks[name]}
+                  onChange={(event) => {
+                    setChecks({ ...checks, [name]: event.currentTarget.value })
+                    setSaved(false)
+                  }}
+                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                />
+              </label>
+            ))}
+            <button
+              type="submit"
+              className={secondary}
+              disabled={Object.values(checks).some((command) => command.trim() === '')}
+            >
+              {busy ? 'Saving…' : 'Save checks'}
+            </button>
+          </fieldset>
+        </form>
+      )}
+      {error !== null && (
+        <p role="alert" className="mt-2 text-sm text-red-ink">
+          {error}
+        </p>
+      )}
+      {saved && (
+        <p role="status" className="mt-2 text-sm text-fg-muted">
+          Saved
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function RepositoryGitIdentity({ repo }: { repo: Pick<Repo, 'key'> }) {
   const [mode, setMode] = useState<GitIdentity['mode']>('path')
   const [path, setPath] = useState('')
@@ -693,6 +799,7 @@ export function RepositorySettingsCard({
   return (
     <div className="mt-6 space-y-4">
       <RepositoryParticipation repo={repo} onChanged={onChanged} />
+      <RepositoryChecks key={repo.key} repo={repo} onChanged={onChanged} />
       <RepositoryForge
         key={repo.key}
         repo={repo}

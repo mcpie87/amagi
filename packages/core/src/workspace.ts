@@ -1,5 +1,5 @@
 import { BeadsService } from './beads-service.ts'
-import { type Config, loadConfig } from './config.ts'
+import { type Config, loadConfig, writeConfig } from './config.ts'
 import { diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { type PrForge, prForgeRouter } from './drivers/pr-route.ts'
@@ -108,6 +108,16 @@ export class Workspaces {
       forge,
       prForge: forge === null ? null : prForgeRouter(entry.path, config, forge),
     }
+  }
+
+  /** Persists checks without requiring a valid workspace, and updates any live workspace. */
+  updateChecks(key: string, checks: Pick<Config['checks'], 'format' | 'lint' | 'test'>): boolean {
+    const entry = this.list().find((candidate) => candidate.key === key)
+    if (entry === undefined) return false
+    writeConfig(entry.path, { checks })
+    const cached = this.cache.get(key)
+    if (cached !== undefined) Object.assign(cached.config.checks, checks)
+    return true
   }
 
   /** Registers a repo and returns its entry. Throws when path is not a repo. */

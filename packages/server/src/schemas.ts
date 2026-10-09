@@ -124,6 +124,12 @@ export const ChatBody = z.object({
 })
 export type ChatBody = z.infer<typeof ChatBody>
 
+export const ChecksBody = z.strictObject({
+  format: z.string().trim().min(1),
+  lint: z.string().trim().min(1),
+  test: z.string().trim().min(1),
+})
+
 export const SettingsBody = z
   .object({
     autoQueue: z.boolean().optional(),

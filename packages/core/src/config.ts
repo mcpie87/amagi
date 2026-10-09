@@ -567,6 +567,11 @@ export function hasPinnedForgeRemote(repoRoot: string): boolean {
   })
 }
 
+/** Reads repository checks even when required commands have not been configured yet. */
+export function readRepoChecks(repoRoot: string): Config['checks'] {
+  return Config.shape.checks.parse(readToml(repoConfigPath(repoRoot)).checks)
+}
+
 export function loadConfig(repoRoot: string): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))

@@ -15,6 +15,7 @@ import {
   newWorkerId,
   pickForgeCredential,
   type RunServiceApi,
+  readRepoChecks,
   removeForgeCredential,
   updateForgeCredential,
   WorkerConfig,
@@ -26,6 +27,7 @@ import { Hono } from 'hono'
 import * as z from 'zod'
 import { resolveWorkspace, valid } from './route-utils.ts'
 import {
+  ChecksBody,
   ForgeCredentialCreateBody,
   ForgeCredentialParam,
   ForgeCredentialUpdateBody,
@@ -65,6 +67,20 @@ export function createFleetRoutes({
   validateGitIdentity,
 }: FleetRouteDeps) {
   return new Hono()
+    .get('/api/repos/:repo/checks', valid('param', RepoParam), (c) => {
+      const { repo } = c.req.valid('param')
+      const entry = workspaces.list().find((candidate) => candidate.key === repo)
+      if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
+      return c.json(readRepoChecks(entry.path))
+    })
+    .patch('/api/repos/:repo/checks', valid('param', RepoParam), valid('json', ChecksBody), (c) => {
+      const { repo } = c.req.valid('param')
+      const checks = c.req.valid('json')
+      if (!workspaces.updateChecks(repo, checks)) {
+        return c.json({ error: `unknown repository ${repo}` }, 404)
+      }
+      return c.json(checks)
+    })
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)

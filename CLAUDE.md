@@ -36,6 +36,8 @@ Tests sit next to the code as `*.test.ts`. `runner.test.ts` and `server/src/app.
 
 ## Conventions
 
+- When adding or changing a configuration setting, update its dashboard Settings controls and API in the same task. A setting is complete when users can view and edit it in the GUI.
+
 - Match the surrounding code; reuse helpers in `core/src` (`exec.ts`, `errors.ts`, `format.ts`, `paths.ts`) before writing new ones.
 - Comments only for non-obvious constraints, never to narrate a change.
 - Every new event type goes into `events.ts`; fold it in `project.ts` when the UIs need it.

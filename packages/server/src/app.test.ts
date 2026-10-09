@@ -42,6 +42,7 @@ import {
   prForgeRouter,
   RunService,
   repoConfigPath,
+  writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
 import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
@@ -2264,6 +2265,75 @@ describe('runner endpoints', () => {
     expect(stopped).toEqual(['bd-1'])
 
     expect((await post('/api/repos/repo1/runs/bd-9/stop')).status).toBe(404)
+  })
+})
+
+describe('repository check settings', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1', 'repo2'])
+    store = ws.store('repo1')
+    app = createApp({ workspaces: ws.workspaces })
+  })
+
+  const patchChecks = (body: unknown, repo = 'repo1') =>
+    app.request(`/api/repos/${repo}/checks`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  test('reads and saves checks, preserves extra commands and applies them live', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    writeConfig(workspace.root, { checks: { commands: ['extra-check'] } })
+    expect(await (await app.request('/api/repos/repo1/checks')).json()).toEqual({
+      format: 'true',
+      lint: 'true',
+      test: 'true',
+      commands: ['extra-check'],
+    })
+    const checks = { format: 'just fmt', lint: 'just lint', test: 'bun test' }
+    const response = await patchChecks({ ...checks, format: ' just fmt ' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(checks)
+    expect(workspace.config.checks).toMatchObject(checks)
+    expect(loadConfig(workspace.root).config.checks).toEqual({
+      ...checks,
+      commands: ['extra-check'],
+    })
+    expect(ws.workspaces.get('repo2')?.config.checks.format).toBe('true')
+  })
+
+  test('repairs missing checks without resolving an invalid workspace', async () => {
+    const entry = ws.workspaces.list().find((repo) => repo.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing')
+    writeFileSync(join(entry.path, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    ws.workspaces.close()
+    expect(() => ws.workspaces.get('repo1')).toThrow('must declare non-empty')
+    const response = await app.request('/api/repos/repo1/checks')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ format: null, lint: null, test: null, commands: [] })
+    expect((await patchChecks({ format: 'true', lint: 'true', test: 'true' })).status).toBe(200)
+    expect(loadConfig(entry.path).config.repo.baseBranch).toBe('custom')
+    expect(ws.workspaces.get('repo1')).not.toBeNull()
+  })
+
+  test('rejects missing, blank, null and unknown commands without changing config', async () => {
+    const before = ws.workspaces.get('repo1')?.config.checks
+    for (const body of [
+      {},
+      { format: 'true', lint: 'true' },
+      { format: ' ', lint: 'true', test: 'true' },
+      { format: 'true', lint: null, test: 'true' },
+      { format: 'true', lint: 'true', test: 'true', unknown: 'true' },
+    ]) {
+      expect((await patchChecks(body)).status).toBe(400)
+    }
+    expect(ws.workspaces.get('repo1')?.config.checks).toEqual(before)
+    expect((await app.request('/api/repos/nope/checks')).status).toBe(404)
+    expect((await patchChecks({ format: 'true', lint: 'true', test: 'true' }, 'nope')).status).toBe(
+      404,
+    )
   })
 })
 
