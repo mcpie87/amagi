@@ -1084,6 +1084,8 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
+    if (!resume) await this.preflight(task.id, worktree.path)
+
     const lease = new Lease(this.deps.tracker, this.deps.store, task.id, this.deps.leaseHeartbeatMs)
     lease.start()
     try {
@@ -1961,12 +1963,13 @@ export class Runner {
       opts.model ?? implement.model ?? null,
       opts.seat ?? implement.seat,
     )
+    const retryState =
+      phase === 'fix review' ? 'fixing' : role === 'review' ? 'reviewing' : 'implementing'
 
     for (let attempt = 1; ; attempt++) {
       const waitingOnUsageHold = readUsageHold(holdKey) !== null
       const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
-      if (waitingOnUsageHold && !this.isCancelled(taskId))
-        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+      if (waitingOnUsageHold && !this.isCancelled(taskId)) this.transition(taskId, retryState)
       let run: Awaited<ReturnType<Runner['runAgent']>>
       try {
         run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
@@ -2014,7 +2017,7 @@ export class Runner {
         this.peakContext = 0
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
-        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+        if (retryState !== 'fixing') this.transition(taskId, retryState)
         releaseProbe?.()
         continue
       }
@@ -2084,7 +2087,7 @@ export class Runner {
         await Bun.sleep(Math.min(100, deadline - Date.now()))
       }
       if (lease?.isLost) throw new LeaseLostError(taskId)
-      if (role !== 'review') this.transition(taskId, 'implementing')
+      if (role !== 'review') this.transition(taskId, retryState)
     }
   }
 
@@ -2092,6 +2095,29 @@ export class Runner {
     const { format, lint, test, commands } = this.deps.config.checks
     const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
     return [...gate, ...commands]
+  }
+
+  private async preflight(taskId: string, cwd: string): Promise<void> {
+    const { format, lint } = this.deps.config.checks
+    const commands = [format, lint].filter(
+      (command): command is string => command !== null && command !== '',
+    )
+    const results: CheckResult[] = []
+    for (const command of commands) {
+      const result = await this.exec(['sh', '-c', command], { cwd })
+      const check = {
+        command,
+        exitCode: result.exitCode,
+        output: `${result.stdout}${result.stderr}`.slice(-8000),
+      }
+      results.push(check)
+      if (result.exitCode !== 0) {
+        this.deps.store.append(taskId, { type: 'checks.finished', ok: false, results })
+        throw new Error(
+          `preflight failed before implementation: ${command}\n${check.output}`.trim(),
+        )
+      }
+    }
   }
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
