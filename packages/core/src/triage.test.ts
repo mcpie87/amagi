@@ -221,6 +221,14 @@ describe('actionFromAnswer', () => {
     expect(actionFromAnswer('skip for now', 'skip')).toBe('skip')
   })
 
+  test('matches whole words and falls back for negated or conflicting actions', () => {
+    expect(actionFromAnswer('Break it into smaller tasks', 'skip')).toBe('skip')
+    expect(actionFromAnswer('skip this task', 'implement')).toBe('skip')
+    expect(actionFromAnswer('do not implement, close it', 'skip')).toBe('skip')
+    expect(actionFromAnswer('do not implement', 'skip')).toBe('skip')
+    expect(actionFromAnswer('implement or close it', 'skip')).toBe('skip')
+  })
+
   test('falls back when nothing matches', () => {
     expect(actionFromAnswer('investigate more', 'skip')).toBe('skip')
   })
