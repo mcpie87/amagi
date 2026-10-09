@@ -18,6 +18,7 @@ import {
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
+  InteractionTimings,
   type LiveRun,
   loadConfig,
   loadGlobalConfig,
@@ -55,6 +56,8 @@ import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
+  InteractionBatch,
+  InteractionQuery,
   ProcessCapUpdateBody,
   ProfilesUpdateBody,
   QuestionQuery,
@@ -89,6 +92,8 @@ export type ServerDeps = {
   chatHarnessFor?: (ws: Workspace) => Harness
   /** Shared with `serve` so its event-loop monitor lands in the same snapshot. */
   timings?: RequestTimings
+  /** Dashboard interaction timings; serve shares the diagnostics file with `timings`. */
+  interactions?: InteractionTimings
 }
 
 const SLOW_REQUEST_MS = 1000
@@ -210,6 +215,7 @@ export function createApp({
   liveRuns,
   chatHarnessFor,
   timings = new RequestTimings(),
+  interactions = new InteractionTimings(),
 }: ServerDeps) {
   // One ChatService per workspace, so the in-flight guard survives requests.
   const chats = new Map<string, ChatService>()
@@ -310,6 +316,15 @@ export function createApp({
 
     .get('/api/diagnostics/requests', valid('query', TimingQuery), (c) =>
       c.json(timings.snapshot(c.req.valid('query'))),
+    )
+
+    .post('/api/diagnostics/interactions', valid('json', InteractionBatch), (c) => {
+      interactions.record(c.req.valid('json').interactions)
+      return c.body(null, 204)
+    })
+
+    .get('/api/diagnostics/interactions', valid('query', InteractionQuery), (c) =>
+      c.json(interactions.snapshot(c.req.valid('query'))),
     )
 
     .get('/api/health', (c) => c.json({ ok: true }))

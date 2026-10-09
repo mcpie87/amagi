@@ -33,6 +33,51 @@ export const TimingQuery = z.object({
   maxMs: z.coerce.number().min(0).optional(),
 })
 
+const InteractionKind = z.enum(['click', 'key', 'change', 'input'])
+
+/** Narrows the diagnostics interaction snapshot; see `InteractionFilter`. */
+export const InteractionQuery = z.object({
+  action: z.string().optional(),
+  page: z.string().optional(),
+  kind: InteractionKind.optional(),
+  from: z.coerce.number().int().min(0).optional(),
+  to: z.coerce.number().int().min(0).optional(),
+  minMs: z.coerce.number().min(0).optional(),
+  maxMs: z.coerce.number().min(0).optional(),
+})
+
+const text = z.string().max(500)
+
+/** A batch of interactions measured by the dashboard; see `InteractionSample`. */
+export const InteractionBatch = z.object({
+  interactions: z
+    .array(
+      z.object({
+        at: z.number().int().min(0),
+        kind: InteractionKind,
+        action: text,
+        context: text.nullable(),
+        route: text,
+        path: text,
+        paintMs: z.number().min(0).nullable(),
+        ms: z.number().min(0),
+        outcome: z.enum(['settled', 'superseded', 'timeout']),
+        requests: z
+          .array(
+            z.object({
+              method: z.string().max(16),
+              path: z.string().max(2000),
+              startMs: z.number().min(0),
+              ms: z.number().min(0).nullable(),
+              status: z.number().int().min(0).nullable(),
+            }),
+          )
+          .max(200),
+      }),
+    )
+    .max(500),
+})
+
 /** With a label, the issue list holds only the open issues carrying it. */
 export const IssueListQuery = z.object({ label: z.string().min(1).optional() })
 

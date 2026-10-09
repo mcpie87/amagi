@@ -1,6 +1,6 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { BeadsTracker, errMsg, loadLiveRuns, RequestTimings } from '@amagi/core'
+import { BeadsTracker, errMsg, InteractionTimings, loadLiveRuns, RequestTimings } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startBeadsGcPoller } from './beads-gc-poller.ts'
 import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
@@ -28,7 +28,7 @@ export type ServeOptions = {
   repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
-  /** SQLite file holding API request timings; in memory when unset. */
+  /** SQLite file holding API request and dashboard interaction timings; in memory when unset. */
   timingsPath?: string
   /** Builds a runner from each registered workspace, including repos added live. */
   runnerFactory?: (workspace: Workspace) => RunServiceApi
@@ -391,11 +391,13 @@ export function serve({
       : { supervisorIntervalMs: repoPollerSupervisorIntervalMs }),
   })
   const timings = new RequestTimings(timingsPath)
+  const interactions = new InteractionTimings(timingsPath)
   const stopLoopWatch = timings.watchEventLoop()
   const app = createApp({
     workspaces,
     notify,
     timings,
+    interactions,
     runner,
     runnerRepo,
     runnerForRepo,
@@ -426,7 +428,10 @@ export function serve({
       runners.clear()
       if (runnerFactory === undefined) runner?.dispose?.()
       // In-flight requests still record their timing until the server stops.
-      return server.stop(closeActiveConnections).finally(() => timings.close())
+      return server.stop(closeActiveConnections).finally(() => {
+        timings.close()
+        interactions.close()
+      })
     },
   }
 }

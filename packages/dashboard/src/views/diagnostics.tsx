@@ -4,77 +4,24 @@ import type {
   SourceTiming,
   TimingSnapshot,
 } from '@amagi/core/request-timings'
-import { type ReactNode, useEffect, useRef, useState } from 'react'
-import { apiBase } from '../api.ts'
+import { useState } from 'react'
 import { fmtAgo } from '../format.ts'
 import { EmptyState, Time } from '../ui.tsx'
-
-const POLL_MS = 3000
-
-type SortState = { column: string; direction: 'asc' | 'desc' }
-type SortValue = number | string
-
-function sortedRows<T>(
-  rows: readonly T[],
-  sort: SortState | null,
-  value: (row: T, column: string) => SortValue,
-): T[] {
-  if (sort === null) return [...rows]
-  const direction = sort.direction === 'asc' ? 1 : -1
-  return [...rows].sort((a, b) => {
-    const left = value(a, sort.column)
-    const right = value(b, sort.column)
-    const comparison =
-      typeof left === 'number' && typeof right === 'number'
-        ? left - right
-        : String(left).localeCompare(String(right), undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          })
-    return comparison * direction
-  })
-}
-
-function toggleSort(sort: SortState | null, column: string): SortState {
-  return {
-    column,
-    direction: sort?.column === column && sort.direction === 'asc' ? 'desc' : 'asc',
-  }
-}
-
-function SortHeader({
-  column,
-  label,
-  sort,
-  onSort,
-  className = 'px-4 py-2 font-medium',
-}: {
-  column: string
-  label: string
-  sort: SortState | null
-  onSort: (column: string) => void
-  className?: string
-}) {
-  return (
-    <th
-      className={className}
-      aria-sort={
-        sort?.column === column ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'
-      }
-    >
-      <button
-        type="button"
-        onClick={() => onSort(column)}
-        className="inline-flex cursor-pointer items-center gap-1 font-medium hover:text-fg-strong"
-      >
-        {label}
-        <span aria-hidden="true" className="text-[10px]">
-          {sort?.column === column ? (sort.direction === 'asc' ? '▲' : '▼') : '↕'}
-        </span>
-      </button>
-    </th>
-  )
-}
+import { InteractionsPanel } from './diagnostics-interactions.tsx'
+import {
+  Field,
+  fmtMs,
+  inputClass,
+  Modal,
+  msTone,
+  SortHeader,
+  type SortState,
+  type SortValue,
+  Stat,
+  sortedRows,
+  toggleSort,
+  usePolled,
+} from './diagnostics-ui.tsx'
 
 function sampleSortValue(sample: RequestSample, column: string): SortValue {
   switch (column) {
@@ -135,17 +82,6 @@ function sourceSortValue(source: SourceTiming, column: string): SortValue {
   }
 }
 
-function fmtMs(ms: number): string {
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
-  return ms < 10 ? `${ms.toFixed(1)}ms` : `${Math.round(ms)}ms`
-}
-
-function msTone(ms: number, warn: number, bad: number): string {
-  if (ms >= bad) return 'text-red-ink'
-  if (ms >= warn) return 'text-amber-ink'
-  return ''
-}
-
 function statusTone(status: number): string {
   if (status >= 500) return 'text-red-ink'
   if (status >= 400) return 'text-amber-ink'
@@ -180,42 +116,8 @@ function filterQuery(filters: Filters): string {
   return params.toString()
 }
 
-const inputClass =
-  'rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent'
-
-function useTimings(paused: boolean, query: string): TimingSnapshot | null | 'error' {
-  const [snapshot, setSnapshot] = useState<TimingSnapshot | null | 'error'>(null)
-  useEffect(() => {
-    if (paused) return
-    let active = true
-    const refresh = () => {
-      fetch(`${apiBase}/api/diagnostics/requests${query === '' ? '' : `?${query}`}`)
-        .then((response) => (response.ok ? (response.json() as Promise<TimingSnapshot>) : null))
-        .then((value) => {
-          if (active) setSnapshot(value ?? 'error')
-        })
-        .catch(() => {
-          if (active) setSnapshot('error')
-        })
-    }
-    refresh()
-    const timer = setInterval(refresh, POLL_MS)
-    return () => {
-      active = false
-      clearInterval(timer)
-    }
-  }, [paused, query])
-  return snapshot
-}
-
-function Stat({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="rounded-lg border border-line bg-surface px-4 py-3">
-      <div className="text-xs uppercase tracking-wide text-fg-faint">{label}</div>
-      <div className={`mt-1 text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
-    </div>
-  )
-}
+const useTimings = (paused: boolean, query: string) =>
+  usePolled<TimingSnapshot>(paused, `/api/diagnostics/requests${query === '' ? '' : `?${query}`}`)
 
 function SampleTable({
   title,
@@ -280,66 +182,6 @@ function SampleTable({
         </table>
       </div>
     </section>
-  )
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <dt className="text-xs text-fg-faint">{label}</dt>
-      <dd className="mt-0.5 break-all text-fg">{children}</dd>
-    </div>
-  )
-}
-
-/**
- * Mount it only while open: it opens on mount, which puts it in the top layer
- * above any modal already open, so a request opened from the route modal
- * stacks on top and Esc closes just that one.
- */
-function Modal({
-  title,
-  wide = false,
-  onClose,
-  children,
-}: {
-  title: string
-  wide?: boolean
-  onClose: () => void
-  children: ReactNode
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null)
-  useEffect(() => {
-    dialogRef.current?.showModal()
-  }, [])
-  return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc already closes via onCancel; this only handles backdrop clicks.
-    <dialog
-      ref={dialogRef}
-      onCancel={(event) => {
-        event.preventDefault()
-        onClose()
-      }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose()
-      }}
-      className="watcher-dialog"
-      style={wide ? { width: 'min(960px, calc(100vw - 32px))' } : undefined}
-    >
-      <div className="watcher-dialog-content p-4">
-        <div className="break-all font-mono text-sm text-fg-strong">{title}</div>
-        {children}
-        <div className="mt-4 flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </dialog>
   )
 }
 
@@ -592,8 +434,7 @@ function RouteDetailDialog({
   )
 }
 
-export function DiagnosticsView() {
-  const [paused, setPaused] = useState(false)
+function RequestsPanel({ paused }: { paused: boolean }) {
   const [filters, setFilters] = useState<Filters>(NO_FILTERS)
   const [advanced, setAdvanced] = useState(false)
   const [selected, setSelected] = useState<RequestSample | null>(null)
@@ -621,25 +462,7 @@ export function DiagnosticsView() {
     setFilters((f) => ({ ...f, [key]: e.target.value }))
 
   return (
-    <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>Diagnostics</h1>
-          <p className="text-sm text-fg-muted">
-            API request timings, kept across server restarts until they age out. Stream routes
-            measure time to first byte. Source is the dashboard page that was open, or the client's
-            user agent for the TUI, CLI and other callers.
-          </p>
-        </div>
-        <button
-          type="button"
-          aria-pressed={paused}
-          onClick={() => setPaused((p) => !p)}
-          className="rounded border border-line-strong px-3 py-1.5 text-sm text-fg-muted hover:text-fg"
-        >
-          {paused ? 'Resume' : 'Pause'}
-        </button>
-      </header>
+    <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           type="search"
@@ -990,6 +813,79 @@ export function DiagnosticsView() {
           onClose={() => setSelected(null)}
         />
       )}
+    </>
+  )
+}
+
+const TABS = [
+  {
+    id: 'requests',
+    label: 'Requests',
+    blurb:
+      "API request timings, kept across server restarts until they age out. Stream routes measure time to first byte. Source is the dashboard page that was open, or the client's user agent for the TUI, CLI and other callers.",
+  },
+  {
+    id: 'interactions',
+    label: 'Interactions',
+    blurb:
+      'Every click, key press, picker change and keystroke in the dashboard, timed from the input to the first painted frame and to settled: painted with every request it started finished. Kept as long as request timings.',
+  },
+] as const
+
+export function DiagnosticsView() {
+  const [paused, setPaused] = useState(false)
+  const [tab, setTab] = useState<(typeof TABS)[number]['id']>('requests')
+  return (
+    <div className="page">
+      <header className="page-header">
+        <div>
+          <h1>Diagnostics</h1>
+          <p className="text-sm text-fg-muted">{TABS.find((t) => t.id === tab)?.blurb}</p>
+        </div>
+        <button
+          type="button"
+          aria-pressed={paused}
+          onClick={() => setPaused((p) => !p)}
+          className="rounded border border-line-strong px-3 py-1.5 text-sm text-fg-muted hover:text-fg"
+        >
+          {paused ? 'Resume' : 'Pause'}
+        </button>
+      </header>
+      <div
+        role="tablist"
+        aria-label="Diagnostics sections"
+        className="mb-4 flex gap-1 border-b border-line"
+      >
+        {TABS.map(({ id, label }) => (
+          <button
+            key={id}
+            id={`diagnostics-tab-${id}`}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`diagnostics-panel-${id}`}
+            onClick={() => setTab(id)}
+            className={`rounded-t px-3 py-2 text-sm ${
+              tab === id
+                ? 'bg-raised text-fg-strong'
+                : 'text-fg-muted hover:bg-raised hover:text-fg'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        id={`diagnostics-panel-${tab}`}
+        role="tabpanel"
+        aria-labelledby={`diagnostics-tab-${tab}`}
+      >
+        {tab === 'requests' ? (
+          <RequestsPanel paused={paused} />
+        ) : (
+          <InteractionsPanel paused={paused} />
+        )}
+      </div>
     </div>
   )
 }
