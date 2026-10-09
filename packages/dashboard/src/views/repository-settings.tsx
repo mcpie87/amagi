@@ -499,14 +499,18 @@ async function createCredential(
 
 function NewTokenForm({
   kind,
+  allowForgeSelection = false,
   onCreated,
   onCancel,
 }: {
   kind: ForgeKind
+  allowForgeSelection?: boolean
   onCreated: (credential: ForgeCredential) => void
   onCancel?: () => void
 }) {
-  const forge = FORGES.find((f) => f.kind === kind)
+  const [selectedKind, setSelectedKind] = useState(kind)
+  const activeKind = allowForgeSelection ? selectedKind : kind
+  const forge = FORGES.find((f) => f.kind === activeKind)
   const label = forge?.label ?? kind
   const urlPlaceholder = forge?.urlPlaceholder ?? null
   const [name, setName] = useState('')
@@ -519,7 +523,7 @@ function NewTokenForm({
     setBusy(true)
     setError(null)
     try {
-      onCreated(await createCredential(kind, name.trim(), token.trim(), url.trim() || null))
+      onCreated(await createCredential(activeKind, name.trim(), token.trim(), url.trim() || null))
       setName('')
       setToken('')
       setUrl('')
@@ -539,6 +543,24 @@ function NewTokenForm({
       }}
       className="flex flex-wrap items-center gap-2"
     >
+      {allowForgeSelection && (
+        <select
+          aria-label="Forge"
+          disabled={busy}
+          value={selectedKind}
+          onChange={(event) => {
+            setSelectedKind(event.currentTarget.value as ForgeKind)
+            setUrl('')
+          }}
+          className="rounded border border-line-strong bg-app px-3 py-1 text-sm text-fg"
+        >
+          {FORGES.map(({ kind: forgeKind, label: forgeLabel }) => (
+            <option key={forgeKind} value={forgeKind}>
+              {forgeLabel}
+            </option>
+          ))}
+        </select>
+      )}
       <input
         type="text"
         aria-label={`${label} token name`}
@@ -597,6 +619,7 @@ function CredentialRow({
   credential: ForgeCredential
   onChanged: () => void
 }) {
+  const forge = FORGES.find((item) => item.kind === credential.kind)
   const urlPlaceholder = FORGES.find((f) => f.kind === credential.kind)?.urlPlaceholder ?? null
   const [token, setToken] = useState('')
   const [url, setUrl] = useState(credential.url ?? '')
@@ -619,54 +642,75 @@ function CredentialRow({
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-2 py-2">
-      <span className="w-40 truncate text-sm text-fg-strong">{credential.name}</span>
-      <input
-        type="password"
-        autoComplete="off"
-        aria-label={`New token for ${credential.name}`}
-        value={token}
-        onChange={(event) => setToken(event.currentTarget.value)}
-        placeholder="Replace token"
-        className="min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg"
-      />
-      <button
-        type="button"
-        disabled={busy || token.trim() === ''}
-        onClick={() => void run('PATCH', { token: token.trim() })}
-        className={secondary}
-      >
-        Rotate
-      </button>
-      {urlPlaceholder !== null && (
-        <>
-          <input
-            type="url"
-            aria-label={`Server URL for ${credential.name}`}
-            value={url}
-            onChange={(event) => setUrl(event.currentTarget.value)}
-            placeholder={`${urlPlaceholder} (empty: from origin)`}
-            className={urlInput}
-          />
-          <button
-            type="button"
-            disabled={busy || url.trim() === (credential.url ?? '')}
-            onClick={() => void run('PATCH', { url: url.trim() || null })}
-            className={secondary}
-          >
-            Save URL
-          </button>
-        </>
+    <li className="py-2">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="rounded bg-raised px-2 py-1 text-xs text-fg-muted">
+          {forge?.label ?? credential.kind}
+        </span>
+        <span className="min-w-32 flex-1 truncate text-sm text-fg-strong">{credential.name}</span>
+        <span className="text-sm text-fg-faint">
+          {credential.kind === 'github' ? 'github.com' : (credential.url ?? 'From origin')}
+        </span>
+        <details>
+          <summary className={`${secondary} cursor-pointer list-none`}>
+            Edit <span className="sr-only">{credential.name}</span>
+          </summary>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label={`New token for ${credential.name}`}
+              disabled={busy}
+              value={token}
+              onChange={(event) => setToken(event.currentTarget.value)}
+              placeholder="Replace token"
+              className="min-w-48 flex-1 rounded border border-line-strong bg-app px-3 py-1 font-mono text-sm text-fg"
+            />
+            <button
+              type="button"
+              disabled={busy || token.trim() === ''}
+              onClick={() => void run('PATCH', { token: token.trim() })}
+              className={secondary}
+            >
+              Replace token
+            </button>
+            {urlPlaceholder !== null && (
+              <>
+                <input
+                  type="url"
+                  aria-label={`Server URL for ${credential.name}`}
+                  disabled={busy}
+                  value={url}
+                  onChange={(event) => setUrl(event.currentTarget.value)}
+                  placeholder={`${urlPlaceholder} (empty: from origin)`}
+                  className={urlInput}
+                />
+                <button
+                  type="button"
+                  disabled={busy || url.trim() === (credential.url ?? '')}
+                  onClick={() => void run('PATCH', { url: url.trim() || null })}
+                  className={secondary}
+                >
+                  Save URL
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run('DELETE')}
+              className={secondary}
+            >
+              Delete
+            </button>
+          </div>
+        </details>
+      </div>
+      {error !== null && (
+        <p role="alert" className="mt-2 text-sm text-red-ink">
+          {error}
+        </p>
       )}
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void run('DELETE')}
-        className={secondary}
-      >
-        Delete
-      </button>
-      {error !== null && <span className="text-sm text-red-ink">{error}</span>}
     </li>
   )
 }
@@ -678,52 +722,43 @@ export function ForgeCredentials({
   credentials: ForgeCredential[]
   onChanged: () => void
 }) {
-  const [adding, setAdding] = useState<ForgeKind | null>(null)
+  const [adding, setAdding] = useState(false)
 
   return (
     <div className={`${card} mt-4`}>
-      <h2 className="mb-1 text-sm text-fg-muted">Forge tokens</h2>
-      <p className="mb-3 text-sm text-fg-faint">
-        Shared by every repository. A repository uses the token it picked, or the only token for its
-        forge. Stored in amagi's state directory, never in a repository.
-      </p>
-      {FORGES.map(({ kind, label }) => (
-        <div key={kind} className="mt-3">
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="text-sm text-fg-strong">{label}</h3>
-            <button
-              type="button"
-              aria-label={`Add ${label} token`}
-              aria-expanded={adding === kind}
-              aria-controls={`new-forge-token-${kind}`}
-              disabled={adding !== null}
-              onClick={() => setAdding(kind)}
-              className={secondary}
-            >
-              Add
-            </button>
-          </div>
-          <ul className="divide-y divide-line">
-            {credentials
-              .filter((credential) => credential.kind === kind)
-              .map((credential) => (
-                <CredentialRow key={credential.id} credential={credential} onChanged={onChanged} />
-              ))}
-          </ul>
-          {adding === kind && (
-            <div id={`new-forge-token-${kind}`} className="mt-3">
-              <NewTokenForm
-                kind={kind}
-                onCancel={() => setAdding(null)}
-                onCreated={() => {
-                  setAdding(null)
-                  onChanged()
-                }}
-              />
-            </div>
-          )}
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm text-fg-muted">Forge tokens</h2>
+        <button
+          type="button"
+          aria-expanded={adding}
+          aria-controls="new-forge-token"
+          disabled={adding}
+          onClick={() => setAdding(true)}
+          className={secondary}
+        >
+          Add token
+        </button>
+      </div>
+      <p className="mb-3 mt-1 text-sm text-fg-faint">Shared across repositories.</p>
+      <ul className="divide-y divide-line">
+        {credentials.map((credential) => (
+          <CredentialRow key={credential.id} credential={credential} onChanged={onChanged} />
+        ))}
+      </ul>
+      {credentials.length === 0 && <p className="py-3 text-sm text-fg-faint">No saved tokens.</p>}
+      {adding && (
+        <div id="new-forge-token" className="mt-3 rounded border border-line p-3">
+          <NewTokenForm
+            kind="github"
+            allowForgeSelection
+            onCancel={() => setAdding(false)}
+            onCreated={() => {
+              setAdding(false)
+              onChanged()
+            }}
+          />
         </div>
-      ))}
+      )}
     </div>
   )
 }
