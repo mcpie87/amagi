@@ -74,7 +74,17 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
     calls.push(cmd)
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
     const hit = routes(cmd)
-    if (hit) return hit
+    if (hit) {
+      const limitIndex = cmd.indexOf('--limit')
+      if (limitIndex >= 0 && Array.isArray(JSON.parse(hit.stdout))) {
+        return ok(
+          JSON.stringify(
+            (JSON.parse(hit.stdout) as unknown[]).slice(0, Number(cmd[limitIndex + 1])),
+          ),
+        )
+      }
+      return hit
+    }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls }
@@ -137,6 +147,16 @@ describe('GithubTracker', () => {
     expect(task?.id).toBe('3')
     const edit = calls.find((c) => c.includes('edit'))
     expect(edit).toEqual(['gh', 'issue', 'edit', '3', '--add-label', CLAIM_LABEL])
+  })
+
+  test('claim skips a newer claimed issue and claims the next eligible issue', async () => {
+    const issues = JSON.parse(GH_READY) as Array<Record<string, unknown>>
+    const { exec } = fake((c) =>
+      c.includes('view') ? ok(GH_VIEW) : ok(JSON.stringify([issues[1], issues[0]])),
+    )
+    const task = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).claim()
+
+    expect(task?.id).toBe('3')
   })
 
   test('heartbeat is a no-op on a host without leases', async () => {

@@ -92,8 +92,9 @@ export abstract class ForgeTracker implements Tracker {
   protected abstract createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue>
 
   async ready(limit = 20): Promise<TrackerTask[]> {
-    return (await this.listOpen(limit))
+    return (await this.listOpen(Math.max(limit, 100)))
       .filter((i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'))
+      .slice(0, limit)
       .map(toTask)
   }
 
