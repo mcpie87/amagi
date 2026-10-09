@@ -237,11 +237,7 @@ function EpicCloseButton({
     setBusy(true)
     setError(null)
     try {
-      const path =
-        action === 'manual'
-          ? `/api/repos/${repo}/epics/close-eligible`
-          : `/api/repos/${repo}/issues/${epic.id}/close`
-      const res = await fetch(`${apiBase}${path}`, {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/issues/${epic.id}/close`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ reason: finalReason }),
