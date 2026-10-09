@@ -166,6 +166,29 @@ test('recovers a stalled implementing task, keeping its worktree, and reports it
   ).toBe(true)
 })
 
+for (const state of ['reviewing', 'fixing'] as const) {
+  test(`recovers a stalled ${state} task`, async () => {
+    const store = new Store(openDatabase(':memory:'))
+    const tracker = new FakeTracker()
+    implementing(store)
+    store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'checks' })
+    store.append('bd-1', { type: 'task.state', from: 'checks', to: 'reviewing' })
+    if (state === 'fixing') {
+      store.append('bd-1', { type: 'task.state', from: 'reviewing', to: 'fixing' })
+    }
+    store.db.query('update tasks set updated_at = ? where id = ?').run(Date.now() - 120_000, 'bd-1')
+
+    watchers.push(
+      startStallWatcher({ repo: 'repo1', store, tracker, timeoutMs: 60_000, intervalMs: 10 }),
+    )
+    await Bun.sleep(40)
+
+    expect(tracker.released).toEqual(['bd-1'])
+    expect(store.task('bd-1')?.state).toBe('queued')
+    expect(store.task('bd-1')?.statusReason).toContain('recovered by stall watcher')
+  })
+}
+
 test('a task with a fresh worker heartbeat is left alone', async () => {
   const store = new Store(openDatabase(':memory:'))
   const tracker = new FakeTracker()
