@@ -6,7 +6,8 @@ import { Link } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge } from '../badges.tsx'
-import { fmtRetryIn } from '../format.ts'
+import { useDateFormatPref } from '../date-format.ts'
+import { fmtAgo, fmtDateTime, fmtRetryIn } from '../format.ts'
 import { useDashboard, useReadyQueue, useRunner } from '../store.tsx'
 import { EmptyState, Icon } from '../ui.tsx'
 import { CloseButtons } from './task-actions.tsx'
@@ -240,6 +241,7 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
  */
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
+  const dateFormat = useDateFormatPref()
   const [prs, setPrs] = useState<PrInfo[] | null>(null)
 
   useEffect(() => {
@@ -298,6 +300,15 @@ function MergeablePrsPanel() {
               <span className="shrink-0 text-xs text-fg-faint">
                 {p.headRefName} &rarr; {p.baseRefName}
               </span>
+              {p.createdAt !== '' && (
+                <time
+                  dateTime={p.createdAt}
+                  title={fmtDateTime(new Date(p.createdAt), dateFormat)}
+                  className="shrink-0 text-xs text-fg-faint"
+                >
+                  created {fmtAgo(Date.parse(p.createdAt))}
+                </time>
+              )}
             </li>
           ))}
         </ul>
