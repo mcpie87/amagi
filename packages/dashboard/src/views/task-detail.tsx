@@ -46,6 +46,7 @@ import {
   StopButton,
 } from './task-actions.tsx'
 import { ChatPanel, TaskReference } from './task-chat.tsx'
+import { watchMissingTaskProjection } from './task-projection-recovery.ts'
 
 function GithubIcon({ className }: { className?: string }) {
   return (
@@ -545,7 +546,7 @@ type DetailTab = 'log' | 'status' | 'checks'
 
 export function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
-  const { state: liveState, selected } = useDashboard()
+  const { state: liveState, selected, resyncStream } = useDashboard()
   const { status } = useRunner()
   // null follows the current attempt, so a reset moves the view along with it.
   const [viewAttempt, setViewAttempt] = useState<number | null>(null)
@@ -558,6 +559,11 @@ export function TaskDetailView() {
     [past, liveState, id, attempt],
   )
   const task: ProjectedTask | undefined = state.tasks[id]
+  const taskMissing = task === undefined
+
+  useEffect(() => {
+    return watchMissingTaskProjection(taskMissing, selected, resyncStream)
+  }, [taskMissing, selected, resyncStream])
   const questions = past ? [] : openQuestionsFor(state, id)
   const currentAgent = currentAgentFor(state, id)
   const runnerTask = past ? undefined : status?.tasks?.[id]
