@@ -897,6 +897,39 @@ describe('Runner.runOnce', () => {
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
   })
 
+  test('retries a transient failure during a review fix and completes the round', async () => {
+    const fixer = new FakeHarness([
+      writesAFile,
+      { outcome: { ok: false, exitCode: 1, stderr: 'rate limit exceeded' } },
+      {
+        effect: (_cwd, prompt) => {
+          const path = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (path === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(path, JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]))
+        },
+      },
+    ])
+    const reviewer = new ReviewHarness([JSON.stringify([finding]), '[]'])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      reviewConfig({}, { retryBaseMs: 0, retryMaxMs: 0 }),
+      undefined,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(fixer.calls).toHaveLength(3)
+    expect(fixer.calls[2]?.resumeFrom).toBe('sess-1')
+    expect(types(TASK.id)).toContain('review.fixed')
+    expect(states(TASK.id)).toContain('retrying')
+    expect(states(TASK.id)).toContain('fixing')
+  })
+
   test('an enabled fleet reviewer turns review on without review.enabled', async () => {
     const reviewer = new ReviewHarness(['[]'])
     await makeRunner(
