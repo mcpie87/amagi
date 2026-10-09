@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { SquarePen } from 'lucide-react'
 import { apiBase } from '../api.ts'
 import logoGlyph from '../assets/logo-glyph.png'
 import {
@@ -136,6 +137,7 @@ function ChatOptionsBar({
   const [harnessOpen, setHarnessOpen] = useState(false)
   const pickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
+  const customModelInputRef = useRef<HTMLInputElement>(null)
   const harnessPickerRef = useRef<HTMLDivElement>(null)
   const harnessButtonRef = useRef<HTMLButtonElement>(null)
   const harness = options.harnesses.find((item) => item.kind === thread.harness)
@@ -143,6 +145,9 @@ function ChatOptionsBar({
     (model): model is string => model !== undefined,
   )
   const customModel = thread.customModel ?? (thread.model !== '' && !models.includes(thread.model))
+  useLayoutEffect(() => {
+    if (open && customModel) customModelInputRef.current?.focus()
+  }, [open, customModel])
   const modelLabel = customModel
     ? thread.model || 'Custom model'
     : thread.model || harness?.model || 'Default model'
@@ -311,6 +316,7 @@ function ChatOptionsBar({
             </button>
             {customModel && (
               <input
+                ref={customModelInputRef}
                 aria-label="Custom model"
                 title="Custom model"
                 value={thread.model}
@@ -324,7 +330,7 @@ function ChatOptionsBar({
                   setOpen(false)
                   modelButtonRef.current?.focus()
                 }}
-                className="mt-1 h-9 w-full rounded-lg border border-line-strong bg-sunken px-2.5 text-sm font-mono text-fg outline-none placeholder:text-fg-faint focus-visible:border-sky-ink"
+                className="mt-1 h-9 w-full rounded-lg border border-line-strong bg-sunken px-2.5 text-sm font-mono text-fg outline-none placeholder:text-fg-faint focus-visible:border-fg-dim focus-visible:outline-none!"
               />
             )}
             <div className="my-1.5 border-t border-line" />
@@ -742,7 +748,7 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
 
   return (
     <SidebarProvider className="-mx-4 -my-6 h-[calc(100dvh-var(--app-header-height))] min-h-0 overflow-hidden bg-app sm:-mx-6">
-      <Sidebar>
+      <Sidebar collapsible="icon">
         <SidebarHeader>
           <SidebarMenu>
             <SidebarMenuItem>
@@ -750,10 +756,10 @@ function ChatWorkspace({ repo }: { repo: string | null }) {
                 onClick={createThread}
                 disabled={options === null || options.harnesses.length === 0}
               >
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-on-solid">
-                  <Icon name="plus" size={12} />
+                <span className="flex w-full items-center justify-between gap-2">
+                  <span className="group-data-[collapsible=icon]:hidden">New chat</span>
+                  <SquarePen aria-hidden="true" className="size-4 shrink-0" />
                 </span>
-                New chat
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
