@@ -1084,6 +1084,8 @@ export class Runner {
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 
+    if (!resume) await this.preflight(task.id, worktree.path)
+
     const lease = new Lease(this.deps.tracker, this.deps.store, task.id, this.deps.leaseHeartbeatMs)
     lease.start()
     try {
@@ -2092,6 +2094,29 @@ export class Runner {
     const { format, lint, test, commands } = this.deps.config.checks
     const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
     return [...gate, ...commands]
+  }
+
+  private async preflight(taskId: string, cwd: string): Promise<void> {
+    const { format, lint } = this.deps.config.checks
+    const commands = [format, lint].filter(
+      (command): command is string => command !== null && command !== '',
+    )
+    const results: CheckResult[] = []
+    for (const command of commands) {
+      const result = await this.exec(['sh', '-c', command], { cwd })
+      const check = {
+        command,
+        exitCode: result.exitCode,
+        output: `${result.stdout}${result.stderr}`.slice(-8000),
+      }
+      results.push(check)
+      if (result.exitCode !== 0) {
+        this.deps.store.append(taskId, { type: 'checks.finished', ok: false, results })
+        throw new Error(
+          `preflight failed before implementation: ${command}\n${check.output}`.trim(),
+        )
+      }
+    }
   }
 
   private async runChecks(cwd: string): Promise<CheckResult[]> {
