@@ -454,14 +454,17 @@ describe('RunService', () => {
       ['claude-2', 'subscription-2'],
       ['claude-3', 'subscription-3'],
     ])
-    expect((await service.start()).ok).toBe(true)
-    expect((await service.start()).ok).toBe(true)
-    expect((await service.start()).ok).toBe(true)
-    await waitFor(() => harness.starts === 3)
-    expect((await service.status()).capacity).toBe(0)
-    await service.stop(TASK.id)
-    await service.stop(TASK2.id)
-    await service.stop(TASK3.id)
+    try {
+      expect((await service.start()).ok).toBe(true)
+      expect((await service.start()).ok).toBe(true)
+      expect((await service.start()).ok).toBe(true)
+      await waitFor(() => harness.starts === 3, 4_000)
+      expect((await service.status()).capacity).toBe(0)
+    } finally {
+      await service.stop(TASK.id)
+      await service.stop(TASK2.id)
+      await service.stop(TASK3.id)
+    }
   })
 
   test('worker replicas use configured named seat capacity', async () => {

@@ -2170,6 +2170,7 @@ describe('runner endpoints', () => {
     expect(specific.status).toBe(201)
     expect(started).toEqual(['bd-9'])
     expect((await post('/api/repos/repo1/runs', '{"taskId":123}')).status).toBe(400)
+    expect((await post('/api/repos/repo1/runs', '{"harness":"codex"}')).status).toBe(400)
   })
 
   test('POST /api/runs forwards worker and model/effort overrides', async () => {

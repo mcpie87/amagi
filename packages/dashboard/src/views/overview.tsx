@@ -39,7 +39,7 @@ function RunButton() {
     setMessage(null)
     const effectiveModel = model === 'custom' ? customModel.trim() : model
     const res = await start(undefined, {
-      ...(harness === '' ? {} : { harness }),
+      ...(selected === undefined ? {} : { workerId: selected.workerId }),
       ...(effectiveModel === '' ? {} : { model: effectiveModel }),
       ...(effort === '' ? {} : { effort }),
     })
@@ -63,7 +63,7 @@ function RunButton() {
           onChange={(e) => switchHarness(e.target.value)}
           className={field}
         >
-          <option value="">default ({options?.default?.kind ?? 'config'})</option>
+          <option value="">default ({options?.default ?? 'config'})</option>
           {harnesses.map((h) => (
             <option key={h.name} value={h.name}>
               {h.name}
