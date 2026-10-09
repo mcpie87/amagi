@@ -65,11 +65,23 @@ export function parseTriageDecision(reply: string): TriageDecision | null {
 
 /** Maps a free-form operator answer onto an action; unknown answers fall back. */
 export function actionFromAnswer(answer: string, fallback: TriageActionType): TriageActionType {
-  const lower = answer.toLowerCase()
-  for (const action of TriageAction.options) {
-    if (lower.includes(action)) return action
+  const actions = TriageAction.options.filter((action) => action !== 'ask')
+  const matches = actions.flatMap((action) => {
+    const pattern = new RegExp(`\\b${action}\\b`, 'gi')
+    return Array.from(answer.matchAll(pattern), (match) => ({
+      action,
+      index: match.index,
+    }))
+  })
+  if (matches.length !== 1) return fallback
+
+  const match = matches[0]
+  if (!match) return fallback
+  const before = answer.slice(Math.max(0, match.index - 80), match.index)
+  if (/\b(?:not|never|avoid|without|don't|dont)\b(?:\W+\w+){0,4}\W*$/i.test(before)) {
+    return fallback
   }
-  return fallback
+  return match.action
 }
 
 export type TriageDeps = {
