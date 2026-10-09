@@ -133,13 +133,33 @@ const FILE_REF = /(?<![\w.-])[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}(?![
 /** Wraps file names and paths in backticks, leaving existing code spans alone. */
 export function backtickFileRefs(text: string): string {
   return text
-    .split(/(```[\s\S]*?```|`[^`\n]+`|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
+    .split(/(```[\s\S]*?```|`[^`\n]+`|https?:\/\/[^\s)>]+|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
     .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
     .join('')
 }
 
+function quoteUsageLimitDiagnostic(text: string): string {
+  return text.replace(
+    /(^|\n[ \t]*\n)([^\n]*(?:\n(?![ \t]*\n)[^\n]*)*)/g,
+    (block, separator: string, paragraph: string) => {
+      if (!/^You(?:’|')ve hit your usage limit\./i.test(paragraph)) return block
+      return `${separator}${paragraph
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n')}`
+    },
+  )
+}
+
 function renderDescriptionMarkdown(text: string): string {
-  return backtickFileRefs(text.replace(/</g, '&lt;').replace(/>/g, '&gt;')).replace(
+  const markdown = quoteUsageLimitDiagnostic(text).replace(
+    /(^|\n)( {0,3}>[ \t]?)/g,
+    (_match, lineStart: string, prefix: string) =>
+      `${lineStart}${prefix.replaceAll('>', '\u0000')}`,
+  )
+  return backtickFileRefs(
+    markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;').replaceAll('\u0000', '>'),
+  ).replace(
     /(^|\n)( {0,3})(#{1,6})(?=[ \t])/g,
     (_match, lineStart, indent: string, hashes: string) => {
       const level = Math.min(6, hashes.length + 2)

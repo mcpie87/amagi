@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
@@ -107,18 +107,21 @@ class FakeTracker implements Tracker {
 class FakeHarness implements Harness {
   readonly kind = 'fake'
 
-  constructor(private readonly effect?: (cwd: string) => void) {}
+  constructor(
+    private readonly effect?: (cwd: string) => void,
+    private readonly summary = 'done',
+  ) {}
 
   start(opts: AgentStartOptions): AgentProcess {
     this.effect?.(opts.cwd)
     const queue = new AsyncQueue<AgentEvent>()
-    queue.push({ kind: 'text', text: 'done' })
+    queue.push({ kind: 'text', text: this.summary })
     queue.close()
     const outcome: AgentOutcome = {
       exitCode: 0,
       ok: true,
       sessionId: 'sess-1',
-      summary: 'done',
+      summary: this.summary,
       usage: null,
       stderr: '',
     }
@@ -319,6 +322,11 @@ beforeEach(async () => {
   await execOk(exec, ['git', 'config', 'user.name', 'Test'], { cwd: repo })
   await execOk(exec, ['git', 'config', 'user.email', 'test@example.com'], { cwd: repo })
   writeFileSync(join(repo, 'README.md'), '# demo\n')
+  mkdirSync(join(repo, '.amagi'))
+  writeFileSync(
+    join(repo, '.amagi', 'config.toml'),
+    '[checks]\nformat = "true"\nlint = "true"\ntest = "true"\n',
+  )
   await execOk(exec, ['git', 'add', '.'], { cwd: repo })
   await execOk(exec, ['git', 'commit', '-q', '-m', 'init'], { cwd: repo })
 })
@@ -932,7 +940,9 @@ describe('RunService', () => {
       forge: new FakePr(),
       makeHarness: (cfg) => {
         captured.push(cfg)
-        return new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+        return cfg.kind === 'codex'
+          ? new FakeHarness(undefined, '{"findings":[]}')
+          : new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
       },
     })
     const result = await service.start()
