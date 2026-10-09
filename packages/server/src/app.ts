@@ -305,8 +305,9 @@ export function createApp({
       const since = Date.now() - windowMs
       const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status !== 'ready') continue
+        const ws = lookup.workspace
         for (const event of ws.store.eventsSince(since)) {
           if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue
           const seat = event.event.seat ?? 'Unassigned / seat not recorded'
@@ -387,12 +388,11 @@ export function createApp({
           : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
       for (const entry of workspaces.list()) {
-        let ws: Workspace | null
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status !== 'ready') continue
+        const ws = lookup.workspace
         let config: Config
-        // A repo with an invalid config (e.g. undeclared checks) must not fail a global save.
         try {
-          ws = workspaces.get(entry.key)
-          if (ws === null) continue
           config = loadConfig(ws.root).config
         } catch (err) {
           console.warn(`seat save: skipping ${entry.key}: ${errMsg(err)}`)
@@ -424,13 +424,9 @@ export function createApp({
         status: string
         since: number | null
       }
-      // A repo with an invalid config (e.g. undeclared checks) must not take down the whole view.
       const workspace = (key: string): Workspace | null => {
-        try {
-          return workspaces.get(key)
-        } catch {
-          return null
-        }
+        const lookup = workspaces.lookup(key)
+        return lookup.status === 'ready' ? lookup.workspace : null
       }
       const configured = new Set<string>()
       const global = loadGlobalConfig()

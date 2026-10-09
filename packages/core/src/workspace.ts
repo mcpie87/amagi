@@ -41,6 +41,11 @@ export type Workspace = {
   prForge: ((prUrl: string | null) => PrForge) | null
 }
 
+export type WorkspaceLookup =
+  | { status: 'ready'; workspace: Workspace }
+  | { status: 'missing' }
+  | { status: 'unavailable'; error: unknown }
+
 export type WorkspacesOptions = {
   registryPath?: string
   /** Overridable so tests use in-memory databases. */
@@ -77,6 +82,16 @@ export class Workspaces {
     const workspace = this.build(entry)
     this.cache.set(key, workspace)
     return workspace
+  }
+
+  /** Returns workspace construction failures as unavailable results. */
+  lookup(key: string): WorkspaceLookup {
+    try {
+      const workspace = this.get(key)
+      return workspace === null ? { status: 'missing' } : { status: 'ready', workspace }
+    } catch (error) {
+      return { status: 'unavailable', error }
+    }
   }
 
   /** Refresh watcher switches from disk so the server supervisor can apply edits live. */

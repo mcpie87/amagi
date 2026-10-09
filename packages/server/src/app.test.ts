@@ -3216,6 +3216,8 @@ describe('GET /api/seats', () => {
     const dir = dirname(repos[0]?.path ?? '')
     mkdirSync(join(dir, 'broken', '.amagi'), { recursive: true })
     writeFileSync(join(dir, 'broken', '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    const gitInit = Bun.spawnSync(['git', 'init', '-q'], { cwd: join(dir, 'broken') })
+    if (gitInit.exitCode !== 0) throw new Error(gitInit.stderr.toString())
     saveRegistry(
       [
         ...repos,
@@ -3230,12 +3232,27 @@ describe('GET /api/seats', () => {
       ],
       join(dir, 'registry.json'),
     )
+    const lookup = ws.workspaces.lookup('broken')
+    expect(lookup.status).toBe('unavailable')
+    const readiness = (await (await app.request('/api/repos/broken/ready')).json()) as {
+      name: string
+      ok: boolean
+      detail?: string
+    }[]
+    expect(readiness).toContainEqual(
+      expect.objectContaining({
+        name: 'config',
+        ok: false,
+        detail: expect.stringContaining('must declare non-empty'),
+      }),
+    )
     const res = await app.request('/api/seats')
     expect(res.status).toBe(200)
     const occupancy = (await res.json()) as { seats: { seat: string; state: string }[] }
     expect(occupancy.seats).toContainEqual(
       expect.objectContaining({ seat: 'claude', state: 'held' }),
     )
+    expect((await app.request('/api/usage-rates')).status).toBe(200)
   })
 
   test('a run on the original seat stays visible after adding replicas', async () => {
