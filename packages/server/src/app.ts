@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   ChatService,
+  type Config,
   claimGate,
   errMsg,
   expandTilde,
@@ -345,9 +346,17 @@ export function createApp({
           : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
-        const { config } = loadConfig(ws.root)
+        let ws: Workspace | null
+        let config: Config
+        // A repo with an invalid config (e.g. undeclared checks) must not fail a global save.
+        try {
+          ws = workspaces.get(entry.key)
+          if (ws === null) continue
+          config = loadConfig(ws.root).config
+        } catch (err) {
+          console.warn(`seat save: skipping ${entry.key}: ${errMsg(err)}`)
+          continue
+        }
         ws.config.seats = config.seats
         ws.config.worker = config.worker
         ws.config.watchers = config.watchers
@@ -374,6 +383,14 @@ export function createApp({
         status: string
         since: number | null
       }
+      // A repo with an invalid config (e.g. undeclared checks) must not take down the whole view.
+      const workspace = (key: string): Workspace | null => {
+        try {
+          return workspaces.get(key)
+        } catch {
+          return null
+        }
+      }
       const configured = new Set<string>()
       const global = loadGlobalConfig()
       for (const { name, count } of global.seats) {
@@ -385,7 +402,7 @@ export function createApp({
         configured.add(workerSeat(worker))
       }
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
+        const ws = workspace(entry.key)
         if (ws === null) continue
         const implementSeat = ws.config.harness.implement.seat ?? ws.config.harness.implement.kind
         if (!configuredNames.has(implementSeat)) configured.add(implementSeat)
@@ -416,7 +433,7 @@ export function createApp({
         Promise.all(runners.map(({ service }) => service.status())),
         Promise.all(
           workspaces.list().map(async (entry) => {
-            const ws = workspaces.get(entry.key)
+            const ws = workspace(entry.key)
             if (ws === null) return null
             const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
               (worker) => worker.enabled,
@@ -432,7 +449,7 @@ export function createApp({
         if (status === undefined) continue
         for (const taskId of status.running) {
           const task = status.tasks[taskId]
-          const ws = workspaces.get(repo)
+          const ws = workspace(repo)
           const projected = ws?.store.task(taskId)
           const taskStatus = projected?.state ?? 'running'
           if (task?.waitingOnSeat) {
@@ -456,7 +473,7 @@ export function createApp({
       }
       for (const run of liveRuns?.() ?? []) {
         if (!pidAlive(run.pid)) continue
-        const ws = workspaces.get(run.repoKey)
+        const ws = workspace(run.repoKey)
         const projected = ws?.store.task(run.taskId)
         const events = ws?.store.events({ taskId: run.taskId, limit: 100_000 }) ?? []
         if (run.waitingOnSeat) {

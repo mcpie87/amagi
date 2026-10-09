@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type {
   AgentEvent,
   AgentOutcome,
@@ -42,6 +42,7 @@ import {
   prForgeRouter,
   RunService,
   repoConfigPath,
+  saveRegistry,
   writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
@@ -3034,6 +3035,17 @@ describe('fleet endpoints', () => {
     expect(withUnused.seats.map(({ seat }) => seat)).toContain('unused-seat')
   })
 
+  test('saving seats skips a repo whose config cannot load', async () => {
+    const entry = ws.workspaces.list().find((repo) => repo.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing')
+    writeFileSync(join(entry.path, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    ws.workspaces.close()
+    const saved = await send('PUT', '/api/seat-names', { seats: [{ name: 'codex', count: 2 }] })
+    expect(saved.status).toBe(200)
+    expect(loadGlobalConfig().seats).toEqual([{ name: 'codex', count: 2 }])
+    expect(ws.workspaces.get('repo2')?.config.seats).toEqual([{ name: 'codex', count: 2 }])
+  })
+
   test('increasing seat capacity wakes cached runners onto the new seats', async () => {
     await send('PUT', '/api/seat-names', { seats: [{ name: 'codex', count: 1 }] })
     await create({ name: 'Codex', kind: 'codex', seat: 'codex', count: 2, enabled: true })
@@ -3197,6 +3209,33 @@ describe('GET /api/seats', () => {
         { seat: 'free-seat', state: 'free', holder: null, waiters: [], eligible: [] },
       ],
     })
+  })
+
+  test('skips a repo whose config cannot load', async () => {
+    const repos = ws.workspaces.list()
+    const dir = dirname(repos[0]?.path ?? '')
+    mkdirSync(join(dir, 'broken', '.amagi'), { recursive: true })
+    writeFileSync(join(dir, 'broken', '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
+    saveRegistry(
+      [
+        ...repos,
+        {
+          key: 'broken',
+          name: 'broken',
+          path: join(dir, 'broken'),
+          workers: true,
+          watchers: true,
+          gitIdentity: null,
+        },
+      ],
+      join(dir, 'registry.json'),
+    )
+    const res = await app.request('/api/seats')
+    expect(res.status).toBe(200)
+    const occupancy = (await res.json()) as { seats: { seat: string; state: string }[] }
+    expect(occupancy.seats).toContainEqual(
+      expect.objectContaining({ seat: 'claude', state: 'held' }),
+    )
   })
 
   test('a run on the original seat stays visible after adding replicas', async () => {
