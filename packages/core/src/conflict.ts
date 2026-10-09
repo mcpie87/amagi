@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { configuredCheckCommands } from './check-commands.ts'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrDriver } from './drivers/pr.ts'
@@ -245,7 +246,7 @@ export async function resolveConflict(
         worktree: wt.path,
         branch: wt.branch,
         baseBranch: opts.config.repo.baseBranch,
-        checks: opts.config.checks.commands,
+        checks: configuredCheckCommands(opts.config.checks),
         conflictFiles: unmerged,
         outPath: verdictPath,
       }
@@ -313,6 +314,13 @@ export async function resolveConflict(
       rmSync(verdictPath, { force: true })
     }
 
+    for (const command of configuredCheckCommands(opts.config.checks, {
+      includeTest: false,
+      includeCommands: false,
+    })) {
+      await execOk(run, ['sh', '-c', command], { cwd: wt.path })
+    }
+    await execOk(run, ['git', 'add', '-A'], { cwd: wt.path })
     const conflictSummary = `Merge: ${opts.config.repo.baseBranch} -> ${opts.pr.headRefName}. Conflict #${iteration}`
     await finishMerge(
       run,
