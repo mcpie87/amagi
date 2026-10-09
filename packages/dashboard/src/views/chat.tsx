@@ -12,6 +12,9 @@ import {
   useState,
 } from 'react'
 import { apiBase } from '../api.ts'
+import claudeHarnessIcon from '../assets/harness-icons/claude.svg'
+import codexHarnessIcon from '../assets/harness-icons/codex.svg'
+import opencodeHarnessIcon from '../assets/harness-icons/opencode.svg'
 import logoGlyph from '../assets/logo-glyph.png'
 import {
   Sidebar,
@@ -127,6 +130,37 @@ function harnessLabel(kind: string): string {
   if (kind === 'codex') return 'Codex'
   if (kind === 'opencode') return 'OpenCode'
   return kind
+}
+
+function HarnessMark({ kind }: { kind: string }) {
+  const icon =
+    kind === 'claude'
+      ? claudeHarnessIcon
+      : kind === 'codex'
+        ? codexHarnessIcon
+        : kind === 'opencode'
+          ? opencodeHarnessIcon
+          : null
+  if (icon === null) return null
+  if (kind === 'claude') {
+    return <img src={icon} alt="" aria-hidden="true" className="size-4 shrink-0" />
+  }
+  return (
+    <span
+      aria-hidden="true"
+      className="size-4 shrink-0 bg-current"
+      style={{
+        maskImage: `url("${icon}")`,
+        maskRepeat: 'no-repeat',
+        maskPosition: 'center',
+        maskSize: 'contain',
+        WebkitMaskImage: `url("${icon}")`,
+        WebkitMaskRepeat: 'no-repeat',
+        WebkitMaskPosition: 'center',
+        WebkitMaskSize: 'contain',
+      }}
+    />
+  )
 }
 
 function parseSseBlock(block: string): { event: string; data: string } | null {
@@ -271,6 +305,7 @@ function ChatOptionsBar({
           }}
           className="flex h-8 items-center gap-2 rounded-lg px-2 text-xs font-medium text-fg-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink disabled:opacity-50"
         >
+          <HarnessMark kind={thread.harness} />
           {harnessLabel(thread.harness)}
           <span aria-hidden="true" className="text-fg-faint">
             ⌄
@@ -289,7 +324,10 @@ function ChatOptionsBar({
                 onClick={() => selectHarness(item.kind)}
                 className={pickerItemClass}
               >
-                <span>{harnessLabel(item.kind)}</span>
+                <span className="flex items-center gap-2">
+                  <HarnessMark kind={item.kind} />
+                  {harnessLabel(item.kind)}
+                </span>
                 {thread.harness === item.kind && <span aria-hidden="true">✓</span>}
               </button>
             ))}
