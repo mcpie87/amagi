@@ -113,6 +113,9 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
   )
 }
 
+/** The forge call takes seconds, so a revisit shows the last list while it refreshes. */
+const lastMergeablePrs = new Map<string, PrInfo[]>()
+
 /**
  * Open PRs the forge reports as currently mergeable, the dashboard twin of the
  * check-prs CLI command. Polled, not streamed: the forge computes mergeability
@@ -122,10 +125,13 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
   const dateFormat = useDateFormatPref()
-  const [prs, setPrs] = useState<PrInfo[] | null>(null)
+  const [prs, setPrs] = useState<PrInfo[] | null>(() =>
+    selected === null ? null : (lastMergeablePrs.get(selected) ?? null),
+  )
 
   useEffect(() => {
     if (selected === null) return
+    setPrs(lastMergeablePrs.get(selected) ?? null)
     let alive = true
     const load = () => {
       fetch(`${apiBase}/api/repos/${selected}/mergeable-prs`)
@@ -136,6 +142,7 @@ function MergeablePrsPanel() {
           return (await res.json()).prs as PrInfo[]
         })
         .then((list) => {
+          lastMergeablePrs.set(selected, list)
           if (alive) setPrs(list)
         })
         .catch(() => {

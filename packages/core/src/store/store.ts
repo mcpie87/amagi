@@ -16,6 +16,7 @@ import {
   type ProjectedWatcherRun,
   type Projection,
   project,
+  projectAll,
 } from '../project.ts'
 
 export { InvalidTransitionError } from '../project.ts'
@@ -363,7 +364,8 @@ export class Store {
    * `withoutAgentLog` drops the agent.stream lines a dashboard keeps only in
    * its log buffers, leaving usage and task chat, which it folds into state.
    * Those lines are most of a long-lived store's bytes; `agentLog` serves them
-   * per task instead.
+   * per task instead. `withoutWatcherRuns` likewise drops watcher history,
+   * which `watcherRuns` pages per watcher.
    */
   events(
     opts: {
@@ -371,14 +373,19 @@ export class Store {
       sinceSeq?: number
       limit?: number
       withoutAgentLog?: boolean
+      withoutWatcherRuns?: boolean
     } = {},
   ): StoredEvent[] {
     const since = opts.sinceSeq ?? 0
     const limit = opts.limit ?? 500
-    const logFilter = opts.withoutAgentLog
-      ? ` and (type != 'agent.stream' or json_extract(body, '$.event.kind') = 'usage'
+    const logFilter =
+      (opts.withoutAgentLog
+        ? ` and (type != 'agent.stream' or json_extract(body, '$.event.kind') = 'usage'
           or (task_id is not null and json_extract(body, '$.role') = 'chat'))`
-      : ''
+        : '') +
+      (opts.withoutWatcherRuns
+        ? ` and type not in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')`
+        : '')
     const rows = (
       opts.taskId
         ? this.db
@@ -479,27 +486,28 @@ export class Store {
     const rows = this.db
       .query(
         `select * from events where type in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')
+         and json_extract(body, '$.repo') = ? and json_extract(body, '$.name') = ?
          and seq < ? order by seq`,
       )
-      .all(beforeSeq) as { seq: number; ts: number; task_id: string | null; body: string }[]
-    let projection = emptyProjection()
-    for (const row of rows) {
-      const event = {
-        seq: row.seq,
-        ts: row.ts,
-        taskId: row.task_id,
-        ...(JSON.parse(row.body) as EventBody),
-      } as StoredEvent
-      if (
-        event.type === 'watcher.run.started' ||
-        event.type === 'watcher.action' ||
-        event.type === 'watcher.run.finished'
-      ) {
-        projection = project(projection, event)
-      }
-    }
+      .all(opts.repo, opts.name, beforeSeq) as {
+      seq: number
+      ts: number
+      task_id: string | null
+      body: string
+    }[]
+    const projection = projectAll(
+      emptyProjection(),
+      rows.map(
+        (row) =>
+          ({
+            seq: row.seq,
+            ts: row.ts,
+            taskId: row.task_id,
+            ...(JSON.parse(row.body) as EventBody),
+          }) as StoredEvent,
+      ),
+    )
     return Object.values(projection.watcherRuns)
-      .filter((run) => run.repo === opts.repo && run.name === opts.name)
       .sort((a, b) => b.startSeq - a.startSeq)
       .slice(0, opts.limit)
   }

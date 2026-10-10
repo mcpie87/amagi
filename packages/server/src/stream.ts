@@ -16,13 +16,20 @@ type Tick = 'tick'
 const isTransientNotice = (event: StoredEvent): boolean =>
   event.type === 'notify.idle' || event.type === 'notify.failed'
 
+/** Check output is a third of a long backlog; the task page fetches its own run's output by seq. */
+const withoutCheckOutput = (event: StoredEvent): StoredEvent =>
+  event.type === 'checks.finished'
+    ? { ...event, results: event.results.map((result) => ({ ...result, output: '' })) }
+    : event
+
 export type EventStreamOptions = {
   taskId?: string
   sinceSeq: number
   /**
-   * Replay the backlog without agent log lines (see `Store.events`), then
-   * send a `replayed` event carrying the last backlog seq, so the client knows
-   * which lines it must fetch per task and which will arrive live.
+   * Replay the backlog without agent log lines or watcher history (see
+   * `Store.events`) and with check output emptied, then send a `replayed`
+   * event carrying the last backlog seq, so the client knows which lines it
+   * must fetch per task and which will arrive live.
    */
   compact?: boolean
 }
@@ -68,9 +75,10 @@ export function eventStream(
           sinceSeq: cursor,
           limit: BACKLOG_PAGE,
           withoutAgentLog: compact,
+          withoutWatcherRuns: compact,
         })
         for (const event of page) {
-          if (!isTransientNotice(event)) await send(event)
+          if (!isTransientNotice(event)) await send(compact ? withoutCheckOutput(event) : event)
           cursor = event.seq
         }
         if (page.length < BACKLOG_PAGE || stream.aborted) break

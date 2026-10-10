@@ -250,4 +250,40 @@ describe('GET /api/repos/repo1/stream', () => {
 
     await stream.close()
   })
+
+  test('a compact replay leaves out watcher history and check output, live events keep them', async () => {
+    claim('bd-1')
+    const checks = () =>
+      store.append('bd-1', {
+        type: 'checks.finished',
+        ok: false,
+        results: [{ command: 'just check', exitCode: 1, output: 'boom' }],
+      })
+    const watcherStart = (runId: string) =>
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo: 'repo1',
+        name: 'mention-watcher',
+        runId,
+      })
+    watcherStart('r1')
+    checks()
+    const stream = sse(await app.request('/api/repos/repo1/stream?compact=1'))
+
+    const [claimed, replayedChecks, marker] = await stream.take(3)
+    expect(claimed?.event.type).toBe('task.claimed')
+    expect(replayedChecks?.event).toMatchObject({
+      type: 'checks.finished',
+      results: [{ command: 'just check', exitCode: 1, output: '' }],
+    })
+    expect(marker?.name).toBe('replayed')
+
+    watcherStart('r2')
+    checks()
+    const [liveStart, liveChecks] = await stream.take(2)
+    expect(liveStart?.event).toMatchObject({ type: 'watcher.run.started', runId: 'r2' })
+    expect(liveChecks?.event).toMatchObject({ results: [{ output: 'boom' }] })
+
+    await stream.close()
+  })
 })

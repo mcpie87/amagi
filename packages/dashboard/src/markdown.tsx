@@ -1,6 +1,6 @@
 import hljs from 'highlight.js/lib/core'
 import { Marked, Renderer } from 'marked'
-import { useSyncExternalStore } from 'react'
+import { useMemo, useSyncExternalStore } from 'react'
 import { languageLoaders } from './highlight-languages.ts'
 
 const escapeHtml = (s: string) =>
@@ -88,9 +88,11 @@ const subscribeLanguages = (listener: () => void) => {
 
 export function Markdown({ text }: { text: string }) {
   // Subscribed so a grammar that finishes loading re-renders this block and highlights it.
-  useSyncExternalStore(subscribeLanguages, () => languageVersion)
+  const version = useSyncExternalStore(subscribeLanguages, () => languageVersion)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new grammar changes the output for the same text.
+  const html = useMemo(() => renderMarkdown(text), [text, version])
   return (
     // biome-ignore lint/security/noDangerouslySetInnerHtml: the renderer escapes raw HTML above.
-    <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
+    <div className="summary-markdown" dangerouslySetInnerHTML={{ __html: html }} />
   )
 }

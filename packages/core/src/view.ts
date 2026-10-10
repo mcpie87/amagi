@@ -14,6 +14,7 @@ import {
   type ProjectedWatcherRun,
   type Projection,
   project,
+  projectAll,
 } from './project.ts'
 
 export type { ProjectedQuestion, ProjectedTask, Projection }
@@ -46,11 +47,10 @@ export const initialDashboardState = (): DashboardState => ({
 export function reduceBatch(state: DashboardState, batch: readonly StoredEvent[]): DashboardState {
   const last = batch.at(-1)
   if (last === undefined) return state
-  let projection: Projection = state
+  const projection = projectAll(state, batch)
   const byTask = { ...state.byTask }
   const grown = new Set<string>()
   for (const event of batch) {
-    projection = project(projection, event)
     if (event.taskId === null) continue
     if (!grown.has(event.taskId)) {
       byTask[event.taskId] = [...(byTask[event.taskId] ?? [])]
