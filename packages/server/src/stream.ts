@@ -1,4 +1,4 @@
-import { AsyncQueue, type Store, type StoredEvent } from '@amagi/core'
+import { AsyncQueue, compactReplayEvent, type Store, type StoredEvent } from '@amagi/core'
 import type { Context } from 'hono'
 import { streamSSE } from 'hono/streaming'
 
@@ -16,18 +16,11 @@ type Tick = 'tick'
 const isTransientNotice = (event: StoredEvent): boolean =>
   event.type === 'notify.idle' || event.type === 'notify.failed'
 
-/** Check output is a third of a long backlog; the task page fetches its own run's output by seq. */
-const withoutCheckOutput = (event: StoredEvent): StoredEvent =>
-  event.type === 'checks.finished'
-    ? { ...event, results: event.results.map((result) => ({ ...result, output: '' })) }
-    : event
-
 export type EventStreamOptions = {
   taskId?: string
   sinceSeq: number
   /**
-   * Replay the backlog without agent log lines or watcher history (see
-   * `Store.events`) and with check output emptied, then send a `replayed`
+   * Replay the backlog as `compactReplayEvent` trims it, then send a `replayed`
    * event carrying the last backlog seq, so the client knows which lines it
    * must fetch per task and which will arrive live.
    */
@@ -64,8 +57,8 @@ export function eventStream(
     }
     stream.onAbort(release)
 
-    const send = (event: StoredEvent) =>
-      stream.writeSSE({ id: String(event.seq), data: JSON.stringify(event) })
+    // JSON.stringify escapes newlines, so one `data:` line always carries the event.
+    const frame = (event: StoredEvent) => `id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`
 
     try {
       let cursor = sinceSeq
@@ -77,10 +70,13 @@ export function eventStream(
           withoutAgentLog: compact,
           withoutWatcherRuns: compact,
         })
+        let chunk = ''
         for (const event of page) {
-          if (!isTransientNotice(event)) await send(compact ? withoutCheckOutput(event) : event)
+          const sent = compact ? compactReplayEvent(event) : isTransientNotice(event) ? null : event
+          if (sent !== null) chunk += frame(sent)
           cursor = event.seq
         }
+        if (chunk !== '') await stream.write(chunk)
         if (page.length < BACKLOG_PAGE || stream.aborted) break
       }
       if (compact) {
@@ -100,7 +96,7 @@ export function eventStream(
         }
         if (event.seq <= cursor && !isTransientNotice(event)) continue
         cursor = Math.max(cursor, event.seq)
-        await send(event)
+        await stream.write(frame(event))
       }
     } finally {
       release()

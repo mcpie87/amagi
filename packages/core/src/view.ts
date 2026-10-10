@@ -40,6 +40,32 @@ export const initialDashboardState = (): DashboardState => ({
 })
 
 /**
+ * What a compact replay carries for this event, or null when it leaves it out:
+ * agent log lines other than usage and task chat (log views backfill them per
+ * task), watcher history (paged per watcher) and transient notices. Check
+ * output is emptied; the task page fetches its run's output by seq. The
+ * store's `withoutAgentLog`/`withoutWatcherRuns` SQL filter must agree.
+ */
+export function compactReplayEvent(event: StoredEvent): StoredEvent | null {
+  switch (event.type) {
+    case 'notify.idle':
+    case 'notify.failed':
+    case 'watcher.run.started':
+    case 'watcher.action':
+    case 'watcher.run.finished':
+      return null
+    case 'agent.stream':
+      return event.event.kind === 'usage' || (event.taskId !== null && event.role === 'chat')
+        ? event
+        : null
+    case 'checks.finished':
+      return { ...event, results: event.results.map((result) => ({ ...result, output: '' })) }
+    default:
+      return event
+  }
+}
+
+/**
  * Folds a batch of events in one pass: the log and each touched task's slice
  * are copied once per batch rather than once per event, which keeps a full
  * replay linear.
