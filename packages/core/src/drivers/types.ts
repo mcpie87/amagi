@@ -140,8 +140,8 @@ export type Permissions = 'read-only' | 'workspace-write' | 'bypass'
 export type AgentStartOptions = {
   cwd: string
   prompt: string
-  /** Credential seat to hold for this process; defaults to the harness kind. */
-  seat?: string
+  /** Credential seat to hold for this process; defaults to the harness kind, null skips the seat lock. */
+  seat?: string | null
   systemPrompt?: string
   model?: string | undefined
   /** Reasoning effort, passed to the harness when the harness honors it. */

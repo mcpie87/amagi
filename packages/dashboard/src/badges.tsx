@@ -16,6 +16,7 @@ const stateBadge: Record<TaskState, string> = {
   fixing: 'bg-blue-soft text-blue-ink ring-blue-edge',
   committed: 'bg-cyan-soft text-cyan-ink ring-cyan-edge',
   retrying: 'bg-orange-soft text-orange-ink ring-orange-edge',
+  chatting: 'bg-teal-soft text-teal-ink ring-teal-edge',
   pr_open: 'bg-sky-soft text-sky-ink ring-sky-edge',
   pr_flagged: 'bg-amber-soft text-amber-ink ring-amber-edge',
   pr_merge_conflict: 'bg-red-soft text-red-ink ring-red-edge',
