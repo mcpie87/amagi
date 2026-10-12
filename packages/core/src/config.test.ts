@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  activeReviewerConfig,
   Config,
   expandWorkers,
   hasPinnedForgeRemote,
@@ -19,6 +20,7 @@ import {
   loadGlobalConfig,
   migrateFleet,
   newWorkerId,
+  type ProfileConfig,
   reviewerHarnessConfig,
   severityAtOrAbove,
   watcherHarnessConfig,
@@ -233,6 +235,28 @@ describe('loadConfig', () => {
     expect(loadRepoConfig().config.review.enabled).toBe(true)
   })
 
+  test('repository review switch gates fleet reviewers and overrides global defaults', () => {
+    process.env.PATH = home
+    writeGlobal(`
+[review]
+enabled = true
+[[worker]]
+id = "reviewer"
+name = "Reviewer"
+kind = "codex"
+model = "review-model"
+roles = ["review"]
+enabled = true
+`)
+    writeRepo('[review]\nenabled = false\n')
+    expect(activeReviewerConfig(loadRepoConfig().config)).toBeUndefined()
+    writeRepo('[review]\nenabled = true\n')
+    expect(activeReviewerConfig(loadRepoConfig().config)).toMatchObject({
+      kind: 'codex',
+      model: 'review-model',
+    })
+  })
+
   test('enabled review requires an explicit or installed reviewer harness', () => {
     process.env.PATH = home
     writeRepo('[review]\nenabled = true\n')
@@ -392,6 +416,33 @@ describe('writeConfig', () => {
     writeConfig(repo, { loop: { autoQueue: true } })
     expect(readFileSync(join(repo, '.amagi', 'config.toml'), 'utf8')).toContain('autoQueue = true')
     expect(() => loadConfig(repo)).toThrow(/must declare non-empty format, lint, test/)
+  })
+})
+
+describe('execution profiles', () => {
+  const profiles: ProfileConfig[] = [
+    { profile_name: 'Careful', harness: 'codex', model: 'custom-model', effort: 'high' },
+  ]
+
+  test('defaults to no profiles and round-trips global profiles into repository config', () => {
+    expect(loadGlobalConfig().profiles).toEqual([])
+    writeGlobalConfig({ profiles })
+    expect(loadGlobalConfig().profiles).toEqual(profiles)
+    expect(loadRepoConfig().config.profiles).toEqual(profiles)
+  })
+
+  test('rejects invalid profiles loaded from global TOML', () => {
+    writeGlobalConfig({ profiles: [profiles[0], profiles[0]] })
+    expect(() => loadGlobalConfig()).toThrow(/profile names must be unique/)
+    writeGlobalConfig({ profiles: [{ ...profiles[0], effort: ' ' }] })
+    expect(() => loadGlobalConfig()).toThrow(/effort/)
+  })
+
+  test('rejects repository-local profiles', () => {
+    writeRepo(
+      '[[profiles]]\nprofile_name = "Local"\nharness = "claude"\nmodel = "opus"\neffort = "high"\n',
+    )
+    expect(() => loadConfig(repo)).toThrow(/\[\[profiles\]\] belongs in the global config/)
   })
 })
 

@@ -13,6 +13,14 @@ import {
   useRef,
   useState,
 } from 'react'
+import {
+  followRepo,
+  pollOk,
+  refreshPoll,
+  resyncRepo,
+  type StreamStatus,
+  usePoll,
+} from './hub-client.ts'
 
 const apiBase = (import.meta.env.VITE_API_BASE ?? '') as string
 
@@ -25,6 +33,11 @@ export type RepoInfo = {
   /** Whether the server runs background pollers and watchers for this repo. */
   watchers: boolean
   ready: { name: string; ok: boolean; detail?: string }[]
+}
+
+/** Failed readiness checks: a repo with any of these cannot run work and needs the operator. */
+export function repoBlockers(repo: RepoInfo): RepoInfo['ready'] {
+  return repo.ready.filter((check) => !check.ok)
 }
 
 export type DashboardValue = {
@@ -62,8 +75,7 @@ const ReadyQueueContext = createContext<TrackerTask[]>([])
  */
 const ReplayContext = createContext<{ repo: string; seq: number | null } | null>(null)
 
-type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting'
-const ConnectionContext = createContext<ConnectionStatus>('connecting')
+const ConnectionContext = createContext<StreamStatus>('connecting')
 
 function readStored(): string | null {
   try {
@@ -73,33 +85,35 @@ function readStored(): string | null {
   }
 }
 
+const reposUrl = `${apiBase}/api/repos`
+const refreshRepos = () => refreshPoll(reposUrl)
+const noTasks: TrackerTask[] = []
+
 /**
- * One EventSource per selected repository, replayed from seq 0 without agent
- * log lines (log views backfill those per task, see useAgentLogBackfill) and
- * resumed from the browser's Last-Event-ID on reconnect. The reducer state is scoped
- * to the repo (the stream component is keyed by repo, so switching resets it)
- * and agent logs are namespaced by repo, so identical issue ids across repos
- * never collide in the dashboard.
+ * One event stream per selected repository, shared by every tab through the
+ * hub (hub.ts), replayed from seq 0 without agent log lines (log views
+ * backfill those per task, see useAgentLogBackfill). The reducer state is
+ * scoped to the repo (the stream component is keyed by repo, so switching
+ * resets it) and agent logs are namespaced by repo, so identical issue ids
+ * across repos never collide in the dashboard.
  */
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [repos, setRepos] = useState<RepoInfo[] | null>(null)
   const [selected, setSelected] = useState<string | null>(readStored)
-  const [resync, setResync] = useState(0)
-  const resyncStream = useCallback(() => setResync((n) => n + 1), [])
+  const resyncStream = useCallback(() => {
+    if (selected !== null) resyncRepo(selected)
+  }, [selected])
 
-  const refreshRepos = useCallback(() => {
-    fetch(`${apiBase}/api/repos`)
-      .then((res) => (res.ok ? (res.json() as Promise<RepoInfo[]>) : []))
-      .then((list) => {
-        setRepos(list)
-        setSelected((prev) =>
-          prev !== null && list.some((r) => r.key === prev) ? prev : (list[0]?.key ?? null),
-        )
-      })
-      .catch(() => setRepos([]))
-  }, [])
-
-  useEffect(refreshRepos, [refreshRepos])
+  // Polled because a repo can break (config edited, remote changed) while the dashboard is open.
+  const reposPoll = usePoll(reposUrl, 15_000)
+  useEffect(() => {
+    if (reposPoll === undefined) return
+    const list = pollOk(reposPoll) ? (reposPoll.body as RepoInfo[]) : []
+    setRepos(list)
+    setSelected((prev) =>
+      prev !== null && list.some((r) => r.key === prev) ? prev : (list[0]?.key ?? null),
+    )
+  }, [reposPoll])
 
   const selectRepo = useCallback((key: string) => {
     setSelected(key)
@@ -119,11 +133,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       })
       const body = (await res.json()) as RepoInfo | { error: string }
       if (!res.ok) return body
-      await refreshRepos()
+      refreshRepos()
       if ('key' in body) selectRepo(body.key)
       return body
     },
-    [refreshRepos, selectRepo],
+    [selectRepo],
   )
 
   return (
@@ -133,7 +147,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       {selected === null ? (
         <StreamContext.Provider value={initialDashboardState()}>{children}</StreamContext.Provider>
       ) : (
-        <RepoStream key={selected} repo={selected} resync={resync}>
+        <RepoStream key={selected} repo={selected}>
           {children}
         </RepoStream>
       )}
@@ -141,63 +155,19 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   )
 }
 
-function RepoStream({
-  repo,
-  resync,
-  children,
-}: {
-  repo: string
-  resync: number
-  children: ReactNode
-}) {
+function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceBatch, undefined, initialDashboardState)
-  const [readyQueue, setReadyQueue] = useState<TrackerTask[]>([])
-  const [connection, setConnection] = useState<ConnectionStatus>('connecting')
-  // Advanced on receipt, not on render: a resync must resume after events
-  // still queued for the next flush, and after agent.stream lines that never
-  // reach the reducer, or the replay would duplicate them.
+  const queuePoll = usePoll(`${apiBase}/api/repos/${repo}/ready-queue`, 4000)
+  const readyQueue = pollOk(queuePoll) ? (queuePoll.body as TrackerTask[]) : noTasks
+  const [connection, setConnection] = useState<StreamStatus>('connecting')
   const latestSeqRef = useRef(0)
-  // Survives reconnects, which only replay missed events, so a resumed stream
-  // keeps counting resets from where the first connection left off.
   const attemptsRef = useRef(new Map<string, number>())
   const replayedRef = useRef<number | null>(null)
   const [replayed, setReplayed] = useState<number | null>(null)
 
   useEffect(() => {
-    let alive = true
-    const load = () => {
-      fetch(`${apiBase}/api/repos/${repo}/ready-queue`)
-        .then((res) => (res.ok ? (res.json() as Promise<TrackerTask[]>) : []))
-        .then((tasks) => {
-          if (alive) setReadyQueue(tasks)
-        })
-        .catch(() => {
-          if (alive) setReadyQueue([])
-        })
-    }
-    load()
-    const timer = setInterval(load, 4000)
-    return () => {
-      alive = false
-      clearInterval(timer)
-    }
-  }, [repo])
-
-  useEffect(() => {
-    // Resync resumes from the last event the client already folded in, so a
-    // reconnection only replays what the stale connection missed. The first
-    // connect replays everything (latestSeq is 0).
-    void resync
-    // Only the first connect is compact: a resumed stream's gap is small, and
-    // its log lines past the replayed seq belong in the buffers.
-    const compact = latestSeqRef.current === 0
-    if (compact) {
-      agentLogStore.clear(`${repo}/`)
-      forgetBackfills(repo)
-    }
-    const source = new EventSource(
-      `${apiBase}/api/repos/${repo}/stream?sinceSeq=${latestSeqRef.current}${compact ? '&compact=1' : ''}`,
-    )
+    agentLogStore.clear(`${repo}/`)
+    forgetBackfills(repo)
     // A replay delivers tens of thousands of events back to back; one dispatch
     // each meant one full render each. Queue them and fold once per frame.
     let pending: StoredEvent[] = []
@@ -213,15 +183,9 @@ function RepoStream({
       pending.push(event)
       frame ??= requestAnimationFrame(flush)
     }
-    source.addEventListener('open', () => setConnection('connected'))
-    source.addEventListener('error', () => setConnection('reconnecting'))
-    source.addEventListener('replayed', (event: MessageEvent) => {
-      replayedRef.current = Number(event.data)
-      setReplayed(replayedRef.current)
-    })
-    source.addEventListener('message', (event: MessageEvent) => {
+    const receive = (data: string) => {
       try {
-        const parsed = JSON.parse(event.data) as StoredEvent
+        const parsed = JSON.parse(data) as StoredEvent
         if (parsed.type === 'notify.idle') {
           window.dispatchEvent(
             new CustomEvent('amagi:idle-notification', {
@@ -268,13 +232,23 @@ function RepoStream({
       } catch {
         // a malformed event must not drop the stream
       }
+    }
+    const unfollow = followRepo(repo, {
+      status: setConnection,
+      events: (data) => {
+        for (const item of data) receive(item)
+      },
+      replayed: (seq) => {
+        replayedRef.current = seq
+        setReplayed(seq)
+      },
     })
     return () => {
-      source.close()
+      unfollow()
       if (frame !== null) cancelAnimationFrame(frame)
       flush()
     }
-  }, [repo, resync])
+  }, [repo])
 
   return (
     <ConnectionContext.Provider value={connection}>
@@ -369,35 +343,18 @@ const RunnerContext = createContext<RunnerApi>({
 export function RunnerProvider({ children }: { children: ReactNode }) {
   const base = (import.meta.env.VITE_API_BASE ?? '') as string
   const { resyncStream, selected } = useContext(ReposContext)
-  const [status, setStatus] = useState<RunnerStatus | null>(null)
+  const runnerUrl = selected === null ? null : `${base}/api/repos/${selected}/runner`
+  const runnerPoll = usePoll(runnerUrl, 4000)
+  const status = pollOk(runnerPoll) ? (runnerPoll.body as RunnerStatus) : null
   const [options, setOptions] = useState<RunOptionsInfo | null>(null)
-  const selectedRef = useRef(selected)
-  selectedRef.current = selected
 
-  const refresh = useCallback(() => {
-    if (selected === null) {
-      setStatus(null)
-      return
-    }
-    const repo = selected
-    fetch(`${base}/api/repos/${selected}/runner`)
-      .then((r) => (r.ok ? (r.json() as Promise<RunnerStatus>) : null))
-      .then((value) => {
-        if (selectedRef.current === repo) setStatus(value)
-      })
-      .catch(() => {
-        if (selectedRef.current === repo) setStatus(null)
-      })
-  }, [selected])
+  const refresh = () => {
+    if (runnerUrl !== null) refreshPoll(runnerUrl)
+  }
 
   useEffect(() => {
-    setStatus(null)
     setOptions(null)
-    refresh()
-    if (selected === null) {
-      setOptions(null)
-      return
-    }
+    if (selected === null) return
     let alive = true
     fetch(`${base}/api/repos/${selected}/runner/options`)
       .then((r) => (r.ok ? (r.json() as Promise<RunOptionsInfo>) : null))
@@ -407,12 +364,10 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
       .catch(() => {
         if (alive) setOptions(null)
       })
-    const timer = setInterval(refresh, 4000)
     return () => {
       alive = false
-      clearInterval(timer)
     }
-  }, [refresh, selected])
+  }, [selected])
 
   const start = async (
     taskId?: string,
@@ -473,7 +428,7 @@ export function useRunner(): RunnerApi {
   return useContext(RunnerContext)
 }
 
-export function useConnection(): ConnectionStatus {
+export function useConnection(): StreamStatus {
   return useContext(ConnectionContext)
 }
 
@@ -494,27 +449,6 @@ export type SeatState = {
 
 /** Global seat state is polled independently of the selected repository stream. */
 export function useSeats(): SeatState[] | null {
-  const [seats, setSeats] = useState<SeatState[] | null>(null)
-  useEffect(() => {
-    let active = true
-    const refresh = () => {
-      fetch(`${apiBase}/api/seats`)
-        .then((response) =>
-          response.ok ? (response.json() as Promise<{ seats: SeatState[] }>) : null,
-        )
-        .then((value) => {
-          if (active) setSeats(value?.seats ?? null)
-        })
-        .catch(() => {
-          if (active) setSeats(null)
-        })
-    }
-    refresh()
-    const timer = setInterval(refresh, 4000)
-    return () => {
-      active = false
-      clearInterval(timer)
-    }
-  }, [])
-  return seats
+  const seats = usePoll(`${apiBase}/api/seats`, 4000)
+  return pollOk(seats) ? (seats.body as { seats: SeatState[] }).seats : null
 }

@@ -1,6 +1,6 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { BeadsTracker, errMsg, loadLiveRuns, RequestTimings } from '@amagi/core'
+import { BeadsTracker, errMsg, InteractionTimings, loadLiveRuns, RequestTimings } from '@amagi/core'
 import { createApp } from './app.ts'
 import { startBeadsGcPoller } from './beads-gc-poller.ts'
 import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
@@ -16,6 +16,8 @@ export type ServeOptions = {
   host: string
   port: number
   notify?: Notifier[] | undefined
+  /** Called once per distinct reason a repo's runner cannot start, not on every retry. */
+  onRunnerUnavailable?: (repo: string, detail: string) => void
   gatePollIntervalMs?: number
   prPollIntervalMs?: number
   mentionWatchIntervalMs?: number
@@ -26,7 +28,7 @@ export type ServeOptions = {
   repoPollerSupervisorIntervalMs?: number
   /** Directory holding the built dashboard, served as an SPA behind the API. */
   staticDir?: string
-  /** SQLite file holding API request timings; in memory when unset. */
+  /** SQLite file holding API request and dashboard interaction timings; in memory when unset. */
   timingsPath?: string
   /** Builds a runner from each registered workspace, including repos added live. */
   runnerFactory?: (workspace: Workspace) => RunServiceApi
@@ -309,6 +311,7 @@ export function serve({
   host,
   port,
   notify,
+  onRunnerUnavailable,
   gatePollIntervalMs,
   prPollIntervalMs,
   mentionWatchIntervalMs,
@@ -324,6 +327,7 @@ export function serve({
 }: ServeOptions) {
   const runners = new Map<string, RunServiceApi>()
   const runnerAutoQueue = new Map<string, boolean>()
+  const runnerErrors = new Map<string, string>()
   const syncRunners = () => {
     const entries = workspaces.list()
     const keys = new Set(entries.map((entry) => entry.key))
@@ -332,6 +336,7 @@ export function serve({
       service.dispose?.()
       runners.delete(key)
       runnerAutoQueue.delete(key)
+      runnerErrors.delete(key)
     }
     for (const entry of entries) {
       if (runners.has(entry.key)) {
@@ -352,9 +357,15 @@ export function serve({
           const service = runnerFactory(workspace)
           runners.set(entry.key, service)
           runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
+          runnerErrors.delete(entry.key)
         }
       } catch (err) {
-        console.warn(`runner for ${entry.key} unavailable: ${errMsg(err)}`)
+        const detail = errMsg(err)
+        if (runnerErrors.get(entry.key) !== detail) {
+          runnerErrors.set(entry.key, detail)
+          console.warn(`runner for ${entry.key} unavailable: ${detail}`)
+          onRunnerUnavailable?.(entry.key, detail)
+        }
       }
     }
   }
@@ -380,11 +391,13 @@ export function serve({
       : { supervisorIntervalMs: repoPollerSupervisorIntervalMs }),
   })
   const timings = new RequestTimings(timingsPath)
+  const interactions = new InteractionTimings(timingsPath)
   const stopLoopWatch = timings.watchEventLoop()
   const app = createApp({
     workspaces,
     notify,
     timings,
+    interactions,
     runner,
     runnerRepo,
     runnerForRepo,
@@ -415,7 +428,10 @@ export function serve({
       runners.clear()
       if (runnerFactory === undefined) runner?.dispose?.()
       // In-flight requests still record their timing until the server stops.
-      return server.stop(closeActiveConnections).finally(() => timings.close())
+      return server.stop(closeActiveConnections).finally(() => {
+        timings.close()
+        interactions.close()
+      })
     },
   }
 }

@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useRunner } from '../store.tsx'
-import { SeatsSettings } from './seats-settings.tsx'
+import { ProcessCapSettings, SeatsSettings } from './seats-settings.tsx'
 import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
 const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
@@ -226,7 +226,7 @@ function Modal({
           <button
             type="submit"
             disabled={busy || !canSubmit}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             {submitLabel}
           </button>
@@ -672,7 +672,7 @@ export function FleetWorkersSettings() {
             type="button"
             onClick={() => setEditing('new')}
             disabled={workers === null}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             Add worker
           </button>
@@ -696,6 +696,8 @@ export function FleetWorkersSettings() {
       </div>
 
       <SeatsSettings onSaved={refreshSeats} />
+
+      <ProcessCapSettings />
 
       {watchers !== null && (
         <div className="mt-6">

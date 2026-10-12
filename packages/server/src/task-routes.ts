@@ -4,17 +4,20 @@ import {
   canReset,
   errMsg,
   exec,
+  expandWorkers,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
   isTerminal,
   type LiveRun,
+  mergeBaseForChat,
   mergeLiveRuns,
   type Notifier,
   type Question,
   type RunServiceApi,
   reconcilePr,
   removeWorktree,
+  runApprovedGitRequest,
   type Store,
   type StoredEvent,
   stageAndCommit,
@@ -32,7 +35,9 @@ import {
   AwaitQuery,
   ChatBody,
   CloseTaskBody,
+  GitDecisionBody,
   GitRequestBody,
+  RepoGitRequestParam,
   RepoParam,
   RepoQuestionParam,
   RepoTaskIdParam,
@@ -81,6 +86,9 @@ export function createTaskRoutes({
   resolveQuestionGate,
   notifyChannels,
 }: TaskRouteDeps) {
+  /** Git requests being carried out, so a double click cannot push or comment twice. */
+  const deciding = new Set<string>()
+
   return new Hono()
     .post('/api/repos/:repo/tasks/:id/stop', valid('param', RepoTaskIdParam), (c) => {
       const { repo, id } = c.req.valid('param')
@@ -492,8 +500,11 @@ export function createTaskRoutes({
       if (runnerFor(repo) === undefined) {
         return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
       }
+      const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+        (worker) => worker.enabled && worker.roles.includes('implement'),
+      )
       return c.json({
-        harnesses: ws.config.worker.map((worker) => ({
+        harnesses: workers.map((worker) => ({
           name: worker.name,
           workerId: worker.id,
           kind: worker.kind,
@@ -502,7 +513,7 @@ export function createTaskRoutes({
         })),
         models: HARDCODED_MODELS,
         efforts: HARDCODED_EFFORTS,
-        default: ws.config.worker.find((worker) => worker.enabled)?.id ?? null,
+        default: workers[0]?.id ?? null,
       })
     })
 
@@ -647,7 +658,7 @@ export function createTaskRoutes({
       valid('json', GitRequestBody),
       async (c) => {
         const { repo, id } = c.req.valid('param')
-        const { verb } = c.req.valid('json')
+        const { verb, message } = c.req.valid('json')
         const ws = resolveWorkspace(workspaces, repo)
         const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
@@ -657,6 +668,36 @@ export function createTaskRoutes({
         if (task.worktree === null) {
           return c.json({ error: `task ${id} has no worktree to commit` }, 409)
         }
+        if (verb === 'merge-base') {
+          try {
+            const result = await mergeBaseForChat(
+              { config: ws.config, exec, repoRoot: ws.root },
+              task.worktree,
+            )
+            return c.json({ verb, result })
+          } catch (err) {
+            return c.json({ error: errMsg(err) }, 500)
+          }
+        }
+        if (verb !== 'commit') {
+          // Outward-facing: the operator approves it in the chat, and the
+          // result reaches the agent as its next chat message.
+          const requestId = crypto.randomUUID()
+          ws.store.append(id, {
+            type: 'git.request',
+            requestId,
+            verb,
+            ...(message === undefined ? {} : { message }),
+          })
+          return c.json(
+            {
+              verb,
+              requestId,
+              result: `requested ${verb}; it waits for the operator's approval in the chat. End your turn now: the decision and its result arrive as the next message.`,
+            },
+            202,
+          )
+        }
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
         try {
@@ -664,7 +705,7 @@ export function createTaskRoutes({
             exec,
             task,
             task.worktree,
-            CHECKPOINT_COMMIT_SUMMARY,
+            message ?? CHECKPOINT_COMMIT_SUMMARY,
             {
               harness: ws.config.harness.implement.kind,
               model: ws.config.harness.implement.model ?? null,
@@ -683,6 +724,64 @@ export function createTaskRoutes({
         } catch (err) {
           return c.json({ error: errMsg(err) }, 500)
         }
+      },
+    )
+
+    .post(
+      '/api/repos/:repo/tasks/:id/git-requests/:requestId/decision',
+      valid('param', RepoGitRequestParam),
+      valid('json', GitDecisionBody),
+      async (c) => {
+        const { repo, id, requestId } = c.req.valid('param')
+        const { approve } = c.req.valid('json')
+        const ws = resolveWorkspace(workspaces, repo)
+        const task = ws.store.task(id)
+        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        let request: Extract<StoredEvent, { type: 'git.request' }> | null = null
+        for (const event of ws.store.events({
+          taskId: id,
+          limit: 100_000,
+          withoutAgentLog: true,
+        })) {
+          if (event.type === 'git.request' && event.requestId === requestId) request = event
+          if (event.type === 'git.request.decided' && event.requestId === requestId) {
+            return c.json({ error: `git request ${requestId} was already decided` }, 409)
+          }
+        }
+        if (request === null) return c.json({ error: `unknown git request ${requestId}` }, 404)
+        if (deciding.has(requestId)) {
+          return c.json({ error: `git request ${requestId} is already being carried out` }, 409)
+        }
+        let result: string
+        let ok = true
+        if (!approve) {
+          result = `the operator declined ${request.verb}`
+        } else {
+          deciding.add(requestId)
+          try {
+            result = await runApprovedGitRequest(
+              {
+                store: ws.store,
+                tracker: ws.tracker,
+                config: ws.config,
+                repoRoot: ws.root,
+                repoName: ws.name,
+                exec,
+                forge: ws.forge,
+              },
+              task,
+              request.verb,
+              request.message,
+            )
+          } catch (err) {
+            ok = false
+            result = `${request.verb} failed: ${errMsg(err)}`
+          } finally {
+            deciding.delete(requestId)
+          }
+        }
+        ws.store.append(id, { type: 'git.request.decided', requestId, approved: approve, result })
+        return c.json({ requestId, approved: approve, ok, result })
       },
     )
 }

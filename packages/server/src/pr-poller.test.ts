@@ -247,10 +247,7 @@ test('a pr closed with the rework label starts a fresh attempt', async () => {
   const tracker = new FakeTracker()
 
   pollers.push(startPrPoller({ store, forgeFor: on(forge), tracker, cwd: repo, intervalMs: 10 }))
-  const deadline = Date.now() + 2_000
-  while (store.task('bd-1')?.state !== 'claimed' && Date.now() < deadline) {
-    await Bun.sleep(10)
-  }
+  await Bun.sleep(200)
 
   const task = store.task('bd-1')
   expect(task?.state).toBe('claimed')
