@@ -4,6 +4,7 @@ import {
   canReset,
   errMsg,
   exec,
+  expandWorkers,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
@@ -499,8 +500,11 @@ export function createTaskRoutes({
       if (runnerFor(repo) === undefined) {
         return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
       }
+      const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+        (worker) => worker.enabled && worker.roles.includes('implement'),
+      )
       return c.json({
-        harnesses: ws.config.worker.map((worker) => ({
+        harnesses: workers.map((worker) => ({
           name: worker.name,
           workerId: worker.id,
           kind: worker.kind,
@@ -509,7 +513,7 @@ export function createTaskRoutes({
         })),
         models: HARDCODED_MODELS,
         efforts: HARDCODED_EFFORTS,
-        default: ws.config.worker.find((worker) => worker.enabled)?.id ?? null,
+        default: workers[0]?.id ?? null,
       })
     })
 

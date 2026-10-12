@@ -2170,6 +2170,7 @@ describe('runner endpoints', () => {
     expect(specific.status).toBe(201)
     expect(started).toEqual(['bd-9'])
     expect((await post('/api/repos/repo1/runs', '{"taskId":123}')).status).toBe(400)
+    expect((await post('/api/repos/repo1/runs', '{"harness":"codex"}')).status).toBe(400)
   })
 
   test('POST /api/runs forwards worker and model/effort overrides', async () => {
@@ -2216,7 +2217,9 @@ describe('runner endpoints', () => {
       harnesses: { name: string; workerId: string; kind: string }[]
       default: string | null
     }
-    const workers = ws.workspaces.get('repo1')?.config.worker ?? []
+    const workers = (ws.workspaces.get('repo1')?.config.worker ?? []).filter(
+      (w) => w.enabled && w.roles.includes('implement'),
+    )
     expect(body.harnesses).toEqual(
       workers.map((worker) => ({
         name: worker.name,
@@ -2227,6 +2230,24 @@ describe('runner endpoints', () => {
       })),
     )
     expect(body.default).toBe(workers.find((worker) => worker.enabled)?.id ?? null)
+  })
+
+  test('runner options expose runnable replica ids and exclude disabled/review-only workers', async () => {
+    const config = ws.workspaces.get('repo1')?.config
+    if (config === undefined) throw new Error('missing workspace')
+    const profile = config.worker[0]
+    if (profile === undefined) throw new Error('missing worker')
+    config.worker = [
+      { ...profile, id: 'fast', name: 'Fast', count: 2, roles: ['implement'], enabled: true },
+      { ...profile, id: 'reviewer', roles: ['review'], enabled: true },
+      { ...profile, id: 'disabled', roles: ['implement'], enabled: false },
+    ]
+    app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
+    const response = await app.request('/api/repos/repo1/runner/options')
+    expect(await response.json()).toMatchObject({
+      harnesses: [{ workerId: 'fast-1' }, { workerId: 'fast-2' }],
+      default: 'fast-1',
+    })
   })
 
   test('GET /api/runner/options is empty without a runner', async () => {
