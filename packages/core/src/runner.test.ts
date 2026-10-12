@@ -2089,6 +2089,79 @@ describe('Runner.runOnce', () => {
     rmSync(remote, { recursive: true, force: true })
   })
 
+  test('rebase recovery does not apply a stash from another worktree', async () => {
+    const remote = mkdtempSync(join(tmpdir(), 'amagi-run-remote-'))
+    await execOk(exec, ['git', 'clone', '-q', repo, remote], { cwd: repo })
+    await execOk(exec, ['git', 'config', 'user.name', 'Remote'], { cwd: remote })
+    await execOk(exec, ['git', 'config', 'user.email', 'remote@example.com'], { cwd: remote })
+    writeFileSync(join(remote, 'fresh.txt'), 'fresh\n')
+    await execOk(exec, ['git', 'add', '.'], { cwd: remote })
+    await execOk(exec, ['git', 'commit', '-q', '-m', 'add fresh.txt'], { cwd: remote })
+    await execOk(exec, ['git', 'remote', 'add', 'origin', remote], { cwd: repo })
+
+    const harness = new FakeHarness([writesAFile, {}, {}])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['test -f fresh.txt'] } }),
+    ).runOnce()
+    await waitFor(() => store.unansweredQuestions(TASK.id).length > 0)
+
+    const otherWorktree = join(wtRoot, 'other')
+    await execOk(exec, ['git', 'worktree', 'add', '--detach', otherWorktree, 'HEAD'], { cwd: repo })
+    writeFileSync(join(otherWorktree, 'other.txt'), 'other worktree\n')
+    await execOk(exec, ['git', 'stash', 'push', '-u', '-m', 'other worktree'], {
+      cwd: otherWorktree,
+    })
+
+    await answerRecovery('rebase')
+    const result = await pending
+    expect(result?.state).toBe('pr_open')
+    const taskWorktree = store.task(TASK.id)?.worktree
+    expect(taskWorktree).not.toBeNull()
+    expect(existsSync(join(taskWorktree as string, 'hello.txt'))).toBe(true)
+    expect(existsSync(join(taskWorktree as string, 'other.txt'))).toBe(false)
+    expect(
+      await execOk(
+        exec,
+        ['git', 'stash', 'show', '--include-untracked', '--name-only', 'stash@{0}'],
+        {
+          cwd: repo,
+        },
+      ),
+    ).toContain('other.txt')
+
+    rmSync(otherWorktree, { recursive: true, force: true })
+    rmSync(remote, { recursive: true, force: true })
+  })
+
+  test('rebase recovery reports a conflict while reapplying local changes', async () => {
+    const remote = mkdtempSync(join(tmpdir(), 'amagi-run-remote-'))
+    await execOk(exec, ['git', 'clone', '-q', repo, remote], { cwd: repo })
+    await execOk(exec, ['git', 'config', 'user.name', 'Remote'], { cwd: remote })
+    await execOk(exec, ['git', 'config', 'user.email', 'remote@example.com'], { cwd: remote })
+    writeFileSync(join(remote, 'README.md'), '# base edit\n')
+    await execOk(exec, ['git', 'add', '.'], { cwd: remote })
+    await execOk(exec, ['git', 'commit', '-q', '-m', 'edit README'], { cwd: remote })
+    await execOk(exec, ['git', 'remote', 'add', 'origin', remote], { cwd: repo })
+
+    const harness = new FakeHarness([writesAFile])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        checks: { commands: ['printf "# task edit\\n" > README.md; false'] },
+        loop: { maxCheckRounds: 1 },
+      }),
+    ).runOnce()
+    await answerRecovery('rebase')
+
+    const result = await pending
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('local changes conflicted')
+    rmSync(remote, { recursive: true, force: true })
+  })
+
   test('a rebase recovery that cannot fetch from origin parks the task', async () => {
     const harness = new FakeHarness([writesAFile, {}, {}])
     const pending = makeRunner(
