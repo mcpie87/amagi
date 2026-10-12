@@ -79,7 +79,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; call
       if (limitIndex >= 0 && Array.isArray(JSON.parse(hit.stdout))) {
         return ok(
           JSON.stringify(
-            (JSON.parse(hit.stdout) as unknown[]).slice(0, Number(cmd[limitIndex + 1])),
+            (JSON.parse(hit.stdout) as unknown[]).slice(
+              (Number(cmd[cmd.indexOf('--page') + 1]) || 1) * Number(cmd[limitIndex + 1]) -
+                Number(cmd[limitIndex + 1]),
+              (Number(cmd[cmd.indexOf('--page') + 1]) || 1) * Number(cmd[limitIndex + 1]),
+            ),
           ),
         )
       }
@@ -282,3 +286,19 @@ describe('ForgejoTracker', () => {
     expect(await tracker.gateResolved({ id: '7#q-2', advisory: true })).toBe(true)
   })
 })
+
+for (const Driver of [GithubTracker, ForgejoTracker]) {
+  test(`${Driver.name} finds ready work past a full window of claimed issues`, async () => {
+    const issues = Array.from({ length: 121 }, (_, i) => ({
+      number: i + 1,
+      index: i + 1,
+      title: 'task',
+      body: '',
+      state: 'open',
+      labels: i < 120 ? [{ name: CLAIM_LABEL }] : [],
+    }))
+    const { exec } = fake((cmd) => (cmd.includes('list') ? ok(JSON.stringify(issues)) : undefined))
+    const tracker = new Driver({ cwd: '/repo', remote: 'origin', exec })
+    expect((await tracker.ready(1)).map((task) => task.id)).toEqual(['121'])
+  })
+}

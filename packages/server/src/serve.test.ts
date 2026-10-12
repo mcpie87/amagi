@@ -156,3 +156,26 @@ test('watcher enable switches reconcile from config on the next supervisor scan'
   await Bun.sleep(40)
   expect(await names()).toContain('pr-conflict-watcher')
 })
+
+test('reports an unavailable runner once per distinct reason, not on every retry', async () => {
+  ws = testWorkspaces(['repo1'])
+  const alerts: [string, string][] = []
+  let reason = 'checks missing'
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runnerFactory: () => {
+      throw new Error(reason)
+    },
+    onRunnerUnavailable: (repo, detail) => alerts.push([repo, detail]),
+  })
+  await Bun.sleep(2200)
+  expect(alerts).toEqual([['repo1', 'checks missing']])
+  reason = 'forge unreachable'
+  await Bun.sleep(1100)
+  expect(alerts).toEqual([
+    ['repo1', 'checks missing'],
+    ['repo1', 'forge unreachable'],
+  ])
+})

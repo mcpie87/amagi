@@ -118,13 +118,57 @@ export const emptyProjection = (): Projection => ({ tasks: {}, questions: {}, wa
  * interprets it, never mutates it.
  */
 export function project(state: Projection, event: StoredEvent): Projection {
+  return fold(state, event, { owned: new Set(), openRuns: null })
+}
+
+/**
+ * `project` over many events, copying each map at most once for the whole
+ * fold instead of once per event: a replay folds thousands of watcher runs,
+ * and a copy per event made it quadratic. `state` itself is never mutated.
+ */
+export function projectAll(state: Projection, events: Iterable<StoredEvent>): Projection {
+  const scope: FoldScope = { owned: new Set(), openRuns: null }
+  let projection = state
+  for (const event of events) projection = fold(projection, event, scope)
+  return projection
+}
+
+type FoldScope = {
+  /** Maps copied earlier in this fold, so they may be written in place. */
+  owned: Set<object>
+  /**
+   * Keys of runs that were open when last seen, per watcher. Built on the
+   * fold's first run start; may hold runs finished since, so check endedAt.
+   */
+  openRuns: Map<string, string[]> | null
+}
+
+const watcherId = (repo: string, name: string): string => JSON.stringify([repo, name])
+
+function fold(state: Projection, event: StoredEvent, scope: FoldScope): Projection {
+  const own = <T extends object>(map: T): T => {
+    if (scope.owned.has(map)) return map
+    const copy = { ...map }
+    scope.owned.add(copy)
+    return copy
+  }
   if (event.type === 'watcher.run.started') {
     const key = watcherRunKey(event.repo, event.name, event.runId)
-    const watcherRuns = { ...state.watcherRuns }
+    const watcherRuns = own(state.watcherRuns)
+    if (scope.openRuns === null) {
+      scope.openRuns = new Map()
+      for (const [k, run] of Object.entries(watcherRuns)) {
+        if (run.endedAt !== null) continue
+        const id = watcherId(run.repo, run.name)
+        scope.openRuns.set(id, [...(scope.openRuns.get(id) ?? []), k])
+      }
+    }
+    const id = watcherId(event.repo, event.name)
     // A watcher's ticks are sequential, so a run still open when the next one
     // starts died with its process (a serve restart) and never finishes.
-    for (const [k, run] of Object.entries(watcherRuns)) {
-      if (run.repo !== event.repo || run.name !== event.name || run.endedAt !== null) continue
+    for (const k of scope.openRuns.get(id) ?? []) {
+      const run = watcherRuns[k]
+      if (run === undefined || run.endedAt !== null) continue
       const error = 'interrupted: the watcher restarted before this run finished'
       watcherRuns[k] = {
         ...run,
@@ -135,6 +179,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         log: [...run.log, { ts: event.ts, message: `run ${error}`, level: 'error' }],
       }
     }
+    scope.openRuns.set(id, [key])
     watcherRuns[key] = {
       repo: event.repo,
       name: event.name,
@@ -148,13 +193,13 @@ export function project(state: Projection, event: StoredEvent): Projection {
       startSeq: event.seq,
       endSeq: null,
     }
-    return { ...state, watcherRuns }
+    return watcherRuns === state.watcherRuns ? state : { ...state, watcherRuns }
   }
   if (event.type === 'watcher.action') {
     const key = watcherRunKey(event.repo, event.name, event.runId)
     const currentRun = state.watcherRuns[key]
     if (currentRun === undefined) return state
-    const watcherRuns = { ...state.watcherRuns }
+    const watcherRuns = own(state.watcherRuns)
     const action: ProjectedWatcherAction = {
       targetType: event.targetType,
       targetId: event.targetId,
@@ -176,13 +221,13 @@ export function project(state: Projection, event: StoredEvent): Projection {
         },
       ],
     }
-    return { ...state, watcherRuns }
+    return watcherRuns === state.watcherRuns ? state : { ...state, watcherRuns }
   }
   if (event.type === 'watcher.run.finished') {
     const key = watcherRunKey(event.repo, event.name, event.runId)
     const currentRun = state.watcherRuns[key]
     if (currentRun === undefined) return state
-    const watcherRuns = { ...state.watcherRuns }
+    const watcherRuns = own(state.watcherRuns)
     const error = event.error ?? null
     watcherRuns[key] = {
       ...currentRun,
@@ -199,7 +244,7 @@ export function project(state: Projection, event: StoredEvent): Projection {
         },
       ],
     }
-    return { ...state, watcherRuns }
+    return watcherRuns === state.watcherRuns ? state : { ...state, watcherRuns }
   }
   if (event.taskId === null) return state
   // Copy-on-write: the clients fold tens of thousands of events, most of which
@@ -207,11 +252,11 @@ export function project(state: Projection, event: StoredEvent): Projection {
   let tasks = state.tasks
   let questions = state.questions
   const writeTasks = () => {
-    if (tasks === state.tasks) tasks = { ...state.tasks }
+    tasks = own(tasks)
     return tasks
   }
   const writeQuestions = () => {
-    if (questions === state.questions) questions = { ...state.questions }
+    questions = own(questions)
     return questions
   }
   const current = tasks[event.taskId]

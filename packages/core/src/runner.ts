@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import * as z from 'zod'
 import { changedCheckTooling } from './check-tooling.ts'
 import { stageAndCommit } from './commit.ts'
@@ -123,6 +123,9 @@ function mergeAgentRuns(prev: AgentRun, next: AgentRun): AgentRun {
     effort: next.effort ?? prev.effort,
   }
 }
+
+/** Worktree dir for agent-to-runner hand-off files; excluded from git, removed before commit. */
+const SCRATCH_DIR = '.amagi-tmp'
 
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
@@ -861,7 +864,25 @@ export class Runner {
           finding.scope === 'in-scope' &&
           !findingSeverityAtOrAbove(finding.severity, config.review.threshold),
       )
-      const replyPath = join(runStateDir(task.id), `review-replies-${round}-${Date.now()}.json`)
+      // The reply file lives in the worktree because a sandboxed implementer cannot write the
+      // state dir. The dir is hidden through the repo-local exclude, never the tracked .gitignore.
+      const scratchDir = join(cwd, SCRATCH_DIR)
+      const excludePath = resolve(
+        cwd,
+        (
+          await execOk(this.exec, ['git', 'rev-parse', '--git-path', 'info/exclude'], { cwd })
+        ).trim(),
+      )
+      const excludes = existsSync(excludePath) ? readFileSync(excludePath, 'utf8') : ''
+      if (!excludes.split('\n').includes(`/${SCRATCH_DIR}/`)) {
+        mkdirSync(dirname(excludePath), { recursive: true })
+        appendFileSync(
+          excludePath,
+          `${excludes === '' || excludes.endsWith('\n') ? '' : '\n'}/${SCRATCH_DIR}/\n`,
+        )
+      }
+      mkdirSync(scratchDir, { recursive: true })
+      const replyPath = join(scratchDir, `review-replies-${round}-${Date.now()}.json`)
       const schemaPath = `${replyPath}.schema.json`
       writeFileSync(schemaPath, JSON.stringify(z.toJSONSchema(z.array(FindingReply)), null, 2))
       const prompt = [
@@ -870,6 +891,7 @@ export class Runner {
         `Below-threshold in-scope findings are optional; consider these while fixing:\n${JSON.stringify(optional, null, 2)}`,
         `Write only a JSON array of FindingReply objects to ${replyPath}\nRequired schema: ${JSON.stringify(z.toJSONSchema(z.array(FindingReply)))}`,
         'Every blocking finding id must appear exactly once. Do not omit a finding. A wont-fix reply needs a specific reason.',
+        `${SCRATCH_DIR}/ is runner scratch: write only that reply file there and touch nothing else in it.`,
       ].join('\n\n')
       this.transition(task.id, 'fixing')
       let fix: AgentRun & { stopped: boolean }
@@ -914,12 +936,10 @@ export class Runner {
         failure = `implementer replies were invalid: ${errMsg(error)}`
         unresolvedIds = blocking.map((finding) => finding.id)
         stopReason = 'rounds'
-        rmSync(replyPath, { force: true })
-        rmSync(schemaPath, { force: true })
+        rmSync(scratchDir, { recursive: true, force: true })
         break
       }
-      rmSync(replyPath, { force: true })
-      rmSync(schemaPath, { force: true })
+      rmSync(scratchDir, { recursive: true, force: true })
       store.append(task.id, { type: 'review.fixed', round, replies })
       priorReplies = replies
       for (const reply of replies) if (reply.outcome === 'fixed') fixedIds.add(reply.id)
@@ -1220,7 +1240,7 @@ export class Runner {
     } else {
       this.deps.store.append(task.id, {
         type: 'review.skipped',
-        reason: 'no enabled fleet worker has the Review role and review.enabled is off',
+        reason: 'review.enabled is off for this repository',
       })
     }
 
@@ -1963,12 +1983,13 @@ export class Runner {
       opts.model ?? implement.model ?? null,
       opts.seat ?? implement.seat,
     )
+    const retryState =
+      phase === 'fix review' ? 'fixing' : role === 'review' ? 'reviewing' : 'implementing'
 
     for (let attempt = 1; ; attempt++) {
       const waitingOnUsageHold = readUsageHold(holdKey) !== null
       const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
-      if (waitingOnUsageHold && !this.isCancelled(taskId))
-        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+      if (waitingOnUsageHold && !this.isCancelled(taskId)) this.transition(taskId, retryState)
       let run: Awaited<ReturnType<Runner['runAgent']>>
       try {
         run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
@@ -2016,7 +2037,7 @@ export class Runner {
         this.peakContext = 0
         this.contextWarned = false
         runOpts = { ...runOpts, prompt: withRestartHandoff(opts.prompt, handoff) }
-        this.transition(taskId, role === 'review' ? 'reviewing' : 'implementing')
+        if (retryState !== 'fixing') this.transition(taskId, retryState)
         releaseProbe?.()
         continue
       }
@@ -2086,7 +2107,7 @@ export class Runner {
         await Bun.sleep(Math.min(100, deadline - Date.now()))
       }
       if (lease?.isLost) throw new LeaseLostError(taskId)
-      if (role !== 'review') this.transition(taskId, 'implementing')
+      if (role !== 'review') this.transition(taskId, retryState)
     }
   }
 
@@ -2338,6 +2359,7 @@ export class Runner {
     base: string,
     run: { summary: string; model: string | null; effort: string | null },
   ): Promise<boolean> {
+    rmSync(join(cwd, SCRATCH_DIR), { recursive: true, force: true })
     await stageAndCommit(this.exec, task, cwd, run.summary, this.commitMeta(run.model, run.effort))
 
     // A clean worktree may still hold the agent's own commit from the session;

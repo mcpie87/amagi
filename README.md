@@ -29,7 +29,7 @@ to the API at `http://127.0.0.1:7777`.
 
 ### Dashboard
 
-The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search workspace** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
+The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
 
 - **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button. An **Auto queue** toggle turns automatic dispatch on or off (when on, free slots are filled as tasks become claimable).
 - **Tasks** browses the tracker's issues in board or list view (the choice is remembered), with a search box, a status filter, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
@@ -255,10 +255,14 @@ automatically is the global **Auto queue** setting (`loop.autoQueue`), not a
 per-worker one.
 
 A seat names the credential an agent uses. Amagi guarantees that at most one
-agent is live on a seat at a time, even when different workers, watchers, or a
-chat reply request it. A worker without an explicit seat uses its harness kind
-as the seat name. Enabled worker replicas can run up to their assigned seat's
-slot capacity; workers assigned to the same slot take turns.
+worker or watcher agent is live on a seat at a time. A worker without an
+explicit seat uses its harness kind as the seat name. Enabled worker replicas
+can run up to their assigned seat's slot capacity; workers assigned to the same
+slot take turns. Chat replies ignore seats.
+
+Separately, `harness.maxProcesses` caps how many agent processes run at once
+across every amagi on the host, chats included; a launch past the cap waits for
+one to exit.
 
 Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
 override them in a repo's `.amagi/config.toml` when needed. The `mention`,
@@ -284,6 +288,7 @@ below gives the schema and defaults.
 | `seats[]` | table array | `[]` | Named credential seats, configured with `[[seats]]`; existing string entries remain one-slot seats. |
 | `seats[].name` | string | required | Stable seat identifier referenced by `worker[].seat`. |
 | `seats[].count` | integer | `1` | Number of concurrent slots provided by the credential seat. |
+| `harness.maxProcesses` | integer | `5` | Global-only hard cap (1 to 64) on agent processes running at once on the host: workers, watchers and chats. Editable from the dashboard fleet page. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
 | `watchers.mention.allowedAuthors` | string[] | `[]` | Exact forge usernames whose mentions may trigger responses. Empty or omitted disables mention-triggered responses. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
