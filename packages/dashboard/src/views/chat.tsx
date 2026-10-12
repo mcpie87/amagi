@@ -1252,9 +1252,9 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
                   if (message.role === 'user') {
                     return (
                       <div key={message.id} className="flex justify-end">
-                        <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-raised px-4 py-2.5 text-[15px] leading-6 text-fg-strong">
-                          {message.content}
-                        </p>
+                        <div className="chat-reply max-w-[85%] rounded-2xl rounded-br-md bg-raised px-4 py-2.5 text-[15px] leading-6 text-fg-strong">
+                          <Markdown text={message.content} />
+                        </div>
                       </div>
                     )
                   }
