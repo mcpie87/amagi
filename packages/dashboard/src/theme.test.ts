@@ -14,7 +14,14 @@ function installGlobals(osLight: boolean): Map<string, string> {
     },
   }
   ;(globalThis as Record<string, unknown>).document = {
-    documentElement: { dataset: {} as Record<string, string> },
+    documentElement: {
+      dataset: {} as Record<string, string>,
+      style: {
+        colorScheme: '',
+        setProperty: () => {},
+        removeProperty: () => {},
+      },
+    },
     querySelector: () => ({ setAttribute: () => {} }),
   }
   ;(globalThis as Record<string, unknown>).window = {

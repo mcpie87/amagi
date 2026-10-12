@@ -16,6 +16,9 @@ import {
   expandTilde,
   expandWorkers,
   type GitIdentity,
+  HARDCODED_EFFORTS,
+  HARDCODED_MODELS,
+  InteractionTimings,
   type LiveRun,
   loadConfig,
   loadGlobalConfig,
@@ -32,6 +35,7 @@ import {
   type RunServiceApi,
   requestSource,
   type Store,
+  setHarnessProcessCap,
   type Tracker,
   Triage,
   type WorkerActivity,
@@ -46,11 +50,16 @@ import type { Harness } from '@amagi/core/drivers/types'
 import type { Context } from 'hono'
 import { Hono } from 'hono'
 import { routePath } from 'hono/route'
+import { createChatRoutes } from './chat-routes.ts'
 import { createFleetRoutes } from './fleet-routes.ts'
 import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
+  InteractionBatch,
+  InteractionQuery,
+  ProcessCapUpdateBody,
+  ProfilesUpdateBody,
   QuestionQuery,
   RepoCommitParam,
   RepoParam,
@@ -83,6 +92,8 @@ export type ServerDeps = {
   chatHarnessFor?: (ws: Workspace) => Harness
   /** Shared with `serve` so its event-loop monitor lands in the same snapshot. */
   timings?: RequestTimings
+  /** Dashboard interaction timings; serve shares the diagnostics file with `timings`. */
+  interactions?: InteractionTimings
 }
 
 const SLOW_REQUEST_MS = 1000
@@ -204,6 +215,7 @@ export function createApp({
   liveRuns,
   chatHarnessFor,
   timings = new RequestTimings(),
+  interactions = new InteractionTimings(),
 }: ServerDeps) {
   // One ChatService per workspace, so the in-flight guard survives requests.
   const chats = new Map<string, ChatService>()
@@ -294,8 +306,25 @@ export function createApp({
 
     .route('/', createIssueRoutes(workspaces))
 
+    .route(
+      '/',
+      createChatRoutes({
+        workspaces,
+        harnessFor: (ws, config) => chatHarnessFor?.(ws) ?? makeHarness(config),
+      }),
+    )
+
     .get('/api/diagnostics/requests', valid('query', TimingQuery), (c) =>
       c.json(timings.snapshot(c.req.valid('query'))),
+    )
+
+    .post('/api/diagnostics/interactions', valid('json', InteractionBatch), (c) => {
+      interactions.record(c.req.valid('json').interactions)
+      return c.body(null, 204)
+    })
+
+    .get('/api/diagnostics/interactions', valid('query', InteractionQuery), (c) =>
+      c.json(interactions.snapshot(c.req.valid('query'))),
     )
 
     .get('/api/health', (c) => c.json({ ok: true }))
@@ -323,6 +352,31 @@ export function createApp({
         }
       }
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
+    })
+
+    .get('/api/profiles', (c) =>
+      c.json({
+        profiles: loadGlobalConfig().profiles,
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+      }),
+    )
+
+    .put('/api/profiles', valid('json', ProfilesUpdateBody), (c) => {
+      const { profiles } = c.req.valid('json')
+      writeGlobalConfig({ profiles })
+      return c.json({ profiles })
+    })
+
+    .get('/api/harness-process-cap', (c) =>
+      c.json({ maxProcesses: loadGlobalConfig().harness.maxProcesses }),
+    )
+
+    .put('/api/harness-process-cap', valid('json', ProcessCapUpdateBody), (c) => {
+      const { maxProcesses } = c.req.valid('json')
+      writeGlobalConfig({ harness: { maxProcesses } })
+      setHarnessProcessCap(maxProcesses)
+      return c.json({ maxProcesses })
     })
 
     .get('/api/seat-names', (c) => {

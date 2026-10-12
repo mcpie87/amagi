@@ -1,15 +1,21 @@
+import type { ProjectedWatcherRun } from '@amagi/core/project'
 import type { WorkerActivity } from '@amagi/core/run-service'
 import { type DashboardState, watcherRunsFor } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
+import { apiBase } from '../api.ts'
 import { PILL } from '../badges.tsx'
 import { useDateFormatPref } from '../date-format.ts'
 import { fmtDateTime, fmtElapsed, fmtInterval, fmtLastRun, fmtUntil } from '../format.ts'
+
+type HistoryPage = { runs: ProjectedWatcherRun[]; nextBeforeSeq: number | null }
 
 /**
  * Detail view for one background watcher (mention / pr-conflict / stall),
  * opened by clicking its slot in the Workers section. The watcher is looked
  * up live from the polled runner status, so the open dialog stays current.
+ * History is paged from the server, since the compact replay leaves it out;
+ * runs that start after the replay arrive through `state` and win the merge.
  */
 export function WatcherDetailDialog({
   selected,
@@ -34,9 +40,51 @@ export function WatcherDetailDialog({
       dialog.showModal()
     } else if (dialog.open) dialog.close()
   }, [open])
-  if (selected === null) return null
   const watcher = workers.find((w) => `${w.repo}/${w.name}` === selected) ?? null
-  const history = watcher === null ? [] : watcherRunsFor(state, watcher.repo, watcher.name)
+  const repo = watcher?.repo
+  const name = watcher?.name
+  const [page, setPage] = useState<HistoryPage | null>(null)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const runsUrl =
+    repo === undefined || name === undefined
+      ? null
+      : `${apiBase}/api/repos/${encodeURIComponent(repo)}/watchers/${encodeURIComponent(name)}/runs`
+  useEffect(() => {
+    setPage(null)
+    if (runsUrl === null) return
+    let alive = true
+    fetch(runsUrl)
+      .then((res) => (res.ok ? (res.json() as Promise<HistoryPage>) : null))
+      .then((first) => {
+        if (alive && first !== null) setPage(first)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [runsUrl])
+  const loadOlder = () => {
+    if (runsUrl === null || page?.nextBeforeSeq == null) return
+    setLoadingOlder(true)
+    fetch(`${runsUrl}?beforeSeq=${page.nextBeforeSeq}`)
+      .then((res) => (res.ok ? (res.json() as Promise<HistoryPage>) : null))
+      .then((older) => {
+        if (older === null) return
+        setPage((current) =>
+          current === null
+            ? older
+            : { runs: [...current.runs, ...older.runs], nextBeforeSeq: older.nextBeforeSeq },
+        )
+      })
+      .catch(() => {})
+      .finally(() => setLoadingOlder(false))
+  }
+  if (selected === null) return null
+  const merged = new Map((page?.runs ?? []).map((run) => [run.runId, run]))
+  if (repo !== undefined && name !== undefined) {
+    for (const run of watcherRunsFor(state, repo, name)) merged.set(run.runId, run)
+  }
+  const history = [...merged.values()].sort((a, b) => b.startSeq - a.startSeq)
   const historyGroups: (typeof history)[] = []
   for (const run of history) {
     const previous = historyGroups.at(-1)
@@ -152,7 +200,7 @@ export function WatcherDetailDialog({
               onClick={() => setActiveTab('history')}
               className={`rounded-t px-3 py-1.5 text-sm ${
                 activeTab === 'history'
-                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  ? 'border-b-2 border-accent text-fg-strong'
                   : 'text-fg-muted hover:text-fg'
               }`}
             >
@@ -164,7 +212,7 @@ export function WatcherDetailDialog({
               onClick={() => setActiveTab('log')}
               className={`rounded-t px-3 py-1.5 text-sm ${
                 activeTab === 'log'
-                  ? 'border-b-2 border-sky-500 text-fg-strong'
+                  ? 'border-b-2 border-accent text-fg-strong'
                   : 'text-fg-muted hover:text-fg'
               }`}
             >
@@ -174,7 +222,9 @@ export function WatcherDetailDialog({
           {activeTab === 'history' && (
             <div className="border-t border-line pt-4">
               {history.length === 0 ? (
-                <p className="mt-2 text-xs text-fg-faint">no runs recorded yet</p>
+                <p className="mt-2 text-xs text-fg-faint">
+                  {page === null ? 'loading runs…' : 'no runs recorded yet'}
+                </p>
               ) : (
                 <div className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-1">
                   {historyGroups.map((group) => {
@@ -266,6 +316,16 @@ export function WatcherDetailDialog({
                       </details>
                     )
                   })}
+                  {page?.nextBeforeSeq != null && (
+                    <button
+                      type="button"
+                      disabled={loadingOlder}
+                      onClick={loadOlder}
+                      className="w-full rounded border border-line px-3 py-1 text-xs text-fg-muted hover:bg-raised hover:text-fg disabled:opacity-50"
+                    >
+                      {loadingOlder ? 'Loading…' : 'Show older runs'}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
