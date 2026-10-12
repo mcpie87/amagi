@@ -1,20 +1,85 @@
-import type { RequestSample, RouteTiming, TimingSnapshot } from '@amagi/core/request-timings'
-import { type ReactNode, useEffect, useRef, useState } from 'react'
-import { apiBase } from '../api.ts'
+import type {
+  RequestSample,
+  RouteTiming,
+  SourceTiming,
+  TimingSnapshot,
+} from '@amagi/core/request-timings'
+import { useState } from 'react'
 import { fmtAgo } from '../format.ts'
 import { EmptyState, Time } from '../ui.tsx'
+import { InteractionsPanel } from './diagnostics-interactions.tsx'
+import {
+  Field,
+  fmtMs,
+  inputClass,
+  Modal,
+  msTone,
+  SortHeader,
+  type SortState,
+  type SortValue,
+  Stat,
+  sortedRows,
+  toggleSort,
+  usePolled,
+} from './diagnostics-ui.tsx'
 
-const POLL_MS = 3000
-
-function fmtMs(ms: number): string {
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
-  return ms < 10 ? `${ms.toFixed(1)}ms` : `${Math.round(ms)}ms`
+function sampleSortValue(sample: RequestSample, column: string): SortValue {
+  switch (column) {
+    case 'at':
+      return sample.at
+    case 'request':
+      return `${sample.method} ${sample.path}${sample.query === '' ? '' : `?${sample.query}`}`
+    case 'source':
+      return sample.source
+    case 'status':
+      return sample.status
+    case 'duration':
+      return sample.ms
+    default:
+      return ''
+  }
 }
 
-function msTone(ms: number, warn: number, bad: number): string {
-  if (ms >= bad) return 'text-red-ink'
-  if (ms >= warn) return 'text-amber-ink'
-  return ''
+function routeSortValue(route: RouteTiming, column: string): SortValue {
+  switch (column) {
+    case 'route':
+      return `${route.method} ${route.route}`
+    case 'calls':
+      return route.count
+    case 'errors':
+      return route.errors
+    case 'avg':
+      return route.avgMs
+    case 'p50':
+      return route.p50Ms
+    case 'p95':
+      return route.p95Ms
+    case 'max':
+      return route.maxMs
+    case 'total':
+      return route.totalMs
+    default:
+      return ''
+  }
+}
+
+function sourceSortValue(source: SourceTiming, column: string): SortValue {
+  switch (column) {
+    case 'source':
+      return source.source
+    case 'calls':
+      return source.count
+    case 'errors':
+      return source.errors
+    case 'avg':
+      return source.avgMs
+    case 'total':
+      return source.totalMs
+    case 'last':
+      return source.lastAt
+    default:
+      return ''
+  }
 }
 
 function statusTone(status: number): string {
@@ -51,42 +116,8 @@ function filterQuery(filters: Filters): string {
   return params.toString()
 }
 
-const inputClass =
-  'rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600'
-
-function useTimings(paused: boolean, query: string): TimingSnapshot | null | 'error' {
-  const [snapshot, setSnapshot] = useState<TimingSnapshot | null | 'error'>(null)
-  useEffect(() => {
-    if (paused) return
-    let active = true
-    const refresh = () => {
-      fetch(`${apiBase}/api/diagnostics/requests${query === '' ? '' : `?${query}`}`)
-        .then((response) => (response.ok ? (response.json() as Promise<TimingSnapshot>) : null))
-        .then((value) => {
-          if (active) setSnapshot(value ?? 'error')
-        })
-        .catch(() => {
-          if (active) setSnapshot('error')
-        })
-    }
-    refresh()
-    const timer = setInterval(refresh, POLL_MS)
-    return () => {
-      active = false
-      clearInterval(timer)
-    }
-  }, [paused, query])
-  return snapshot
-}
-
-function Stat({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="rounded-lg border border-line bg-surface px-4 py-3">
-      <div className="text-xs uppercase tracking-wide text-fg-faint">{label}</div>
-      <div className={`mt-1 text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
-    </div>
-  )
-}
+const useTimings = (paused: boolean, query: string) =>
+  usePolled<TimingSnapshot>(paused, `/api/diagnostics/requests${query === '' ? '' : `?${query}`}`)
 
 function SampleTable({
   title,
@@ -97,6 +128,9 @@ function SampleTable({
   samples: RequestSample[]
   onSelect: (sample: RequestSample) => void
 }) {
+  const [sort, setSort] = useState<SortState | null>(null)
+  const rows = sortedRows(samples, sort, sampleSortValue)
+  const onSort = (column: string) => setSort((current) => toggleSort(current, column))
   return (
     <section className="mt-6">
       <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">{title}</h2>
@@ -104,15 +138,27 @@ function SampleTable({
         <table className="w-full text-sm">
           <thead className="border-b border-line text-left text-xs text-fg-faint">
             <tr>
-              <th className="px-4 py-2 font-medium">At</th>
-              <th className="px-4 py-2 font-medium">Request</th>
-              <th className="px-4 py-2 font-medium">Source</th>
-              <th className="px-4 py-2 text-right font-medium">Status</th>
-              <th className="px-4 py-2 text-right font-medium">Duration</th>
+              <SortHeader column="at" label="At" sort={sort} onSort={onSort} />
+              <SortHeader column="request" label="Request" sort={sort} onSort={onSort} />
+              <SortHeader column="source" label="Source" sort={sort} onSort={onSort} />
+              <SortHeader
+                column="status"
+                label="Status"
+                sort={sort}
+                onSort={onSort}
+                className="px-4 py-2 text-right font-medium"
+              />
+              <SortHeader
+                column="duration"
+                label="Duration"
+                sort={sort}
+                onSort={onSort}
+                className="px-4 py-2 text-right font-medium"
+              />
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {samples.map((s) => (
+            {rows.map((s) => (
               <tr key={s.id} onClick={() => onSelect(s)} className="cursor-pointer hover:bg-raised">
                 <td className="whitespace-nowrap px-4 py-2 text-xs text-fg-muted">
                   <Time ts={s.at} />
@@ -136,66 +182,6 @@ function SampleTable({
         </table>
       </div>
     </section>
-  )
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <dt className="text-xs text-fg-faint">{label}</dt>
-      <dd className="mt-0.5 break-all text-fg">{children}</dd>
-    </div>
-  )
-}
-
-/**
- * Mount it only while open: it opens on mount, which puts it in the top layer
- * above any modal already open, so a request opened from the route modal
- * stacks on top and Esc closes just that one.
- */
-function Modal({
-  title,
-  wide = false,
-  onClose,
-  children,
-}: {
-  title: string
-  wide?: boolean
-  onClose: () => void
-  children: ReactNode
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null)
-  useEffect(() => {
-    dialogRef.current?.showModal()
-  }, [])
-  return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc already closes via onCancel; this only handles backdrop clicks.
-    <dialog
-      ref={dialogRef}
-      onCancel={(event) => {
-        event.preventDefault()
-        onClose()
-      }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose()
-      }}
-      className="watcher-dialog"
-      style={wide ? { width: 'min(960px, calc(100vw - 32px))' } : undefined}
-    >
-      <div className="watcher-dialog-content p-4">
-        <div className="break-all font-mono text-sm text-fg-strong">{title}</div>
-        {children}
-        <div className="mt-4 flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </dialog>
   )
 }
 
@@ -318,6 +304,12 @@ function RouteDetailDialog({
   params.set('route', selected.route)
   const snapshot = useTimings(paused, params.toString())
   const timing = snapshot === null || snapshot === 'error' ? undefined : snapshot.routes[0]
+  const [sourceSort, setSourceSort] = useState<SortState | null>(null)
+  const callers =
+    snapshot === null || snapshot === 'error'
+      ? []
+      : sortedRows(snapshot.sources, sourceSort, sourceSortValue)
+  const onSourceSort = (column: string) => setSourceSort((current) => toggleSort(current, column))
   return (
     <Modal title={`${selected.method} ${selected.route}`} wide onClose={onClose}>
       {snapshot === 'error' ? (
@@ -376,15 +368,44 @@ function RouteDetailDialog({
               <table className="w-full text-sm">
                 <thead className="border-b border-line text-left text-xs text-fg-faint">
                   <tr>
-                    <th className="px-4 py-2 font-medium">Source</th>
-                    <th className="px-4 py-2 text-right font-medium">Calls</th>
-                    <th className="px-4 py-2 text-right font-medium">5xx</th>
-                    <th className="px-4 py-2 text-right font-medium">Avg</th>
-                    <th className="px-4 py-2 text-right font-medium">Total</th>
+                    <SortHeader
+                      column="source"
+                      label="Source"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                    />
+                    <SortHeader
+                      column="calls"
+                      label="Calls"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
+                    <SortHeader
+                      column="errors"
+                      label="5xx"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
+                    <SortHeader
+                      column="avg"
+                      label="Avg"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
+                    <SortHeader
+                      column="total"
+                      label="Total"
+                      sort={sourceSort}
+                      onSort={onSourceSort}
+                      className="px-4 py-2 text-right font-medium"
+                    />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
-                  {snapshot.sources.map((s) => (
+                  {callers.map((s) => (
                     <tr key={s.source}>
                       <td className="break-all px-4 py-2 font-mono text-xs">{s.source}</td>
                       <td className="px-4 py-2 text-right tabular-nums">{s.count}</td>
@@ -413,14 +434,25 @@ function RouteDetailDialog({
   )
 }
 
-export function DiagnosticsView() {
-  const [paused, setPaused] = useState(false)
+function RequestsPanel({ paused }: { paused: boolean }) {
   const [filters, setFilters] = useState<Filters>(NO_FILTERS)
   const [advanced, setAdvanced] = useState(false)
   const [selected, setSelected] = useState<RequestSample | null>(null)
   const [selectedRoute, setSelectedRoute] = useState<RouteKey | null>(null)
+  const [routeSort, setRouteSort] = useState<SortState | null>(null)
+  const [sourceSort, setSourceSort] = useState<SortState | null>(null)
   const query = filterQuery(filters)
   const snapshot = useTimings(paused, query)
+  const routes =
+    snapshot === null || snapshot === 'error'
+      ? []
+      : sortedRows(snapshot.routes, routeSort, routeSortValue)
+  const sources =
+    snapshot === null || snapshot === 'error'
+      ? []
+      : sortedRows(snapshot.sources, sourceSort, sourceSortValue)
+  const onRouteSort = (column: string) => setRouteSort((current) => toggleSort(current, column))
+  const onSourceSort = (column: string) => setSourceSort((current) => toggleSort(current, column))
   const requestRoute =
     selected === null || snapshot === null || snapshot === 'error'
       ? null
@@ -430,25 +462,7 @@ export function DiagnosticsView() {
     setFilters((f) => ({ ...f, [key]: e.target.value }))
 
   return (
-    <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>Diagnostics</h1>
-          <p className="text-sm text-fg-muted">
-            API request timings, kept across server restarts until they age out. Stream routes
-            measure time to first byte. Source is the dashboard page that was open, or the client's
-            user agent for the TUI, CLI and other callers.
-          </p>
-        </div>
-        <button
-          type="button"
-          aria-pressed={paused}
-          onClick={() => setPaused((p) => !p)}
-          className="rounded border border-line-strong px-3 py-1.5 text-sm text-fg-muted hover:text-fg"
-        >
-          {paused ? 'Resume' : 'Pause'}
-        </button>
-      </header>
+    <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           type="search"
@@ -581,24 +595,71 @@ export function DiagnosticsView() {
               )}
               <section className="mt-6">
                 <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                  By route, most total time first
+                  By route
                 </h2>
                 <div className="overflow-x-auto rounded-lg border border-line bg-surface">
                   <table className="w-full text-sm">
                     <thead className="border-b border-line text-left text-xs text-fg-faint">
                       <tr>
-                        <th className="px-4 py-2 font-medium">Route</th>
-                        <th className="px-4 py-2 text-right font-medium">Calls</th>
-                        <th className="px-4 py-2 text-right font-medium">5xx</th>
-                        <th className="px-4 py-2 text-right font-medium">Avg</th>
-                        <th className="px-4 py-2 text-right font-medium">p50</th>
-                        <th className="px-4 py-2 text-right font-medium">p95</th>
-                        <th className="px-4 py-2 text-right font-medium">Max</th>
-                        <th className="px-4 py-2 text-right font-medium">Total</th>
+                        <SortHeader
+                          column="route"
+                          label="Route"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                        />
+                        <SortHeader
+                          column="calls"
+                          label="Calls"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="errors"
+                          label="5xx"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="avg"
+                          label="Avg"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="p50"
+                          label="p50"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="p95"
+                          label="p95"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="max"
+                          label="Max"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="total"
+                          label="Total"
+                          sort={routeSort}
+                          onSort={onRouteSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-line">
-                      {snapshot.routes.map((r) => (
+                      {routes.map((r) => (
                         <tr
                           key={`${r.method} ${r.route}`}
                           onClick={() => setSelectedRoute(r)}
@@ -648,22 +709,57 @@ export function DiagnosticsView() {
               </section>
               <section className="mt-6">
                 <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-                  By source, most total time first
+                  By source
                 </h2>
                 <div className="overflow-x-auto rounded-lg border border-line bg-surface">
                   <table className="w-full text-sm">
                     <thead className="border-b border-line text-left text-xs text-fg-faint">
                       <tr>
-                        <th className="px-4 py-2 font-medium">Source</th>
-                        <th className="px-4 py-2 text-right font-medium">Calls</th>
-                        <th className="px-4 py-2 text-right font-medium">5xx</th>
-                        <th className="px-4 py-2 text-right font-medium">Avg</th>
-                        <th className="px-4 py-2 text-right font-medium">Total</th>
-                        <th className="px-4 py-2 text-right font-medium">Last</th>
+                        <SortHeader
+                          column="source"
+                          label="Source"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                        />
+                        <SortHeader
+                          column="calls"
+                          label="Calls"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="errors"
+                          label="5xx"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="avg"
+                          label="Avg"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="total"
+                          label="Total"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
+                        <SortHeader
+                          column="last"
+                          label="Last"
+                          sort={sourceSort}
+                          onSort={onSourceSort}
+                          className="px-4 py-2 text-right font-medium"
+                        />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-line">
-                      {snapshot.sources.map((s) => (
+                      {sources.map((s) => (
                         <tr key={s.source}>
                           <td className="break-all px-4 py-2 font-mono text-xs">{s.source}</td>
                           <td className="px-4 py-2 text-right tabular-nums">{s.count}</td>
@@ -717,6 +813,79 @@ export function DiagnosticsView() {
           onClose={() => setSelected(null)}
         />
       )}
+    </>
+  )
+}
+
+const TABS = [
+  {
+    id: 'requests',
+    label: 'Requests',
+    blurb:
+      "API request timings, kept across server restarts until they age out. Stream routes measure time to first byte. Source is the dashboard page that was open, or the client's user agent for the TUI, CLI and other callers.",
+  },
+  {
+    id: 'interactions',
+    label: 'Interactions',
+    blurb:
+      'Every click, key press, picker change and keystroke in the dashboard, timed from the input to the first painted frame and to settled: painted with every request it started finished. Kept as long as request timings.',
+  },
+] as const
+
+export function DiagnosticsView() {
+  const [paused, setPaused] = useState(false)
+  const [tab, setTab] = useState<(typeof TABS)[number]['id']>('requests')
+  return (
+    <div className="page">
+      <header className="page-header">
+        <div>
+          <h1>Diagnostics</h1>
+          <p className="text-sm text-fg-muted">{TABS.find((t) => t.id === tab)?.blurb}</p>
+        </div>
+        <button
+          type="button"
+          aria-pressed={paused}
+          onClick={() => setPaused((p) => !p)}
+          className="rounded border border-line-strong px-3 py-1.5 text-sm text-fg-muted hover:text-fg"
+        >
+          {paused ? 'Resume' : 'Pause'}
+        </button>
+      </header>
+      <div
+        role="tablist"
+        aria-label="Diagnostics sections"
+        className="mb-4 flex gap-1 border-b border-line"
+      >
+        {TABS.map(({ id, label }) => (
+          <button
+            key={id}
+            id={`diagnostics-tab-${id}`}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`diagnostics-panel-${id}`}
+            onClick={() => setTab(id)}
+            className={`rounded-t px-3 py-2 text-sm ${
+              tab === id
+                ? 'bg-raised text-fg-strong'
+                : 'text-fg-muted hover:bg-raised hover:text-fg'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        id={`diagnostics-panel-${tab}`}
+        role="tabpanel"
+        aria-labelledby={`diagnostics-tab-${tab}`}
+      >
+        {tab === 'requests' ? (
+          <RequestsPanel paused={paused} />
+        ) : (
+          <InteractionsPanel paused={paused} />
+        )}
+      </div>
     </div>
   )
 }

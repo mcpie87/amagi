@@ -3,6 +3,7 @@ import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
 import { QueueView } from './views/board.tsx'
+import { ChatView } from './views/chat.tsx'
 import { DiagnosticsView } from './views/diagnostics.tsx'
 import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
@@ -18,6 +19,19 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   component: OverviewView,
+})
+export const chatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/chat',
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { triage?: string; repo?: string; chat?: string; thread?: string } => ({
+    ...(typeof search.triage === 'string' ? { triage: search.triage } : {}),
+    ...(typeof search.repo === 'string' ? { repo: search.repo } : {}),
+    ...(typeof search.chat === 'string' ? { chat: search.chat } : {}),
+    ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
+  }),
+  component: ChatView,
 })
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -53,9 +67,11 @@ const diagnosticsRoute = createRoute({
   path: '/diagnostics',
   component: DiagnosticsView,
 })
-const settingsRoute = createRoute({
+export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings',
+  validateSearch: (search: Record<string, unknown>): { repo?: string } =>
+    typeof search.repo === 'string' ? { repo: search.repo } : {},
   component: SettingsView,
 })
 export const manualRoute = createRoute({
@@ -88,6 +104,7 @@ export const gitCommitRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  chatRoute,
   boardRoute,
   issuesRoute,
   inboxRoute,

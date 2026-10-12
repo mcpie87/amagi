@@ -941,13 +941,12 @@ describe('RunService', () => {
     )
   })
 
-  test('review runs resolve their harness, model, and seat from an assigned reviewer', async () => {
-    const captured: Config['harness']['implement'][] = []
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK]),
-      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
-      config: config({
+  test.each([false, true])(
+    'repository review switch controls assigned reviewer: %s',
+    async (enabled) => {
+      const captured: Config['harness']['implement'][] = []
+      const runConfig = config({
+        review: { enabled },
         worker: [
           { id: 'implementer', name: 'Implementer', kind: 'claude', roles: ['implement'] },
           {
@@ -960,30 +959,46 @@ describe('RunService', () => {
             roles: ['review'],
           },
         ],
-      }),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      makeHarness: (cfg) => {
-        captured.push(cfg)
-        return cfg.kind === 'codex'
-          ? new FakeHarness(undefined, '{"findings":[]}')
-          : new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
-      },
-    })
-    const result = await service.start()
-    expect(result).toEqual({ ok: true, taskId: TASK.id })
-    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    expect(captured).toEqual([
-      expect.objectContaining({ kind: 'claude' }),
-      expect.objectContaining({
-        kind: 'codex',
-        model: 'review-model',
-        effort: 'high',
-        seat: 'review-seat',
-      }),
-    ])
-  })
+      })
+      const service = new RunService({
+        store,
+        tracker: new FakeTracker([TASK]),
+        harness: new FakeHarness((cwd) => {
+          writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+          runConfig.review.enabled = !enabled
+        }),
+        config: runConfig,
+        repoRoot: repo,
+        repoName: 'demo',
+        forge: new FakePr(),
+        makeHarness: (cfg) => {
+          captured.push(cfg)
+          return cfg.kind === 'codex'
+            ? new FakeHarness(undefined, '{"findings":[]}')
+            : new FakeHarness((cwd) => {
+                writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+                runConfig.review.enabled = !enabled
+              })
+        },
+      })
+      const result = await service.start()
+      expect(result).toEqual({ ok: true, taskId: TASK.id })
+      await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+      expect(captured).toEqual([
+        expect.objectContaining({ kind: 'claude' }),
+        ...(enabled
+          ? [
+              expect.objectContaining({
+                kind: 'codex',
+                model: 'review-model',
+                effort: 'high',
+                seat: 'review-seat',
+              }),
+            ]
+          : []),
+      ])
+    },
+  )
 
   test('review-only workers are not eligible for implementation runs', async () => {
     const tracker = new FakeTracker([TASK])

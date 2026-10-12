@@ -43,7 +43,7 @@ function Toggle({
       title={title}
       className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
         on
-          ? 'bg-emerald-600 text-on-solid hover:bg-emerald-500'
+          ? 'bg-emerald-ink text-on-solid hover:opacity-90'
           : 'border border-line-strong bg-surface text-fg-muted hover:bg-raised'
       }`}
     >

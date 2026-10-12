@@ -38,6 +38,8 @@ type SeatHolder = SeatTicket
 export type SeatLockOptions = {
   /** Requests at a higher priority are served first; equal priorities stay FIFO. Defaults to high. */
   priority?: SeatRequestPriority
+  /** How many holders may share this seat at once. Defaults to 1. */
+  capacity?: number
   /** Maximum time to wait for this seat before rejecting. Defaults to five minutes, null waits indefinitely. */
   maxWaitMs?: number | null
   /** Called once when another holder or waiter is ahead. */
@@ -136,7 +138,7 @@ async function withAllocator<T>(dir: string, deadline: number, work: () => T): P
   throw new Error('timed out allocating a seat queue ticket')
 }
 
-function queuedTickets(dir: string, holderId: string | undefined): SeatTicket[] {
+function queuedTickets(dir: string, holderIds: Set<string>): SeatTicket[] {
   const queueDir = join(dir, 'queue')
   const tickets: SeatTicket[] = []
   for (const file of readdirSync(queueDir)) {
@@ -147,7 +149,7 @@ function queuedTickets(dir: string, holderId: string | undefined): SeatTicket[] 
       rmSync(path, { force: true })
       continue
     }
-    if (!pidAlive(ticket.pid) || (ticket.id !== holderId && ticketStale(path))) {
+    if (!pidAlive(ticket.pid) || (!holderIds.has(ticket.id) && ticketStale(path))) {
       rmSync(path, { force: true })
       continue
     }
@@ -167,15 +169,20 @@ function ticketStale(path: string): boolean {
   }
 }
 
-function readHolder(dir: string): SeatHolder | undefined {
-  const holderPath = join(dir, 'holder.json')
-  const holder = readJson<SeatHolder>(holderPath)
+/** Slot 0 keeps the single-holder file name so builds without capacity still see it. */
+function holderPath(dir: string, slot: number): string {
+  return join(dir, slot === 0 ? 'holder.json' : `holder-${slot + 1}.json`)
+}
+
+function readHolder(dir: string, slot: number): SeatHolder | undefined {
+  const path = holderPath(dir, slot)
+  const holder = readJson<SeatHolder>(path)
   if (!holder || !Number.isInteger(holder.pid) || typeof holder.id !== 'string') {
-    rmSync(holderPath, { force: true })
+    rmSync(path, { force: true })
     return undefined
   }
   if (!pidAlive(holder.pid)) {
-    rmSync(holderPath, { force: true })
+    rmSync(path, { force: true })
     rmSync(ticketPath(dir, holder.id), { force: true })
     return undefined
   }
@@ -185,6 +192,10 @@ function readHolder(dir: string): SeatHolder | undefined {
 /** Acquire one named seat across all processes sharing the same state home. */
 export async function acquireSeat(seat: string, options: SeatLockOptions = {}): Promise<SeatLease> {
   if (!seat.trim()) throw new Error('seat name must not be empty')
+  const capacity = options.capacity ?? 1
+  if (!Number.isInteger(capacity) || capacity < 1) {
+    throw new Error('seat capacity must be a positive integer')
+  }
   const dir = seatDir(seat, options.directory)
   const queueDir = join(dir, 'queue')
   mkdirSync(queueDir, { recursive: true })
@@ -228,14 +239,18 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
       const now = new Date()
       utimesSync(ticketPath(dir, id), now, now)
     }
-    const holder = readHolder(dir)
-    const queue = queuedTickets(dir, holder?.id)
-    if (holder === undefined && queue[0]?.id === id) {
-      const ticket = queue[0]
-      if (!ticket) break
+    const holders = Array.from({ length: capacity }, (_, slot) => readHolder(dir, slot))
+    const holderIds = new Set(holders.flatMap((holder) => (holder ? [holder.id] : [])))
+    const waiting = queuedTickets(dir, holderIds).filter((ticket) => !holderIds.has(ticket.id))
+    const freeSlots = holders.flatMap((holder, slot) => (holder ? [] : [slot]))
+    // Every waiter sorts the same queue, so the n-th waiter alone claims the n-th free slot.
+    const position = waiting.findIndex((ticket) => ticket.id === id)
+    const ticket = waiting[position]
+    const slot = freeSlots[position]
+    if (ticket !== undefined && slot !== undefined) {
       const nextHolder: SeatHolder = { ...ticket, startedAt: Date.now() }
-      writeAtomic(join(dir, 'holder.json'), nextHolder)
-      return lease(seat, dir, nextHolder)
+      writeAtomic(holderPath(dir, slot), nextHolder)
+      return lease(seat, dir, slot, nextHolder)
     }
     if (!waitingNotified) {
       waitingNotified = true
@@ -249,7 +264,7 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
   throw new SeatWaitTimeoutError(seat, maxWaitMs)
 }
 
-function lease(seat: string, dir: string, ticket: SeatTicket): SeatLease {
+function lease(seat: string, dir: string, slot: number, ticket: SeatTicket): SeatLease {
   let released = false
   let currentTicket = ticket
   return {
@@ -261,13 +276,13 @@ function lease(seat: string, dir: string, ticket: SeatTicket): SeatLease {
         throw new Error('agent pid must be a positive integer')
       currentTicket = { ...currentTicket, pid }
       writeAtomic(ticketPath(dir, currentTicket.id), currentTicket)
-      writeAtomic(join(dir, 'holder.json'), currentTicket)
+      writeAtomic(holderPath(dir, slot), currentTicket)
     },
     release(): void {
       if (released) return
       released = true
-      const currentHolder = readJson<SeatHolder>(join(dir, 'holder.json'))
-      if (currentHolder?.id === currentTicket.id) rmSync(join(dir, 'holder.json'), { force: true })
+      const currentHolder = readJson<SeatHolder>(holderPath(dir, slot))
+      if (currentHolder?.id === currentTicket.id) rmSync(holderPath(dir, slot), { force: true })
       rmSync(ticketPath(dir, currentTicket.id), { force: true })
     },
   }

@@ -195,7 +195,7 @@ function AutoQueueToggle() {
 
   return (
     <div className="flex items-center gap-2">
-      {error !== null && <span className="text-sm text-red-400">{error}</span>}
+      {error !== null && <span className="text-sm text-red-ink">{error}</span>}
       <button
         type="button"
         disabled={busy || runnerRepo === null}
@@ -207,8 +207,8 @@ function AutoQueueToggle() {
         }
         className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
           on
-            ? 'bg-emerald-600 text-zinc-950 hover:bg-emerald-500'
-            : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800'
+            ? 'bg-emerald-ink text-on-solid hover:opacity-90'
+            : 'border border-line-strong bg-surface text-fg-muted hover:bg-raised'
         }`}
       >
         Auto queue: {on ? 'on' : 'off'}
