@@ -19,6 +19,7 @@ import {
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
+  InteractionTimings,
   type LiveRun,
   loadConfig,
   loadGlobalConfig,
@@ -35,6 +36,7 @@ import {
   type RunServiceApi,
   requestSource,
   type Store,
+  setHarnessProcessCap,
   type Tracker,
   Triage,
   type WorkerActivity,
@@ -65,6 +67,9 @@ import { createIssueRoutes } from './issues-routes.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
+  InteractionBatch,
+  InteractionQuery,
+  ProcessCapUpdateBody,
   ProfilesUpdateBody,
   QuestionQuery,
   RepoCommitParam,
@@ -102,6 +107,8 @@ export type ServerDeps = {
   host?: string
   /** The operator secret; generated per server when unset. */
   secret?: string
+  /** Dashboard interaction timings; serve shares the diagnostics file with `timings`. */
+  interactions?: InteractionTimings
 }
 
 const SLOW_REQUEST_MS = 1000
@@ -234,6 +241,7 @@ export function createApp({
   timings = new RequestTimings(),
   host,
   secret = randomBytes(32).toString('hex'),
+  interactions = new InteractionTimings(),
 }: ServerDeps) {
   const authorized = (c: Context, store: Store, id: string): boolean =>
     operatorSession(c, secret) || c.req.header('X-Amagi-Token') === store.token(id)
@@ -359,6 +367,15 @@ export function createApp({
       c.json(timings.snapshot(c.req.valid('query'))),
     )
 
+    .post('/api/diagnostics/interactions', valid('json', InteractionBatch), (c) => {
+      interactions.record(c.req.valid('json').interactions)
+      return c.body(null, 204)
+    })
+
+    .get('/api/diagnostics/interactions', valid('query', InteractionQuery), (c) =>
+      c.json(interactions.snapshot(c.req.valid('query'))),
+    )
+
     .get('/api/health', (c) => c.json({ ok: true }))
 
     .get('/api/usage-rates', (c) => {
@@ -398,6 +415,17 @@ export function createApp({
       const { profiles } = c.req.valid('json')
       writeGlobalConfig({ profiles })
       return c.json({ profiles })
+    })
+
+    .get('/api/harness-process-cap', (c) =>
+      c.json({ maxProcesses: loadGlobalConfig().harness.maxProcesses }),
+    )
+
+    .put('/api/harness-process-cap', valid('json', ProcessCapUpdateBody), (c) => {
+      const { maxProcesses } = c.req.valid('json')
+      writeGlobalConfig({ harness: { maxProcesses } })
+      setHarnessProcessCap(maxProcesses)
+      return c.json({ maxProcesses })
     })
 
     .get('/api/seat-names', (c) => {

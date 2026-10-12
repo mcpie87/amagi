@@ -280,6 +280,41 @@ describe('dashboard state reducer', () => {
     expect(run?.log).toHaveLength(3)
   })
 
+  test('a batched fold closes runs interrupted across and within batches', () => {
+    const start = (seq: number, name: string, runId: string) =>
+      ev(seq, null, seq * 100, { type: 'watcher.run.started', repo: 'repo', name, runId })
+    const finish = (seq: number, name: string, runId: string) =>
+      ev(seq, null, seq * 100, {
+        type: 'watcher.run.finished',
+        repo: 'repo',
+        name,
+        runId,
+        ok: true,
+      })
+    const events = [
+      start(1, 'mention-watcher', 'r1'),
+      start(2, 'pr-conflict-watcher', 'c1'),
+      start(3, 'mention-watcher', 'r2'),
+      start(4, 'mention-watcher', 'r3'),
+      start(5, 'mention-watcher', 'r4'),
+      finish(6, 'mention-watcher', 'r4'),
+    ]
+    const single = events.reduce(reduceState, initialDashboardState())
+    const before = reduceBatch(initialDashboardState(), events.slice(0, 3))
+    const snapshot = structuredClone(before)
+    const batched = reduceBatch(before, events.slice(3))
+    expect(before).toEqual(snapshot)
+    expect(batched).toEqual(single)
+    const runs = watcherRunsFor(batched, 'repo', 'mention-watcher')
+    expect(runs.map((run) => [run.runId, run.error])).toEqual([
+      ['r4', null],
+      ['r3', 'interrupted: the watcher restarted before this run finished'],
+      ['r2', 'interrupted: the watcher restarted before this run finished'],
+      ['r1', 'interrupted: the watcher restarted before this run finished'],
+    ])
+    expect(watcherRunsFor(batched, 'repo', 'pr-conflict-watcher')[0]?.endedAt).toBeNull()
+  })
+
   test('a batch leaves the previous state untouched', () => {
     const before = reduceBatch(initialDashboardState(), recorded.slice(0, 3))
     const snapshot = structuredClone(before)

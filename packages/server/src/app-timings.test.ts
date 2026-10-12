@@ -1,5 +1,10 @@
 import { afterEach, expect, test } from 'bun:test'
-import { RequestTimings, type TimingSnapshot } from '@amagi/core'
+import {
+  type InteractionSample,
+  type InteractionSnapshot,
+  RequestTimings,
+  type TimingSnapshot,
+} from '@amagi/core'
 import { createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
@@ -41,4 +46,37 @@ test('applies the query as a filter and rejects malformed bounds', async () => {
   expect(body.recent.map((s) => s.route)).toEqual(['/api/repos/:repo/questions'])
 
   expect((await app.request('/api/diagnostics/requests?minMs=fast')).status).toBe(400)
+})
+
+test('stores posted dashboard interactions without timing the upload as a request', async () => {
+  ws = testWorkspaces(['repo1'])
+  const timings = new RequestTimings()
+  const secret = 'operator-secret-for-tests'
+  const app = createApp({ workspaces: ws.workspaces, timings, secret })
+  const interaction: Omit<InteractionSample, 'id'> = {
+    at: Date.now(),
+    kind: 'click',
+    action: 'button "Close"',
+    context: 'mention',
+    route: '/repos/$repo',
+    path: '/repos/repo1',
+    paintMs: 12,
+    ms: 40,
+    outcome: 'settled',
+    requests: [{ method: 'GET', path: '/api/health', startMs: 1, ms: 5, status: 200 }],
+  }
+
+  const post = (body: unknown) =>
+    app.request('/api/diagnostics/interactions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Amagi-Secret': secret },
+      body: JSON.stringify(body),
+    })
+  expect((await post({ interactions: [interaction] })).status).toBe(204)
+  expect((await post({ interactions: [{ ...interaction, kind: 'hover' }] })).status).toBe(400)
+
+  const res = await app.request('/api/diagnostics/interactions?action=mention')
+  const body = (await res.json()) as InteractionSnapshot
+  expect(body.recent.map(({ id: _, ...rest }) => rest)).toEqual([interaction])
+  expect(timings.snapshot().total).toBe(0)
 })

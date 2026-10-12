@@ -8,6 +8,7 @@ import { apiBase } from '../api.ts'
 import { Badge } from '../badges.tsx'
 import { useDateFormatPref } from '../date-format.ts'
 import { fmtAgo, fmtDateTime, fmtRetryIn } from '../format.ts'
+import { pollOk, usePoll } from '../hub-client.ts'
 import { useDashboard, useReadyQueue, useRunner } from '../store.tsx'
 import { EmptyState, Icon } from '../ui.tsx'
 import { CloseButtons } from './task-actions.tsx'
@@ -113,6 +114,9 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
   )
 }
 
+/** The forge call takes seconds, so a revisit shows the last list while it refreshes. */
+const lastMergeablePrs = new Map<string, PrInfo[]>()
+
 /**
  * Open PRs the forge reports as currently mergeable, the dashboard twin of the
  * check-prs CLI command. Polled, not streamed: the forge computes mergeability
@@ -122,33 +126,32 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
   const dateFormat = useDateFormatPref()
-  const [prs, setPrs] = useState<PrInfo[] | null>(null)
+  const [prs, setPrs] = useState<PrInfo[] | null>(() =>
+    selected === null ? null : (lastMergeablePrs.get(selected) ?? null),
+  )
+
+  const result = usePoll(
+    selected === null ? null : `${apiBase}/api/repos/${selected}/mergeable-prs`,
+    10_000,
+  )
 
   useEffect(() => {
-    if (selected === null) return
-    let alive = true
-    const load = () => {
-      fetch(`${apiBase}/api/repos/${selected}/mergeable-prs`)
-        .then(async (res) => {
-          // A repo without a forge driver simply has no mergeable PRs to show.
-          if (res.status === 501) return []
-          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return (await res.json()).prs as PrInfo[]
-        })
-        .then((list) => {
-          if (alive) setPrs(list)
-        })
-        .catch(() => {
-          // A transient fetch failure keeps the last good list, not a spinner.
-        })
-    }
-    load()
-    const timer = setInterval(load, 10_000)
-    return () => {
-      alive = false
-      clearInterval(timer)
-    }
+    if (selected !== null) setPrs(lastMergeablePrs.get(selected) ?? null)
   }, [selected])
+
+  useEffect(() => {
+    if (selected === null || result === undefined) return
+    // A repo without a forge driver simply has no mergeable PRs to show.
+    if (result?.status === 501) {
+      lastMergeablePrs.set(selected, [])
+      setPrs([])
+    } else if (pollOk(result)) {
+      const list = (result.body as { prs: PrInfo[] }).prs
+      lastMergeablePrs.set(selected, list)
+      setPrs(list)
+    }
+    // A transient failure keeps the last good list, not a spinner.
+  }, [result, selected])
 
   if (selected === null || prs === null) return null
 
@@ -201,24 +204,11 @@ type UsageRate = { seat: string; calls: number; tokens: number }
 
 function SeatUsagePanel() {
   const [rates, setRates] = useState<UsageRate[] | null>(null)
+  const result = usePoll(`${apiBase}/api/usage-rates`, 10_000)
 
   useEffect(() => {
-    let alive = true
-    const load = () => {
-      fetch(`${apiBase}/api/usage-rates`)
-        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-        .then((data: { rates: UsageRate[] }) => {
-          if (alive) setRates(data.rates)
-        })
-        .catch(() => {})
-    }
-    load()
-    const timer = setInterval(load, 10_000)
-    return () => {
-      alive = false
-      clearInterval(timer)
-    }
-  }, [])
+    if (pollOk(result)) setRates((result.body as { rates: UsageRate[] }).rates)
+  }, [result])
 
   return (
     <section className="mb-6">

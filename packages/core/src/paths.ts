@@ -50,7 +50,7 @@ export function dbPathForRepo(key: string): string {
   return join(stateHome(), 'amagi', 'repos', `${key}.db`)
 }
 
-/** API request timings shown on the dashboard's Diagnostics page; one file for the whole server. */
+/** API request and dashboard interaction timings shown on the Diagnostics page; one file for the whole server. */
 export const requestTimingsPath = (): string => join(stateHome(), 'amagi', 'request-timings.db')
 
 /** The repository registry lives here; overridable for tests. */

@@ -38,6 +38,25 @@ describe('seat locks', () => {
     second.release()
   })
 
+  test('lets up to capacity holders share a seat and queues the rest', async () => {
+    const path = tempDirectory()
+    const held = await Promise.all(
+      [1, 2].map(() => acquireSeat('cap', { directory: path, capacity: 2 })),
+    )
+    let thirdHeld = false
+    const third = acquireSeat('cap', { directory: path, capacity: 2 }).then((lease) => {
+      thirdHeld = true
+      return lease
+    })
+
+    await Bun.sleep(100)
+    expect(thirdHeld).toBe(false)
+    held[0]?.release()
+    const lease = await third
+    held[1]?.release()
+    lease.release()
+  })
+
   test('serves queued callers in arrival order', async () => {
     const path = tempDirectory()
     const first = await acquireSeat('codex', { directory: path })

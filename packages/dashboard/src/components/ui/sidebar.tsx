@@ -13,6 +13,9 @@ const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH = '16rem'
 const SIDEBAR_WIDTH_MOBILE = '18rem'
 const SIDEBAR_WIDTH_ICON = '3rem'
+const SIDEBAR_WIDTH_MIN = 96
+const SIDEBAR_WIDTH_MAX = 480
+const SIDEBAR_TRANSITION_DURATION_MS = 200
 const SIDEBAR_KEYBOARD_SHORTCUT = 'b'
 
 type SidebarContextProps = {
@@ -22,6 +25,11 @@ type SidebarContextProps = {
   openMobile: boolean
   setOpenMobile: (open: boolean) => void
   isMobile: boolean
+  isResizing: boolean
+  setIsResizing: (resizing: boolean) => void
+  isAnimating: boolean
+  setIsAnimating: (animating: boolean) => void
+  setSidebarWidth: (width: number) => void
   toggleSidebar: () => void
 }
 
@@ -51,6 +59,9 @@ function SidebarProvider({
 }) {
   const isMobile = useIsMobile()
   const [openMobile, setOpenMobile] = React.useState(false)
+  const [sidebarWidth, setSidebarWidth] = React.useState<number | null>(null)
+  const [isResizing, setIsResizing] = React.useState(false)
+  const [isAnimating, setIsAnimating] = React.useState(false)
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
@@ -102,9 +113,14 @@ function SidebarProvider({
       isMobile,
       openMobile,
       setOpenMobile,
+      isResizing,
+      setIsResizing,
+      isAnimating,
+      setIsAnimating,
+      setSidebarWidth,
       toggleSidebar,
     }),
-    [state, open, setOpen, isMobile, openMobile, toggleSidebar],
+    [state, open, setOpen, isMobile, openMobile, isResizing, isAnimating, toggleSidebar],
   )
 
   return (
@@ -117,6 +133,7 @@ function SidebarProvider({
               '--sidebar-width': SIDEBAR_WIDTH,
               '--sidebar-width-icon': SIDEBAR_WIDTH_ICON,
               ...style,
+              ...(sidebarWidth === null ? {} : { '--sidebar-width': `${sidebarWidth}px` }),
             } as React.CSSProperties
           }
           className={cn(
@@ -144,7 +161,7 @@ function Sidebar({
   variant?: 'sidebar' | 'floating' | 'inset'
   collapsible?: 'offcanvas' | 'icon' | 'none'
 }) {
-  const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
+  const { isMobile, state, openMobile, setOpenMobile, isResizing, isAnimating } = useSidebar()
 
   if (collapsible === 'none') {
     return (
@@ -198,6 +215,7 @@ function Sidebar({
       {/* This is what handles the sidebar gap on desktop */}
       <div
         data-slot="sidebar-gap"
+        style={isResizing && !isAnimating ? { transitionDuration: '0ms' } : undefined}
         className={cn(
           'relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear',
           'group-data-[collapsible=offcanvas]:w-0',
@@ -209,6 +227,7 @@ function Sidebar({
       />
       <div
         data-slot="sidebar-container"
+        style={isResizing && !isAnimating ? { transitionDuration: '0ms' } : undefined}
         className={cn(
           'absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear md:flex',
           side === 'left'
@@ -256,19 +275,108 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
   )
 }
 
-function SidebarRail({ className, ...props }: React.ComponentProps<'button'>) {
-  const { toggleSidebar } = useSidebar()
+function SidebarRail({
+  className,
+  onClick,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+  ...props
+}: React.ComponentProps<'button'>) {
+  const { isMobile, open, setOpen, setIsResizing, setIsAnimating, setSidebarWidth, toggleSidebar } =
+    useSidebar()
+  const drag = React.useRef<{
+    startX: number
+    startWidth: number
+    direction: number
+  } | null>(null)
+  const didDrag = React.useRef(false)
+  const animationTimer = React.useRef<number | null>(null)
+
+  React.useEffect(
+    () => () => {
+      if (animationTimer.current !== null) window.clearTimeout(animationTimer.current)
+    },
+    [],
+  )
 
   return (
     <button
       data-sidebar="rail"
       data-slot="sidebar-rail"
-      aria-label="Toggle Sidebar"
+      aria-label="Resize or toggle sidebar"
       tabIndex={-1}
-      onClick={toggleSidebar}
-      title="Toggle Sidebar"
+      onPointerDown={(event) => {
+        didDrag.current = false
+        onPointerDown?.(event)
+        if (event.defaultPrevented || event.button !== 0 || isMobile || !open) return
+
+        if (animationTimer.current !== null) {
+          window.clearTimeout(animationTimer.current)
+          animationTimer.current = null
+          setIsAnimating(false)
+        }
+
+        const sidebar = event.currentTarget.closest<HTMLElement>('[data-slot="sidebar"]')
+        const container = sidebar?.querySelector<HTMLElement>('[data-slot="sidebar-container"]')
+        if (container === null || container === undefined) return
+
+        drag.current = {
+          startX: event.clientX,
+          startWidth: container.getBoundingClientRect().width,
+          direction: sidebar?.dataset.side === 'right' ? -1 : 1,
+        }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        setIsResizing(true)
+      }}
+      onPointerMove={(event) => {
+        onPointerMove?.(event)
+        const currentDrag = drag.current
+        if (currentDrag === null) return
+
+        const delta = (event.clientX - currentDrag.startX) * currentDrag.direction
+        if (Math.abs(delta) > 2) didDrag.current = true
+        const width = currentDrag.startWidth + delta
+        const shouldOpen = width >= SIDEBAR_WIDTH_MIN
+        setSidebarWidth(Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, width)))
+        if (open !== shouldOpen) {
+          setOpen(shouldOpen)
+          setIsAnimating(true)
+          if (animationTimer.current !== null) window.clearTimeout(animationTimer.current)
+          animationTimer.current = window.setTimeout(() => {
+            animationTimer.current = null
+            setIsAnimating(false)
+          }, SIDEBAR_TRANSITION_DURATION_MS)
+        }
+      }}
+      onPointerUp={(event) => {
+        onPointerUp?.(event)
+        const currentDrag = drag.current
+        if (currentDrag === null) return
+
+        drag.current = null
+        setIsResizing(false)
+      }}
+      onPointerCancel={(event) => {
+        onPointerCancel?.(event)
+        drag.current = null
+        didDrag.current = false
+        setIsResizing(false)
+      }}
+      onClick={(event) => {
+        onClick?.(event)
+        if (event.defaultPrevented) return
+        if (didDrag.current) {
+          didDrag.current = false
+          event.preventDefault()
+          return
+        }
+        toggleSidebar()
+      }}
+      title="Drag to resize or click to toggle sidebar"
       className={cn(
-        'absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] hover:after:bg-sidebar-border sm:flex',
+        'absolute inset-y-0 z-20 hidden w-4 touch-none select-none -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] hover:after:bg-sidebar-border md:flex',
         'in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize',
         '[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize',
         'group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:after:left-full hover:group-data-[collapsible=offcanvas]:bg-sidebar',

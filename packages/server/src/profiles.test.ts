@@ -17,6 +17,7 @@ describe('profile settings', () => {
   let home: string
   let workspaces: TestWorkspaces
   let app: AppType
+  const secret = 'operator-secret-for-tests'
   const profile: ProfileConfig = {
     profile_name: 'Careful',
     harness: 'codex',
@@ -26,7 +27,7 @@ describe('profile settings', () => {
   const save = (body: unknown) =>
     app.request('/api/profiles', {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'X-Amagi-Secret': secret },
       body: JSON.stringify(body),
     })
 
@@ -34,7 +35,7 @@ describe('profile settings', () => {
     home = mkdtempSync(join(tmpdir(), 'amagi-profiles-'))
     process.env.XDG_CONFIG_HOME = home
     workspaces = testWorkspaces([])
-    app = createApp({ workspaces: workspaces.workspaces })
+    app = createApp({ workspaces: workspaces.workspaces, secret })
   })
 
   afterEach(() => {
@@ -60,7 +61,7 @@ describe('profile settings', () => {
       seats: [{ name: 'shared', count: 1 }],
     })
 
-    const restarted = createApp({ workspaces: workspaces.workspaces })
+    const restarted = createApp({ workspaces: workspaces.workspaces, secret })
     expect(await (await restarted.request('/api/profiles')).json()).toMatchObject({
       profiles: [profile],
     })

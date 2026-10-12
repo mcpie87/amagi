@@ -23,8 +23,14 @@ const indexRoute = createRoute({
 export const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/chat',
-  validateSearch: (search: Record<string, unknown>): { triage?: string } =>
-    typeof search.triage === 'string' ? { triage: search.triage } : {},
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { triage?: string; repo?: string; chat?: string; thread?: string } => ({
+    ...(typeof search.triage === 'string' ? { triage: search.triage } : {}),
+    ...(typeof search.repo === 'string' ? { repo: search.repo } : {}),
+    ...(typeof search.chat === 'string' ? { chat: search.chat } : {}),
+    ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
+  }),
   component: ChatView,
 })
 const boardRoute = createRoute({

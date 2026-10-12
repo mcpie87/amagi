@@ -85,8 +85,6 @@
   --selection-fg: #fbf1c7;
   --code-bg: rgb(29 32 33 / 0.7);
   --shadow-color: rgb(29 32 33 / 0.5);
-  /* Covers the 36px mobile menu button plus py-3 and the bottom border. */
-  --app-header-height: 4rem;
 }
 
 /* Light theme. Tailwind emits the tokens above inside its theme layer, so an
@@ -244,7 +242,7 @@
 }
 
 html {
-  scroll-padding-top: calc(var(--app-header-height) + 1rem);
+  scroll-padding-top: 1rem;
 }
 
 body {
@@ -310,14 +308,6 @@ textarea::placeholder {
   color: var(--color-fg-faint);
 }
 
-.connection-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--color-fg-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
 .connection-dot {
   width: 8px;
   height: 8px;
@@ -339,23 +329,18 @@ textarea::placeholder {
   }
 }
 
-.runner-status {
-  color: var(--color-fg-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
 .app-shell {
   display: flex;
   min-height: 100vh;
 }
 
-.app-header {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  background: color-mix(in srgb, var(--color-app) 85%, transparent);
-  backdrop-filter: blur(8px);
+@media (min-width: 768px) {
+  .app-shell > [data-slot="sidebar"] {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    height: 100svh;
+  }
 }
 
 .workspace {
@@ -495,13 +480,6 @@ textarea::placeholder {
   border-top: 1px solid var(--color-line);
   color: var(--color-fg-faint);
   font-size: 11px;
-}
-
-@media (max-width: 500px) {
-  .connection-status,
-  .runner-status {
-    font-size: 10px;
-  }
 }
 
 .empty-state {

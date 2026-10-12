@@ -3,10 +3,21 @@ import { errMsg } from '../../errors.ts'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
 import { killTree } from '../../process.ts'
-import { acquireSeat } from '../../seat-lock.ts'
+import { acquireSeat, type SeatLease } from '../../seat-lock.ts'
 import { recordWatcherSeat, removeWatcherSeat } from '../../watcher-seats.ts'
 import type { AgentOutcome, AgentProcess, AgentStartOptions, AgentUsage } from '../types.ts'
 import { harnessEnv } from './env.ts'
+
+const PROCESS_CAP_SEAT = 'amagi:harness-processes'
+let processCap: number | null = null
+
+/**
+ * Caps concurrently running harness processes across every amagi on the host.
+ * Each spawn holds one slot from launch to exit; null lifts the cap.
+ */
+export function setHarnessProcessCap(cap: number | null): void {
+  processCap = cap
+}
 
 /**
  * Renders a harness tool_result payload into a single string: strings pass
@@ -40,8 +51,8 @@ type Translator = {
 }
 
 export type SpawnAgentOptions = {
-  /** Resolved credential seat. Every harness provides it before entering this path. */
-  seat?: string
+  /** Resolved credential seat, or null to skip the seat lock. Every harness resolves it before entering this path. */
+  seat?: string | null
   /** Extra env vars, layered over harnessEnv and opts.env (claude's CLAUDE_EFFORT). */
   env?: Record<string, string>
   /** Emits the closing events once stdout ends, for streams without a terminal message. */
@@ -66,29 +77,48 @@ export function spawnAgent(
   translator: Translator,
   options: SpawnAgentOptions = {},
 ): AgentProcess {
-  const seat = options.seat ?? opts.seat
-  if (seat === undefined || seat.trim() === '') throw new Error('harness spawn requires a seat')
+  const seat = options.seat === undefined ? opts.seat : options.seat
+  if (seat === undefined || seat?.trim() === '') throw new Error('harness spawn requires a seat')
   const queue = new AsyncQueue<AgentEvent>()
   const abort = new AbortController()
   let child: AgentProcess | undefined
   let cancelled = false
 
   const done: Promise<AgentOutcome> = (async () => {
-    let lease: Awaited<ReturnType<typeof acquireSeat>> | undefined
+    const leases: SeatLease[] = []
+    const waitOptions = {
+      ...(opts.seatMaxWaitMs === undefined ? {} : { maxWaitMs: opts.seatMaxWaitMs }),
+      ...(opts.seatPriority === undefined ? {} : { priority: opts.seatPriority }),
+      signal: abort.signal,
+    }
     try {
-      lease = await acquireSeat(seat, {
-        ...(opts.seatMaxWaitMs === undefined ? {} : { maxWaitMs: opts.seatMaxWaitMs }),
-        ...(opts.seatPriority === undefined ? {} : { priority: opts.seatPriority }),
-        signal: abort.signal,
-        onWaiting: (message) => queue.push({ kind: 'status', message }),
-      })
-      if (cancelled) {
-        lease.release()
-        return cancelledOutcome()
+      if (seat !== null) {
+        leases.push(
+          await acquireSeat(seat, {
+            ...waitOptions,
+            onWaiting: (message) => queue.push({ kind: 'status', message }),
+          }),
+        )
       }
+      // Taken after the seat so a run queued on its seat does not idle in a slot.
+      const cap = processCap
+      if (cap !== null && !cancelled) {
+        leases.push(
+          await acquireSeat(PROCESS_CAP_SEAT, {
+            ...waitOptions,
+            capacity: cap,
+            onWaiting: () =>
+              queue.push({
+                kind: 'status',
+                message: `waiting for a harness slot (${cap} running)`,
+              }),
+          }),
+        )
+      }
+      if (cancelled) return cancelledOutcome()
       child = spawnUnlocked(argv, opts, translator, options)
-      lease.bind(child.pid)
-      if (opts.seatActivity !== undefined) {
+      for (const lease of leases) lease.bind(child.pid)
+      if (opts.seatActivity !== undefined && seat !== null) {
         recordWatcherSeat({ ...opts.seatActivity, pid: child.pid, seat })
       }
       for await (const event of child.events()) queue.push(event)
@@ -100,7 +130,7 @@ export function spawnAgent(
       if (child !== undefined && opts.seatActivity !== undefined) {
         removeWatcherSeat(child.pid)
       }
-      lease?.release()
+      for (const lease of leases) lease.release()
       queue.close()
     }
   })()

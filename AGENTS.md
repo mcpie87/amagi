@@ -34,6 +34,8 @@ In an interactive session on the main checkout, see a UI change in the operator'
 - `packages/dashboard/src`: React 19 + TanStack Router web UI. `routes.tsx` is only the route tree; each page lives in `views/*.tsx`, shared pieces in `layout.tsx`, `badges.tsx`, `format.ts`, `markdown.tsx`; `store.tsx` holds client state.
 - `packages/tui/src`: Ink terminal UI.
 
+Diagnostics (request and dashboard interaction timings): read `docs/diagnostics.md` before changing them or when investigating why the UI is slow.
+
 Tests sit next to the code as `*.test.ts`. `runner.test.ts` and `server/src/app.test.ts` are large: grep for the `describe`/`test` you need and read that range, not the whole file.
 
 ## Conventions

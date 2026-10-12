@@ -5,7 +5,7 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
 import { matchForgeRemote } from './drivers/forge-cred.ts'
 import { FindingSeverity, findingSeverityAtOrAbove } from './events.ts'
-import { MAX_WORKERS } from './limits.ts'
+import { MAX_HARNESS_PROCESSES, MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
@@ -259,6 +259,11 @@ export const Config = z
         definitions: z.record(z.string().min(1), HarnessConfig).default({}),
         implement: HarnessConfig.prefault({ kind: 'claude' }),
         triage: HarnessConfig.prefault({ kind: 'claude' }),
+        /**
+         * Hard cap on harness processes running at once across every amagi on
+         * the host, chats included. Global config only; each agent costs memory.
+         */
+        maxProcesses: z.number().int().min(1).max(MAX_HARNESS_PROCESSES).default(5),
       })
       .prefault({}),
     review: ReviewConfig.prefault({}),

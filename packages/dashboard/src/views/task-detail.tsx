@@ -2,6 +2,7 @@ import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { errMsg } from '@amagi/core/errors'
 import {
   type AgentEvent,
+  type CheckResult,
   currentAttemptEvents,
   FINDING_SEVERITIES,
   type StoredEvent,
@@ -24,6 +25,7 @@ import {
 import { Link, useParams } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AgentLogView } from '../AgentLogView.tsx'
+import { apiBase } from '../api.ts'
 import { Badge, DetailRow, PrStatusChip } from '../badges.tsx'
 import { useDateFormatPref } from '../date-format.ts'
 import { fmtDateTime, fmtRetryIn } from '../format.ts'
@@ -799,27 +801,13 @@ export function TaskDetailView() {
           <AgentLogView repo={selected} taskId={id} attempt={attempt} />
         )}
         {tab === 'status' && <StatusLogView entries={statusLog(state, id, past ? null : now)} />}
-        {tab === 'checks' && task.checks !== null && (
-          <ul className="space-y-2">
-            {task.checks.map((c) => (
-              <li
-                key={c.command}
-                className="check-result rounded-lg border border-line bg-surface px-4 py-3"
-              >
-                <p className="font-mono text-sm">
-                  <span className={c.exitCode === 0 ? 'text-emerald-ink' : 'text-red-ink'}>
-                    exit {c.exitCode}
-                  </span>{' '}
-                  {c.command}
-                </p>
-                {c.output !== '' && (
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-sunken p-2 font-mono text-xs text-fg-muted">
-                    {c.output}
-                  </pre>
-                )}
-              </li>
-            ))}
-          </ul>
+        {tab === 'checks' && task.checks !== null && selected !== null && (
+          <CheckResults
+            repo={selected}
+            taskId={id}
+            seq={taskEvents(state, id).findLast((e) => e.type === 'checks.finished')?.seq ?? null}
+            checks={task.checks}
+          />
         )}
       </div>
 
@@ -842,5 +830,63 @@ export function TaskDetailView() {
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * The compact replay strips check output, so the tab fetches the event that
+ * produced `checks` and shows its output once it arrives.
+ */
+function CheckResults({
+  repo,
+  taskId,
+  seq,
+  checks,
+}: {
+  repo: string
+  taskId: string
+  seq: number | null
+  checks: CheckResult[]
+}) {
+  const [full, setFull] = useState<{ seq: number; results: CheckResult[] } | null>(null)
+  useEffect(() => {
+    if (seq === null) return
+    let alive = true
+    fetch(
+      `${apiBase}/api/repos/${encodeURIComponent(repo)}/events?taskId=${encodeURIComponent(taskId)}&sinceSeq=${seq - 1}&limit=1`,
+    )
+      .then((res) => (res.ok ? (res.json() as Promise<StoredEvent[]>) : []))
+      .then(([event]) => {
+        if (alive && event?.type === 'checks.finished' && event.seq === seq) {
+          setFull({ seq, results: event.results })
+        }
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [repo, taskId, seq])
+  const results = full !== null && full.seq === seq ? full.results : checks
+  return (
+    <ul className="space-y-2">
+      {results.map((c) => (
+        <li
+          key={c.command}
+          className="check-result rounded-lg border border-line bg-surface px-4 py-3"
+        >
+          <p className="font-mono text-sm">
+            <span className={c.exitCode === 0 ? 'text-emerald-ink' : 'text-red-ink'}>
+              exit {c.exitCode}
+            </span>{' '}
+            {c.command}
+          </p>
+          {c.output !== '' && (
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-sunken p-2 font-mono text-xs text-fg-muted">
+              {c.output}
+            </pre>
+          )}
+        </li>
+      ))}
+    </ul>
   )
 }
