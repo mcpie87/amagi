@@ -92,16 +92,26 @@ export abstract class ForgeTracker implements Tracker {
   protected abstract createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue>
 
   async ready(limit = 20): Promise<TrackerTask[]> {
-    return (await this.listOpen(limit))
-      .filter((i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'))
-      .map(toTask)
+    if (limit <= 0) return []
+    for (let window = Math.max(limit, 100); ; window *= 2) {
+      const issues = await this.listOpen(window)
+      const ready = issues.filter(
+        (i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'),
+      )
+      if (ready.length >= limit || issues.length < window) return ready.slice(0, limit).map(toTask)
+    }
   }
 
   async claim(id?: string): Promise<TrackerTask | null> {
     const target = id ?? (await this.ready(1))[0]?.id
     if (target === undefined) return null
     const existing = await this.getIssue(target)
-    if (existing === null || existing.labels.some((label) => label.name === 'proposed')) return null
+    if (
+      existing === null ||
+      isClaimed(existing) ||
+      existing.labels.some((label) => label.name === 'proposed')
+    )
+      return null
     await this.addClaimLabel(target)
     const issue = await this.getIssue(target)
     return issue === null ? null : toTask(issue)
@@ -324,26 +334,35 @@ export class ForgejoTracker extends ForgeTracker {
   }
 
   protected async listOpen(limit: number): Promise<ForgeIssue[]> {
-    const out = await execOk(
-      this.exec,
-      [
-        'tea',
-        'issues',
-        'list',
-        ...teaRepoArgs(this.cwd, this.remote),
-        '--state',
-        'open',
-        '--limit',
-        String(limit),
-        '--fields',
-        TEA_FIELDS,
-        '--output',
-        'json',
-      ],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
-    )
-    const parsed = JSON.parse(out)
-    return (Array.isArray(parsed) ? parsed : []).map(teaIssue)
+    const issues: ForgeIssue[] = []
+    const pageSize = Math.min(limit, 50)
+    const env = await teaEnv(this.exec, this.cwd, this.remote)
+    for (let page = 1; issues.length < limit; page++) {
+      const out = await execOk(
+        this.exec,
+        [
+          'tea',
+          'issues',
+          'list',
+          ...teaRepoArgs(this.cwd, this.remote),
+          '--state',
+          'open',
+          '--limit',
+          String(pageSize),
+          '--page',
+          String(page),
+          '--fields',
+          TEA_FIELDS,
+          '--output',
+          'json',
+        ],
+        { cwd: this.cwd, env },
+      )
+      const parsed = JSON.parse(out)
+      if (!Array.isArray(parsed) || parsed.length === 0) break
+      issues.push(...parsed.map(teaIssue))
+    }
+    return issues.slice(0, limit)
   }
 
   protected async getIssue(id: string): Promise<ForgeIssue | null> {
