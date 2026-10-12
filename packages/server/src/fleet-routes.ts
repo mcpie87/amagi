@@ -23,6 +23,7 @@ import {
   writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
+import { BeadsTracker } from '@amagi/core/drivers/tracker/beads'
 import { Hono } from 'hono'
 import * as z from 'zod'
 import { resolveWorkspace, valid } from './route-utils.ts'
@@ -87,6 +88,8 @@ export function createFleetRoutes({
       return c.json({
         autoQueue: ws.config.loop.autoQueue,
         autoRebase: ws.config.loop.autoRebase,
+        epicCloseEnabled: ws.config.watchers.epicClose.enabled,
+        epicCloseAvailable: ws.tracker instanceof BeadsTracker,
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
@@ -111,6 +114,7 @@ export function createFleetRoutes({
         const {
           autoQueue,
           autoRebase,
+          epicCloseEnabled,
           ntfyTopic,
           ntfyServer,
           desktopFailureAlerts,
@@ -147,6 +151,9 @@ export function createFleetRoutes({
           if (id !== undefined) pickForgeCredential(ws.root, kind, id)
         }
         writeConfig(ws.root, {
+          ...(epicCloseEnabled === undefined
+            ? {}
+            : { watchers: { epicClose: { enabled: epicCloseEnabled } } }),
           ...(forgeKind === undefined && forgeRemote === undefined
             ? {}
             : {
@@ -183,6 +190,7 @@ export function createFleetRoutes({
                 },
               }),
         })
+        if (epicCloseEnabled !== undefined) ws.config.watchers.epicClose.enabled = epicCloseEnabled
         if (autoRebase !== undefined) ws.config.loop.autoRebase = autoRebase
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
         if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
@@ -212,6 +220,8 @@ export function createFleetRoutes({
         return c.json({
           autoQueue: ws.config.loop.autoQueue,
           autoRebase: ws.config.loop.autoRebase,
+          epicCloseEnabled: ws.config.watchers.epicClose.enabled,
+          epicCloseAvailable: ws.tracker instanceof BeadsTracker,
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,

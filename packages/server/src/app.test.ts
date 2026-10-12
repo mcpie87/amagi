@@ -2364,6 +2364,8 @@ describe('repo settings endpoints', () => {
     expect(await res.json()).toEqual({
       autoQueue: false,
       autoRebase: false,
+      epicCloseEnabled: true,
+      epicCloseAvailable: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2375,6 +2377,23 @@ describe('repo settings endpoints', () => {
       forgeRemotePinned: false,
       remotes: expect.any(Array),
       forgeCredentials: expect.any(Object),
+    })
+  })
+
+  test('PATCH persists epic closure per repository and updates the workspace config', async () => {
+    const res = await patch('repo1', '{"epicCloseEnabled":false}')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({
+      epicCloseEnabled: false,
+      epicCloseAvailable: true,
+    })
+    expect(ws.workspaces.get('repo1')?.config.watchers.epicClose.enabled).toBe(false)
+    expect(ws.workspaces.get('repo2')?.config.watchers.epicClose.enabled).toBe(true)
+    const entry = ws.workspaces.list().find((candidate) => candidate.key === 'repo1')
+    if (entry === undefined) throw new Error('repo1 missing from registry')
+    expect(loadConfig(entry.path).config.watchers.epicClose.enabled).toBe(false)
+    expect(await (await app.request('/api/repos/repo2/settings')).json()).toMatchObject({
+      epicCloseEnabled: true,
     })
   })
 
@@ -2405,6 +2424,8 @@ describe('repo settings endpoints', () => {
     expect(await res.json()).toEqual({
       autoQueue: true,
       autoRebase: false,
+      epicCloseEnabled: true,
+      epicCloseAvailable: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2419,6 +2440,8 @@ describe('repo settings endpoints', () => {
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
       autoRebase: false,
+      epicCloseEnabled: true,
+      epicCloseAvailable: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2512,6 +2535,8 @@ describe('repo settings endpoints', () => {
     expect(await (await app.request('/api/repos/repo1/settings')).json()).toEqual({
       autoQueue: true,
       autoRebase: false,
+      epicCloseEnabled: true,
+      epicCloseAvailable: true,
       ntfyTopic: null,
       ntfyServer: 'https://ntfy.sh',
       desktopFailureAlerts: false,
@@ -2547,6 +2572,8 @@ describe('repo settings endpoints', () => {
     expect(await res.json()).toEqual({
       autoQueue: false,
       autoRebase: false,
+      epicCloseEnabled: true,
+      epicCloseAvailable: true,
       ntfyTopic: 'queue-alerts',
       ntfyServer: 'https://ntfy.example',
       desktopFailureAlerts: false,
