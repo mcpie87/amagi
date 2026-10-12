@@ -108,7 +108,8 @@ function startRepoPollers(
     const keys = new Set(entries.filter((entry) => entry.watchers).map((e) => e.key))
     if (runner !== undefined && runnerRepo !== undefined) {
       const entry = byKey.get(runnerRepo)
-      const ws = entry ? workspaces.get(runnerRepo) : null
+      const lookup = entry ? workspaces.lookup(runnerRepo) : { status: 'missing' as const }
+      const ws = lookup.status === 'ready' ? lookup.workspace : null
       const enabled = entry?.workers === true && ws?.config.loop.autoQueue === true
       if (enabled !== autoQueueAllowed) {
         autoQueueAllowed = enabled
@@ -340,8 +341,9 @@ export function serve({
     }
     for (const entry of entries) {
       if (runners.has(entry.key)) {
-        const workspace = workspaces.get(entry.key)
-        if (workspace !== null) {
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status === 'ready') {
+          const workspace = lookup.workspace
           const enabled = workspace.config.loop.autoQueue && entry.workers
           if (runnerAutoQueue.get(entry.key) !== enabled) {
             runners.get(entry.key)?.setAutoQueue(enabled)
@@ -352,8 +354,10 @@ export function serve({
       }
       if (runnerFactory === undefined) continue
       try {
-        const workspace = workspaces.get(entry.key)
-        if (workspace !== null) {
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status === 'unavailable') throw lookup.error
+        if (lookup.status === 'ready') {
+          const workspace = lookup.workspace
           const service = runnerFactory(workspace)
           runners.set(entry.key, service)
           runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
