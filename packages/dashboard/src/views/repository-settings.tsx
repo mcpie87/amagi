@@ -1072,10 +1072,10 @@ export function RepositorySettingsCard({
   return (
     <div className="mt-6 space-y-4">
       <RepositoryParticipation repo={repo} onChanged={onChanged} />
-      <RepositoryReview key={repo.key} repo={repo} />
-      <RepositoryChecks key={repo.key} repo={repo} onChanged={onChanged} />
+      <RepositoryReview key={`review:${repo.key}`} repo={repo} />
+      <RepositoryChecks key={`checks:${repo.key}`} repo={repo} onChanged={onChanged} />
       <RepositoryForge
-        key={repo.key}
+        key={`forge:${repo.key}`}
         repo={repo}
         credentials={credentials}
         onCredentialsChanged={onCredentialsChanged}
