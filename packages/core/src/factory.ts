@@ -18,9 +18,9 @@ export function makeTracker(config: Config, repoRoot: string, actor = 'amagi'): 
     case 'beads':
       return new BeadsTracker({ cwd: repoRoot, actor })
     case 'github':
-      return new GithubTracker({ cwd: repoRoot })
+      return new GithubTracker({ cwd: repoRoot, remote: config.forge.remote })
     case 'forgejo':
-      return new ForgejoTracker({ cwd: repoRoot })
+      return new ForgejoTracker({ cwd: repoRoot, remote: config.forge.remote })
     default:
       throw new NotImplementedDriverError('tracker', config.tracker.kind)
   }

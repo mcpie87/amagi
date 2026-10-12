@@ -9,6 +9,7 @@ import {
   type Harness,
   type MergeStatus,
   openDatabase,
+  PRIMARY_FORGE,
   type PrComment,
   type PrDriver,
   type PrInfo,
@@ -42,11 +43,17 @@ const pr = (over: Partial<PrInfo> = {}): PrInfo => ({
 function fakeExec(baseOid: () => string = () => 'base1'): Exec {
   let unmerged = false
   return async (cmd) => {
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref')) {
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
+    }
     if (cmd.includes('ls-remote') && cmd.includes('refs/heads/main')) {
       return { exitCode: 0, stdout: `${baseOid()}\trefs/heads/main\n`, stderr: '' }
     }
     if (cmd.includes('MERGE_HEAD')) return { exitCode: 0, stdout: 'merge-head', stderr: '' }
-    if (cmd.includes('origin/main^{commit}'))
+    if (cmd.some((arg) => arg.endsWith('/main^{commit}')))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) {
@@ -67,6 +74,7 @@ function fakeExec(baseOid: () => string = () => 'base1'): Exec {
 
 class FakePr implements PrDriver {
   prs: PrInfo[] = []
+  diff = ''
   mergeStatus: MergeStatus = 'mergeable'
   readonly mergeStatusCalls: number[] = []
   readonly addedLabels: string[] = []
@@ -79,6 +87,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return this.prs
   }
@@ -87,7 +98,7 @@ class FakePr implements PrDriver {
     return this.mergeStatus
   }
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
-    return ''
+    return this.diff
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -220,6 +231,68 @@ const stateFile = (): Record<string, { headOid: string; baseOid?: string }> =>
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
+test('automatic rebasing is opt-in, skips active tasks and retries only after a head or base move', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', { type: 'pr.created', url: pr().url, number: 7 })
+  const driver = new FakePr()
+  driver.diff = 'diff --git a/x b/x\n'
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  const cfg = config()
+  let base = 'base1'
+  let rebaseCount = 0
+  const git = fakeExec()
+  const exec: Exec = async (cmd, opts) => {
+    if (cmd[1] === 'rev-parse' && cmd[2] === 'refs/remotes/origin/main') {
+      return { exitCode: 0, stdout: base, stderr: '' }
+    }
+    if (cmd[1] === 'rev-parse' && cmd[2] === `refs/remotes/origin/${pr().headRefName}`) {
+      return { exitCode: 0, stdout: driver.prs[0]?.headRefOid ?? '', stderr: '' }
+    }
+    if (cmd[1] === 'merge-base') return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd[1] === 'rebase' && cmd[2] !== '--abort') {
+      rebaseCount++
+      return { exitCode: 1, stdout: '', stderr: 'replay conflict' }
+    }
+    return git(cmd, opts)
+  }
+  start(
+    exec,
+    () =>
+      fakeHarness(() => {
+        throw new Error('unexpected agent')
+      }),
+    {
+      driver,
+      store,
+      config: cfg,
+    },
+  )
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(0)
+  cfg.loop.autoRebase = true
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(1)
+  expect(
+    store
+      .events({ limit: 1000 })
+      .some(
+        (action) =>
+          action.type === 'watcher.action' && action.result.includes('automatic rebase failed'),
+      ),
+  ).toBe(true)
+  base = 'base2'
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(2)
+  store.append('am-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
+  base = 'base3'
+  await Bun.sleep(60)
+  expect(rebaseCount).toBe(2)
+})
+
 test('lists open PRs, resolves only conflicting ones, and records counters', async () => {
   const store = new Store(openDatabase(':memory:'))
   let started = 0
@@ -294,6 +367,268 @@ test('a queued PR bypasses the unchanged conflict cache and is recorded', async 
   ).toBe(true)
 })
 
+test('a queued PR gets one dispatch after reaching the automatic iteration limit', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const driver = new FakePr()
+  driver.prs = [pr({ labels: ['amagi/iterations:3'] })]
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    store,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(0)
+
+  w.queue(7)
+  await Bun.sleep(60)
+
+  expect(started).toBe(1)
+})
+
+test('conflict resolution runs in its own task state and returns unresolved PRs to conflict', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  store.append('am-1', { type: 'pr.status', mergeStatus: 'conflicted' })
+  store.append('am-1', {
+    type: 'task.state',
+    from: 'pr_open',
+    to: 'pr_merge_conflict',
+  })
+  const driver = new FakePr()
+  driver.mergeStatus = 'conflicted'
+  driver.prs = [pr()]
+  start(fakeExec(), () => fakeHarness(() => {}), { driver, store })
+
+  await Bun.sleep(100)
+
+  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+  expect(
+    store
+      .events()
+      .some((event) => event.type === 'task.state' && event.to === 'pr_conflict_fixing'),
+  ).toBe(true)
+})
+
+test('a manually queued conflict stays fixing until the resolution attempt finishes', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  store.append('am-1', { type: 'pr.status', mergeStatus: 'conflicted' })
+  store.append('am-1', {
+    type: 'task.state',
+    from: 'pr_open',
+    to: 'pr_merge_conflict',
+  })
+  const driver = new FakePr()
+  let releaseResolution: (() => void) | undefined
+  let signalResolutionStarted: (() => void) | undefined
+  const resolutionStarted = new Promise<void>((resolve) => {
+    signalResolutionStarted = resolve
+  })
+  const resolutionGate = new Promise<void>((resolve) => {
+    releaseResolution = resolve
+  })
+  let harness: Harness = fakeHarness(() => {})
+  const watcher = start(fakeExec(), () => harness, {
+    driver,
+    store,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(50)
+
+  harness = {
+    kind: 'fake',
+    start: () => {
+      signalResolutionStarted?.()
+      return {
+        pid: -1,
+        events: async function* () {},
+        done: resolutionGate.then(() => ({
+          exitCode: 0,
+          ok: true,
+          sessionId: null,
+          summary: 'done',
+          usage: null,
+          stderr: '',
+        })),
+        kill: async () => {},
+        model: null,
+        effort: null,
+      }
+    },
+    resume: () => {
+      throw new Error('unused')
+    },
+    listModels: async () => [],
+    listEfforts: async () => [],
+  }
+  driver.prs = [pr()]
+  store.append('am-1', {
+    type: 'task.state',
+    from: 'pr_merge_conflict',
+    to: 'pr_conflict_fixing',
+    reason: 'Conflict resolution queued for PR #7',
+  })
+  watcher.queue(7)
+  await resolutionStarted
+
+  expect(store.task('am-1')?.state).toBe('pr_conflict_fixing')
+  releaseResolution?.()
+  await Bun.sleep(100)
+
+  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+})
+
+test('a task PR left on the previously configured forge is scanned and resolved there', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  const primary = new FakePr()
+  const github = new FakePr()
+  github.prs = [pr()]
+  const cfg = config()
+  let started = 0
+  start(fakeExec(), () => fakeHarness(() => started++), {
+    driver: primary,
+    store,
+    config: cfg,
+    forgeFor: (prUrl) =>
+      prUrl === null
+        ? { key: PRIMARY_FORGE, config: cfg, driver: primary }
+        : { key: 'github:origin', config: cfg, driver: github },
+  })
+
+  await Bun.sleep(60)
+
+  expect(started).toBe(1)
+  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+  expect(Object.keys(stateFile())).toEqual(['github:origin#7'])
+})
+
+test('GitLab task conflicts are resolved even when the selected forge scan fails', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of [
+    'worktree_ready',
+    'implementing',
+    'checks',
+    'committed',
+    'pr_open',
+    'pr_merge_conflict',
+  ] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  const url = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  store.append('am-1', { type: 'pr.created', url, number: 7 })
+  const primary = new FakePr()
+  primary.listOpenPrs = async () => {
+    throw new Error('selected forge unavailable')
+  }
+  const gitlab = new FakePr()
+  gitlab.prs = [pr({ url, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })]
+  gitlab.mergeStatus = 'conflicted'
+  const cfg = config()
+  const gitlabConfig = {
+    ...cfg,
+    forge: { ...cfg.forge, kind: 'gitlab' as const, remote: 'gitlab' },
+  }
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver: primary,
+    store,
+    config: cfg,
+    forgeFor: (prUrl) =>
+      prUrl === null
+        ? { key: PRIMARY_FORGE, config: cfg, driver: primary }
+        : { key: 'gitlab:gitlab', config: gitlabConfig, driver: gitlab },
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+  expect(gitlab.mergeStatusCalls).toContain(7)
+  expect(store.task('am-1')?.statusReason).toBe(
+    'PR #7 remains conflicted after resolution attempt: pushed; the forge reports conflicted',
+  )
+  expect(counter(w, 'scanned')).toBe(1)
+  expect(counter(w, 'conflicting')).toBe(1)
+  expect(w.activity().ok).toBe(false)
+  expect(w.activity().error).toContain('selected forge unavailable')
+  expect(Object.keys(stateFile())).toEqual(['gitlab:gitlab#7'])
+})
+
+test('UNKNOWN status refresh cycles independently on every task forge', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  const url = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  store.append('am-1', { type: 'pr.created', url, number: 7 })
+  const primary = new FakePr()
+  const gitlab = new FakePr()
+  for (const driver of [primary, gitlab]) {
+    driver.prs = [7, 8, 9, 10].map((number) =>
+      pr({ number, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }),
+    )
+    driver.mergeStatus = 'unknown'
+  }
+  const cfg = config()
+  const w = start(fakeExec(), () => fakeHarness(() => {}), {
+    driver: primary,
+    store,
+    forgeFor: (prUrl) =>
+      prUrl === null
+        ? { key: PRIMARY_FORGE, config: cfg, driver: primary }
+        : { key: 'gitlab:gitlab', config: cfg, driver: gitlab },
+  })
+  await Bun.sleep(60)
+  w.stop()
+  for (const driver of [primary, gitlab]) {
+    expect([...new Set(driver.mergeStatusCalls)].sort((a, b) => a - b)).toEqual([7, 8, 9, 10])
+  }
+})
+
+test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  w.queue(7)
+  await Bun.sleep(60)
+
+  expect(started).toBe(2)
+  expect(counter(w, 'conflicting')).toBe(0)
+})
+
 test('re-attempts a conflicting PR once its head SHA changes', async () => {
   let started = 0
   let head = 'deadbeef'
@@ -338,14 +673,12 @@ test('a PR whose work base already contains is flagged once and not re-dispatche
   const exec: Exec = async (cmd, opts) => {
     // The merge result equals the merged base; the PR's own three-dot diff is not empty.
     if (cmd[1] === 'diff' && cmd.includes('--quiet')) return { exitCode: 0, stdout: '', stderr: '' }
-    if (cmd[0] === 'gh' && cmd.includes('diff')) {
-      return { exitCode: 0, stdout: 'diff --git a/x b/x\n', stderr: '' }
-    }
     return git(cmd, opts)
   }
   const store = new Store(openDatabase(':memory:'))
   openPrTask(store)
   const driver = new FakePr()
+  driver.diff = 'diff --git a/x b/x\n'
   driver.prs = [pr({ labels: ['amagi'] })]
   start(
     exec,
@@ -428,6 +761,7 @@ test('fetches every open PR head each tick when a head moved', async () => {
   const git = fakeExec()
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd as string[])
+    if (cmd.includes('--symref')) return git(cmd, opts)
     if (cmd.includes('ls-remote')) {
       return { exitCode: 0, stdout: `abc123\trefs/pull/7/head\n`, stderr: '' }
     }
@@ -444,7 +778,7 @@ test('fetches every open PR head each tick when a head moved', async () => {
     'fetch',
     '--prune',
     'origin',
-    '+refs/pull/*/head:refs/remotes/origin/pr/*',
+    '+refs/pull/*/head:refs/remotes/origin/pr/*/head',
   ])
   expect(started).toBeGreaterThanOrEqual(1)
 })
@@ -489,7 +823,7 @@ test('records merge-tree observations and divergences when the flag is on', asyn
         ? { exitCode: 1, stdout: '', stderr: '' }
         : { exitCode: 0, stdout: '', stderr: '' }
     }
-    if (cmd.includes('origin/main^{commit}'))
+    if (cmd.some((arg) => arg.endsWith('/main^{commit}')))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
@@ -517,7 +851,7 @@ test('records merge-tree observations and divergences when the flag is on', asyn
 test('UNKNOWN mergeable is forced per-PR and never counts as a divergence', async () => {
   const exec: Exec = async (cmd) => {
     if (cmd.includes('merge-tree')) return { exitCode: 0, stdout: '', stderr: '' }
-    if (cmd.includes('origin/main^{commit}'))
+    if (cmd.some((arg) => arg.endsWith('/main^{commit}')))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     if (cmd.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (cmd.includes('merge')) return { exitCode: 1, stdout: '', stderr: 'conflict' }
@@ -558,12 +892,8 @@ const openPrTask = (store: Store): void => {
   }
 }
 
-/** Serves the pointless pass's `gh pr diff`; PRs come from the driver. */
-function fakeExecForPointless(diff: () => string): Exec {
-  return async (cmd) => {
-    if (cmd.includes('diff')) return { exitCode: 0, stdout: diff(), stderr: '' }
-    return { exitCode: 0, stdout: '', stderr: '' }
-  }
+function fakeExecForPointless(): Exec {
+  return async () => ({ exitCode: 0, stdout: '', stderr: '' })
 }
 
 const pointlessStateFile = (): Record<string, { headOid: string; flagged: boolean }> =>
@@ -575,11 +905,7 @@ test('an amagi PR with an empty diff gets labelled, commented on and parked in p
   const tracker = fakeTracker()
   const driver = new FakePr()
   driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
-  start(
-    fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
-    { store, tracker, driver },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), { store, tracker, driver })
 
   await Bun.sleep(60)
 
@@ -608,7 +934,7 @@ test('an agent verdict on a pointless PR carries reasoning on the PR and the pro
     '',
   ].join('\n')
   start(
-    fakeExecForPointless(() => ''),
+    fakeExecForPointless(),
     () =>
       fakeHarness(({ prompt }) => {
         const outPath = prompt.match(/^file: (.+)$/m)?.[1]
@@ -633,11 +959,7 @@ test('a PR without the amagi label is never flagged whatever its diff', async ()
   const tracker = fakeTracker()
   const driver = new FakePr()
   driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: [] }]
-  start(
-    fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
-    { store, tracker, driver },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), { store, tracker, driver })
 
   await Bun.sleep(60)
 
@@ -652,7 +974,6 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
   openPrTask(store)
   const tracker = fakeTracker()
   const driver = new FakePr()
-  let diff = ''
   let head = 'deadbeef'
   driver.prs = [
     {
@@ -660,20 +981,16 @@ test('a flagged PR that receives real commits is cleared back to pr_open without
       labels: ['amagi'],
     },
   ]
-  start(
-    fakeExecForPointless(() => diff),
-    () => fakeHarness(() => {}),
-    {
-      store,
-      tracker,
-      driver,
-    },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), {
+    store,
+    tracker,
+    driver,
+  })
 
   await Bun.sleep(60)
   expect(store.task('bd-1')?.state).toBe('pr_flagged')
 
-  diff = 'a real diff\n'
+  driver.diff = 'a real diff\n'
   head = 'newsha'
   driver.prs = [
     {
@@ -697,11 +1014,7 @@ test('an unchanged flagged PR is not re-commented on subsequent ticks', async ()
   const tracker = fakeTracker()
   const driver = new FakePr()
   driver.prs = [{ ...pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }), labels: ['amagi'] }]
-  start(
-    fakeExecForPointless(() => ''),
-    () => fakeHarness(() => {}),
-    { store, tracker, driver },
-  )
+  start(fakeExecForPointless(), () => fakeHarness(() => {}), { store, tracker, driver })
 
   await Bun.sleep(60)
   expect(store.task('bd-1')?.state).toBe('pr_flagged')

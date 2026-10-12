@@ -42,6 +42,17 @@ describe('isUsageLimit', () => {
     expect(isUsageLimit("You've hit your usage limit, resets at 15:40")).toBe(true)
     expect(isUsageLimit('hit the turn limit')).toBe(false)
   })
+
+  test('recognizes four repeated Codex usage-limit messages', () => {
+    const message = Array(4)
+      .fill(
+        'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:05 PM.',
+      )
+      .join('\n')
+
+    expect(isUsageLimit(message)).toBe(true)
+    expect(isTransientFailure(message)).toBe(true)
+  })
 })
 
 describe('usageLimitExpiry', () => {
@@ -55,9 +66,48 @@ describe('usageLimitExpiry', () => {
     expect(expiry.getMinutes()).toBe(40)
   })
 
+  test.each([
+    ['resets at 12:00 AM', 0, 23, 28],
+    ['resets at 12:00 PM', 12, 10, 27],
+  ])('keeps AM/PM boundary parsing for %s', (detail, hour, nowHour, day) => {
+    const now = new Date(2026, 8, 27, nowHour, 0)
+    const expiry = new Date(usageLimitExpiry(detail, now))
+
+    expect(expiry.getDate()).toBe(day)
+    expect(expiry.getHours()).toBe(hour)
+    expect(expiry.getMinutes()).toBe(0)
+  })
+
+  test('parses a Codex try-again clock in local time', () => {
+    const now = new Date(2026, 8, 27, 14, 30)
+    const detail =
+      'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:05 PM.'
+    const expiry = new Date(usageLimitExpiry(detail, now))
+
+    expect(expiry.getFullYear()).toBe(now.getFullYear())
+    expect(expiry.getMonth()).toBe(now.getMonth())
+    expect(expiry.getDate()).toBe(now.getDate())
+    expect(expiry.getHours()).toBe(23)
+    expect(expiry.getMinutes()).toBe(5)
+  })
+
+  test('rolls a passed Codex try-again clock to the next day', () => {
+    const now = new Date(2026, 8, 27, 23, 6)
+    const expiry = new Date(usageLimitExpiry('try again at 11:05 PM', now))
+
+    expect(expiry.getDate()).toBe(28)
+    expect(expiry.getHours()).toBe(23)
+    expect(expiry.getMinutes()).toBe(5)
+  })
+
   test('uses a bounded window when no reset is reported', () => {
     const now = new Date(2026, 8, 27, 14, 30)
     expect(usageLimitExpiry('usage limit reached', now) - now.getTime()).toBe(15 * 60 * 1000)
+  })
+
+  test('uses a bounded window when the reported clock is invalid', () => {
+    const now = new Date(2026, 8, 27, 14, 30)
+    expect(usageLimitExpiry('try again at 11:65 PM', now) - now.getTime()).toBe(15 * 60 * 1000)
   })
 })
 

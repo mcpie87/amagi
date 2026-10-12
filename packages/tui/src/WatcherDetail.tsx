@@ -46,6 +46,7 @@ export function WatcherDetail({
                 .slice(0, 40)
                 .map((entry, i) => (
                   <Text
+                    // biome-ignore lint/suspicious/noArrayIndexKey: log entries can share a timestamp; the index disambiguates.
                     key={`${entry.ts}-${i}`}
                     {...(entry.level === 'error' ? { color: 'red' } : {})}
                   >
@@ -67,6 +68,7 @@ export function WatcherDetail({
                   </Text>
                   {run.actions.map((action, i) => (
                     <Text
+                      // biome-ignore lint/suspicious/noArrayIndexKey: a run's actions are append-only and carry no id.
                       key={`${run.runId}-${i}`}
                       {...(action.level === 'error' ? { color: 'red' } : {})}
                     >

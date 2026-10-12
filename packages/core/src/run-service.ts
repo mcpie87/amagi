@@ -6,7 +6,7 @@ import {
   reviewerWorkerConfig,
   type WorkerConfig,
 } from './config.ts'
-import { claimEligible, claimGate, implementModel } from './difficulty.ts'
+import { claimEligible, claimGate } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
 import type { Exec } from './exec.ts'
@@ -67,6 +67,7 @@ export type RunnerStatus = {
 export type FleetWorkerStatus = {
   id: string
   name: string
+  roles: WorkerConfig['roles']
   kind: WorkerConfig['kind']
   model: string | null
   effort: string | null
@@ -260,6 +261,7 @@ export class RunService implements RunServiceApi {
   private async autoQueuePoll(): Promise<void> {
     if (this.autoQueuePolling) return
     this.autoQueuePolling = true
+    let backoff = this.autoQueueIdleMs
     try {
       if (!this.autoQueue || this.stopped) return
       const result = await this.start()
@@ -277,9 +279,11 @@ export class RunService implements RunServiceApi {
           console.warn(`idle notification failed: ${String(err)}`)
         }
       }
-      const backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
-      if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
+      backoff = result.ok ? this.autoQueueActiveMs : this.autoQueueIdleMs
+    } catch (err) {
+      console.warn(`auto-queue poll failed: ${String(err)}`)
     } finally {
+      if (this.autoQueue && !this.stopped) this.scheduleAutoQueuePoll(backoff)
       this.autoQueuePolling = false
     }
   }
@@ -354,6 +358,7 @@ export class RunService implements RunServiceApi {
       fleet: this.workers().map((worker) => ({
         id: worker.id,
         name: worker.name,
+        roles: worker.roles,
         kind: worker.kind,
         model: worker.model ?? null,
         effort: worker.effort ?? null,
@@ -450,16 +455,13 @@ export class RunService implements RunServiceApi {
         error: `${activeHold.harness}+${activeHold.model} usage limit hold until ${expiry}`,
       }
     }
-    // Difficulty gating reads the model the worker would actually run, so the
-    // override config (not the stored default) is what gates the claim.
-    const runConfig = { ...this.opts.config, harness: { ...this.opts.config.harness, implement } }
     if (taskId !== undefined) {
       const ready = await this.opts.tracker.ready()
       const target = ready.find((t) => t.id === taskId)
       if (target === undefined) {
         return { ok: false, status: 409, error: `task ${taskId} is not ready to run` }
       }
-      const gate = claimGate(runConfig, target, implementModel(runConfig))
+      const gate = claimGate(this.opts.config, target, selected)
       if (!gate.allowed) {
         return { ok: false, status: 409, error: `task ${taskId}: ${gate.reason}` }
       }
@@ -469,11 +471,8 @@ export class RunService implements RunServiceApi {
       return { ok: true, taskId: task.id }
     }
     const skipped: string[] = []
-    const task = await claimEligible(
-      this.opts.tracker,
-      runConfig,
-      implementModel(runConfig),
-      (t, reason) => skipped.push(`${t.id}: ${reason}`),
+    const task = await claimEligible(this.opts.tracker, this.opts.config, selected, (t, reason) =>
+      skipped.push(`${t.id}: ${reason}`),
     )
     if (task === null) {
       const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''
@@ -519,7 +518,11 @@ export class RunService implements RunServiceApi {
       store,
       tracker,
       harness,
-      config: { ...config, harness: { ...config.harness, implement } },
+      config: {
+        ...config,
+        review: { ...config.review },
+        harness: { ...config.harness, implement },
+      },
       reviewerConfig,
       ...(reviewerConfig === undefined ? {} : { reviewerHarness: makeHarnessFn(reviewerConfig) }),
       repoRoot,
@@ -528,6 +531,7 @@ export class RunService implements RunServiceApi {
       channel: true,
       exec,
       forge,
+      workerName: worker.name,
     })
     const seat = this.workerSeat(worker)
     const holder = `${repoName}/${task.id}`

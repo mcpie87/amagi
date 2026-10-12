@@ -1,45 +1,15 @@
-import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { errMsg } from '@amagi/core/errors'
-import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
-import { DetailRow, PILL } from '../badges.tsx'
 import { Markdown } from '../markdown.tsx'
 import { issuesRoute } from '../routes.tsx'
 import { type RepoInfo, useDashboard } from '../store.tsx'
-
-type Dependency = {
-  id: string
-  title: string
-  /** Tracker status of the blocker: open/in_progress/blocked/closed. */
-  status: string
-  /** Human-only blockers carry the `human` label and need an operator, not an agent. */
-  labels: string[]
-}
-
-export type Issue = {
-  id: string
-  title: string
-  description: string
-  acceptanceCriteria: string | null
-  status: 'open' | 'in_progress' | 'blocked' | 'closed'
-  priority: number | null
-  url?: string | null
-  type: string | null
-  assignee: string | null
-  labels: string[]
-  parent: string | null
-  dependencies: Dependency[]
-  /** Issues this one blocks; only the single-issue detail endpoint reports them. */
-  dependents?: Dependency[]
-}
-
-/** One issue with its blockers and dependents, from the tracker's detail view. */
-export async function fetchIssue(repo: string, id: string): Promise<Issue> {
-  const res = await fetch(`${apiBase}/api/repos/${repo}/issues/${id}`)
-  if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-  return res.json() as Promise<Issue>
-}
+import { IssueBoard } from './issue-board.tsx'
+import { IssueCloseButton } from './issue-close.tsx'
+import { EpicDetailView, IssueDetailView } from './issue-details.tsx'
+import type { Issue } from './issue-model.ts'
 
 /** One epic from /api/repos/:repo/epics/close-eligible (bd epic close-eligible --dry-run). */
 type EligibleEpic = {
@@ -49,46 +19,6 @@ type EligibleEpic = {
   totalChildren: number
   closedChildren: number
 }
-
-/** Preset close reasons offered for an epic; '__other' falls back to free text. */
-const EPIC_CLOSE_REASONS = [
-  'completed',
-  'superseded / duplicate',
-  'abandoned',
-  'merged into another epic',
-  'out of scope',
-  '__other',
-]
-
-const ISSUE_STATES: Issue['status'][] = ['open', 'in_progress', 'blocked', 'closed']
-
-const columnHeader: Record<Issue['status'], string> = {
-  open: 'Open',
-  in_progress: 'In progress',
-  blocked: 'Blocked',
-  closed: 'Closed',
-}
-
-const columnDot: Record<Issue['status'], string> = {
-  open: 'bg-fg-faint',
-  in_progress: 'bg-blue-500',
-  blocked: 'bg-red-500',
-  closed: 'bg-emerald-500',
-}
-
-function IssueBadge({ issue }: { issue: Issue }) {
-  const tone =
-    issue.status === 'closed'
-      ? 'bg-emerald-soft text-emerald-ink ring-emerald-edge'
-      : issue.status === 'blocked'
-        ? 'bg-red-soft text-red-ink ring-red-edge'
-        : issue.status === 'in_progress'
-          ? 'bg-blue-soft text-blue-ink ring-blue-edge'
-          : 'bg-neutral-soft text-fg ring-neutral-edge'
-  return <span className={`${PILL} ${tone}`}>{issue.status}</span>
-}
-
-type IssuesViewMode = 'kanban' | 'list'
 
 function IssueFormModal({
   repo,
@@ -264,143 +194,12 @@ function IssueFormModal({
           <button
             type="submit"
             disabled={busy || title.trim() === ''}
-            className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             {mode === 'create' ? 'Create task' : 'Save changes'}
           </button>
         </div>
       </form>
-    </div>
-  )
-}
-
-type EpicCloseAction = 'manual' | 'done'
-
-function EpicCloseButton({
-  repo,
-  epic,
-  onClosed,
-  action,
-}: {
-  repo: string
-  epic: Pick<EligibleEpic, 'id' | 'title'>
-  onClosed: () => void
-  action: EpicCloseAction
-}) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
-  const [reason, setReason] = useState<string>(EPIC_CLOSE_REASONS[0] ?? 'completed')
-  const [custom, setCustom] = useState('')
-
-  const close = async (finalReason: string) => {
-    if (finalReason === '') return
-    setBusy(true)
-    setError(null)
-    try {
-      const path =
-        action === 'manual'
-          ? `/api/repos/${repo}/epics/close-eligible`
-          : `/api/repos/${repo}/issues/${epic.id}/close`
-      const res = await fetch(`${apiBase}${path}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ reason: finalReason }),
-      })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
-      else {
-        onClosed()
-        setOpen(false)
-      }
-    } catch {
-      setError('could not reach the amagi server')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const input =
-    'w-full rounded border border-line-strong bg-sunken px-3 py-1 text-sm text-fg-strong'
-  const label = 'mb-1 block text-sm text-fg-muted'
-  const buttonText = action === 'manual' ? 'Close' : 'Mark done'
-  const heading = action === 'manual' ? `Close ${epic.id}` : `Mark ${epic.id} done`
-  const reasonId = `epic-${action}-reason-${epic.id}`
-  const customId = `epic-${action}-custom-${epic.id}`
-
-  return (
-    <div className={action === 'manual' ? 'ml-auto' : undefined}>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => setOpen(true)}
-        className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
-      >
-        {buttonText}
-      </button>
-      {error !== null && !open && <p className="mt-1 text-sm text-red-ink">{error}</p>}
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              void close(reason === '__other' ? custom.trim() : reason)
-            }}
-            className="w-full max-w-sm rounded-lg border border-line-strong bg-surface p-4"
-          >
-            <h2 className="mb-3 text-lg font-semibold">{heading}</h2>
-            <div className="space-y-3">
-              <p className="text-sm text-fg-muted">{epic.title}</p>
-              <div>
-                <label className={label} htmlFor={reasonId}>
-                  Reason for closing
-                </label>
-                <select
-                  id={reasonId}
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  className={input}
-                >
-                  {EPIC_CLOSE_REASONS.map((r) => (
-                    <option key={r} value={r}>
-                      {r === '__other' ? 'Other...' : r}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {reason === '__other' && (
-                <div>
-                  <label className={label} htmlFor={customId}>
-                    Custom reason
-                  </label>
-                  <input
-                    id={customId}
-                    value={custom}
-                    onChange={(e) => setCustom(e.target.value)}
-                    className={input}
-                  />
-                </div>
-              )}
-              {error !== null && <p className="text-sm text-red-ink">{error}</p>}
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={busy || (reason === '__other' && custom.trim() === '')}
-                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {busy ? 'Closing…' : buttonText}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   )
 }
@@ -415,7 +214,7 @@ function CloseEpicButton({
   epic: EligibleEpic
   onClosed: () => void
 }) {
-  return <EpicCloseButton repo={repo} epic={epic} onClosed={onClosed} action="manual" />
+  return <IssueCloseButton repo={repo} issue={epic} onClosed={onClosed} action="manual" />
 }
 
 function MarkEpicDoneButton({
@@ -427,7 +226,7 @@ function MarkEpicDoneButton({
   epic: Pick<EligibleEpic, 'id' | 'title'>
   onClosed: () => void
 }) {
-  return <EpicCloseButton repo={repo} epic={epic} onClosed={onClosed} action="done" />
+  return <IssueCloseButton repo={repo} issue={epic} onClosed={onClosed} action="done" />
 }
 
 type Proposal = Issue & { repo: RepoInfo }
@@ -448,25 +247,33 @@ function ProposalsInbox({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    void refresh
     let active = true
     setError(null)
-    Promise.all(
-      repos.map(async (repo) => {
+    // A repo whose config does not load already reports it in its readiness checks.
+    const loadable = repos.filter((repo) =>
+      repo.ready.every((check) => check.name !== 'config' || check.ok),
+    )
+    void Promise.allSettled(
+      loadable.map(async (repo) => {
         const response = await fetch(`${apiBase}/api/repos/${repo.key}/issues`)
         if (!response.ok)
-          throw new Error((await response.json()).error ?? `HTTP ${response.status}`)
+          throw new Error(
+            `${repo.name}: ${(await response.json()).error ?? `HTTP ${response.status}`}`,
+          )
         const issues = (await response.json()) as Issue[]
         return issues
           .filter((issue) => issue.status !== 'closed' && issue.labels.includes(PROPOSED_LABEL))
           .map((issue) => ({ ...issue, repo }))
       }),
-    )
-      .then((lists) => {
-        if (active) setProposals(lists.flat())
-      })
-      .catch((err: unknown) => {
-        if (active) setError(errMsg(err))
-      })
+    ).then((results) => {
+      if (!active) return
+      setProposals(results.flatMap((result) => (result.status === 'fulfilled' ? result.value : [])))
+      const failures = results.flatMap((result) =>
+        result.status === 'rejected' ? [errMsg(result.reason)] : [],
+      )
+      setError(failures.length > 0 ? failures.join('; ') : null)
+    })
     return () => {
       active = false
     }
@@ -624,7 +431,7 @@ function ProposalCard({
           type="button"
           disabled={busy}
           onClick={() => void submit('accept')}
-          className="rounded bg-emerald-700 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
+          className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           {busy ? 'Saving…' : 'Accept'}
         </button>
@@ -634,7 +441,7 @@ function ProposalCard({
               type="button"
               disabled={busy || reason.trim() === ''}
               onClick={() => void submit('dismiss')}
-              className="rounded bg-red-700 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
+              className="rounded bg-red-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
             >
               {busy ? 'Saving…' : 'Confirm dismissal'}
             </button>
@@ -668,37 +475,10 @@ export function IssuesView() {
   const [eligibleEpics, setEligibleEpics] = useState<EligibleEpic[]>([])
   const { issue: selectedId, epic: selectedEpicId } = useSearch({ from: issuesRoute.id })
   const navigate = useNavigate()
-  const [issueDetail, setIssueDetail] = useState<Issue | null>(null)
-  const [issueError, setIssueError] = useState<string | null>(null)
-  const [epicIssueDetail, setEpicIssueDetail] = useState<Issue | null>(null)
-  const [epicIssueError, setEpicIssueError] = useState<string | null>(null)
-  const [epicChildren, setEpicChildren] = useState<Issue[]>([])
-  const [epicChildrenLoading, setEpicChildrenLoading] = useState(false)
-  const [epicChildrenError, setEpicChildrenError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [status, setStatus] = useState<Issue['status'] | 'all'>('all')
-  const [search, setSearch] = useState('')
   const [form, setForm] = useState<{ mode: 'create' } | { mode: 'edit'; issue: Issue } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const repoRef = useRef(selected)
-  const [view, setView] = useState<IssuesViewMode>(() => {
-    try {
-      return localStorage.getItem('amagi:issue-view') === 'list' ? 'list' : 'kanban'
-    } catch {
-      // storage unavailable (private mode, blocked), keep the default
-      return 'kanban'
-    }
-  })
-
-  const setMode = (mode: IssuesViewMode) => {
-    setView(mode)
-    try {
-      localStorage.setItem('amagi:issue-view', mode)
-    } catch {
-      // storage unavailable, the choice just won't persist
-    }
-  }
-
   useEffect(() => {
     if (selected === null) return
     void refresh
@@ -716,66 +496,6 @@ export function IssuesView() {
       .then(setIssues)
       .catch((err: unknown) => setError(errMsg(err)))
   }, [selected, refresh, navigate])
-
-  useEffect(() => {
-    setIssueError(null)
-    if (selected === null || selectedId === undefined) return
-    void refresh
-    let active = true
-    fetchIssue(selected, selectedId)
-      .then((issue) => {
-        if (active) setIssueDetail(issue)
-      })
-      .catch((err: unknown) => {
-        if (active) setIssueError(errMsg(err))
-      })
-    return () => {
-      active = false
-    }
-  }, [selected, selectedId, refresh])
-
-  useEffect(() => {
-    setEpicIssueDetail(null)
-    setEpicIssueError(null)
-    if (selected === null || selectedEpicId === undefined) return
-    let active = true
-    fetchIssue(selected, selectedEpicId)
-      .then((issue) => {
-        if (active) setEpicIssueDetail(issue)
-      })
-      .catch((err: unknown) => {
-        if (active) setEpicIssueError(errMsg(err))
-      })
-    return () => {
-      active = false
-    }
-  }, [selected, selectedEpicId, refresh])
-
-  useEffect(() => {
-    if (selected === null || selectedEpicId === undefined) return
-    void refresh
-    let active = true
-    setEpicChildren([])
-    setEpicChildrenLoading(true)
-    setEpicChildrenError(null)
-    fetch(`${apiBase}/api/repos/${selected}/issues/${selectedEpicId}/children`)
-      .then(async (res) => {
-        if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-        return res.json() as Promise<Issue[]>
-      })
-      .then((children) => {
-        if (active) setEpicChildren(children)
-      })
-      .catch((err: unknown) => {
-        if (active) setEpicChildrenError(errMsg(err))
-      })
-      .finally(() => {
-        if (active) setEpicChildrenLoading(false)
-      })
-    return () => {
-      active = false
-    }
-  }, [selected, selectedEpicId, refresh])
 
   useEffect(() => {
     if (selected === null) return
@@ -808,28 +528,7 @@ export function IssuesView() {
   const selectedEpic =
     selectedEpicId === undefined
       ? null
-      : (eligibleEpics.find((epic) => epic.id === selectedEpicId) ??
-        (epicIssueDetail !== null && epicIssueDetail.id === selectedEpicId
-          ? {
-              id: epicIssueDetail.id,
-              title: epicIssueDetail.title,
-              status: epicIssueDetail.status,
-              totalChildren: epicChildren.length,
-              closedChildren: epicChildren.filter((child) => child.status === 'closed').length,
-            }
-          : null))
-  // The previous detail stays up while a refresh refetches it, but never
-  // stands in for a different issue.
-  const selectedIssue = issueDetail?.id === selectedId ? issueDetail : null
-
-  const q = search.trim().toLowerCase()
-  const filtered = status === 'all' ? issues : issues.filter((issue) => issue.status === status)
-  const searched =
-    q === ''
-      ? filtered
-      : filtered.filter(
-          (issue) => issue.title.toLowerCase().includes(q) || issue.id.toLowerCase().includes(q),
-        )
+      : (eligibleEpics.find((epic) => epic.id === selectedEpicId) ?? null)
 
   const backToList = (
     <button
@@ -841,70 +540,24 @@ export function IssuesView() {
     </button>
   )
 
-  if (selectedId !== undefined && selectedIssue === null) {
+  if (selectedId !== undefined) {
     return (
-      <section>
-        {backToList}
-        {issueError !== null ? (
-          <p className="mt-4 text-red-ink">{issueError}</p>
-        ) : (
-          <p className="mt-4 text-fg-faint">Loading {selectedId}...</p>
-        )}
-      </section>
-    )
-  }
-
-  if (selectedIssue !== null) {
-    return (
-      <section>
-        {backToList}
-        <div className="mt-3 flex items-center gap-3">
-          <h1 className="text-xl font-semibold">{selectedIssue.title}</h1>
-          <IssueBadge issue={selectedIssue} />
-          {selected !== null && (
-            <button
-              type="button"
-              onClick={() => setForm({ mode: 'edit', issue: selectedIssue })}
-              className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
-            >
-              Edit
-            </button>
-          )}
-          {selected !== null &&
-            selectedIssue.type === 'epic' &&
-            eligibleEpics.some((epic) => epic.id === selectedIssue.id) && (
-              <MarkEpicDoneButton repo={selected} epic={selectedIssue} onClosed={saved} />
-            )}
-        </div>
-        <p className="mt-1 text-sm text-fg-faint">
-          {selectedIssue.id}
-          {selectedIssue.parent ? ` · child of ${selectedIssue.parent}` : ''}
-        </p>
-        <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
-          <DetailRow
-            label="priority"
-            value={selectedIssue.priority === null ? null : `P${selectedIssue.priority}`}
-          />
-          <DetailRow label="type" value={selectedIssue.type} />
-          <DetailRow label="assignee" value={selectedIssue.assignee} />
-          <DetailRow label="labels" value={selectedIssue.labels.join(', ') || null} />
-        </dl>
-        <Blockers issue={selectedIssue} />
-        <Unblocks issue={selectedIssue} />
-        <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-            Description
-          </h2>
-          <Markdown text={selectedIssue.description || 'No description.'} />
-        </div>
-        {selectedIssue.acceptanceCriteria !== null && (
-          <div className="mt-6">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-              Acceptance criteria
-            </h2>
-            <p className="whitespace-pre-wrap text-fg">{selectedIssue.acceptanceCriteria}</p>
-          </div>
-        )}
+      <>
+        <IssueDetailView
+          repo={selected}
+          id={selectedId}
+          refresh={refresh}
+          back={backToList}
+          onClosed={saved}
+          onEdit={(issue) => setForm({ mode: 'edit', issue })}
+          actions={
+            selected !== null &&
+            selectedEpic !== null &&
+            eligibleEpics.some((epic) => epic.id === selectedId) ? (
+              <MarkEpicDoneButton repo={selected} epic={selectedEpic} onClosed={saved} />
+            ) : null
+          }
+        />
         {selected !== null && form !== null && (
           <IssueFormModal
             repo={selected}
@@ -914,73 +567,36 @@ export function IssuesView() {
             onSaved={saved}
           />
         )}
-      </section>
+      </>
     )
   }
   if (selectedEpicId !== undefined && selectedId === undefined) {
+    const epicBack = (
+      <button
+        type="button"
+        onClick={() => void navigate({ to: '/issues', search: {}, replace: true })}
+        className="text-sm text-sky-ink hover:underline"
+      >
+        &larr; tasks
+      </button>
+    )
     return (
-      <section>
-        <button
-          type="button"
-          onClick={() => void navigate({ to: '/issues', search: {}, replace: true })}
-          className="text-sm text-sky-ink hover:underline"
-        >
-          &larr; tasks
-        </button>
-        <div className="mt-3 flex items-center gap-3">
-          <h1 className="text-xl font-semibold">
-            {selectedEpic?.title ?? (epicIssueError === null ? 'Loading epic...' : selectedEpicId)}
-          </h1>
-          {selectedEpic?.status === 'closed' ? (
-            <span className="rounded bg-raised px-2 py-0.5 text-xs text-fg-muted">Closed</span>
-          ) : (
-            selected !== null &&
-            selectedEpic !== null &&
-            eligibleEpics.some((epic) => epic.id === selectedEpic.id) && (
-              <MarkEpicDoneButton repo={selected} epic={selectedEpic} onClosed={saved} />
-            )
-          )}
-        </div>
-        <p className="mt-1 text-sm text-fg-faint">
-          {selectedEpicId}
-          {selectedEpic === null
-            ? ''
-            : ` · ${selectedEpic.closedChildren}/${selectedEpic.totalChildren} children done`}
-        </p>
-        {epicIssueError !== null && <p className="mt-2 text-sm text-red-ink">{epicIssueError}</p>}
-        <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-          Child tasks ({epicChildren.length})
-        </h2>
-        {epicChildrenError !== null ? (
-          <p className="text-sm text-red-ink">{epicChildrenError}</p>
-        ) : epicChildrenLoading ? (
-          <p className="text-sm text-fg-faint">Loading child tasks...</p>
-        ) : epicChildren.length === 0 ? (
-          <p className="text-sm text-fg-faint">No child tasks.</p>
-        ) : (
-          <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
-            {epicChildren.map((child) => (
-              <li key={child.id}>
-                <button
-                  type="button"
-                  onClick={() => openIssue(child.id)}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
-                >
-                  <IssueBadge issue={child} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">{child.title}</span>
-                    <span className="block truncate text-xs text-fg-faint">
-                      {child.id}
-                      {child.priority === null ? '' : ` · P${child.priority}`}
-                      {child.type === null ? '' : ` · ${child.type}`}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <EpicDetailView
+        repo={selected}
+        id={selectedEpicId}
+        refresh={refresh}
+        epic={selectedEpic}
+        back={epicBack}
+        actions={
+          selected !== null &&
+          selectedEpic !== null &&
+          eligibleEpics.some((epic) => epic.id === selectedEpic.id) ? (
+            <MarkEpicDoneButton repo={selected} epic={selectedEpic} onClosed={saved} />
+          ) : null
+        }
+        onClosed={saved}
+        onOpenIssue={openIssue}
+      />
     )
   }
   return (
@@ -991,66 +607,6 @@ export function IssuesView() {
         onChanged={saved}
         selectRepo={selectRepo}
       />
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">Tasks</h1>
-        <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search tasks…"
-            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
-          />
-          <span className="text-sm text-fg-faint">
-            {searched.length} {searched.length === 1 ? 'task' : 'tasks'}
-            {status !== 'all' && ` · ${filtered.length} shown`}
-          </span>
-          <div className="flex rounded-lg border border-line-strong p-0.5">
-            <button
-              type="button"
-              aria-label="Board view"
-              onClick={() => setMode('kanban')}
-              className={`rounded px-2 py-1 text-sm ${
-                view === 'kanban'
-                  ? 'bg-raised-strong text-fg-strong'
-                  : 'text-fg-muted hover:text-fg'
-              }`}
-            >
-              Board
-            </button>
-            <button
-              type="button"
-              aria-label="List view"
-              onClick={() => setMode('list')}
-              className={`rounded px-2 py-1 text-sm ${
-                view === 'list' ? 'bg-raised-strong text-fg-strong' : 'text-fg-muted hover:text-fg'
-              }`}
-            >
-              List
-            </button>
-          </div>
-          <select
-            value={status}
-            onChange={(event) => setStatus(event.target.value as typeof status)}
-            className="rounded border border-line-strong bg-surface px-2 py-1 text-sm"
-          >
-            <option value="all">All statuses</option>
-            <option value="open">Open</option>
-            <option value="in_progress">In progress</option>
-            <option value="blocked">Blocked</option>
-            <option value="closed">Closed</option>
-          </select>
-          {selected !== null && (
-            <button
-              type="button"
-              onClick={() => setForm({ mode: 'create' })}
-              className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500"
-            >
-              New task
-            </button>
-          )}
-        </div>
-      </div>
       {selected !== null && eligibleEpics.length > 0 && (
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-emerald-ink">
@@ -1081,85 +637,13 @@ export function IssuesView() {
           </ul>
         </section>
       )}
-      {error !== null ? (
-        <p className="text-red-ink">{error}</p>
-      ) : view === 'kanban' ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {ISSUE_STATES.map((state) => {
-            if (status !== 'all' && status !== state) return null
-            const columnIssues = searched.filter((issue) => issue.status === state)
-            return (
-              <div
-                key={state}
-                className="flex min-w-0 flex-col rounded-lg border border-line bg-surface"
-              >
-                <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className={`h-2 w-2 shrink-0 rounded-full ${columnDot[state]}`} />
-                    <span className="truncate text-xs font-medium uppercase tracking-wide text-fg">
-                      {columnHeader[state]}
-                    </span>
-                  </span>
-                  <span className="rounded bg-raised px-1.5 text-xs tabular-nums text-fg-muted">
-                    {columnIssues.length}
-                  </span>
-                </div>
-                <ul className="flex flex-col gap-2 p-2">
-                  {columnIssues.map((issue) => (
-                    <li key={issue.id}>
-                      <button
-                        type="button"
-                        onClick={() => openIssue(issue.id)}
-                        className="issue-card w-full rounded border border-line bg-sunken px-3 py-2 text-left hover:bg-raised"
-                      >
-                        <span className="block text-xs text-fg-faint">{issue.id}</span>
-                        <span className="mt-0.5 block break-words font-medium leading-snug">
-                          {issue.title}
-                        </span>
-                        <span className="mt-1 block text-xs text-fg-faint">
-                          {[issue.priority === null ? null : `P${issue.priority}`, issue.type]
-                            .filter(Boolean)
-                            .join(' · ') || '\u00a0'}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                  {columnIssues.length === 0 && (
-                    <li className="px-1 py-2 text-xs text-fg-dim">No tasks.</li>
-                  )}
-                </ul>
-              </div>
-            )
-          })}
-        </div>
-      ) : (
-        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
-          {searched.map((issue) => (
-            <li key={issue.id}>
-              <button
-                type="button"
-                onClick={() => openIssue(issue.id)}
-                className="issue-list-row flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-raised"
-              >
-                <IssueBadge issue={issue} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{issue.title}</span>
-                  <span className="block truncate text-xs text-fg-faint">
-                    {issue.id}
-                    {issue.priority === null ? '' : ` · P${issue.priority}`}
-                    {issue.type === null ? '' : ` · ${issue.type}`}
-                  </span>
-                </span>
-              </button>
-            </li>
-          ))}
-          {searched.length === 0 && (
-            <li className="px-4 py-6 text-center text-sm text-fg-faint">
-              No tasks match "{search}".
-            </li>
-          )}
-        </ul>
-      )}
+      <IssueBoard
+        issues={issues}
+        error={error}
+        hasRepo={selected !== null}
+        onOpenIssue={(id) => openIssue(id)}
+        onCreate={() => setForm({ mode: 'create' })}
+      />
       {selected !== null && form !== null && (
         <IssueFormModal
           repo={selected}
@@ -1170,100 +654,5 @@ export function IssuesView() {
         />
       )}
     </section>
-  )
-}
-
-const DEPENDENCY_TONE = {
-  red: {
-    heading: 'text-red-ink',
-    list: 'border-red-edge bg-red-soft',
-    chip: 'bg-red-soft-hover text-red-ink',
-  },
-  amber: {
-    heading: 'text-amber-ink',
-    list: 'border-amber-edge bg-amber-soft',
-    chip: 'bg-amber-soft-hover text-amber-ink',
-  },
-  emerald: {
-    heading: 'text-emerald-ink',
-    list: 'border-emerald-edge bg-emerald-soft',
-    chip: 'bg-emerald-soft-hover text-emerald-ink',
-  },
-} as const
-
-function DependencyList({
-  items,
-  tone,
-}: {
-  items: Dependency[]
-  tone: keyof typeof DEPENDENCY_TONE
-}) {
-  return (
-    <ul className={`rounded-lg border px-3 py-1 ${DEPENDENCY_TONE[tone].list}`}>
-      {items.map((d) => (
-        <li key={d.id}>
-          <Link
-            to="/issues"
-            search={{ issue: d.id }}
-            className="flex items-center gap-2 py-1 text-sm hover:underline"
-          >
-            <span className={`rounded px-1.5 py-0.5 text-xs ${DEPENDENCY_TONE[tone].chip}`}>
-              {d.status}
-            </span>
-            <span className="shrink-0 text-fg-faint">{d.id}</span>
-            <span className="min-w-0 truncate text-fg">{d.title}</span>
-          </Link>
-        </li>
-      ))}
-    </ul>
-  )
-}
-
-/** Why a task cannot run: the open issues it waits on, split by who resolves them. */
-export function Blockers({ issue }: { issue: Issue }) {
-  const blocking = issue.dependencies.filter((d) => d.status !== 'closed')
-  if (blocking.length === 0) return null
-  const humanOnly = blocking.filter((d) => d.labels.includes(HUMAN_ONLY_LABEL))
-  const tasks = blocking.filter((d) => !d.labels.includes(HUMAN_ONLY_LABEL))
-
-  const group = (title: string, items: Dependency[], tone: 'red' | 'amber') => (
-    <div>
-      <h3
-        className={`mb-1 text-xs font-semibold uppercase tracking-wide ${DEPENDENCY_TONE[tone].heading}`}
-      >
-        {title} ({items.length})
-      </h3>
-      <DependencyList items={items} tone={tone} />
-    </div>
-  )
-
-  return (
-    <div className="mt-6">
-      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-red-ink">
-        Blocked by
-      </h2>
-      <p className="mb-2 text-sm text-fg-faint">
-        This task cannot run until every blocker is closed.
-      </p>
-      <div className="space-y-3">
-        {tasks.length > 0 && group('Tasks', tasks, 'red')}
-        {humanOnly.length > 0 && group('Human-only', humanOnly, 'amber')}
-      </div>
-    </div>
-  )
-}
-
-/** The open issues waiting on this one: closing it lets them run. */
-export function Unblocks({ issue }: { issue: Issue }) {
-  const waiting = (issue.dependents ?? []).filter((d) => d.status !== 'closed')
-  if (waiting.length === 0) return null
-  return (
-    <div className="mt-6">
-      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-emerald-ink">
-        Unblocks ({waiting.length})
-      </h2>
-      <p className="mb-2 text-sm text-fg-faint">Closing this task lets these run.</p>
-      <DependencyList items={waiting} tone="emerald" />
-    </div>
   )
 }

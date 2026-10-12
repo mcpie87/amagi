@@ -1,24 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { Config } from './config.ts'
-import {
-  claimEligible,
-  claimGate,
-  classifyDifficulty,
-  implementModel,
-  modelTier,
-  parseDifficulty,
-  requiredTier,
-} from './difficulty.ts'
+import { claimEligible, claimGate, classifyDifficulty, parseDifficulty } from './difficulty.ts'
 import type { Tracker, TrackerTask } from './drivers/types.ts'
 import type { makeHarness } from './factory.ts'
 
 const config = (over: Record<string, unknown> = {}) =>
   Config.parse({
     harness: { implement: { kind: 'claude', model: 'claude-haiku-4-5' } },
-    difficulty: {
-      enabled: true,
-      modelTiers: { 'claude-haiku-4-5': 'fast', 'claude-sonnet-4-5': 'smart' },
-    },
+    difficulty: { enabled: true },
     ...over,
   })
 
@@ -33,57 +22,35 @@ const task = (difficulty: string | null | undefined): TrackerTask => ({
   ...(difficulty === undefined || difficulty === null ? {} : { difficulty }),
 })
 
-describe('modelTier', () => {
-  test('uses the configured tier for a listed model', () => {
-    expect(modelTier(config(), 'claude-sonnet-4-5')).toBe('smart')
-  })
-
-  test('unlisted and unknown models get the weakest tier', () => {
-    expect(modelTier(config(), 'claude-haiku-4-5')).toBe('fast')
-    expect(modelTier(config(), 'some-other-model')).toBe('fast')
-    expect(modelTier(config(), null)).toBe('fast')
-  })
-})
-
-describe('requiredTier', () => {
-  test('high needs smart by default, unlisted levels need the weakest', () => {
-    expect(requiredTier(config(), 'high')).toBe('smart')
-    expect(requiredTier(config(), 'low')).toBe('fast')
-    expect(requiredTier(config(), null)).toBe('fast')
-  })
-})
+const easyOnly = { name: 'Haiku 1', difficulties: ['low', 'medium'] }
 
 describe('claimGate', () => {
   test('disabled gating allows everything', () => {
     const cfg = config({ difficulty: { enabled: false } })
-    expect(claimGate(cfg, task('high'), 'claude-haiku-4-5')).toEqual({ allowed: true })
+    expect(claimGate(cfg, task('high'), easyOnly)).toEqual({ allowed: true })
   })
 
-  test('a smart model may claim high difficulty', () => {
-    const gate = claimGate(config(), task('high'), 'claude-sonnet-4-5')
-    expect(gate).toEqual({ allowed: true })
+  test('a worker may claim the levels it lists', () => {
+    expect(claimGate(config(), task('low'), easyOnly)).toEqual({ allowed: true })
+    expect(claimGate(config(), task('medium'), easyOnly)).toEqual({ allowed: true })
   })
 
-  test('a fast model is rejected from high difficulty with a clear reason', () => {
-    const gate = claimGate(config(), task('high'), 'claude-haiku-4-5')
-    expect(gate).toEqual({
+  test('a worker is rejected from a level it does not list, with a clear reason', () => {
+    expect(claimGate(config(), task('high'), easyOnly)).toEqual({
       allowed: false,
-      reason: 'claude-haiku-4-5 is only a fast model but high difficulty needs smart',
+      reason: 'Haiku 1 does not take high difficulty tasks',
     })
-  })
-
-  test('low difficulty is claimable by any tier', () => {
-    expect(claimGate(config(), task('low'), 'claude-haiku-4-5')).toEqual({ allowed: true })
+    expect(claimGate(config(), task('low'), { name: 'Idle', difficulties: [] }).allowed).toBe(false)
   })
 
   test('a task without difficulty is never gated', () => {
-    expect(claimGate(config(), task(null), 'claude-haiku-4-5')).toEqual({ allowed: true })
-    expect(claimGate(config(), task(undefined), 'claude-haiku-4-5')).toEqual({ allowed: true })
+    expect(claimGate(config(), task(null), easyOnly)).toEqual({ allowed: true })
+    expect(claimGate(config(), task(undefined), easyOnly)).toEqual({ allowed: true })
   })
 
-  test('an unlisted model counts as weakest, so high difficulty rejects it', () => {
-    expect(claimGate(config(), task('high'), null).allowed).toBe(false)
-    expect(claimGate(config(), task('low'), null)).toEqual({ allowed: true })
+  test('a worker without a list, or no worker at all, takes every level', () => {
+    expect(claimGate(config(), task('high'), { name: 'Opus 1' })).toEqual({ allowed: true })
+    expect(claimGate(config(), task('high'), null)).toEqual({ allowed: true })
   })
 })
 
@@ -149,7 +116,7 @@ describe('claimEligible', () => {
       { ...task('high'), id: 't3' },
     ])
     const skipped: string[] = []
-    const claimed = await claimEligible(t, config(), 'claude-haiku-4-5', (skippedTask, reason) =>
+    const claimed = await claimEligible(t, config(), easyOnly, (skippedTask, reason) =>
       skipped.push(`${skippedTask.id}:${reason}`),
     )
     expect(claimed?.id).toBe('t2')
@@ -164,7 +131,7 @@ describe('claimEligible', () => {
       { ...task('high'), id: 't2' },
     ])
     const skipped: string[] = []
-    const claimed = await claimEligible(t, config(), 'claude-haiku-4-5', (tt, r) =>
+    const claimed = await claimEligible(t, config(), easyOnly, (tt, r) =>
       skipped.push(`${tt.id}:${r}`),
     )
     expect(claimed).toBeNull()
@@ -175,7 +142,7 @@ describe('claimEligible', () => {
   test('falls back to the tracker claim when gating is disabled', async () => {
     const t = tracker([task('high')])
     const cfg = config({ difficulty: { enabled: false } })
-    const claimed = await claimEligible(t, cfg, 'claude-haiku-4-5')
+    const claimed = await claimEligible(t, cfg, easyOnly)
     expect(claimed?.id).toBe('bd-1')
     expect(t.claimedIds).toEqual(['bd-1'])
   })
@@ -247,12 +214,5 @@ describe('classifyDifficulty', () => {
       fakeHarness('maybe') as typeof makeHarness,
     )
     expect(level).toBeNull()
-  })
-})
-
-describe('implementModel', () => {
-  test('reads the model from the implement harness config', () => {
-    expect(implementModel(config())).toBe('claude-haiku-4-5')
-    expect(implementModel(config({ harness: { implement: { kind: 'claude' } } }))).toBeNull()
   })
 })

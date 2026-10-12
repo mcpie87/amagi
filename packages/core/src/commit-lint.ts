@@ -6,12 +6,14 @@ const FOOTER = new RegExp(`^${COMMIT_FOOTER_PREFIX}( · .+)?$`)
 const FILE_STAT = /^- `[^`]+` (\+\d+ -\d+|binary)$/
 
 /**
- * A commit amagi made: a `[task-id]` subject or the amagi footer. Human and
- * agent-authored commits carry neither, so the lint leaves them alone.
+ * A commit amagi made: one carrying the amagi footer. Hand commits share the
+ * `[task-id]` subject, so the subject alone does not mark one.
  */
 export function isAmagiCommit(message: string): boolean {
-  const lines = message.trim().split('\n')
-  return SUBJECT.test(lines[0] ?? '') || lines.some((line) => FOOTER.test(line.trim()))
+  return message
+    .trim()
+    .split('\n')
+    .some((line) => FOOTER.test(line.trim()))
 }
 
 /**

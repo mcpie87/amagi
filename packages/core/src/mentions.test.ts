@@ -51,6 +51,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref'))
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, inputs }
@@ -83,6 +88,9 @@ class FakeDriver implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     throw new Error('unused')
@@ -167,6 +175,12 @@ function fakeTracker(create: boolean): Tracker & { created: CreateTrackerTask[] 
     kind: 'fake',
     capabilities,
     created: [] as CreateTrackerTask[],
+    async openIds(): Promise<string[]> {
+      return []
+    },
+    async get(): Promise<TrackerTask | null> {
+      return null
+    },
     async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
       tracker.created.push(input)
       return {
@@ -240,6 +254,24 @@ function summaryHarness(
   }
 }
 
+function quickTaskHarness(
+  result: unknown,
+  prompts: string[] = [],
+  options: AgentStartOptions[] = [],
+): Harness {
+  const base = fakeHarness({ summary: 'add-a-task' })
+  const draft = fakeHarness({ summary: JSON.stringify(result) })
+  return {
+    ...base,
+    start: (opts: AgentStartOptions) => {
+      if (!opts.prompt.startsWith('Draft one issue')) return base.start(opts)
+      prompts.push(opts.prompt)
+      options.push(opts)
+      return draft.start(opts)
+    },
+  }
+}
+
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
@@ -252,7 +284,7 @@ describe('parseMentionKind', () => {
     expect(parseMentionKind('FIX-PR')).toBe('fix-pr')
     expect(parseMentionKind('explain')).toBe('explain')
     expect(parseMentionKind('add-a-task')).toBe('add-a-task')
-    expect(parseMentionKind('take-down')).toBe('take-down')
+    expect(parseMentionKind('flag')).toBe('flag')
     expect(parseMentionKind('ambiguous')).toBe('ambiguous')
   })
 
@@ -610,6 +642,10 @@ describe('respondToMention', () => {
     const outPath = join(tmpdir(), `amagi-explain-7-10.md`)
     writeFileSync(outPath, 'It drifts from base.\n')
     const { exec } = fake((c) => {
+      if (c[1] === 'merge-base') return { exitCode: 0, stdout: 'branch-point\n', stderr: '' }
+      if (c[1] === 'log') {
+        return { exitCode: 0, stdout: 'abc123 Relevant fix landed\n', stderr: '' }
+      }
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
       return undefined
@@ -639,6 +675,7 @@ describe('respondToMention', () => {
     expect(kind).toBe('explain')
     expect(prompts.join('\n')).toContain('does not merge cleanly into this PR')
     expect(prompts.join('\n')).toContain('drift')
+    expect(prompts.join('\n')).toContain('abc123 Relevant fix landed')
   })
 
   test('classification uses the mention watcher harness overrides', async () => {
@@ -669,9 +706,11 @@ describe('respondToMention', () => {
     })
   })
 
-  test('an add-a-task mention creates a tracker task and posts a confirmation', async () => {
+  test('an add-a-task mention creates an issue through the tracker and posts its URL', async () => {
     const tracker = fakeTracker(true)
     const driver = new FakeDriver()
+    const prompts: string[] = []
+    const options: AgentStartOptions[] = []
     const kind = await respondToMention({
       root: '/repo',
       repoName: 'amagi',
@@ -680,14 +719,55 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker,
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () =>
+        quickTaskHarness(
+          {
+            status: 'create',
+            title: 'Add tests',
+            context: 'Requested on PR #7',
+            goal: 'Cover the feature',
+            scope: 'Add tests',
+            assumptions: 'Use Bun',
+            acceptance: 'Tests pass',
+          },
+          prompts,
+          options,
+        ),
     })
 
     expect(kind).toBe('add-a-task')
     expect(tracker.created).toHaveLength(1)
-    expect(tracker.created[0]?.title).toContain('PR #7:')
-    expect(tracker.created[0]?.description).toContain('@bob')
+    expect(tracker.created[0]?.description).toContain('## Acceptance\nTests pass')
+    expect(prompts[0]).toContain('The service will create it through the configured tracker')
+    expect(prompts[0]).toContain('please track adding tests for this')
+    expect(options[0]?.permissions).toBe('read-only')
+    expect(options[0]?.cwd).toBe(tmpdir())
     expect(driver.posted).toEqual(['@bob Logged this as task bd-new.'])
+  })
+
+  test('a materially ambiguous task request asks one focused question without creating an issue', async () => {
+    const tracker = fakeTracker(true)
+    const driver = new FakeDriver()
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '4', user: 'bob', body: 'please track the migration' },
+      config: config(),
+      driver,
+      tracker,
+      makeHarnessFn: () =>
+        quickTaskHarness({
+          status: 'clarification',
+          question: 'Should this migrate the public API or the persisted data format?',
+        }),
+    })
+
+    expect(kind).toBe('add-a-task')
+    expect(tracker.created).toHaveLength(0)
+    expect(driver.posted).toEqual([
+      '@bob Should this migrate the public API or the persisted data format?',
+    ])
   })
 
   test('an add-a-task mention without a task-capable tracker explains it cannot', async () => {
@@ -700,7 +780,7 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker: fakeTracker(false),
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () => quickTaskHarness({ status: 'create', title: 'Something' }),
     })
 
     expect(kind).toBe('add-a-task')
@@ -749,7 +829,7 @@ describe('respondToMention', () => {
   })
 
   test('a TAKE DOWN verdict posts the reason on the tracker issue and replies on the PR', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-1.md')
+    const outPath = join(tmpdir(), 'amagi-flag-7-1.md')
     writeFileSync(
       outPath,
       'TAKE DOWN\nThis PR reverses the base behavior and breaks existing callers.\n',
@@ -767,10 +847,10 @@ describe('respondToMention', () => {
         driver,
         tracker,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual([
         'This PR reverses the base behavior and breaks existing callers.',
       ])
@@ -784,7 +864,7 @@ describe('respondToMention', () => {
   })
 
   test('a KEEP verdict replies on the PR but does not comment on the tracker', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-2.md')
+    const outPath = join(tmpdir(), 'amagi-flag-7-2.md')
     writeFileSync(outPath, 'KEEP\nThe conflicts are trivial and the PR is fine.\n')
     const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
@@ -799,10 +879,10 @@ describe('respondToMention', () => {
         driver,
         tracker,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual(['The conflicts are trivial and the PR is fine.'])
       expect(tracker.comments).toEqual([])
     } finally {
@@ -810,8 +890,8 @@ describe('respondToMention', () => {
     }
   })
 
-  test('take-down without a tracker or task id still replies on the PR', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-3.md')
+  test('flag without a tracker or task id still replies on the PR', async () => {
+    const outPath = join(tmpdir(), 'amagi-flag-7-3.md')
     writeFileSync(outPath, 'TAKE DOWN\nThe PR duplicates existing functionality.\n')
     const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
@@ -824,10 +904,10 @@ describe('respondToMention', () => {
         config: config(),
         driver,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual(['The PR duplicates existing functionality.'])
     } finally {
       rmSync(outPath, { force: true })

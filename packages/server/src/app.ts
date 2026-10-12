@@ -9,94 +9,67 @@ import {
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
-  BeadsTracker,
-  CAPABILITY_WORDS,
   ChatService,
-  Config,
-  canReset,
+  type Config,
   claimGate,
-  classifyDifficulty,
   errMsg,
   expandTilde,
   expandWorkers,
   type GitIdentity,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
-  HUMAN_ONLY_LABEL,
-  hasStaleMaxParallel,
-  isTerminal,
-  LibnotifyNotifier,
+  InteractionTimings,
   type LiveRun,
+  loadConfig,
   loadGlobalConfig,
   loadWatcherSeats,
   makeHarness,
-  mergeLiveRuns,
   type Notifier,
-  NtfyNotifier,
-  newWorkerId,
+  PR_TASK_STATES,
+  type PrForge,
+  type PrInfo,
   pidAlive,
   type Question,
   type RegistryEntry,
-  Runner,
+  RequestTimings,
   type RunServiceApi,
-  reconcilePr,
-  removeWorktree,
-  resolveWorkerHarness,
+  requestSource,
   type Store,
-  type StoredEvent,
+  setHarnessProcessCap,
   type Tracker,
-  type TrackerCapabilities,
-  type TrackerTask,
   Triage,
-  type UpdateTrackerTask,
   type WorkerActivity,
-  WorkerConfig,
+  type WorkerConfig,
   type Workspace,
   type Workspaces,
   watcherHarnessConfig,
   workerSeat,
-  writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
 import type { Harness } from '@amagi/core/drivers/types'
-import { zValidator } from '@hono/zod-validator'
-import type { Context, ValidationTargets } from 'hono'
+import type { Context } from 'hono'
 import { Hono } from 'hono'
-import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import * as z from 'zod'
+import { routePath } from 'hono/route'
+import { createChatRoutes } from './chat-routes.ts'
+import { createFleetRoutes } from './fleet-routes.ts'
+import { createIssueRoutes } from './issues-routes.ts'
+import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
-  AnswerBody,
-  AskBody,
-  AwaitQuery,
-  ChatBody,
-  CloseTaskBody,
-  EpicCloseBody,
   EventQuery,
-  GitIdentityBody,
-  GitRequestBody,
-  IssueCreateBody,
-  IssueUpdateBody,
-  ParticipationBody,
+  InteractionBatch,
+  InteractionQuery,
+  ProcessCapUpdateBody,
+  ProfilesUpdateBody,
   QuestionQuery,
   RepoCommitParam,
   RepoParam,
-  RepoQuestionParam,
   RepoRegisterBody,
-  RepoTaskIdParam,
-  RunBody,
   SeatNamesUpdateBody,
-  SettingsBody,
   StreamQuery,
-  TaskIdParam,
-  TaskListQuery,
-  WatcherHistoryParam,
-  WatcherHistoryQuery,
-  WatcherParam,
-  WatcherUpdateBody,
-  WorkerCreateBody,
-  WorkerUpdateBody,
+  TimingQuery,
 } from './schemas.ts'
 import { eventStream } from './stream.ts'
+import { createTaskRoutes } from './task-routes.ts'
 
 export type ServerDeps = {
   workspaces: Workspaces
@@ -112,31 +85,18 @@ export type ServerDeps = {
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
   /** Queues one PR on the existing conflict watcher. */
-  queueConflictResolution?: (repo: string, prNumber: number) => boolean
+  queueConflictResolution?: (repo: string, prNumber: number, prUrl: string | null) => boolean
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
+  /** Shared with `serve` so its event-loop monitor lands in the same snapshot. */
+  timings?: RequestTimings
+  /** Dashboard interaction timings; serve shares the diagnostics file with `timings`. */
+  interactions?: InteractionTimings
 }
 
-/**
- * Every failure on the API answers with the same `{ error }` shape, so the
- * hono/client response union stays one success type plus one error type.
- */
-const valid = <T extends z.ZodType, Target extends keyof ValidationTargets>(
-  target: Target,
-  schema: T,
-) =>
-  zValidator(target, schema, (result, c) => {
-    if (!result.success) return c.json({ error: z.prettifyError(result.error) }, 400)
-  })
-
-/** The 501 reason for an operation the tracker cannot do, or null when it can. */
-function capabilityError(tracker: Tracker, capability: keyof TrackerCapabilities): string | null {
-  return tracker.capabilities[capability]
-    ? null
-    : `${tracker.kind} tracker does not support ${CAPABILITY_WORDS[capability]}`
-}
+const SLOW_REQUEST_MS = 1000
 
 function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
   if (identity === null) return null
@@ -168,11 +128,6 @@ function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
     rmSync(dir, { recursive: true, force: true })
   }
   return identity
-}
-
-/** The beads tracker's issue browser and epic closer, or null for any other tracker. */
-function beadsTracker(ws: Workspace): BeadsTracker | null {
-  return ws.tracker instanceof BeadsTracker ? ws.tracker : null
 }
 
 /**
@@ -240,29 +195,6 @@ async function resolveQuestionGate(
   }
 }
 
-/** Thrown by repo resolution so handlers keep a single typed return. */
-class RepoError extends Error {
-  constructor(
-    readonly status: ContentfulStatusCode,
-    message: string,
-  ) {
-    super(message)
-    this.name = 'RepoError'
-  }
-}
-
-/** Resolves a repo param to its workspace, throwing a RepoError on failure. */
-function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
-  let ws: Workspace | null
-  try {
-    ws = workspaces.get(repo)
-  } catch (err) {
-    throw new RepoError(500, `repo ${repo}: ${errMsg(err)}`)
-  }
-  if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
-  return ws
-}
-
 function gitOutput(root: string, args: string[]): string {
   const result = Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' })
   if (result.exitCode !== 0) {
@@ -282,6 +214,8 @@ export function createApp({
   queueConflictResolution,
   liveRuns,
   chatHarnessFor,
+  timings = new RequestTimings(),
+  interactions = new InteractionTimings(),
 }: ServerDeps) {
   // One ChatService per workspace, so the in-flight guard survives requests.
   const chats = new Map<string, ChatService>()
@@ -322,7 +256,76 @@ export function createApp({
       return { ...worker, taskId: state?.taskId ?? null }
     })
   }
+  const seatReferences = () => {
+    const global = loadGlobalConfig()
+    const seats = new Map(global.seats.map(({ name, count }) => [name, count]))
+    for (const worker of global.worker) {
+      if (worker.seat !== undefined && !seats.has(worker.seat)) seats.set(worker.seat, 1)
+    }
+    for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
+      if (watcher.seat !== undefined && !seats.has(watcher.seat)) seats.set(watcher.seat, 1)
+    }
+    for (const harness of [
+      global.harness.implement,
+      global.harness.triage,
+      ...(global.review.harness ? [global.review.harness] : []),
+      ...Object.values(global.harness.definitions),
+    ]) {
+      if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
+    }
+    return { global, seats }
+  }
   return new Hono()
+    .use('/api/*', async (c, next) => {
+      const start = performance.now()
+      await next()
+      if (c.req.path.startsWith('/api/diagnostics/')) return
+      const ms = performance.now() - start
+      const route = routePath(c, -1)
+      const referer = c.req.header('referer') ?? null
+      const userAgent = c.req.header('user-agent') ?? null
+      const sample = {
+        at: Date.now(),
+        method: c.req.method,
+        route: route === '/api/*' ? '(no route)' : route,
+        path: c.req.path,
+        query: new URL(c.req.url).search.slice(1),
+        source: requestSource(referer ?? undefined, userAgent ?? undefined),
+        referer,
+        userAgent,
+        status: c.res.status,
+        ms,
+      }
+      timings.record(sample)
+      if (ms >= SLOW_REQUEST_MS) {
+        console.warn(
+          `slow request ${sample.method} ${sample.path} ${Math.round(ms)}ms (${sample.source})`,
+        )
+      }
+    })
+
+    .route('/', createIssueRoutes(workspaces))
+
+    .route(
+      '/',
+      createChatRoutes({
+        workspaces,
+        harnessFor: (ws, config) => chatHarnessFor?.(ws) ?? makeHarness(config),
+      }),
+    )
+
+    .get('/api/diagnostics/requests', valid('query', TimingQuery), (c) =>
+      c.json(timings.snapshot(c.req.valid('query'))),
+    )
+
+    .post('/api/diagnostics/interactions', valid('json', InteractionBatch), (c) => {
+      interactions.record(c.req.valid('json').interactions)
+      return c.body(null, 204)
+    })
+
+    .get('/api/diagnostics/interactions', valid('query', InteractionQuery), (c) =>
+      c.json(interactions.snapshot(c.req.valid('query'))),
+    )
 
     .get('/api/health', (c) => c.json({ ok: true }))
 
@@ -331,7 +334,13 @@ export function createApp({
       const since = Date.now() - windowMs
       const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
+        let ws: Workspace | null
+        // A repo with an invalid config (e.g. undeclared checks) must not fail the whole rate view.
+        try {
+          ws = workspaces.get(entry.key)
+        } catch {
+          continue
+        }
         if (ws === null) continue
         for (const event of ws.store.eventsSince(since)) {
           if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue
@@ -345,22 +354,33 @@ export function createApp({
       return c.json({ windowSeconds: 60, rates: [...groups.values()] })
     })
 
+    .get('/api/profiles', (c) =>
+      c.json({
+        profiles: loadGlobalConfig().profiles,
+        models: HARDCODED_MODELS,
+        efforts: HARDCODED_EFFORTS,
+      }),
+    )
+
+    .put('/api/profiles', valid('json', ProfilesUpdateBody), (c) => {
+      const { profiles } = c.req.valid('json')
+      writeGlobalConfig({ profiles })
+      return c.json({ profiles })
+    })
+
+    .get('/api/harness-process-cap', (c) =>
+      c.json({ maxProcesses: loadGlobalConfig().harness.maxProcesses }),
+    )
+
+    .put('/api/harness-process-cap', valid('json', ProcessCapUpdateBody), (c) => {
+      const { maxProcesses } = c.req.valid('json')
+      writeGlobalConfig({ harness: { maxProcesses } })
+      setHarnessProcessCap(maxProcesses)
+      return c.json({ maxProcesses })
+    })
+
     .get('/api/seat-names', (c) => {
-      const global = loadGlobalConfig()
-      const seats = new Map(global.seats.map(({ name, count }) => [name, count]))
-      for (const worker of global.worker)
-        if (worker.seat !== undefined && !seats.has(worker.seat)) seats.set(worker.seat, 1)
-      for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
-        if (watcher.seat !== undefined && !seats.has(watcher.seat)) seats.set(watcher.seat, 1)
-      }
-      for (const harness of [
-        global.harness.implement,
-        global.harness.review,
-        global.harness.triage,
-        ...Object.values(global.harness.definitions),
-      ]) {
-        if (harness.seat !== undefined && !seats.has(harness.seat)) seats.set(harness.seat, 1)
-      }
+      const { seats } = seatReferences()
       return c.json({
         seats: [...seats]
           .sort(([a], [b]) => a.localeCompare(b))
@@ -371,20 +391,8 @@ export function createApp({
     .put('/api/seat-names', valid('json', SeatNamesUpdateBody), (c) => {
       const { seats: seatEntries, renames } = c.req.valid('json')
       const seats = seatEntries.map(({ name }) => name)
-      const global = loadGlobalConfig()
-      const current = new Set(global.seats.map(({ name }) => name))
-      for (const worker of global.worker) if (worker.seat !== undefined) current.add(worker.seat)
-      for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
-        if (watcher.seat !== undefined) current.add(watcher.seat)
-      }
-      for (const harness of [
-        global.harness.implement,
-        global.harness.review,
-        global.harness.triage,
-        ...Object.values(global.harness.definitions),
-      ]) {
-        if (harness.seat !== undefined) current.add(harness.seat)
-      }
+      const { global, seats: referencedSeats } = seatReferences()
+      const current = new Set(referencedSeats.keys())
 
       const renameMap = new Map<string, string>()
       for (const { from, to } of renames) {
@@ -415,7 +423,7 @@ export function createApp({
         if (seat !== original.seat) watchers[kind] = { seat: seat ?? null }
       }
       const harness: Record<string, unknown> = {}
-      for (const name of ['implement', 'review', 'triage'] as const) {
+      for (const name of ['implement', 'triage'] as const) {
         const original = global.harness[name]
         const seat = rewrite(original.seat)
         if (seat !== original.seat) harness[name] = { kind: original.kind, seat: seat ?? null }
@@ -426,13 +434,37 @@ export function createApp({
         if (seat !== original.seat) definitions[name] = { seat: seat ?? null }
       }
       if (Object.keys(definitions).length > 0) harness.definitions = definitions
+      const reviewer = global.review.harness
+      const reviewerSeat = rewrite(reviewer?.seat)
 
       writeGlobalConfig({
         seats: seatEntries,
         worker,
         ...(Object.keys(watchers).length === 0 ? {} : { watchers }),
         ...(Object.keys(harness).length === 0 ? {} : { harness }),
+        ...(reviewer === undefined || reviewerSeat === reviewer.seat
+          ? {}
+          : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
+      for (const entry of workspaces.list()) {
+        let ws: Workspace | null
+        let config: Config
+        // A repo with an invalid config (e.g. undeclared checks) must not fail a global save.
+        try {
+          ws = workspaces.get(entry.key)
+          if (ws === null) continue
+          config = loadConfig(ws.root).config
+        } catch (err) {
+          console.warn(`seat save: skipping ${entry.key}: ${errMsg(err)}`)
+          continue
+        }
+        ws.config.seats = config.seats
+        ws.config.worker = config.worker
+        ws.config.watchers = config.watchers
+        ws.config.harness = config.harness
+        ws.config.review = config.review
+        runnerFor(entry.key)?.fleetChanged()
+      }
       return c.json({ seats: [...seatEntries].sort((a, b) => a.name.localeCompare(b.name)) })
     })
 
@@ -452,6 +484,14 @@ export function createApp({
         status: string
         since: number | null
       }
+      // A repo with an invalid config (e.g. undeclared checks) must not take down the whole view.
+      const workspace = (key: string): Workspace | null => {
+        try {
+          return workspaces.get(key)
+        } catch {
+          return null
+        }
+      }
       const configured = new Set<string>()
       const global = loadGlobalConfig()
       for (const { name, count } of global.seats) {
@@ -459,17 +499,18 @@ export function createApp({
           configured.add(count === 1 ? name : `${name}-${slot}`)
       }
       const configuredNames = new Set(global.seats.map(({ name }) => name))
-      for (const worker of global.worker) {
-        const seat = workerSeat(worker)
-        if (!configuredNames.has(seat)) configured.add(seat)
+      for (const worker of expandWorkers(global.worker, global.seats)) {
+        configured.add(workerSeat(worker))
       }
       for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
+        const ws = workspace(entry.key)
         if (ws === null) continue
-        configured.add(ws.config.harness.implement.seat ?? ws.config.harness.implement.kind)
+        const implementSeat = ws.config.harness.implement.seat ?? ws.config.harness.implement.kind
+        if (!configuredNames.has(implementSeat)) configured.add(implementSeat)
         for (const watcher of ['mention', 'prConflict'] as const) {
           const harness = watcherHarnessConfig(ws.config, watcher)
-          configured.add(harness.seat ?? harness.kind)
+          const seat = harness.seat ?? harness.kind
+          if (!configuredNames.has(seat)) configured.add(seat)
         }
       }
 
@@ -488,11 +529,28 @@ export function createApp({
         waiters.set(seat, queue)
       }
 
-      for (const { repo, service } of servedRunners()) {
-        const status = await service.status()
+      const runners = servedRunners()
+      const [statuses, queues] = await Promise.all([
+        Promise.all(runners.map(({ service }) => service.status())),
+        Promise.all(
+          workspaces.list().map(async (entry) => {
+            const ws = workspace(entry.key)
+            if (ws === null) return null
+            const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
+              (worker) => worker.enabled,
+            )
+            const ready = workers.length === 0 ? [] : await ws.tracker.ready()
+            return { repo: entry.key, ws, workers, ready }
+          }),
+        ),
+      ])
+
+      for (const [index, { repo }] of runners.entries()) {
+        const status = statuses[index]
+        if (status === undefined) continue
         for (const taskId of status.running) {
           const task = status.tasks[taskId]
-          const ws = workspaces.get(repo)
+          const ws = workspace(repo)
           const projected = ws?.store.task(taskId)
           const taskStatus = projected?.state ?? 'running'
           if (task?.waitingOnSeat) {
@@ -516,7 +574,7 @@ export function createApp({
       }
       for (const run of liveRuns?.() ?? []) {
         if (!pidAlive(run.pid)) continue
-        const ws = workspaces.get(run.repoKey)
+        const ws = workspace(run.repoKey)
         const projected = ws?.store.task(run.taskId)
         const events = ws?.store.events({ taskId: run.taskId, limit: 100_000 }) ?? []
         if (run.waitingOnSeat) {
@@ -554,16 +612,16 @@ export function createApp({
           since: null,
         })
       }
-      for (const entry of workspaces.list()) {
-        const ws = workspaces.get(entry.key)
-        if (ws === null) continue
+      for (const queue of queues) {
+        if (queue === null) continue
+        const { repo, ws, workers, ready } = queue
         for (const chat of ws.store.activeChatAgents()) {
           const startedAt = ws.store
             .events({ taskId: chat.taskId, limit: 100_000 })
             .filter((event) => event.type === 'agent.started' && event.role === 'chat')
             .at(-1)?.ts
           setHolder(chat.seat, {
-            repo: entry.key,
+            repo,
             taskId: chat.taskId,
             title: ws.store.task(chat.taskId)?.title ?? chat.taskId,
             status: 'chat',
@@ -571,11 +629,7 @@ export function createApp({
           })
         }
 
-        const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
-          (worker) => worker.enabled,
-        )
         if (workers.length === 0) continue
-        const ready = await ws.tracker.ready()
         const workersBySeat = new Map<string, (typeof workers)[number][]>()
         for (const worker of workers) {
           const seat = worker.seat ?? worker.kind
@@ -586,21 +640,14 @@ export function createApp({
         for (const [seat, seatWorkers] of workersBySeat) {
           const tasks = eligible.get(seat) ?? []
           for (const task of ready) {
-            const canRun = seatWorkers.some((worker) => {
-              const harness = resolveWorkerHarness(ws.config, worker)
-              return claimGate(
-                { ...ws.config, harness: { ...ws.config.harness, implement: harness } },
-                task,
-                harness.model ?? null,
-              ).allowed
-            })
+            const canRun = seatWorkers.some((worker) => claimGate(ws.config, task, worker).allowed)
             if (
               !canRun ||
-              tasks.some((queued) => queued.repo === entry.key && queued.taskId === task.id)
+              tasks.some((queued) => queued.repo === repo && queued.taskId === task.id)
             )
               continue
             tasks.push({
-              repo: entry.key,
+              repo,
               taskId: task.id,
               title: task.title,
               status: 'ready',
@@ -612,13 +659,15 @@ export function createApp({
       }
 
       return c.json({
-        seats: [...configured].sort().map((seat) => ({
-          seat,
-          state: holders.has(seat) ? 'held' : 'free',
-          holder: holders.get(seat) ?? null,
-          waiters: waiters.get(seat) ?? [],
-          eligible: eligible.get(seat) ?? [],
-        })),
+        seats: [...new Set([...configured, ...holders.keys(), ...waiters.keys()])]
+          .sort()
+          .map((seat) => ({
+            seat,
+            state: holders.has(seat) ? 'held' : 'free',
+            holder: holders.get(seat) ?? null,
+            waiters: waiters.get(seat) ?? [],
+            eligible: eligible.get(seat) ?? [],
+          })),
       })
     })
 
@@ -731,115 +780,6 @@ export function createApp({
       return c.json({ ...entry, ready }, 201)
     })
 
-    .get('/api/repos/:repo/issues/:id', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
-      if (beads === null) {
-        return c.json({ error: `issue detail is unavailable for ${repo}` }, 501)
-      }
-      const issue = await beads.getIssue(id)
-      if (issue === null) return c.json({ error: `unknown issue ${id}` }, 404)
-      return c.json({ ...issue, dependents: await beads.dependents(id) })
-    })
-
-    .get('/api/repos/:repo/issues/:id/children', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
-      if (beads === null) {
-        return c.json({ error: `issue details are unavailable for ${repo}` }, 501)
-      }
-      return c.json(await beads.children(id))
-    })
-
-    .post(
-      '/api/repos/:repo/issues/:id/close',
-      valid('param', RepoTaskIdParam),
-      valid('json', EpicCloseBody),
-      async (c) => {
-        const { repo, id } = c.req.valid('param')
-        const { reason } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        if (beadsTracker(ws) === null) {
-          return c.json({ error: `issue closure is unavailable for ${repo}` }, 501)
-        }
-        await ws.tracker.close(id, reason)
-        return c.json({ id, status: 'closed', reason })
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/issues',
-      valid('param', RepoParam),
-      valid('json', IssueCreateBody),
-      async (c) => {
-        const { repo } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
-        const cap = capabilityError(ws.tracker, 'create')
-        if (cap !== null) return c.json({ error: cap }, 501)
-        const body = c.req.valid('json')
-        const input = ws.config.difficulty.enabled
-          ? {
-              ...body,
-              difficulty: await classifyDifficulty(body.title, body.description, ws.config),
-            }
-          : body
-        const created: TrackerTask = await ws.tracker.createTask(input)
-        const beads = beadsTracker(ws)
-        const issue = beads === null ? null : await beads.getIssue(created.id)
-        return c.json(issue ?? created, 201)
-      },
-    )
-
-    .patch(
-      '/api/repos/:repo/issues/:id',
-      valid('param', RepoTaskIdParam),
-      valid('json', IssueUpdateBody),
-      async (c) => {
-        const { repo, id } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
-        const body = c.req.valid('json')
-        const input: UpdateTrackerTask = {
-          title: body.title,
-          description: body.description,
-          acceptanceCriteria: body.acceptanceCriteria,
-          priority: body.priority,
-          labels: body.labels,
-        }
-        // Only the operation actually requested is gated, so a dependency-only
-        // edit reports the dependency gap rather than a generic edit gap.
-        const hasEditFields =
-          input.title !== undefined ||
-          input.description !== undefined ||
-          input.acceptanceCriteria !== undefined ||
-          input.priority !== undefined ||
-          input.labels !== undefined
-        if (hasEditFields) {
-          const editCap = capabilityError(ws.tracker, 'edit')
-          if (editCap !== null) return c.json({ error: editCap }, 501)
-        }
-        // The board edits dependencies as a full set; the tracker wants a diff.
-        if (body.dependencies !== undefined) {
-          const depCap = capabilityError(ws.tracker, 'dependencies')
-          if (depCap !== null) return c.json({ error: depCap }, 501)
-          const beads = beadsTracker(ws)
-          if (beads === null) {
-            return c.json({ error: 'cannot resolve dependency changes without issue detail' }, 501)
-          }
-          const current = (await beads.getIssue(id))?.dependencies.map((d) => d.id) ?? []
-          input.dependencies = {
-            add: body.dependencies.filter((d) => !current.includes(d)),
-            remove: current.filter((d) => !body.dependencies?.includes(d)),
-          }
-        }
-        const updated = await ws.tracker.updateTask(id, input)
-        const beads = beadsTracker(ws)
-        const issue = beads === null ? null : await beads.getIssue(updated.id)
-        return c.json(issue ?? updated)
-      },
-    )
-
     .delete('/api/repos/:repo', valid('param', RepoParam), (c) => {
       const repo = c.req.valid('param').repo
       if (!workspaces.remove(repo)) {
@@ -869,9 +809,25 @@ export function createApp({
       if (ws.forge === null) {
         return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
       }
-      // The driver reports the forge's own flags (gh wording on both drivers),
-      // so one filter is all it takes to find the PRs that can merge now.
-      const open = await ws.forge.listOpenPrs(ws.root)
+      const forges = new Map<string, PrForge>()
+      if (ws.prForge !== null) {
+        const selected = ws.prForge(null)
+        forges.set(selected.key, selected)
+        for (const task of ws.store.tasks({ states: PR_TASK_STATES })) {
+          const attached = ws.prForge(task.prUrl)
+          forges.set(attached.key, attached)
+        }
+      }
+      const drivers = forges.size === 0 ? [ws.forge] : [...forges.values()].map((f) => f.driver)
+      const results = await Promise.allSettled(drivers.map((driver) => driver.listOpenPrs(ws.root)))
+      const open: PrInfo[] = []
+      for (const result of results) {
+        if (result.status === 'fulfilled') open.push(...result.value)
+        else console.warn(`mergeable PR refresh: ${errMsg(result.reason)}`)
+      }
+      if (results.every((result) => result.status === 'rejected')) {
+        throw new Error('mergeable PR refresh failed on every forge')
+      }
       return c.json({
         prs: open.filter((p) => p.mergeable === 'MERGEABLE' || p.mergeStateStatus === 'CLEAN'),
       })
@@ -886,838 +842,26 @@ export function createApp({
       return c.json({ prs: await ws.forge.listOpenPrs(ws.root) })
     })
 
-    .get('/api/repos/:repo/issues', valid('param', RepoParam), async (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
-      if (beads === null) {
-        return c.json({ error: `issue browser is unavailable for ${repo}` }, 501)
-      }
-      return c.json(await beads.list())
-    })
-
-    .get('/api/repos/:repo/epics/close-eligible', valid('param', RepoParam), async (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const beads = beadsTracker(ws)
-      if (beads === null) {
-        return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
-      }
-      return c.json(await beads.eligibleEpics())
-    })
-
-    .post('/api/repos/:repo/tasks/:id/stop', valid('param', RepoTaskIdParam), (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const { store } = ws
-      const task = store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      if (isTerminal(task.state)) {
-        return c.json({ error: `task ${id} is already in terminal state ${task.state}` }, 409)
-      }
-      // Park the run in `cancelled`; a live runner watches the store, kills
-      // the agent process and unwinds. A crashed runner leaves the task parked
-      // for the operator to reclaim via the restart flow.
-      store.append(id, {
-        type: 'task.state',
-        from: task.state,
-        to: 'cancelled',
-        reason: 'operator interrupt',
-      })
-      void runnerFor(repo)?.stop(id)
-      return c.json({ task: store.task(id) })
-    })
-
-    .post(
-      '/api/repos/:repo/epics/close-eligible',
-      valid('param', RepoParam),
-      valid('json', EpicCloseBody),
-      async (c) => {
-        const { repo } = c.req.valid('param')
-        const { reason } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        const beads = beadsTracker(ws)
-        if (beads === null) {
-          return c.json({ error: `epic closure is unavailable for ${repo}` }, 501)
-        }
-        return c.json(await beads.closeEligibleEpics(reason))
-      },
+    .route(
+      '/',
+      createTaskRoutes({
+        workspaces,
+        notify,
+        runnerFor,
+        workers,
+        liveRuns,
+        queueConflictResolution,
+        chatFor,
+        authorized,
+        openQuestionGate,
+        resolveQuestionGate,
+        notifyChannels,
+      }),
     )
 
-    .get(
-      '/api/repos/:repo/tasks',
-      valid('param', RepoParam),
-      valid('query', TaskListQuery),
-      (c) => {
-        const { repo } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
-        const { state, limit } = c.req.valid('query')
-        return c.json(ws.store.tasks(state ? { states: state, limit } : { limit }))
-      },
-    )
-
-    .get('/api/repos/:repo/tasks/:id', valid('param', RepoTaskIdParam), (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const task = ws.store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // The dashboard answers via the token-bound endpoint but has no other
-      // channel for the credential, so the task detail doubles as its source.
-      return c.json({ task, token: ws.store.token(id), questions: ws.store.openQuestions(id) })
-    })
-
-    .post('/api/repos/:repo/tasks/:id/reclaim', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const task = ws.store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // A completed or abandoned run cannot come back: the tracker issue is
-      // closed and the runner will never claim it again. Everything else is
-      // restartable — the runner resumes the recorded worktree when present
-      // and starts from a fresh worktree otherwise.
-      if (task.state === 'done' || task.state === 'abandoned') {
-        return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
-      }
-      // Best effort: the runner only re-claims issues the tracker sees as
-      // ready, so a lapsed or still-live claim is released for it to pick up.
-      try {
-        await ws.tracker.release(id)
-      } catch (err) {
-        console.warn(`release ${id}: ${errMsg(err)}`)
-      }
-      ws.store.append(id, { type: 'task.reclaimed' })
-      return c.json({ task: ws.store.task(id) })
-    })
-
-    .post('/api/repos/:repo/tasks/:id/reset', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const task = ws.store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      if (!canReset(task.state, task.worktree !== null)) {
-        return c.json({ error: `task ${id} cannot be reset from state ${task.state}` }, 409)
-      }
-      const runner = runnerFor(repo)
-      if (runner !== undefined) {
-        try {
-          await runner.stop(id)
-        } catch (err) {
-          console.warn(`stop on reset ${id}: ${errMsg(err)}`)
-        }
-      }
-      // Unlike close, the worktree removal is not best effort: a surviving
-      // worktree or branch would be resumed by the next run, which is exactly
-      // what the reset promises not to do.
-      if (task.worktree !== null) {
-        try {
-          await removeWorktree(ws.store, id, {
-            repoRoot: ws.root,
-            path: task.worktree,
-            branch: task.branch ?? null,
-          })
-        } catch (err) {
-          return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
-        }
-      }
-      // The runner only claims ready issues, so a reset of a closed one would
-      // sit in claimed until the stall watcher parks it as closed remotely.
-      try {
-        const issue = await ws.tracker.get(id)
-        if (issue?.status === 'closed') await ws.tracker.setStatus(id, 'open')
-      } catch (err) {
-        return c.json({ error: `failed to reopen tracker issue: ${errMsg(err)}` }, 500)
-      }
-      try {
-        await ws.tracker.release(id)
-      } catch (err) {
-        console.warn(`release on reset ${id}: ${errMsg(err)}`)
-      }
-      ws.store.append(id, { type: 'task.reset', reason: 'operator reset' })
-      return c.json({ task: ws.store.task(id) })
-    })
-
-    .post('/api/repos/:repo/tasks/:id/retry', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const task = ws.store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // The runner's backoff only reacts to a wake-up while the task is
-      // actually deferring a retry; anything else would mislead the operator.
-      if (task.state !== 'retrying') {
-        return c.json({ error: `task ${id} is not deferring a retry` }, 409)
-      }
-      const runner = runnerFor(repo)
-      if (runner === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const result = await runner.retryNow(id)
-      if (!result.ok) return c.json({ error: result.error }, result.status)
-      return c.json({ taskId: result.taskId })
-    })
-
-    .post('/api/repos/:repo/tasks/:id/recheck', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const task = ws.store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // Only a task parked on its pull request has anything to re-check; the
-      // sweep these states otherwise wait for is what this endpoint short-cuts.
-      if (task.state !== 'pr_open' && task.state !== 'pr_flagged') {
-        return c.json(
-          { error: `task ${id} is not waiting on a pull request (state ${task.state})` },
-          409,
-        )
-      }
-      if (task.prNumber === null) {
-        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
-      }
-      if (ws.forge === null) {
-        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
-      }
-      // The reconcile writes events the dashboard already streams, so the
-      // caller's live state picks up a merge/close without a page reload.
-      await reconcilePr(ws.store, ws.forge, ws.tracker, ws.root, ws.config.forge.remote, task)
-      return c.json({ task: ws.store.task(id) })
-    })
-
-    .post('/api/repos/:repo/tasks/:id/resolve-conflicts', valid('param', RepoTaskIdParam), (c) => {
-      const { repo, id } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const task = ws.store.task(id)
-      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      if (task.state !== 'pr_merge_conflict' || task.prMergeStatus !== 'conflicted') {
-        return c.json({ error: `task ${id} has no open conflicted PR` }, 409)
-      }
-      if (task.prNumber === null) {
-        return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
-      }
-      if (queueConflictResolution?.(repo, task.prNumber) !== true) {
-        return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
-      }
-      return c.json({ taskId: id, queued: true })
-    })
-
-    .post(
-      '/api/repos/:repo/tasks/:id/filed-as-error',
-      valid('param', RepoTaskIdParam),
-      async (c) => {
-        const { repo, id } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
-        const task = ws.store.task(id)
-        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        // The error-task retry path applies to a task parked for attention with
-        // an error to carry; a bare park (e.g. no_pr) has nothing to rerun from.
-        if (task.state !== 'needs_human') {
-          return c.json({ error: `task ${id} is not waiting for human attention` }, 409)
-        }
-        const reason = task.statusReason
-        if (reason === null || reason.trim() === '') {
-          return c.json({ error: `task ${id} has no recorded error to file` }, 409)
-        }
-        const createCap = capabilityError(ws.tracker, 'create')
-        if (createCap !== null) return c.json({ error: createCap }, 501)
-        const depCap = capabilityError(ws.tracker, 'dependencies')
-        if (depCap !== null) return c.json({ error: depCap }, 501)
-        // The same failure on the same task must not stack a second error bead:
-        // filing twice (a repeated recovery, a double-click) reuses the open
-        // error task already recorded for this exact reason.
-        const prior = ws.store
-          .events({ taskId: id })
-          .filter(
-            (e): e is Extract<StoredEvent, { type: 'retry.filed_as_error' }> =>
-              e.type === 'retry.filed_as_error',
-          )
-          .findLast((e) => e.reason === reason)
-        const priorTask = prior === undefined ? null : await ws.tracker.get(prior.errorTaskId)
-        const errorTask =
-          priorTask !== null && priorTask.status !== 'closed'
-            ? priorTask
-            : await ws.tracker.createTask({
-                title: `Error: ${task.title}`,
-                description:
-                  `The task ${id} errored out while the agent was implementing it.\n\n` +
-                  `${reason}\n\n` +
-                  `Resolve this task to rerun ${id} once its root cause is fixed.`,
-                acceptanceCriteria: null,
-                priority: null,
-                // The error task is the operator's to resolve, not the agent's.
-                labels: [HUMAN_ONLY_LABEL],
-                dependencies: [],
-                parent: null,
-              })
-        // The original blocks on the error task, so the runner skips it until
-        // the error task resolves, then reruns it from its preserved worktree.
-        await ws.tracker.updateTask(id, { dependencies: { add: [errorTask.id], remove: [] } })
-        // Best effort: release the tracker claim so the unblocked task re-enters
-        // the ready queue once the error task is closed and the auto-pick loop
-        // reruns it. A hiccup here only delays the rerun, never loses the work.
-        try {
-          await ws.tracker.release(id)
-        } catch (err) {
-          console.warn(
-            `release on filed-as-error ${id}: ${err instanceof Error ? err.message : String(err)}`,
-          )
-        }
-        ws.store.append(id, {
-          type: 'retry.filed_as_error',
-          errorTaskId: errorTask.id,
-          reason,
-        })
-        return c.json({ task: ws.store.task(id), errorTask })
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/tasks/:id/close',
-      valid('param', RepoTaskIdParam),
-      valid('json', CloseTaskBody),
-      async (c) => {
-        const { repo, id } = c.req.valid('param')
-        const { reason, to } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        const task = ws.store.task(id)
-        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        // Instant close retires any in-flight or parked task; only a task
-        // already settled (done/abandoned) has nothing left to close.
-        if (
-          isTerminal(task.state) &&
-          task.state !== 'needs_human' &&
-          task.state !== 'no_pr' &&
-          task.state !== 'cancelled'
-        ) {
-          return c.json({ error: `task ${id} cannot be closed from state ${task.state}` }, 409)
-        }
-        // Only a parked no_pr/needs_human task can be marked done: the agent
-        // left no changes because the work was already satisfied.
-        if (to === 'done' && task.state !== 'needs_human' && task.state !== 'no_pr') {
-          return c.json({ error: `task ${id} cannot be marked done from state ${task.state}` }, 409)
-        }
-        // Closing a pr_flagged task retires its pointless pull request too: the
-        // watcher parked it because the diff is empty and a human is the only
-        // one who closes it. This is the one step that must not be best effort,
-        // else the task retires with the PR still open on the forge.
-        if (task.state === 'pr_flagged') {
-          if (ws.forge === null) {
-            return c.json(
-              {
-                error: `task ${id} is pr_flagged but no forge driver is available to close its PR`,
-              },
-              501,
-            )
-          }
-          if (task.prNumber === null) {
-            return c.json({ error: `task ${id} is pr_flagged without a pull request number` }, 409)
-          }
-          try {
-            await ws.forge.closePr(ws.root, task.prNumber, reason)
-          } catch (err) {
-            return c.json({ error: `failed to close pull request: ${errMsg(err)}` }, 502)
-          }
-        }
-        // Shut the worker down first: stop() kills the owned agent process and
-        // parks a live run in cancelled, releasing the tracker claim, so the
-        // close below retires it without racing the run. A task not running on
-        // this server's runner (CLI run, another server) is simply not stopped.
-        const runner = runnerFor(repo)
-        if (runner !== undefined) {
-          try {
-            await runner.stop(id)
-          } catch (err) {
-            console.warn(`stop on close ${id}: ${errMsg(err)}`)
-          }
-        }
-        const afterStop = ws.store.task(id)
-        ws.store.append(id, {
-          type: 'task.state',
-          from: afterStop?.state ?? task.state,
-          to,
-          reason,
-        })
-        // Best effort like reconcile: the store is authoritative, so a git or
-        // tracker hiccup logs the failure instead of losing the operator's close.
-        if (afterStop !== null && afterStop.worktree !== null) {
-          const { worktree, branch } = afterStop
-          try {
-            await removeWorktree(ws.store, id, {
-              repoRoot: ws.root,
-              path: worktree,
-              branch: branch ?? null,
-            })
-          } catch (err) {
-            console.warn(`worktree removal on close ${id}: ${errMsg(err)}`)
-          }
-        }
-        try {
-          await ws.tracker.close(id, reason)
-        } catch (err) {
-          console.warn(`close ${id}: ${errMsg(err)}`)
-        }
-        if (task.state === 'pr_flagged' && ws.forge !== null && task.branch !== null) {
-          try {
-            await ws.forge.deleteBranch(ws.root, ws.config.forge.remote, task.branch)
-          } catch (err) {
-            console.warn(`branch removal on close ${id}: ${errMsg(err)}`)
-          }
-        }
-        return c.json({ task: ws.store.task(id) })
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/tasks/:id/chat',
-      valid('param', RepoTaskIdParam),
-      valid('json', ChatBody),
-      (c) => {
-        const { repo, id } = c.req.valid('param')
-        const { message } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        const result = chatFor(ws).send(id, message)
-        if (!result.ok) return c.json({ error: result.error }, result.status)
-        // The answer streams back through the repo event stream like any agent
-        // run, so the request returns before the run finishes.
-        return c.json({ taskId: id }, 202)
-      },
-    )
-
-    .get('/api/repos/:repo/runner', valid('param', RepoParam), async (c) => {
-      const { repo } = c.req.valid('param')
-      const service = runnerFor(repo)
-      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      let status = await service.status()
-      if (liveRuns !== undefined) {
-        status = await mergeLiveRuns(status, liveRuns(), undefined, repo)
-      }
-      if (workers === undefined) return c.json(status)
-      return c.json({ ...status, workers: workers().filter((worker) => worker.repo === repo) })
-    })
-
-    .get(
-      '/api/repos/:repo/watchers/:name/runs',
-      valid('param', WatcherHistoryParam),
-      valid('query', WatcherHistoryQuery),
-      (c) => {
-        const { repo, name } = c.req.valid('param')
-        const { limit, beforeSeq } = c.req.valid('query')
-        const ws = resolveWorkspace(workspaces, repo)
-        const runs = ws.store.watcherRuns({
-          repo,
-          name,
-          limit,
-          ...(beforeSeq === undefined ? {} : { beforeSeq }),
-        })
-        return c.json({ runs, nextBeforeSeq: runs.at(-1)?.startSeq ?? null })
-      },
-    )
-
-    .get('/api/repos/:repo/runner/options', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      if (runnerFor(repo) === undefined) {
-        return c.json({ harnesses: [], models: {}, efforts: {}, default: null })
-      }
-      return c.json({
-        harnesses: ws.config.worker.map((worker) => ({
-          name: worker.name,
-          workerId: worker.id,
-          kind: worker.kind,
-          ...(worker.model === undefined ? {} : { model: worker.model }),
-          ...(worker.effort === undefined ? {} : { effort: worker.effort }),
-        })),
-        models: HARDCODED_MODELS,
-        efforts: HARDCODED_EFFORTS,
-        default: ws.config.worker.find((worker) => worker.enabled)?.id ?? null,
-      })
-    })
-
-    .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      return c.json({
-        autoQueue: ws.config.loop.autoQueue,
-        epicCloseEnabled:
-          ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled,
-        epicCloseAvailable: ws.tracker instanceof BeadsTracker,
-        ntfyTopic: ws.config.notify.ntfyTopic,
-        ntfyServer: ws.config.notify.ntfyServer,
-        desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
-        staleMaxParallel: hasStaleMaxParallel(ws.root),
-      })
-    })
-
-    .patch(
-      '/api/repos/:repo/settings',
-      valid('param', RepoParam),
-      valid('json', SettingsBody),
-      (c) => {
-        const { repo } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
-        const { autoQueue, epicCloseEnabled, ntfyTopic, ntfyServer, desktopFailureAlerts } =
-          c.req.valid('json')
-        writeConfig(ws.root, {
-          ...(autoQueue === undefined ? {} : { loop: { autoQueue } }),
-          ...(epicCloseEnabled === undefined
-            ? {}
-            : { watchers: { epicClose: { enabled: epicCloseEnabled } } }),
-          ...(ntfyTopic === undefined &&
-          ntfyServer === undefined &&
-          desktopFailureAlerts === undefined
-            ? {}
-            : {
-                notify: {
-                  ...(ntfyTopic === undefined ? {} : { ntfyTopic }),
-                  ...(ntfyServer === undefined ? {} : { ntfyServer }),
-                  ...(desktopFailureAlerts === undefined ? {} : { desktopFailureAlerts }),
-                },
-              }),
-        })
-        if (epicCloseEnabled !== undefined) {
-          ws.config.watchers.epicClose.enabled = epicCloseEnabled
-        }
-        if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
-        if (ntfyServer !== undefined) ws.config.notify.ntfyServer = ntfyServer
-        if (desktopFailureAlerts !== undefined) {
-          ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
-        }
-        if (autoQueue !== undefined) {
-          ws.config.loop.autoQueue = autoQueue
-          const service = runnerFor(repo)
-          if (service !== undefined) {
-            const workersEnabled =
-              workspaces.list().find((entry) => entry.key === repo)?.workers === true
-            service.setAutoQueue(autoQueue && workersEnabled)
-          }
-        }
-        return c.json({
-          autoQueue: ws.config.loop.autoQueue,
-          epicCloseEnabled:
-            ws.tracker instanceof BeadsTracker && ws.config.watchers.epicClose.enabled,
-          epicCloseAvailable: ws.tracker instanceof BeadsTracker,
-          ntfyTopic: ws.config.notify.ntfyTopic,
-          ntfyServer: ws.config.notify.ntfyServer,
-          desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
-        })
-      },
-    )
-
-    .post('/api/repos/:repo/settings/test-desktop', valid('param', RepoParam), async (c) => {
-      const { repo } = c.req.valid('param')
-      resolveWorkspace(workspaces, repo)
-      try {
-        await new LibnotifyNotifier().notify('Amagi desktop test', 'Desktop notifications work.')
-        return c.json({ ok: true })
-      } catch (err) {
-        return c.json({ error: errMsg(err) }, 500)
-      }
-    })
-
-    .post('/api/repos/:repo/settings/test-ntfy', valid('param', RepoParam), async (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const { ntfyTopic, ntfyServer } = ws.config.notify
-      if (!ntfyTopic) return c.json({ error: 'Configure an ntfy topic first' }, 400)
-      try {
-        await new NtfyNotifier(ntfyTopic, ntfyServer).notify(
-          'Amagi ntfy test',
-          'ntfy notifications work.',
-        )
-        return c.json({ ok: true })
-      } catch (err) {
-        return c.json({ error: errMsg(err) }, 500)
-      }
-    })
-
-    .patch(
-      '/api/repos/:repo/participation',
-      valid('param', RepoParam),
-      valid('json', ParticipationBody),
-      (c) => {
-        const { repo } = c.req.valid('param')
-        const body = c.req.valid('json')
-        const participation = {
-          ...(body.workers === undefined ? {} : { workers: body.workers }),
-          ...(body.watchers === undefined ? {} : { watchers: body.watchers }),
-        }
-        if (!workspaces.updateParticipation(repo, participation)) {
-          return c.json({ error: `unknown repository ${repo}` }, 404)
-        }
-        const service = runnerFor(repo)
-        if (body.workers !== undefined && service !== undefined) {
-          service.setAutoQueue(
-            resolveWorkspace(workspaces, repo).config.loop.autoQueue && body.workers,
-          )
-        }
-        const entry = workspaces.list().find((e) => e.key === repo)
-        return c.json({ workers: entry?.workers ?? false, watchers: entry?.watchers ?? false })
-      },
-    )
-
-    .get('/api/repos/:repo/git-identity', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const entry = workspaces.list().find((candidate) => candidate.key === repo)
-      if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
-      return c.json({ gitIdentity: entry.gitIdentity })
-    })
-
-    .patch(
-      '/api/repos/:repo/git-identity',
-      valid('param', RepoParam),
-      valid('json', GitIdentityBody),
-      (c) => {
-        const { repo } = c.req.valid('param')
-        let gitIdentity: GitIdentity | null
-        try {
-          gitIdentity = validateGitIdentity(c.req.valid('json'))
-        } catch (err) {
-          return c.json({ error: errMsg(err) }, 400)
-        }
-        if (!workspaces.updateGitIdentity(repo, gitIdentity)) {
-          return c.json({ error: `unknown repository ${repo}` }, 404)
-        }
-        return c.json({ gitIdentity })
-      },
-    )
-
-    .get('/api/workers', async (c) => c.json({ workers: await fleetView() }))
-
-    .post('/api/workers', valid('json', WorkerCreateBody), async (c) => {
-      const fleet = loadGlobalConfig().worker
-      const parsed = WorkerConfig.safeParse({
-        id: newWorkerId(fleet.map((w) => w.id)),
-        ...c.req.valid('json'),
-      })
-      if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
-      const next = Config.shape.worker.safeParse([...fleet, parsed.data])
-      if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
-      saveFleet(next.data)
-      return c.json({ ...parsed.data, taskId: null }, 201)
-    })
-
-    .patch(
-      '/api/workers/:id',
-      valid('param', TaskIdParam),
-      valid('json', WorkerUpdateBody),
-      async (c) => {
-        const { id } = c.req.valid('param')
-        const fields = c.req.valid('json')
-        const fleet = loadGlobalConfig().worker
-        const current = fleet.find((w) => w.id === id)
-        if (current === undefined) return c.json({ error: `unknown worker ${id}` }, 404)
-        const merged: Record<string, unknown> = { ...current }
-        for (const [key, value] of Object.entries(fields)) {
-          if (value === null) delete merged[key]
-          else if (value !== undefined) merged[key] = value
-        }
-        const parsed = WorkerConfig.safeParse(merged)
-        if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
-        const worker = parsed.data
-        const next = Config.shape.worker.safeParse(fleet.map((w) => (w.id === id ? worker : w)))
-        if (!next.success) return c.json({ error: z.prettifyError(next.error) }, 400)
-        saveFleet(next.data)
-        return c.json((await fleetView()).find((w) => w.id === id))
-      },
-    )
-
-    .delete('/api/workers/:id', valid('param', TaskIdParam), async (c) => {
-      const { id } = c.req.valid('param')
-      const fleet = loadGlobalConfig().worker
-      if (!fleet.some((w) => w.id === id)) return c.json({ error: `unknown worker ${id}` }, 404)
-      const running = (await fleetView()).find((w) => w.id === id)?.taskId ?? null
-      if (running !== null) {
-        return c.json(
-          { error: `worker ${id} is running ${running}; stop that run before deleting the worker` },
-          409,
-        )
-      }
-      saveFleet(fleet.filter((w) => w.id !== id))
-      return c.json({ id })
-    })
-
-    .get('/api/watchers', (c) => c.json(loadGlobalConfig().watchers))
-
-    .patch(
-      '/api/watchers/:kind',
-      valid('param', WatcherParam),
-      valid('json', WatcherUpdateBody),
-      (c) => {
-        const { kind } = c.req.valid('param')
-        const patch = c.req.valid('json')
-        if (kind === 'stall' && Object.keys(patch).some((key) => key !== 'enabled')) {
-          return c.json(
-            { error: 'the stall watcher spawns no agent; only enabled can be set' },
-            400,
-          )
-        }
-        // No live mutation here: the serve supervisor re-reads watcher config
-        // from disk on every tick and starts or stops watchers to match.
-        writeGlobalConfig({ watchers: { [kind]: patch } })
-        return c.json(loadGlobalConfig().watchers[kind])
-      },
-    )
-
-    .post('/api/repos/:repo/runs', valid('param', RepoParam), valid('json', RunBody), async (c) => {
-      const { repo } = c.req.valid('param')
-      const service = runnerFor(repo)
-      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const { taskId, workerId, model, effort } = c.req.valid('json')
-      const result = await service.start(taskId, {
-        ...(workerId === undefined ? {} : { workerId }),
-        ...(model === undefined ? {} : { model }),
-        ...(effort === undefined ? {} : { effort }),
-      })
-      if (!result.ok) return c.json({ error: result.error }, result.status)
-      return c.json({ taskId: result.taskId }, 201)
-    })
-
-    .post('/api/repos/:repo/runs/:id/stop', valid('param', RepoTaskIdParam), async (c) => {
-      const { repo, id } = c.req.valid('param')
-      const service = runnerFor(repo)
-      if (service === undefined) return c.json({ error: 'runner service is unavailable' }, 501)
-      const result = await service.stop(id)
-      if (!result.ok) return c.json({ error: result.error }, result.status)
-      return c.json({ taskId: result.taskId })
-    })
-
-    .post(
-      '/api/repos/:repo/tasks/:id/questions',
-      valid('param', RepoTaskIdParam),
-      valid('json', AskBody),
-      async (c) => {
-        const { repo, id } = c.req.valid('param')
-        const { question, options } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        const task = ws.store.task(id)
-        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        const questionId = crypto.randomUUID()
-        const gateRef = await openQuestionGate(ws.tracker, id, {
-          id: questionId,
-          text: question,
-          options,
-        })
-        ws.store.append(id, { type: 'question.asked', questionId, question, options, gateRef })
-        ws.store.append(id, {
-          type: 'task.state',
-          from: task.state,
-          to: 'awaiting_answer',
-        })
-        void notifyChannels(
-          notify,
-          ws.store,
-          `question from ${id}`,
-          question,
-          ws.config.notify.desktopFailureAlerts,
-        )
-        return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) }, 201)
-      },
-    )
-
-    .get(
-      '/api/repos/:repo/tasks/:id/questions/:questionId/await',
-      valid('param', RepoQuestionParam),
-      valid('query', AwaitQuery),
-      (c) => {
-        const { repo, id, questionId } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
-        const { deadlineMs } = c.req.valid('query')
-        const question = ws.store.question(questionId)
-        if (!question) return c.json({ error: `unknown question ${questionId}` }, 404)
-        if (question.taskId !== id) {
-          return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
-        }
-        if (!authorized(c, ws.store, id)) {
-          return c.json({ error: 'task token mismatch' }, 401)
-        }
-        // An answer that landed before the poll started is not lost.
-        if (question.resolvedAt !== null) return c.json({ question })
-
-        return new Promise<Response>((resolve) => {
-          let unsub: () => void = () => {}
-          let timer: ReturnType<typeof setTimeout> | null = null
-          function cleanup(): void {
-            if (timer !== null) clearTimeout(timer)
-            unsub()
-            c.req.raw.signal.removeEventListener('abort', cleanup)
-          }
-          unsub = ws.store.subscribe((event) => {
-            if (event.taskId !== id) return
-            const resolved =
-              event.type === 'question.timedout' ||
-              (event.type === 'question.answered' && event.questionId === questionId)
-            if (!resolved) return
-            cleanup()
-            resolve(c.json({ question: ws.store.question(questionId) }))
-          })
-          timer = setTimeout(() => {
-            ws.store.append(id, { type: 'question.timedout', questionId })
-            cleanup()
-            resolve(c.json({ question: ws.store.question(questionId) }))
-          }, deadlineMs)
-          c.req.raw.signal.addEventListener('abort', cleanup, { once: true })
-        })
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/tasks/:id/questions/:questionId/answer',
-      valid('param', RepoQuestionParam),
-      valid('json', AnswerBody),
-      async (c) => {
-        const { repo, id, questionId } = c.req.valid('param')
-        const { answer, via } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        const task = ws.store.task(id)
-        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        if (!authorized(c, ws.store, id)) {
-          return c.json({ error: 'task token mismatch' }, 401)
-        }
-        const question = ws.store.question(questionId)
-        if (!question) return c.json({ error: `unknown question ${questionId}` }, 404)
-        if (question.taskId !== id) {
-          return c.json({ error: `question ${questionId} does not belong to task ${id}` }, 404)
-        }
-        // Timed out is not answered: a late reply still resumes the parked runner.
-        if (question.answer !== null) {
-          return c.json({ error: `question ${questionId} already answered` }, 409)
-        }
-        ws.store.append(id, { type: 'question.answered', questionId, answer, via })
-        // Only an awaiting task moves; a question answered after the runner
-        // escalated is recorded but must not yank the task out of needs_human.
-        if (task.state === 'awaiting_answer') {
-          ws.store.append(id, { type: 'task.state', from: task.state, to: 'implementing' })
-        }
-        await resolveQuestionGate(ws.tracker, question.gateRef)
-        return c.json({ task: ws.store.task(id), question: ws.store.question(questionId) })
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/tasks/:id/git-requests',
-      valid('param', RepoTaskIdParam),
-      valid('json', GitRequestBody),
-      async (c) => {
-        const { repo, id } = c.req.valid('param')
-        const { verb } = c.req.valid('json')
-        const ws = resolveWorkspace(workspaces, repo)
-        const task = ws.store.task(id)
-        if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-        if (!authorized(c, ws.store, id)) {
-          return c.json({ error: 'task token mismatch' }, 401)
-        }
-        if (task.worktree === null) {
-          return c.json({ error: `task ${id} has no worktree to commit` }, 409)
-        }
-        // The commit is synchronous, so it runs here and the sha returns in
-        // the same response; a separate await endpoint would add a round trip.
-        const runner = new Runner({
-          store: ws.store,
-          tracker: ws.tracker,
-          harness: makeHarness(ws.config.harness.implement),
-          config: ws.config,
-          repoRoot: ws.root,
-          repoName: ws.name,
-          ...(ws.forge === null ? {} : { forge: ws.forge }),
-        })
-        const result = await runner.requestCommit(id, task.worktree)
-        if (!result.ok) return c.json({ error: result.error }, 500)
-        return c.json({ verb, sha: result.sha })
-      },
+    .route(
+      '/',
+      createFleetRoutes({ workspaces, runnerFor, saveFleet, fleetView, validateGitIdentity }),
     )
 
     .get('/api/repos/:repo/events', valid('param', RepoParam), valid('query', EventQuery), (c) => {
@@ -1730,16 +874,16 @@ export function createApp({
     .get('/api/repos/:repo/stream', valid('param', RepoParam), valid('query', StreamQuery), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
-      const { taskId, sinceSeq } = c.req.valid('query')
+      const { taskId, sinceSeq, compact } = c.req.valid('query')
       // A browser resends the last id it saw on reconnect; that beats whatever
       // sinceSeq was baked into the EventSource url when it first connected.
       const resumed = Number(c.req.header('Last-Event-ID'))
-      const from = Number.isInteger(resumed) && resumed >= 0 ? resumed : sinceSeq
-      return eventStream(
-        c,
-        ws.store,
-        taskId === undefined ? { sinceSeq: from } : { taskId, sinceSeq: from },
-      )
+      const isResume = Number.isInteger(resumed) && resumed >= 0
+      const from = isResume ? resumed : sinceSeq
+      // The url still asks for compact on a resume, but the client counts on
+      // the log lines it missed since the first replay.
+      const opts = { sinceSeq: from, compact: compact && !isResume }
+      return eventStream(c, ws.store, taskId === undefined ? opts : { taskId, ...opts })
     })
 
     .get(
@@ -1751,31 +895,6 @@ export function createApp({
         const ws = resolveWorkspace(workspaces, repo)
         const { taskId } = c.req.valid('query')
         return c.json(ws.store.openQuestions(taskId))
-      },
-    )
-
-    .post(
-      '/api/repos/:repo/run',
-      valid('param', RepoParam),
-      (c, next) => {
-        resolveWorkspace(workspaces, c.req.valid('param').repo)
-        return next()
-      },
-      valid('json', RunBody),
-      async (c) => {
-        const { repo } = c.req.valid('param')
-        const service = runnerFor(repo)
-        if (service === undefined) {
-          return c.json({ error: 'runner service is unavailable for this repository' }, 501)
-        }
-        const { taskId, workerId, model, effort } = c.req.valid('json')
-        const result = await service.start(taskId, {
-          ...(workerId === undefined ? {} : { workerId }),
-          ...(model === undefined ? {} : { model }),
-          ...(effort === undefined ? {} : { effort }),
-        })
-        if (!result.ok) return c.json({ error: result.error }, result.status)
-        return c.json({ repo, taskId: result.taskId, started: true }, 202)
       },
     )
 

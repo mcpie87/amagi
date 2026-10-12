@@ -57,7 +57,7 @@ export function isUsageLimit(detail: string): boolean {
 
 /** Parses a provider's local reset clock, or returns a bounded re-probe time. */
 export function usageLimitExpiry(detail: string, now = new Date()): number {
-  const clock = detail.match(/\bresets?\s+at\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i)
+  const clock = detail.match(/\b(?:resets?|try again)\s+at\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i)
   if (clock) {
     let hour = Number(clock[1])
     const minute = Number(clock[2])

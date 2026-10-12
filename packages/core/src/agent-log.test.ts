@@ -145,4 +145,19 @@ describe('AgentLogStore', () => {
     expect(store.get('am-1').at(0)?.text).toBe('one')
     expect(store.get('am-2').at(0)?.role).toBe('chat')
   })
+
+  test('backfill puts earlier lines ahead of lines already streamed', () => {
+    const scheduled: Array<() => void> = []
+    const store = new AgentLogStore((cb) => {
+      scheduled.push(cb)
+    })
+    store.append('am-1', 'implement', 3, { kind: 'text', text: 'live' })
+    store.backfill('am-1', [
+      { role: 'implement', ts: 1, event: { kind: 'text', text: 'one\ntwo' } },
+    ])
+    for (const flush of scheduled) flush()
+
+    const buffer = store.get('am-1')
+    expect([0, 1, 2].map((index) => buffer.at(index)?.text)).toEqual(['one', 'two', 'live'])
+  })
 })

@@ -8,6 +8,7 @@ import {
   migrateFleet,
   RunService,
   repoRoot,
+  requestTimingsPath,
   Workspaces,
 } from '@amagi/core'
 import { portInUse, serve, streamClientCount } from '@amagi/server'
@@ -73,6 +74,15 @@ export const serveCommand = defineCommand({
       host: config.server.host,
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
+      timingsPath: requestTimingsPath(),
+      onRunnerUnavailable: (repo, detail) => {
+        // No repo config loads here, so the global channels carry the alert.
+        for (const notifier of makeNotifiers(config)) {
+          notifier
+            .notify(`${repo} cannot run work`, detail)
+            .catch((err: unknown) => console.warn(`notify ${notifier.kind}: ${String(err)}`))
+        }
+      },
       runnerFactory: (ws) => {
         return new RunService({
           store: ws.store,

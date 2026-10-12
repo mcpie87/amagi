@@ -55,6 +55,9 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return this.prs
   }
@@ -147,6 +150,12 @@ const start = (
 const counter = (w: ReturnType<typeof startMentionWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
 
+const waitFor = async (condition: () => boolean): Promise<void> => {
+  const deadline = Date.now() + 5_000
+  while (!condition() && Date.now() < deadline) await Bun.sleep(10)
+  expect(condition()).toBe(true)
+}
+
 test('scans every open PR each tick and responds to each unhandled mention exactly once', async () => {
   const store = new Store(openDatabase(':memory:'))
   const driver = new FakePr()
@@ -154,7 +163,7 @@ test('scans every open PR each tick and responds to each unhandled mention exact
   driver.prs = [prInfo()]
   const w = start(driver, noopExec, { store })
 
-  await Bun.sleep(60)
+  await waitFor(() => driver.listCalls > 1 && driver.posted.length === 1)
 
   // Handled-set dedup: the mention is replied to once even though every tick
   // re-lists comments.
@@ -192,12 +201,12 @@ test('publishes the active scan state while a watcher run is still waiting on th
   driver.listOpenPrs = () => new Promise((resolve) => (release = resolve))
   const w = start(driver)
 
-  await Bun.sleep(1)
+  await waitFor(() => release !== undefined)
   expect(w.activity().status).toBe('active')
   expect(w.activity().detail).toBe('scanning open PRs')
 
   release?.([prInfo()])
-  await Bun.sleep(20)
+  await waitFor(() => driver.listCalls === 1)
 })
 
 test('a new mention is noticed even when the PR updatedAt does not change', async () => {
@@ -206,13 +215,13 @@ test('a new mention is noticed even when the PR updatedAt does not change', asyn
   driver.prs = [prInfo()]
   start(driver)
 
-  await Bun.sleep(60)
+  await waitFor(() => driver.listCalls >= 2)
   expect(driver.posted).toHaveLength(0)
 
   // A human mentions the agent, but the forge never moves the PR's updatedAt.
   // The watcher must still pick the mention up on the next tick.
   driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
-  await Bun.sleep(60)
+  await waitFor(() => driver.posted.length === 1)
 
   expect(driver.posted).toHaveLength(1)
 })
@@ -223,7 +232,7 @@ test('responds to fresh mentions added to an already-scanned PR', async () => {
   driver.prs = [prInfo()]
   const w = start(driver)
 
-  await Bun.sleep(60)
+  await waitFor(() => driver.posted.length === 1)
   expect(driver.posted).toHaveLength(1)
 
   // A new comment mentioning the agent lands; the next tick responds to it.
@@ -231,7 +240,7 @@ test('responds to fresh mentions added to an already-scanned PR', async () => {
     { id: '1', user: 'bob', body: '@chise-maru hi' },
     { id: '2', user: 'alice', body: '@chise-maru and this?' },
   ]
-  await Bun.sleep(60)
+  await waitFor(() => driver.posted.length === 2)
   expect(driver.posted).toHaveLength(2)
   expect(driver.posted[1]).toContain('@alice')
   expect(counter(w, 'responded')).toBe(2)
@@ -247,7 +256,7 @@ test('a later mention in a lower-numbered id space (issue comment) is not skippe
   driver.prs = [prInfo()]
   start(driver)
 
-  await Bun.sleep(60)
+  await waitFor(() => driver.posted.length === 1)
   expect(driver.posted).toHaveLength(1)
 
   // New issue comment (smaller id than the review id) mentions the agent.
@@ -256,7 +265,7 @@ test('a later mention in a lower-numbered id space (issue comment) is not skippe
     { id: '9000000000', user: 'carol', body: 'review summary, no mention' },
     { id: '2', user: 'alice', body: '@chise-maru and this?' },
   ]
-  await Bun.sleep(60)
+  await waitFor(() => driver.posted.length === 2)
   expect(driver.posted).toHaveLength(2)
   expect(driver.posted[1]).toContain('@alice')
 })
@@ -269,7 +278,7 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   const store = new Store(openDatabase(':memory:'))
   const w = start(driver, noopExec, { store })
 
-  await Bun.sleep(60)
+  await waitFor(() => driver.failPost === 0)
   // Every attempt fails: nothing posted, nothing recorded as handled.
   expect(driver.posted).toHaveLength(0)
   expect(w.activity().ok).toBe(true)
@@ -277,7 +286,7 @@ test('a failed response is retried on later ticks, not marked handled', async ()
   expect(counter(w, 'scanned')).toBeGreaterThanOrEqual(1)
 
   driver.failPost = 0
-  await Bun.sleep(40)
+  await waitFor(() => driver.posted.length === 1)
   expect(driver.posted).toHaveLength(1)
   expect(counter(w, 'responded')).toBe(1)
   const runs = store.watcherRuns({ repo: 'amagi', name: 'mention-watcher', limit: 20 })
@@ -295,7 +304,7 @@ test('a tick that throws is counted as a failure and keeps run totals consistent
   }
   const w = start(driver)
 
-  await Bun.sleep(30)
+  await waitFor(() => w.activity().failures >= 1)
   const a = w.activity()
   expect(a.ok).toBe(false)
   expect(a.failures).toBeGreaterThanOrEqual(1)

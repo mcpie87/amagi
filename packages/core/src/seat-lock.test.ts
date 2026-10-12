@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { childPids, killTree } from './process.ts'
@@ -36,6 +36,25 @@ describe('seat locks', () => {
     first.release()
     const second = await secondPromise
     second.release()
+  })
+
+  test('lets up to capacity holders share a seat and queues the rest', async () => {
+    const path = tempDirectory()
+    const held = await Promise.all(
+      [1, 2].map(() => acquireSeat('cap', { directory: path, capacity: 2 })),
+    )
+    let thirdHeld = false
+    const third = acquireSeat('cap', { directory: path, capacity: 2 }).then((lease) => {
+      thirdHeld = true
+      return lease
+    })
+
+    await Bun.sleep(100)
+    expect(thirdHeld).toBe(false)
+    held[0]?.release()
+    const lease = await third
+    held[1]?.release()
+    lease.release()
   })
 
   test('serves queued callers in arrival order', async () => {
@@ -127,11 +146,18 @@ describe('seat locks', () => {
     'reclaims a seat whose holder exited but was never reaped',
     async () => {
       const path = tempDirectory()
-      const parent = Bun.spawn(['sh', '-c', 'true & exec sleep 30'], { stdout: 'ignore' })
+      const parent = Bun.spawn(['sh', '-c', 'sleep 30 & exec sleep 30'], { stdout: 'ignore' })
       try {
-        await Bun.sleep(300)
-        const [zombie] = await childPids(parent.pid)
+        let zombie: number | undefined
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if (readFileSync(`/proc/${parent.pid}/comm`, 'utf8').trim() === 'sleep') {
+            zombie = (await childPids(parent.pid))[0]
+            if (zombie !== undefined) break
+          }
+          await Bun.sleep(10)
+        }
         if (zombie === undefined) throw new Error('no unreaped child left behind')
+        process.kill(zombie, 'SIGKILL')
         const stale = await acquireSeat('codex', { directory: path })
         stale.bind(zombie)
         const reclaimed = await acquireSeat('codex', { directory: path, maxWaitMs: 1000 })

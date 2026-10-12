@@ -42,6 +42,23 @@ export class AgentLogBuffer {
     }
   }
 
+  /** Puts older lines ahead of the current ones; the oldest fall off past capacity. */
+  prepend(lines: Omit<AgentLogLine, 'id'>[]): void {
+    const current: AgentLogLine[] = []
+    for (let index = 0; index < this.count; index++) {
+      const line = this.at(index)
+      if (line !== undefined) current.push(line)
+    }
+    this.clear()
+    for (const line of [...lines, ...current]) this.push(line.role, line.ts, line.kind, line.text)
+  }
+
+  clear(): void {
+    this.items.fill(undefined)
+    this.start = 0
+    this.count = 0
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => {
@@ -131,6 +148,29 @@ export class AgentLogStore {
       buffer.push(role, ts, event.kind, line)
     }
     this.dirty.add(taskId)
+    this.scheduleFlush()
+  }
+
+  /** Lines from before the live stream began, placed ahead of whatever it already appended. */
+  backfill(
+    taskId: string,
+    events: readonly { role: AgentRole; ts: number; event: AgentEvent }[],
+  ): void {
+    const lines = events.flatMap(({ role, ts, event }) =>
+      linesForAgentEvent(event).map((text) => ({ role, ts, kind: event.kind, text })),
+    )
+    this.get(taskId).prepend(lines)
+    this.dirty.add(taskId)
+    this.scheduleFlush()
+  }
+
+  /** Empties every buffer under a key prefix, keeping their subscribers. */
+  clear(prefix: string): void {
+    for (const [taskId, buffer] of this.buffers) {
+      if (!taskId.startsWith(prefix)) continue
+      buffer.clear()
+      this.dirty.add(taskId)
+    }
     this.scheduleFlush()
   }
 

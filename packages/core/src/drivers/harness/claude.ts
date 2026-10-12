@@ -234,12 +234,18 @@ export class ClaudeHarness implements Harness {
       argv.push('--allowedTools', allowedTools.join(' '))
     }
 
+    if (opts.outputSchema) {
+      // claude's validator rejects the 2020-12 meta-schema URI zod emits.
+      const { $schema: _, ...schema } = JSON.parse(readFileSync(opts.outputSchema, 'utf8'))
+      argv.push('--json-schema', JSON.stringify(schema))
+    }
+
     argv.push(...(opts.extraArgs ?? []))
     return argv
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    const seat = opts.seat ?? this.seat ?? this.kind
+    const seat = opts.seat === null ? null : (opts.seat ?? this.seat ?? this.kind)
     opts = { ...opts, seat }
     const translator = new ClaudeTranslator()
     return spawnAgent(argv, opts, translator, {

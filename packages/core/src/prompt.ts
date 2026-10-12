@@ -6,6 +6,23 @@ import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from 
 
 export { reviewPrompt } from './review-pack.ts'
 
+export const MENTION_KINDS = [
+  { kind: 'fix-pr', description: 'the human wants code in this PR changed' },
+  {
+    kind: 'explain',
+    description:
+      'the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
+  },
+  {
+    kind: 'add-a-task',
+    description: 'the human wants a new task tracked in the issue tracker, not done in this PR',
+  },
+  { kind: 'flag', description: 'the human explicitly wants this PR closed or reverted' },
+  { kind: 'ambiguous', description: 'the comment is not a request at all' },
+] as const
+
+export type MentionKind = (typeof MENTION_KINDS)[number]['kind']
+
 export type PromptContext = {
   task: TrackerTask
   worktree: string
@@ -32,6 +49,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '- Do not commit, push, or otherwise write to git. The orchestrator commits your work.',
     '- Inspect the base with read-only commands such as `git show <base>:<path>` and `git diff <base>`; do not use `git stash`.',
     '- Follow the conventions already present in the code you are changing.',
+    '- Do not edit check tooling to make checks pass: justfiles, package scripts,',
+    '  lint or typecheck config, and check scripts. Dependency changes are allowed.',
     ...(checks.length > 0
       ? [
           '- When you finish, the orchestrator runs these checks in order as a mandatory',
@@ -83,7 +102,11 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
     '   opens no pull request, so the verdict is what tells the operator what to do next.',
     ...verdictPromptLines().map((l) => `   ${l}`),
-    'It is rendered as markdown, so wrap paths, identifiers and commands in `backticks`.',
+    'The final message is rendered as markdown. Before finishing, check its prose',
+    'and wrap references to code identifiers, environment variables, paths and',
+    'commands in `backticks` (for example `ensureTeaLogin`, `GIT_CONFIG_COUNT`,',
+    '`/proc/<pid>/cmdline` and `tea logins add --token TOKEN`). Use the meaning',
+    'in context to decide what is code, rather than spelling alone.',
   ]
 
   if (ctx.askCommand) {
@@ -190,9 +213,80 @@ export function answerPrompt(question: string, answer: string): string {
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
-  return ['The project checks failed on your changes. Fix them, then stop.', '', ...blocks].join(
-    '\n',
-  )
+  return [
+    'The project checks failed on your changes. Fix them, then stop.',
+    'Do not edit check tooling to make checks pass. Restore changes to justfiles,',
+    'package scripts, lint or typecheck config, and check scripts.',
+    '',
+    ...blocks,
+  ].join('\n')
+}
+
+export type TaskChatPromptContext = {
+  task: TrackerTask
+  worktree: string
+  branch: string
+  baseBranch: string
+  /** The repository's format, lint and test commands, in order. */
+  checks: readonly string[]
+  prUrl: string | null
+}
+
+/**
+ * The operator's chat agent on one task: it triages, implements, reviews and
+ * gets the work merged in a conversation, writing code itself but reaching git
+ * and the forge only through `amagi git-request`.
+ */
+export function taskChatSystemPrompt(ctx: TaskChatPromptContext): string {
+  const task = [
+    `Task ${ctx.task.id}: ${ctx.task.title}`,
+    ...(ctx.task.type === null ? [] : [`Type: ${ctx.task.type}`]),
+    '',
+    ctx.task.description.trim() || '(no description)',
+    ...(ctx.task.acceptanceCriteria ? ['', 'Acceptance:', ctx.task.acceptanceCriteria] : []),
+    ...(ctx.task.notes ? ['', 'Notes:', ctx.task.notes] : []),
+    ...(ctx.task.comments?.length ? ['', 'Comments:', ...ctx.task.comments] : []),
+  ]
+  return [
+    'You are chatting with the operator of amagi about one tracked task, inside a',
+    'dedicated git worktree for it. The operator reads every message you write.',
+    `Worktree: ${ctx.worktree}`,
+    `Branch: ${ctx.branch}`,
+    `Base branch: ${ctx.baseBranch}`,
+    `Pull request: ${ctx.prUrl ?? 'none yet'}`,
+    '',
+    ...task,
+    '',
+    'When asked for a full triage, carry the task end to end, reporting as you go:',
+    '1. Triage: read the code the task touches and decide whether to implement it,',
+    '   split it, close it as done or obsolete, or ask the operator. Say which and why.',
+    '2. Implement: make the change in this worktree, following the conventions of the',
+    '   surrounding code.',
+    `3. Check: run ${ctx.checks.length > 0 ? ctx.checks.map((c) => `\`${c}\``).join(', ') : 'the project formatter, lint and tests'} and fix every failure.`,
+    '   Never pipe check output through head/tail; redirect it to a file and grep it.',
+    '4. Review: read your own `git diff` as a strict reviewer would, for correctness,',
+    '   missed cases and needless code, and fix what you find. Report the findings.',
+    '5. Land it: commit, then open the pull request (or push to the existing one).',
+    '   If the pull request has merge conflicts, merge the base, resolve them, commit',
+    '   and push.',
+    '',
+    'Git and the forge are read-only to you: never commit, push, merge, stash or',
+    'reset yourself, and never edit issues with bd. Ask amagi instead, one verb at a',
+    'time, and read what it prints:',
+    '- `amagi git-request commit [--message "<summary>"]`: stages everything and',
+    '  commits it with the task subject; the message becomes the commit body. Runs',
+    '  immediately.',
+    '- `amagi git-request merge-base`: merges the latest base into this branch. Runs',
+    '  immediately; on conflicts it lists the files to resolve, then request a commit.',
+    '- `amagi git-request pr`: pushes the branch and opens the pull request.',
+    '- `amagi git-request push`: pushes new commits to the existing pull request.',
+    '- `amagi git-request comment --message "<text>"`: comments on the pull request,',
+    '  or on the task when there is none.',
+    '- `amagi git-request close --message "<reason>"`: closes the task.',
+    'pr, push, comment and close need the operator to approve them in the chat. After',
+    'requesting one, end your turn and say what you asked for; the decision and its',
+    'result arrive as the next message, and then you continue.',
+  ].join('\n')
 }
 
 /** Body of a commit made before the agent has reported what it did. */
@@ -326,7 +420,7 @@ export type MentionPromptContext = {
   conflicted: boolean
 }
 
-export type TakeDownMentionContext = {
+export type FlagMentionContext = {
   pr: { number: number; title: string; url: string }
   mention: { user: string; body: string }
   outPath: string
@@ -388,6 +482,8 @@ export type ExplainMentionContext = {
   pr: { number: number; title: string; url: string }
   mention: { user: string; body: string }
   diff: string
+  /** Base branch commits after the PR branch point, in chronological order. */
+  baseCommits: string[]
   outPath: string
   /** True when the base branch does not merge cleanly into the PR head. */
   conflicted: boolean
@@ -417,20 +513,19 @@ export function classifyMentionSystemPrompt(): string {
 }
 
 export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
+  const kinds = MENTION_KINDS.map(({ kind }) => kind)
   return [
     `A human (@${ctx.mention.user}) commented on PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
     'Classify the comment into exactly one of:',
-    '- fix-pr: the human wants code in this PR changed',
-    '- explain: the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
-    '- add-a-task: the human wants a new task tracked in the issue tracker, not done in this PR',
-    '- ambiguous: only when the intent genuinely cannot be determined',
+    ...MENTION_KINDS.map(({ kind, description }) => `- ${kind}: ${description}`),
     '',
-    'Any question about the PR is explain, never ambiguous. For example, "is this change still relevant?" and "is this already resolved?" are explain.',
+    'Any question about this PR is explain, never ambiguous, even if it is not asking why or how something was done. For example, "is this change still relevant?" and "is this already resolved?" are explain. Use ambiguous only for comments that are not requests at all.',
+    'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
     '',
-    'Reply with exactly one token: fix-pr, explain, add-a-task, or ambiguous.',
+    `Reply with exactly one token: ${kinds.join(', ').replace(/, ([^,]*)$/, ', or $1')}.`,
   ].join('\n')
 }
 
@@ -441,7 +536,7 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
     ctx.mention.body.trim(),
     '',
     `Write your answer to this file: ${ctx.outPath}`,
-    'It will be posted as a comment on the PR. Answer the question first.',
+    "It will be posted as a comment on the PR. Answer the human's actual question directly and first.",
     'For a question like "is this already resolved?", check the current code and relevant history, then say yes or no with one decisive fact. If it is resolved, stop there.',
     `Use plain text, at most two short sentences and ${MAX_EXPLAIN_ANSWER_CHARS} characters. Do not recap the PR or list implementation details unless the human asks for them.`,
   ]
@@ -452,28 +547,38 @@ export function explainMentionPrompt(ctx: ExplainMentionContext): string {
       'base. Mention this conflict if it matters to the answer.',
     )
   }
-  parts.push('', 'Pull request diff:', '', ctx.diff, '', 'Write the answer to the file and stop.')
+  parts.push(
+    '',
+    'Base commits landed since the PR branch point:',
+    ...(ctx.baseCommits.length > 0 ? ctx.baseCommits : ['(none)']),
+    '',
+    'Pull request diff:',
+    '',
+    ctx.diff,
+    '',
+    'Write the answer to the file and stop.',
+  )
   return parts.join('\n')
 }
 
-export function takeDownSystemPrompt(): string {
+export function flagSystemPrompt(): string {
   return [
-    'You are deciding whether a pull request deserves to be taken down (closed or reverted).',
+    'You are deciding whether a pull request should be flagged as a candidate for closure.',
     'Read the PR and the request, then write a verdict to the file.',
     'Do not modify any files in the repository.',
   ].join('\n')
 }
 
-export function takeDownPrompt(ctx: TakeDownMentionContext): string {
+export function flagPrompt(ctx: FlagMentionContext): string {
   const parts = [
-    `A human (@${ctx.mention.user}) asked to take down PR #${ctx.pr.number} "${ctx.pr.title}":`,
+    `A human (@${ctx.mention.user}) asked to flag PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
     `Write your verdict to this file: ${ctx.outPath}`,
     '',
     'Start the file with one of these verdict lines:',
-    '- `TAKE DOWN` when the PR deserves to be taken down, followed by the concise, direct reason on the next line.',
+    '- `TAKE DOWN` when the PR deserves to be flagged for closure, followed by the concise, direct reason on the next line.',
     '- `KEEP` when it does not, followed by a short explanation.',
     '',
     'The reason is posted as a comment on the task issue, so keep it concise and direct.',
