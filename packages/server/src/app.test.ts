@@ -3166,12 +3166,7 @@ describe('fleet endpoints', () => {
       const occupancy = (await (await app.request('/api/seats')).json()) as {
         seats: { seat: string }[]
       }
-      expect(occupancy.seats.map(({ seat }) => seat)).toEqual([
-        'claude',
-        'codex',
-        'codex-1',
-        'codex-2',
-      ])
+      expect(occupancy.seats.map(({ seat }) => seat)).toEqual(['claude', 'codex-1', 'codex-2'])
     } finally {
       for (const service of services.values()) service.dispose()
     }
@@ -3274,18 +3269,6 @@ describe('GET /api/seats', () => {
           ],
           eligible: [],
         },
-        {
-          seat: 'codex',
-          state: 'held',
-          holder: {
-            repo: 'amagi',
-            watcher: 'pr-conflict-watcher',
-            status: 'watcher',
-            since: null,
-          },
-          waiters: [],
-          eligible: [],
-        },
         { seat: 'free-seat', state: 'free', holder: null, waiters: [], eligible: [] },
       ],
     })
@@ -3350,7 +3333,6 @@ describe('GET /api/seats', () => {
       'claude',
       'claude-1',
       'claude-2',
-      'codex',
       'free-seat',
     ])
     expect(occupancy.seats[0]).toMatchObject({

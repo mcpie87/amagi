@@ -67,9 +67,11 @@ const diagnosticsRoute = createRoute({
   path: '/diagnostics',
   component: DiagnosticsView,
 })
-const settingsRoute = createRoute({
+export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings',
+  validateSearch: (search: Record<string, unknown>): { repo?: string } =>
+    typeof search.repo === 'string' ? { repo: search.repo } : {},
   component: SettingsView,
 })
 export const manualRoute = createRoute({

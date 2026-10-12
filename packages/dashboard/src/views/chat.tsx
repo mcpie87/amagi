@@ -208,11 +208,13 @@ function ChatOptionsBar({
   thread,
   options,
   disabled,
+  harnessLocked,
   onChange,
 }: {
   thread: ChatThread
   options: ChatOptions
   disabled: boolean
+  harnessLocked: boolean
   onChange: (patch: Partial<ChatThread>) => void
 }) {
   const id = useId()
@@ -236,7 +238,7 @@ function ChatOptionsBar({
     ? thread.model || 'Custom model'
     : thread.model || harness?.model || 'Default model'
   const efforts = [
-    ...new Set([...(options.efforts[thread.harness] ?? []), harness?.effort, thread.effort]),
+    ...new Set([...(options.efforts[thread.harness] ?? []), harness?.effort]),
   ].filter((effort): effort is string => effort !== undefined && effort !== '')
   const effortLabel = thread.effort || 'Default effort'
 
@@ -273,8 +275,10 @@ function ChatOptionsBar({
       setOpen(false)
       setEffortOpen(false)
       setHarnessOpen(false)
+    } else if (harnessLocked) {
+      setHarnessOpen(false)
     }
-  }, [disabled])
+  }, [disabled, harnessLocked])
 
   const selectHarness = (kind: string) => {
     const next = options.harnesses.find((item) => item.kind === kind)
@@ -298,7 +302,7 @@ function ChatOptionsBar({
           aria-expanded={harnessOpen}
           aria-controls={`${id}-harnesses`}
           title="Harness"
-          disabled={disabled}
+          disabled={disabled || harnessLocked}
           onClick={() => {
             setOpen(false)
             setEffortOpen(false)
@@ -363,7 +367,7 @@ function ChatOptionsBar({
             <div className="max-h-56 overflow-y-auto">
               <button
                 type="button"
-                aria-pressed={!customModel && thread.model === ''}
+                aria-pressed={thread.model === ''}
                 onClick={() => {
                   onChange({ model: '', customModel: false })
                   setOpen(false)
@@ -371,13 +375,13 @@ function ChatOptionsBar({
                 className={pickerItemClass}
               >
                 <span>Default model</span>
-                {!customModel && thread.model === '' && <span aria-hidden="true">✓</span>}
+                {thread.model === '' && <span aria-hidden="true">✓</span>}
               </button>
               {models.map((model) => (
                 <button
                   key={model}
                   type="button"
-                  aria-pressed={!customModel && thread.model === model}
+                  aria-pressed={thread.model === model}
                   onClick={() => {
                     onChange({ model, customModel: false })
                     setOpen(false)
@@ -385,7 +389,7 @@ function ChatOptionsBar({
                   className={pickerItemClass}
                 >
                   <span className="truncate">{model}</span>
-                  {!customModel && thread.model === model && <span aria-hidden="true">✓</span>}
+                  {thread.model === model && <span aria-hidden="true">✓</span>}
                 </button>
               ))}
             </div>
@@ -971,6 +975,12 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
       .filter((item) => item.content.trim() !== '')
       .slice(-50)
       .map(({ role, content }) => ({ role, content }))
+    const modelOptions = [
+      ...(options?.models[thread.harness] ?? []),
+      options?.harnesses.find((item) => item.kind === thread.harness)?.model,
+    ]
+    const customModel =
+      thread.customModel ?? (thread.model !== '' && !modelOptions.includes(thread.model))
     setThreads((current) =>
       current.map((item) =>
         item.id === thread.id
@@ -995,7 +1005,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
           conversationId: thread.id,
           harness: thread.harness,
           ...(thread.model.trim() === '' ? {} : { model: thread.model.trim() }),
-          ...(thread.customModel === undefined ? {} : { customModel: thread.customModel }),
+          customModel,
           ...(thread.effort.trim() === '' ? {} : { effort: thread.effort.trim() }),
           ...(thread.taskId === undefined ? {} : { taskId: thread.taskId }),
           ...(thread.sessionId === undefined ? {} : { sessionId: thread.sessionId }),
@@ -1242,9 +1252,9 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
                   if (message.role === 'user') {
                     return (
                       <div key={message.id} className="flex justify-end">
-                        <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-raised px-4 py-2.5 text-[15px] leading-6 text-fg-strong">
-                          {message.content}
-                        </p>
+                        <div className="chat-reply max-w-[85%] rounded-2xl rounded-br-md bg-raised px-4 py-2.5 text-[15px] leading-6 text-fg-strong">
+                          <Markdown text={message.content} />
+                        </div>
                       </div>
                     )
                   }
@@ -1328,8 +1338,10 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
                   <ChatOptionsBar
                     thread={activeThread}
                     options={options}
-                    // A task thread resumes one harness session, which cannot change harness.
-                    disabled={sending || activeThread.sessionId !== undefined}
+                    disabled={sending}
+                    harnessLocked={
+                      activeThread.sessionId !== undefined || activeThread.messages.length > 0
+                    }
                     onChange={updateActive}
                   />
                 )}

@@ -698,6 +698,31 @@ textarea::placeholder {
   border-left: 2px solid var(--color-amber-ink);
   color: var(--color-fg-muted);
 }
+.summary-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.summary-markdown th,
+.summary-markdown td {
+  padding: 6px 10px;
+  border: 1px solid var(--color-line-strong);
+  text-align: left;
+}
+.summary-markdown th {
+  background: var(--color-raised);
+  font-weight: 600;
+}
+.summary-markdown ul.contains-task-list {
+  padding-left: 0;
+  list-style: none;
+}
+.summary-markdown input[type="checkbox"] {
+  margin-right: 6px;
+  accent-color: var(--color-accent);
+}
 .summary-markdown hr {
   margin: 10px 0;
   border-color: var(--color-line);

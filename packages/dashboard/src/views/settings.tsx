@@ -1,7 +1,9 @@
+import { useSearch } from '@tanstack/react-router'
 import { type ChangeEvent, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
 import { DEFAULT_DATE_FORMAT, fmtDateTime } from '../format.ts'
+import { settingsRoute } from '../routes.tsx'
 import { useDashboard } from '../store.tsx'
 import {
   addTheme,
@@ -322,10 +324,16 @@ function Appearance() {
 
 export function SettingsView() {
   const { repos, refreshRepos, selected } = useDashboard()
+  const { repo: linkedRepo } = useSearch({ from: settingsRoute.id })
   const [activeTab, setActiveTab] = useState<
     'general' | 'appearance' | 'profiles' | 'workers' | 'repositories'
-  >('general')
-  const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
+  >(linkedRepo === undefined ? 'general' : 'repositories')
+  const [selectedRepo, setSelectedRepo] = useState<string | null>(linkedRepo ?? null)
+  useEffect(() => {
+    if (linkedRepo === undefined) return
+    setSelectedRepo(linkedRepo)
+    setActiveTab('repositories')
+  }, [linkedRepo])
   const [loaded, setLoaded] = useState(false)
   const [autoRebase, setAutoRebase] = useState(false)
   const [rebaseBusy, setRebaseBusy] = useState(false)
