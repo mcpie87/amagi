@@ -380,6 +380,8 @@ describe('githubPr', () => {
       'list',
       '--state',
       'open',
+      '--limit',
+      '1000',
       '--json',
       'number,title,body,url,headRefName,baseRefName,mergeable,mergeStateStatus,headRefOid,createdAt,updatedAt,labels',
     ])

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { loadGlobalConfig, setHarnessProcessCap } from '@amagi/core'
 import { defineCommand, runMain } from 'citty'
 import { addCommand } from './commands/add.ts'
 import { answerCommand } from './commands/answer.ts'
@@ -49,5 +50,11 @@ const main = defineCommand({
     'respond-to-mentions': respondToMentionsCommand,
   },
 })
+
+try {
+  setHarnessProcessCap(loadGlobalConfig().harness.maxProcesses)
+} catch {
+  // An invalid global config fails the command that needs it, with a clearer error.
+}
 
 runMain(main)
