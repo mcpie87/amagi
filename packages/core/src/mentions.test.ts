@@ -401,13 +401,20 @@ describe('respondToMention', () => {
   test('a fix-pr mention posts its summary after pushing to the PR head', async () => {
     const order: string[] = []
     const cfg = config()
+    cfg.checks = { format: 'format', lint: 'lint', test: 'test', commands: ['extra'] }
     cfg.watchers.mention.model = 'gpt-5'
     cfg.watchers.mention.effort = 'high'
+    let formatted = false
+    let stagedFormatted = false
     const { exec, calls, inputs } = fake((c) => {
       if (c.includes('reflog')) {
         return { exitCode: 0, stdout: 'aaa checkout: initial\n', stderr: '' }
       }
-      if (c[1] === 'status') return { exitCode: 0, stdout: ' M src/fix.ts\n', stderr: '' }
+      if (c[0] === 'sh' && c[2] === 'format') formatted = true
+      if (c[1] === 'status')
+        return { exitCode: 0, stdout: formatted ? ' M src/fix.ts\n' : '', stderr: '' }
+      if (c[1] === 'add') stagedFormatted = formatted
+      if (c[1] === 'commit' && !stagedFormatted) return fail('formatter changes were not staged')
       if (c[1] === 'push') order.push('push')
       return c.includes('rev-parse') ? fail('') : undefined
     })
@@ -444,6 +451,7 @@ describe('respondToMention', () => {
     })
 
     expect(kind).toBe('fix-pr')
+    expect(stagedFormatted).toBe(true)
     const merge = calls.find((call) => call[1] === 'merge' && call.includes('base-oid'))
     expect(merge?.[3]).toContain('[am-1] am-1')
     expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
@@ -467,11 +475,49 @@ describe('respondToMention', () => {
     expect(started?.prompt).toContain(
       'then stop. The dispatcher will commit and push your changes.',
     )
+    expect(started?.prompt).toContain(
+      'Run the project checks and make sure they pass before stopping:',
+    )
+    expect(started?.prompt).toContain('- format\n- lint\n- test\n- extra')
+    expect(calls).toContainEqual(['sh', '-c', 'format'])
+    expect(calls).toContainEqual(['sh', '-c', 'lint'])
+    expect(calls.some((call) => call[2] === 'test' || call[2] === 'extra')).toBe(false)
     expect(started?.prompt).not.toContain('commit, and stop')
     expect(started?.systemPrompt).toContain(
       'Do not commit or push. The dispatcher commits your changes and pushes them.',
     )
     expect(bypassed).toEqual([])
+  })
+
+  test('a fix-pr mention does not push when lint fails', async () => {
+    const cfg = config()
+    cfg.checks.lint = 'lint'
+    const { exec, calls } = fake((c) => {
+      if (c[0] === 'sh' && c[2] === 'lint') return fail('lint failed')
+      if (c.includes('reflog'))
+        return { exitCode: 0, stdout: 'aaa checkout: initial\n', stderr: '' }
+      if (c[1] === 'status') return { exitCode: 0, stdout: ' M src/fix.ts\n', stderr: '' }
+      return c.includes('rev-parse') ? fail('') : undefined
+    })
+    await expect(
+      respondToMention({
+        root: '/repo',
+        repoName: 'amagi',
+        mention: { id: 'lint-failure', user: 'bob', body: 'fix this' },
+        config: cfg,
+        driver: new FakeDriver(),
+        tracker: new FakeTracker(),
+        pr: pr({ body: '**Task:** `am-1`' }),
+        exec,
+        makeHarnessFn: () =>
+          summaryHarness(
+            'Fixed the parser edge case.',
+            join(tmpdir(), 'amagi-fix-pr-7-lint-failure.md'),
+          ),
+      }),
+    ).rejects.toThrow('lint failed')
+    expect(calls.some((call) => call[1] === 'push')).toBe(false)
+    expect(calls.some((call) => call[1] === 'commit')).toBe(false)
   })
 
   test('a fix-pr mention with no tracker uses a lint-clean PR commit message', async () => {

@@ -1,13 +1,14 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { configuredCheckCommands } from './check-commands.ts'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
 import type { AgentEvent } from './events.ts'
-import { exec as defaultExec, type Exec } from './exec.ts'
+import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { commitFooter, modelFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
@@ -299,7 +300,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
           worktree: wt.path,
           branch: wt.branch,
           baseBranch: opts.config.repo.baseBranch,
-          checks: opts.config.checks.commands,
+          checks: configuredCheckCommands(opts.config.checks),
           outPath,
           conflicted: wt.conflicted,
         }
@@ -330,6 +331,12 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
     }
     const summary = readFileSync(outPath, 'utf8').trim()
     if (summary === '') throw new Error('agent produced no fix summary')
+    for (const command of configuredCheckCommands(opts.config.checks, {
+      includeTest: false,
+      includeCommands: false,
+    })) {
+      await execOk(run, ['sh', '-c', command], { cwd: wt.path })
+    }
     const changed = await commitWorktree(run, wt.path, opts.pr, task, summary, commitMeta)
     p.phase('pushing fix')
     await pushConflictFix({
