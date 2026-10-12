@@ -48,7 +48,7 @@ import {
 } from '@amagi/core'
 import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { hc } from 'hono/client'
-import { type AppType, createApp } from './app.ts'
+import { type AppType, createApp, type ServerDeps } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
 let ws: TestWorkspaces
@@ -57,6 +57,23 @@ let app: AppType
 
 const claim = (id: string, title = `work on ${id}`) =>
   store.append(id, { type: 'task.claimed', title, tracker: 'beads' })
+
+const OPERATOR_SECRET = 'operator-secret-for-tests'
+
+/**
+ * Builds the app with a known operator secret. A request that names no agent
+ * token carries the secret, as the dashboard, TUI and CLI do; a request that
+ * names one reaches the token check unaided, as an agent's does.
+ */
+function operatorApp(deps: ServerDeps): AppType {
+  const raw = createApp({ ...deps, secret: OPERATOR_SECRET })
+  const request = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers)
+    if (!headers.has('X-Amagi-Token')) headers.set('X-Amagi-Secret', OPERATOR_SECRET)
+    return raw.request(input, { ...init, headers })
+  }) as AppType['request']
+  return Object.assign(Object.create(raw), { request }) as AppType
+}
 
 class FakeGateTracker implements Tracker {
   readonly kind = 'fake'
@@ -133,7 +150,7 @@ describe('GET /api/repos/:repo/git', () => {
     git(['commit', '-q', '-m', 'first change', '-m', 'First body'])
     writeFileSync(join(workspace.root, 'note.txt'), 'second version\n')
     git(['commit', '-qam', 'second change'])
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('lists repo commits and returns commit details with a first-parent file diff', async () => {
@@ -173,7 +190,7 @@ describe('GET /api/repos/:repo/tasks', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('returns the store projection newest first', async () => {
@@ -234,7 +251,7 @@ describe('GET /api/repos/:repo/tasks', () => {
     })
     store.append('bd-1', { type: 'pr.status', mergeStatus: 'conflicted' })
     store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_merge_conflict' })
-    app = createApp({ workspaces: ws.workspaces, queueConflictResolution: () => true })
+    app = operatorApp({ workspaces: ws.workspaces, queueConflictResolution: () => true })
 
     const response = await app.request('/api/repos/repo1/tasks/bd-1/resolve-conflicts', {
       method: 'POST',
@@ -280,7 +297,7 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
   beforeEach(() => {
     forge = new FakeMergePrDriver()
     ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('returns only the PRs the forge reports as mergeable', async () => {
@@ -406,7 +423,7 @@ describe('GET /api/repos/:repo/mergeable-prs', () => {
 
   test('501s when the repo has no forge driver', async () => {
     const noForge = testWorkspaces(['repo1'], { forgeFor: () => null })
-    const noForgeApp = createApp({ workspaces: noForge.workspaces })
+    const noForgeApp = operatorApp({ workspaces: noForge.workspaces })
     const res = await noForgeApp.request('/api/repos/repo1/mergeable-prs')
     expect(res.status).toBe(501)
     noForge.cleanup()
@@ -447,7 +464,7 @@ describe('GET /api/repos/:repo/open-prs', () => {
       },
     ]
     ws = testWorkspaces(['repo1'], { forgeFor: () => forge })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
 
     const res = await app.request('/api/repos/repo1/open-prs')
     expect(res.status).toBe(200)
@@ -459,7 +476,7 @@ describe('GET /api/repos/:repo/open-prs', () => {
 describe('identical issue ids across repos do not collide', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1', 'repo2'])
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('each repo sees only its own task under the same id', async () => {
@@ -496,7 +513,7 @@ describe('GET /api/repos/:repo/issues', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('reports when issue browsing is unavailable (non-beads tracker)', async () => {
@@ -649,7 +666,7 @@ class FakeIssueTracker extends BeadsTracker {
 function issueApp(tracker: Tracker) {
   ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
   store = ws.store('repo1')
-  return createApp({ workspaces: ws.workspaces })
+  return operatorApp({ workspaces: ws.workspaces })
 }
 
 test('GET /api/repos/:repo/issues?label= lists only open issues carrying the label', async () => {
@@ -912,7 +929,7 @@ describe('epic close-eligible endpoints', () => {
 
   test('GET reports when epic closure is unavailable (non-beads tracker)', async () => {
     ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await app.request('/api/repos/repo1/epics/close-eligible')
     expect(res.status).toBe(501)
   })
@@ -922,7 +939,7 @@ describe('epic close-eligible endpoints', () => {
     tracker.seedEligible({ id: 'bd-1', title: 'M4', totalChildren: 7, closedChildren: 7 })
     tracker.seedEligible({ id: 'bd-2', title: 'M6', totalChildren: 5, closedChildren: 2 })
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await app.request('/api/repos/repo1/epics/close-eligible')
     expect(res.status).toBe(200)
     const body = (await res.json()) as EpicCloseEligible[]
@@ -934,7 +951,7 @@ describe('epic close-eligible endpoints', () => {
     const tracker = new FakeEpicTracker()
     tracker.seedEligible({ id: 'bd-1' })
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await post('All children completed')
     expect(res.status).toBe(200)
     const body = (await res.json()) as EpicCloseResult
@@ -945,14 +962,14 @@ describe('epic close-eligible endpoints', () => {
   test('POST rejects a blank reason', async () => {
     const tracker = new FakeEpicTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     expect((await post('   ')).status).toBe(400)
     expect(tracker.closedReasons).toHaveLength(0)
   })
 
   test('POST is 501 on a tracker without epic closure', async () => {
     ws = testWorkspaces(['repo1'], { trackerFor: () => new FakeGateTracker() })
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     expect((await post('x')).status).toBe(501)
   })
 })
@@ -964,7 +981,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const stuckTask = (id: string) => {
@@ -1008,7 +1025,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     const tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     claim('bd-1')
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
     expect(res.status).toBe(200)
@@ -1029,7 +1046,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
     const tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     stuckTask('bd-1')
     store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'cancelled' })
     const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
@@ -1046,7 +1063,7 @@ describe('POST /api/repos/:repo/tasks/:id/reclaim', () => {
       const tracker = new FakeGateTracker()
       ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
       store = ws.store('repo1')
-      app = createApp({ workspaces: ws.workspaces })
+      app = operatorApp({ workspaces: ws.workspaces })
       stuckTask('bd-1')
       store.append('bd-1', { type: 'task.state', from: 'implementing', to: state })
       const res = await app.request('/api/repos/repo1/tasks/bd-1/reclaim', { method: 'POST' })
@@ -1066,7 +1083,7 @@ describe('POST /api/repos/:repo/tasks/:id/reset', () => {
     tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     // git runs in the repo root to drop the branch, so it has to exist.
     mkdirSync(ws.workspaces.get('repo1')?.root ?? '', { recursive: true })
   })
@@ -1281,7 +1298,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
     tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const deferred = (id: string) => {
@@ -1300,7 +1317,7 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
 
   test('wakes a deferred retry on the runner and reports the task id', async () => {
     const retried: string[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: {
         status: async () => ({
@@ -1360,7 +1377,7 @@ describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
     forge = new FakeMergePrDriver()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker, forgeFor: () => forge })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const parked = (id: string, state: 'pr_open' | 'pr_flagged' = 'pr_open') => {
@@ -1431,7 +1448,7 @@ describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
 
   test('501s when the repo has no forge driver', async () => {
     const noForge = testWorkspaces(['repo1'], { trackerFor: () => tracker, forgeFor: () => null })
-    const noForgeApp = createApp({ workspaces: noForge.workspaces })
+    const noForgeApp = operatorApp({ workspaces: noForge.workspaces })
     const noForgeStore = noForge.store('repo1')
     noForgeStore.append('bd-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
     noForgeStore.append('bd-1', {
@@ -1458,7 +1475,7 @@ describe('POST /api/tasks/:id/stop', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const running = (id: string) => {
@@ -1496,7 +1513,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
     tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const parked = (id: string, state: 'needs_human' | 'no_pr') => {
@@ -1565,7 +1582,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
   test('instantly closes an in-flight task, stopping the worker and deleting the worktree', async () => {
     const stopped: string[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: {
         status: async () => ({
@@ -1622,7 +1639,7 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
 
   test('abandons a deferred retry, stopping the backoff and retiring the task', async () => {
     const stopped: string[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: {
         status: async () => ({
@@ -1890,7 +1907,7 @@ describe('POST /api/repos/:repo/tasks/:id/chat', () => {
     harness = new FakeChatHarness()
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces, chatHarnessFor: () => harness })
+    app = operatorApp({ workspaces: ws.workspaces, chatHarnessFor: () => harness })
   })
 
   const parked = (id: string) => {
@@ -1998,11 +2015,11 @@ describe('runner endpoints', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('GET /api/runner reports availability, capacity and per-task resources', async () => {
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         status: async () => ({
@@ -2036,7 +2053,7 @@ describe('runner endpoints', () => {
   })
 
   test('GET /api/runner merges background worker activity when present', async () => {
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner(),
       workers: () => [
@@ -2088,7 +2105,7 @@ describe('runner endpoints', () => {
   test('GET /api/runner merges a live foreground worker into the slots', async () => {
     const proc = Bun.spawn(['sleep', '30'], { stdout: 'ignore' })
     try {
-      app = createApp({
+      app = operatorApp({
         workspaces: ws.workspaces,
         runner: stubRunner(),
         liveRuns: () => [
@@ -2140,7 +2157,7 @@ describe('runner endpoints', () => {
 
   test('POST /api/runs launches the next ready task', async () => {
     const started: (string | undefined)[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         start: async (taskId) => {
@@ -2157,7 +2174,7 @@ describe('runner endpoints', () => {
 
   test('POST /api/runs forwards a task id and rejects an invalid body', async () => {
     const started: (string | undefined)[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         start: async (taskId) => {
@@ -2174,7 +2191,7 @@ describe('runner endpoints', () => {
 
   test('POST /api/runs forwards worker and model/effort overrides', async () => {
     const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         start: async (taskId, opts) => {
@@ -2195,7 +2212,7 @@ describe('runner endpoints', () => {
 
   test('POST /api/runs sends no opts when the body omits them', async () => {
     const received: { taskId: string | undefined; opts: RunOptions | undefined }[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         start: async (taskId, opts) => {
@@ -2209,7 +2226,7 @@ describe('runner endpoints', () => {
   })
 
   test('GET /api/runner/options lists fleet workers and the default worker', async () => {
-    app = createApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
+    app = operatorApp({ workspaces: ws.workspaces, runner: stubRunner(), runnerRepo: 'repo1' })
     const res = await app.request('/api/repos/repo1/runner/options')
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
@@ -2236,7 +2253,7 @@ describe('runner endpoints', () => {
   })
 
   test('POST /api/runs propagates a launch failure', async () => {
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         start: async () => ({ ok: false, status: 409, error: 'runner at capacity (1/1)' }),
@@ -2249,7 +2266,7 @@ describe('runner endpoints', () => {
 
   test('POST /api/runs/:id/stop forwards to the runner and propagates failures', async () => {
     const stopped: string[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: stubRunner({
         stop: async (id) => {
@@ -2273,7 +2290,7 @@ describe('repository check settings', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1', 'repo2'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const patchChecks = (body: unknown, repo = 'repo1') =>
@@ -2355,7 +2372,7 @@ describe('repo settings endpoints', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1', 'repo2'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('GET returns the auto-queue and ntfy settings and stale maxParallel notice flag', async () => {
@@ -2484,7 +2501,7 @@ describe('repo settings endpoints', () => {
 
   test('PATCH persists the auto-queue toggle and applies it to the served runner', async () => {
     const applied: boolean[] = []
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: {
         status: async () => ({
@@ -2734,7 +2751,7 @@ describe('repo settings endpoints', () => {
   })
 
   test('PATCH rejects unknown settings instead of persisting a worker count', async () => {
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: {
         status: async () => ({
@@ -2830,7 +2847,7 @@ describe('fleet endpoints', () => {
     fleet = []
     fleetChanges = 0
     queued.length = 0
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runner: {
         status: async () => ({
@@ -3132,7 +3149,7 @@ describe('fleet endpoints', () => {
         }),
       )
     }
-    app = createApp({ workspaces: ws.workspaces, runnerForRepo: (repo) => services.get(repo) })
+    app = operatorApp({ workspaces: ws.workspaces, runnerForRepo: (repo) => services.get(repo) })
     try {
       await Bun.sleep(20)
       expect(claimCalls).toBe(0)
@@ -3207,7 +3224,7 @@ describe('GET /api/seats', () => {
       },
       autoQueue: false,
     })
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       runnerForRepo: (repo) =>
         ({
@@ -3329,7 +3346,7 @@ describe('GET /api/repos/:repo/tasks/:id', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('returns the task with its open questions', async () => {
@@ -3344,11 +3361,10 @@ describe('GET /api/repos/:repo/tasks/:id', () => {
     const res = await app.request('/api/repos/repo1/tasks/bd-1')
     const body = (await res.json()) as {
       task: ProjectedTask
-      token: string
       questions: ProjectedQuestion[]
     }
     expect(body.task.id).toBe('bd-1')
-    expect(body.token).toBe(store.token('bd-1'))
+    expect(body).not.toHaveProperty('token')
     expect(body.questions).toHaveLength(1)
     expect(body.questions[0]?.options).toEqual(['npm', 'nexus'])
   })
@@ -3364,7 +3380,7 @@ describe('GET /api/repos/:repo/events', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('replays from a sequence number without repeating it', async () => {
@@ -3389,7 +3405,7 @@ describe('GET /api/repos/:repo/watchers/:name/runs', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('returns a window of complete runs, newest first', async () => {
@@ -3433,7 +3449,7 @@ describe('GET /api/repos/:repo/questions', () => {
   beforeEach(() => {
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   test('lists only unresolved questions', async () => {
@@ -3461,7 +3477,7 @@ describe('question channel', () => {
     tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
   })
 
   const token = (id: string) => store.token(id)
@@ -3594,7 +3610,7 @@ describe('question channel', () => {
         throw new Error('channel down')
       },
     }
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       notify: [
         {
@@ -3624,7 +3640,7 @@ describe('question channel', () => {
     const workspace = ws.workspaces.get('repo1')
     if (workspace === null) throw new Error('repo1 missing')
     workspace.config.notify.desktopFailureAlerts = true
-    app = createApp({
+    app = operatorApp({
       workspaces: ws.workspaces,
       notify: [
         {
@@ -3678,7 +3694,7 @@ describe('question channel', () => {
 describe('GET /api/repos', () => {
   test('lists registered repositories with readiness', async () => {
     ws = testWorkspaces(['repo1', 'repo2'])
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await app.request('/api/repos')
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
@@ -3696,7 +3712,7 @@ describe('GET /api/repos', () => {
 describe('POST /api/repos (onboarding)', () => {
   test('registers a new repo without a restart and reports readiness', async () => {
     ws = testWorkspaces([])
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await app.request('/api/repos', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -3711,7 +3727,7 @@ describe('POST /api/repos (onboarding)', () => {
 
   test('rejects a path that is not a git repository', async () => {
     ws = testWorkspaces([])
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await app.request('/api/repos', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -3744,7 +3760,7 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
 
     ws = testWorkspaces(['repo1'])
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     store.append('bd-1', { type: 'task.claimed', title: 'do something', tracker: 'beads' })
     store.append('bd-1', { type: 'worktree.created', path: wt, branch })
     store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
@@ -3810,7 +3826,14 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
   })
 
   test('a missing token is a 401', async () => {
-    const res = await request('bd-1', 'commit')
+    const res = await createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET }).request(
+      '/api/repos/repo1/tasks/bd-1/git-requests',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ verb: 'commit' }),
+      },
+    )
     expect(res.status).toBe(401)
   })
 
@@ -3832,7 +3855,7 @@ describe('POST /api/repos/:repo/triage', () => {
     const tracker = new FakeGateTracker()
     ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
     store = ws.store('repo1')
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     const res = await app.request('/api/repos/repo1/triage', { method: 'POST' })
     expect(res.status).toBe(202)
     await Bun.sleep(20)
@@ -3842,14 +3865,14 @@ describe('POST /api/repos/:repo/triage', () => {
 
   test('404s for an unknown repo', async () => {
     ws = testWorkspaces(['repo1'])
-    app = createApp({ workspaces: ws.workspaces })
+    app = operatorApp({ workspaces: ws.workspaces })
     expect((await app.request('/api/repos/nope/triage', { method: 'POST' })).status).toBe(404)
   })
 })
 
 test('unknown routes answer with the shared error shape', async () => {
   ws = testWorkspaces(['repo1'])
-  app = createApp({ workspaces: ws.workspaces })
+  app = operatorApp({ workspaces: ws.workspaces })
   const res = await app.request('/api/nope')
   expect(res.status).toBe(404)
   expect((await res.json()) as { error: string }).toHaveProperty('error')
@@ -3863,7 +3886,7 @@ test('unknown routes answer with the shared error shape', async () => {
 test('hono/client infers the store projections', async () => {
   ws = testWorkspaces(['repo1'])
   store = ws.store('repo1')
-  app = createApp({ workspaces: ws.workspaces })
+  app = operatorApp({ workspaces: ws.workspaces })
   claim('bd-1')
   const client = hc<AppType>('http://localhost', { fetch: app.request })
 
@@ -3878,4 +3901,122 @@ test('hono/client infers the store projections', async () => {
   if (detail.status !== 200) throw new Error('expected 200')
   const body: { task: ProjectedTask; questions: ProjectedQuestion[] } = await detail.json()
   expect(body.task.title).toBe('work on bd-1')
+})
+
+describe('operator access', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    claim('bd-1')
+  })
+
+  const stop = (target: AppType, headers: Record<string, string> = {}) =>
+    target.request('/api/repos/repo1/tasks/bd-1/stop', { method: 'POST', headers })
+
+  test('a foreign Host is refused, even for reads', async () => {
+    const app = createApp({ workspaces: ws.workspaces })
+    const res = await app.request('http://evil.example/api/repos/repo1/tasks/bd-1')
+    expect(res.status).toBe(403)
+    const posted = await app.request('http://evil.example/api/repos/repo1/tasks/bd-1/stop', {
+      method: 'POST',
+    })
+    expect(posted.status).toBe(403)
+  })
+
+  test('loopback names pass whatever the port', async () => {
+    const app = createApp({ workspaces: ws.workspaces })
+    for (const host of ['localhost:7777', '127.0.0.1:5173', '[::1]:7777']) {
+      const res = await app.request(`http://${host}/api/repos/repo1/tasks/bd-1`)
+      expect(res.status).toBe(200)
+    }
+  })
+
+  test('the configured bind host passes, other names do not', async () => {
+    const app = createApp({ workspaces: ws.workspaces, host: 'amagi.lan' })
+    expect((await app.request('http://amagi.lan:7777/api/repos/repo1/tasks/bd-1')).status).toBe(200)
+    expect((await app.request('http://amagi.lan.evil/api/repos/repo1/tasks/bd-1')).status).toBe(403)
+  })
+
+  test('a mutating request without the secret is a 401', async () => {
+    const app = createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
+    expect((await stop(app)).status).toBe(401)
+    expect(store.task('bd-1')?.state).not.toBe('stopped')
+  })
+
+  test('an agent token alone does not open an operator route', async () => {
+    const app = createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
+    expect((await stop(app, { 'X-Amagi-Token': store.token('bd-1') })).status).toBe(401)
+  })
+
+  test('the secret header or the dashboard cookie passes the gate', async () => {
+    const app = createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
+    const byHeader = await stop(app, { 'X-Amagi-Secret': OPERATOR_SECRET })
+    expect(byHeader.status).not.toBe(401)
+    const byCookie = await stop(app, {
+      cookie: `amagi_session=${OPERATOR_SECRET}`,
+      origin: 'http://localhost',
+    })
+    expect(byCookie.status).not.toBe(401)
+    expect((await stop(app, { 'X-Amagi-Secret': 'wrong' })).status).toBe(401)
+  })
+
+  test('the session endpoint hands out the secret and sets it as a strict cookie', async () => {
+    const app = createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
+    const res = await app.request('/api/session')
+    expect(((await res.json()) as { secret: string }).secret).toBe(OPERATOR_SECRET)
+    const cookie = res.headers.get('set-cookie') ?? ''
+    expect(cookie).toContain(`amagi_session=${OPERATOR_SECRET}`)
+    expect(cookie).toContain('HttpOnly')
+    expect(cookie).toContain('SameSite=Strict')
+  })
+
+  test('the ask route refuses a mutating call with neither token nor secret', async () => {
+    const app = createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/questions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ question: 'which?', options: [] }),
+    })
+    expect(res.status).toBe(401)
+    expect(store.openQuestions('bd-1')).toHaveLength(0)
+  })
+})
+
+describe('operator session origin', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'])
+    store = ws.store('repo1')
+    claim('bd-1')
+  })
+
+  const app = () => createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
+  const stop = (headers: Record<string, string>) =>
+    app().request('http://localhost:7777/api/repos/repo1/tasks/bd-1/stop', {
+      method: 'POST',
+      headers,
+    })
+  const cookie = `amagi_session=${OPERATOR_SECRET}`
+
+  test('a cookie from a same-site page on another port is refused', async () => {
+    const res = await stop({ cookie, origin: 'http://localhost:8080' })
+    expect(res.status).toBe(401)
+  })
+
+  test('a cookie from a sibling hostname is refused', async () => {
+    const res = await stop({ cookie, origin: 'http://evil.localhost:7777' })
+    expect(res.status).toBe(401)
+  })
+
+  test('a cookie without an Origin is refused', async () => {
+    expect((await stop({ cookie })).status).toBe(401)
+  })
+
+  test('a cookie from the dashboard own origin passes', async () => {
+    expect((await stop({ cookie, origin: 'http://localhost:7777' })).status).not.toBe(401)
+  })
+
+  test('the header path needs no Origin, as the CLI and TUI send none', async () => {
+    const res = await stop({ 'X-Amagi-Secret': OPERATOR_SECRET, origin: 'http://localhost:8080' })
+    expect(res.status).not.toBe(401)
+  })
 })

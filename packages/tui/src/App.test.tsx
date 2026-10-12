@@ -253,11 +253,11 @@ describe('App', () => {
     }
   })
 
-  test('answering an option posts it with the task token', async () => {
+  test('answering an option posts it with the operator secret', async () => {
     const posted: { url: string; body: unknown }[] = []
     globalThis.fetch = streamMock(EVENTS, (href, init) => {
-      if (href.endsWith('/api/repos/repo1/tasks/am-1')) {
-        return new Response(JSON.stringify({ token: 'secret' }), { status: 200 })
+      if (href.endsWith('/api/session')) {
+        return new Response(JSON.stringify({ secret: 'secret' }), { status: 200 })
       }
       if (href.includes('/answer')) {
         posted.push({ url: href, body: JSON.parse(init?.body as string) })

@@ -14,7 +14,7 @@ import {
 } from '@amagi/core'
 import { Box, Text, useInput } from 'ink'
 import { useMemo, useState, useSyncExternalStore } from 'react'
-import { fetchTaskToken, submitAnswer } from './answer.ts'
+import { fetchOperatorSecret, submitAnswer } from './answer.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
@@ -100,18 +100,18 @@ export function TaskDetail({
 
   async function answer(questionId: string, text: string): Promise<void> {
     setMode({ kind: 'answering', questionId, draft: text, busy: true, error: null })
-    const token = await fetchTaskToken(baseUrl, repo, taskId)
-    if (token === null) {
+    const secret = await fetchOperatorSecret(baseUrl)
+    if (secret === null) {
       setMode({
         kind: 'answering',
         questionId,
         draft: text,
         busy: false,
-        error: 'could not fetch the task token',
+        error: 'could not fetch the operator secret',
       })
       return
     }
-    const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, token, text)
+    const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, secret, text)
     if (outcome.kind === 'error') {
       setMode({ kind: 'answering', questionId, draft: text, busy: false, error: outcome.message })
     } else {

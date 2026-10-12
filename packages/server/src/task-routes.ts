@@ -128,9 +128,7 @@ export function createTaskRoutes({
       const ws = resolveWorkspace(workspaces, repo)
       const task = ws.store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // The dashboard answers via the token-bound endpoint but has no other
-      // channel for the credential, so the task detail doubles as its source.
-      return c.json({ task, token: ws.store.token(id), questions: ws.store.openQuestions(id) })
+      return c.json({ task, questions: ws.store.openQuestions(id) })
     })
 
     .get(
@@ -546,6 +544,9 @@ export function createTaskRoutes({
         const ws = resolveWorkspace(workspaces, repo)
         const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        if (!authorized(c, ws.store, id)) {
+          return c.json({ error: 'task token mismatch' }, 401)
+        }
         const questionId = crypto.randomUUID()
         const gateRef = await openQuestionGate(ws.tracker, id, {
           id: questionId,

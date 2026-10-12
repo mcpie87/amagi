@@ -43,6 +43,18 @@ test('serves dashboard assets with SPA fallback', async () => {
   expect(api.status).toBe(200)
 })
 
+test('refuses a foreign Host on the socket, static assets included', async () => {
+  ws = testWorkspaces(['repo1'])
+  const dir = `${import.meta.dir}/../../dashboard/dist`
+  server = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0, staticDir: dir })
+
+  const base = `http://127.0.0.1:${server.port}`
+  const evil = { host: 'evil.example' }
+  expect((await fetch(`${base}/`, { headers: evil })).status).toBe(403)
+  expect((await fetch(`${base}/api/health`, { headers: evil })).status).toBe(403)
+  expect((await fetch(`${base}/api/health`)).status).toBe(200)
+})
+
 test('portInUse tracks whether the port is bound', async () => {
   ws = testWorkspaces(['repo1'])
   const bound = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0 })

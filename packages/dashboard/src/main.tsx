@@ -1,6 +1,7 @@
 import { RouterProvider } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { refreshSession } from './api.ts'
 import { installInteractionTracking } from './interactions.ts'
 import { router } from './routes.tsx'
 import { DashboardProvider } from './store.tsx'
@@ -9,6 +10,7 @@ import './index.css'
 const root = document.getElementById('root')
 if (!root) throw new Error('missing #root')
 
+void refreshSession()
 installInteractionTracking(() => router.state.matches.at(-1)?.routeId ?? location.pathname)
 
 createRoot(root).render(
