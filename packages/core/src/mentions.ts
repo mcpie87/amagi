@@ -6,11 +6,12 @@ import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
 import { agentFailure } from './errors.ts'
-import type { AgentEvent } from './events.ts'
+import { type AgentEvent, canTransition } from './events.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { commitFooter, modelFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
+import { configuredCheckCommands, runMandatoryWorkerChecks } from './mandatory-checks.ts'
 import { cacheHome } from './paths.ts'
 import { type PrBodyMeta, taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
@@ -21,6 +22,7 @@ import {
   commitMessage,
   explainMentionPrompt,
   explainMentionSystemPrompt,
+  fixChecksPrompt,
   flagPrompt,
   flagSystemPrompt,
   MAX_EXPLAIN_ANSWER_CHARS,
@@ -263,7 +265,7 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage
     baseBranch: opts.config.repo.baseBranch,
     pr: opts.pr,
     persona: opts.config.repo.persona,
-    ...(mergeMessage === undefined ? {} : { mergeMessage }),
+    ...(mergeMessage === undefined ? {} : { mergeMessage, deferCommit: true }),
     exec: run,
   })
 }
@@ -289,7 +291,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
   const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('fixing in worktree')
-    const { outcome, proc } = await withHeadReflogBypassCheck(
+    const { outcome, proc, checks } = await withHeadReflogBypassCheck(
       wt.path,
       run,
       async () => {
@@ -299,32 +301,77 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
           worktree: wt.path,
           branch: wt.branch,
           baseBranch: opts.config.repo.baseBranch,
-          checks: opts.config.checks.commands,
+          checks: configuredCheckCommands(opts.config.checks),
           outPath,
           conflicted: wt.conflicted,
         }
-        const proc = startImplementHarness(
-          mk,
-          harnessConfig,
-          wt.path,
-          respondToMentionPrompt(ctx),
-          respondToMentionSystemPrompt(ctx),
-          opts.repo,
-          { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
-        )
-        return {
-          outcome: await p.agent(proc, 'fixing in worktree', {
+        let prompt = respondToMentionPrompt(ctx)
+        let checks: import('./events.ts').CheckResult[] = []
+        for (let round = 0; ; round++) {
+          const proc = startImplementHarness(
+            mk,
+            harnessConfig,
+            wt.path,
+            prompt,
+            respondToMentionSystemPrompt(ctx),
+            opts.repo,
+            { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
+          )
+          const outcome = await p.agent(proc, 'fixing in worktree', {
             role: 'implement',
             harness: harnessConfig.kind,
             source: `PR #${opts.pr.number} mention fix-pr`,
             cwd: wt.path,
-          }),
-          proc,
+          })
+          if (!outcome.ok) return { outcome, proc, checks }
+          checks = await runMandatoryWorkerChecks(
+            run,
+            wt.path,
+            opts.config.checks,
+            wt.baseOid,
+            true,
+          )
+          if (taskId !== null)
+            opts.store?.append(taskId, {
+              type: 'checks.finished',
+              ok: checks.every((result) => result.exitCode === 0),
+              results: checks,
+            })
+          if (
+            checks.every((result) => result.exitCode === 0) ||
+            round >= opts.config.loop.maxCheckRounds
+          ) {
+            return { outcome, proc, checks }
+          }
+          prompt = `${fixChecksPrompt(checks)}\n\n${respondToMentionPrompt(ctx)}`
         }
       },
       opts.onGitBypassed,
       true,
     )
+    if (!checks.every((result) => result.exitCode === 0)) {
+      const detail = checks
+        .filter((result) => result.exitCode !== 0)
+        .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+        .join('\n')
+      const taskRow = taskId === null ? null : (opts.store?.task(taskId) ?? null)
+      if (
+        taskId !== null &&
+        taskRow !== null &&
+        opts.store !== undefined &&
+        canTransition(taskRow.state, 'needs_human')
+      ) {
+        opts.store.append(taskId, {
+          type: 'task.state',
+          from: taskRow.state,
+          to: 'needs_human',
+          reason: `PR #${opts.pr.number} mention fix failed mandatory checks:\n${detail}${outcome.ok ? '' : `\nRepair agent failed: ${agentFailure(outcome)}`}`,
+        })
+      }
+      throw new Error(
+        `mandatory checks still fail after repair attempts:\n${detail}${outcome.ok ? '' : `\nRepair agent failed: ${agentFailure(outcome)}`}`,
+      )
+    }
     if (!outcome.ok) {
       throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }

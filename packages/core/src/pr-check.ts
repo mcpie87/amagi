@@ -293,6 +293,7 @@ export type PrepareConflictWorktreeOptions = {
   persona?: string | null
   /** Linted message for a clean merge commit; absent keeps the legacy message. */
   mergeMessage?: string
+  deferCommit?: boolean
   exec?: Exec
 }
 
@@ -368,7 +369,17 @@ export async function prepareConflictWorktree(
     const errors = lintCommitMessage(opts.mergeMessage)
     if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
   }
-  const merge = await run(['git', 'merge', '-m', message, baseOid], { cwd: path })
+  const merge = await run(
+    [
+      'git',
+      'merge',
+      ...(opts.deferCommit ? ['--no-commit', '--no-ff'] : []),
+      '-m',
+      message,
+      baseOid,
+    ],
+    { cwd: path },
+  )
   return { path, branch, conflicted: merge.exitCode !== 0, baseOid }
 }
 

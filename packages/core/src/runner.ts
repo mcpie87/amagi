@@ -27,6 +27,7 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { configuredCheckCommands } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -2112,9 +2113,7 @@ export class Runner {
   }
 
   private checkCommands(): string[] {
-    const { format, lint, test, commands } = this.deps.config.checks
-    const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
-    return [...gate, ...commands]
+    return configuredCheckCommands(this.deps.config.checks)
   }
 
   private async preflight(taskId: string, cwd: string): Promise<void> {

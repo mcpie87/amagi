@@ -3779,6 +3779,20 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
     expect(git(wt, ['rev-parse', 'HEAD']).stdout.trim()).toBe(body.sha)
   })
 
+  test('a checkpoint with failing checks keeps changes uncommitted and records the failure', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('missing test workspace')
+    workspace.config.checks = { format: 'true', lint: 'false', test: 'true', commands: [] }
+    writeFileSync(join(wt, 'hello.txt'), 'hi\n')
+    const before = git(wt, ['rev-parse', 'HEAD']).stdout
+    const response = await request('bd-1', 'commit', store.token('bd-1'))
+    expect(response.status).toBe(409)
+    expect(git(wt, ['rev-parse', 'HEAD']).stdout).toBe(before)
+    expect(git(wt, ['status', '--porcelain']).stdout).toContain('hello.txt')
+    const event = store.events({ taskId: 'bd-1' }).find((e) => e.type === 'checks.finished')
+    expect(event?.type === 'checks.finished' && event.ok).toBe(false)
+  })
+
   test('rejects an unknown verb as a 400 before any git write', async () => {
     writeFileSync(join(wt, 'hello.txt'), 'hi\n')
     const res = await request('bd-1', 'rebase', store.token('bd-1'))

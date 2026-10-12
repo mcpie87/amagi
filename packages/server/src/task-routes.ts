@@ -2,6 +2,7 @@ import {
   CHECKPOINT_COMMIT_SUMMARY,
   type ChatService,
   canReset,
+  diffBase,
   errMsg,
   exec,
   HARDCODED_EFFORTS,
@@ -17,6 +18,7 @@ import {
   reconcilePr,
   removeWorktree,
   runApprovedGitRequest,
+  runMandatoryWorkerChecks,
   type Store,
   type StoredEvent,
   stageAndCommit,
@@ -697,6 +699,26 @@ export function createTaskRoutes({
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
         try {
+          const base = await diffBase(
+            exec,
+            task.worktree,
+            ws.config.forge.remote,
+            ws.config.repo.baseBranch,
+          )
+          const results = await runMandatoryWorkerChecks(
+            exec,
+            task.worktree,
+            ws.config.checks,
+            base,
+          )
+          const ok = results.every((result) => result.exitCode === 0)
+          ws.store.append(id, { type: 'checks.finished', ok, results })
+          if (!ok) {
+            return c.json(
+              { error: 'project checks failed; repair and retry the commit', results },
+              409,
+            )
+          }
           const staged = await stageAndCommit(
             exec,
             task,

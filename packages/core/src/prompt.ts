@@ -341,6 +341,7 @@ export type ConflictPromptContext = {
   checks: readonly string[]
   /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
   conflictFiles?: readonly string[]
+  checkResults?: readonly CheckResult[]
   outPath?: string
 }
 
@@ -394,13 +395,12 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
       '',
     )
   }
-  if (ctx.checks.length > 0) {
-    parts.push(
-      '',
-      'Run the project checks and make sure they pass before stopping:',
-      ...ctx.checks.map((c) => `- ${c}`),
-    )
-  }
+  parts.push(
+    '',
+    'Run the project checks and make sure they pass before stopping:',
+    ...ctx.checks.map((c) => `- ${c}`),
+  )
+  if (ctx.checkResults !== undefined) parts.push('', fixChecksPrompt(ctx.checkResults))
   parts.push(
     '',
     'The runner stages and commits the resolved merge. Stop when the conflicts are resolved.',
@@ -463,13 +463,11 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
       'Resolve the merge conflicts first, then address the feedback.',
     )
   }
-  if (ctx.checks.length > 0) {
-    parts.push(
-      '',
-      'Run the project checks and make sure they pass before stopping:',
-      ...ctx.checks.map((c) => `- ${c}`),
-    )
-  }
+  parts.push(
+    '',
+    'Run the project checks and make sure they pass before stopping:',
+    ...ctx.checks.map((c) => `- ${c}`),
+  )
   parts.push(
     '',
     'Address the feedback with the smallest change that satisfies it, then stop. The dispatcher will commit and push your changes.',

@@ -34,7 +34,7 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
     }
     if (cmd.includes('--symref'))
       return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
-    if (cmd[1] === 'diff') return { exitCode: 1, stdout: '', stderr: '' }
+    if (cmd[1] === 'diff' && cmd.includes('--quiet')) return { exitCode: 1, stdout: '', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, inputs }
@@ -148,7 +148,7 @@ function fakeHarness(
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [], format: null, lint: null },
+    checks: { commands: ['just check', 'just fresh-check'], format: null, lint: null },
   })
 
 beforeEach(() => {
@@ -189,8 +189,43 @@ describe('resolveConflict', () => {
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
     const merge = calls.find((call) => call[1] === 'merge')
-    expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
-    expect(logs).toContain('base merges cleanly; pushed the merge to update the PR')
+    expect(merge).toContain('--no-commit')
+    expect(lintCommitMessage(merge?.[(merge?.indexOf('-m') ?? -1) + 1] ?? '')).toEqual([])
+    expect(
+      logs.some((line) =>
+        line.startsWith('base merges cleanly; pushed the merge to update the PR'),
+      ),
+    ).toBe(true)
+  })
+
+  test('repairs failed checks after a clean merge before pushing', async () => {
+    let checks = 0
+    let launches = 0
+    const cfg = config()
+    cfg.checks = { format: 'format-code', lint: 'lint-code', test: 'test-code', commands: [] }
+    const { exec, calls } = fake((c) => {
+      if (c.includes('rev-parse')) return fail('')
+      if (c.includes('merge')) return ok('Already up to date')
+      if (c[0] === 'sh' && c[2] === 'lint-code' && checks++ === 0) return fail('lint failed')
+      return undefined
+    })
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: cfg,
+      driver: fakeDriver(),
+      exec,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness()
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect(launches).toBe(1)
+    const commands = calls.filter((c) => c[0] === 'sh').map((c) => c[2])
+    expect(commands).toEqual(['format-code', 'lint-code', 'format-code', 'lint-code', 'test-code'])
+    expect(calls.some((c) => c[1] === 'push')).toBe(true)
   })
 
   test('dispatches the agent, pushes the fix, and reports the merge status', async () => {
@@ -292,7 +327,7 @@ describe('resolveConflict', () => {
     expect(result.verdict?.verdict).toBe('CLOSE TASK')
     expect(calls.some((c) => c.includes('push'))).toBe(false)
     // Against the commit that was merged: origin/main may have moved during the agent run.
-    expect(calls).toContainEqual(['git', 'diff', '--quiet', 'base-oid', 'HEAD'])
+    expect(calls).toContainEqual(['git', 'diff', '--quiet', 'base-oid'])
   })
 
   test('pushes a real merge even when the agent verdict is not resolved', async () => {
@@ -440,6 +475,46 @@ describe('resolveConflict', () => {
     expect(result.ok).toBe(false)
     expect(result.message).toBe(`agent failed: ${message}`)
     expect(calls.some((c) => c.includes('push'))).toBe(false)
+  })
+
+  test('parks with failed check details when a conflict repair agent fails', async () => {
+    const store = new Store(openDatabase(':memory:'))
+    store.append('am-1', { type: 'task.claimed', title: 'x', tracker: 'beads' })
+    for (const to of [
+      'worktree_ready',
+      'implementing',
+      'checks',
+      'committed',
+      'pr_open',
+    ] as const) {
+      store.append('am-1', { type: 'task.state', from: null, to })
+    }
+    const { exec, calls } = fake((command) => {
+      if (command[0] === 'sh') return fail('check failed')
+      return conflicted(command)
+    })
+    let launches = 0
+    const result = await resolveConflict({
+      repoRoot: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      config: config(),
+      driver: fakeDriver(),
+      store,
+      exec,
+      makeHarnessFn: () => {
+        launches++
+        return fakeHarness(launches === 1 ? {} : { ok: false, stderr: 'repair failed' })
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('just check')
+    expect(result.message).toContain('check failed')
+    expect(result.message).toContain('repair failed')
+    expect(result.message).toContain('parked the task at needs_human')
+    expect(store.task('am-1')?.state).toBe('needs_human')
+    expect(calls.some((command) => command.includes('push'))).toBe(false)
   })
 
   test('out of iterations, parks a pr_open task and leaves a task already off pr_open alone', async () => {

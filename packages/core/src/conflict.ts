@@ -11,6 +11,7 @@ import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { commitFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
+import { configuredCheckCommands, runMandatoryWorkerChecks } from './mandatory-checks.ts'
 import { cacheHome } from './paths.ts'
 import { type PointlessVerdict, parsePointlessVerdict } from './pointless.ts'
 import type { PrBodyMeta } from './pr-body.ts'
@@ -63,7 +64,7 @@ export type ResolveConflictResult = {
 
 /** True when the merge result adds nothing on top of the merged base commit. */
 async function conflictDiffEmpty(cwd: string, baseOid: string, run: Exec): Promise<boolean> {
-  const diff = await run(['git', 'diff', '--quiet', baseOid, 'HEAD'], { cwd })
+  const diff = await run(['git', 'diff', '--quiet', baseOid], { cwd })
   if (diff.exitCode === 0) return true
   if (diff.exitCode === 1) return false
   throw new Error(diff.stderr.trim() || `git diff ${baseOid} HEAD failed`)
@@ -106,7 +107,12 @@ export async function stageResolved(
 /** Finishes the in-progress merge with the runner's message when the task is known. */
 async function finishMerge(run: Exec, cwd: string, message?: string): Promise<void> {
   const head = await run(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd })
-  if (head.exitCode !== 0) return
+  if (head.exitCode !== 0) {
+    const status = await run(['git', 'status', '--porcelain'], { cwd })
+    if (status.exitCode !== 0) throw new Error(status.stderr || 'git status failed')
+    if (status.stdout.trim() === '') return
+  }
+  await execOk(run, ['git', 'add', '-A'], { cwd })
   const args = message === undefined ? ['git', 'commit', '--no-edit'] : ['git', 'commit', '-F', '-']
   const commit = await run(args, { cwd, ...(message === undefined ? {} : { stdin: message }) })
   if (commit.exitCode !== 0) {
@@ -145,6 +151,21 @@ function markPrMergeConflict(opts: ResolveConflictOptions, unmerged: readonly st
     from: task.state,
     to: 'pr_merge_conflict',
     reason: `PR #${opts.pr.number} still has unmerged paths after ${opts.config.loop.conflictMaxIterations} conflict-resolution dispatches: ${unmerged.join(', ')}`,
+  })
+  return true
+}
+
+function parkAtNeedsHuman(opts: ResolveConflictOptions, reason: string): boolean {
+  if (opts.store === undefined) return false
+  const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
+  if (taskId === null) return false
+  const task = opts.store.task(taskId)
+  if (task === null || !canTransition(task.state, 'needs_human')) return false
+  opts.store.append(taskId, {
+    type: 'task.state',
+    from: task.state,
+    to: 'needs_human',
+    reason,
   })
   return true
 }
@@ -194,11 +215,14 @@ export async function resolveConflict(
       pr: opts.pr,
       persona: opts.config.repo.persona,
       mergeMessage: cleanMergeMessage,
+      deferCommit: true,
       exec: run,
     })
     log('info', `worktree: ${wt.path}`)
     iteration = iterationsFromLabels(opts.pr.labels)
     const verdictPath = join(tmpdir(), `amagi-conflict-${opts.pr.number}-${randomUUID()}.md`)
+    let checkRound = 0
+    let checkResults: import('./events.ts').CheckResult[] | undefined
 
     if (!wt.conflicted) {
       if (await conflictDiffEmpty(wt.path, wt.baseOid, run)) {
@@ -206,38 +230,61 @@ export async function resolveConflict(
         log('warn', message)
         return { ok: false, message, iteration, contained: true }
       }
-      await pushConflictFix({
-        cwd: wt.path,
-        branch: wt.branch,
-        headRef: opts.pr.headRefName,
-        remote: opts.config.forge.remote,
-        exec: run,
-      })
-      const message = 'base merges cleanly; pushed the merge to update the PR'
-      log('ok', message)
-      return { ok: true, message, iteration }
     }
 
     for (;;) {
       const unmerged = await unmergedPaths(run, wt.path)
-      if (unmerged.length === 0) break
-      if (iteration >= opts.config.loop.conflictMaxIterations && !opts.manual) {
+      if (unmerged.length === 0) {
+        const results = await runMandatoryWorkerChecks(
+          run,
+          wt.path,
+          opts.config.checks,
+          wt.baseOid,
+          true,
+        )
+        const ok = results.every((result) => result.exitCode === 0)
+        if (taskId !== null) opts.store?.append(taskId, { type: 'checks.finished', ok, results })
+        if (ok) {
+          checkResults = results
+          break
+        }
+        checkRound++
+        checkResults = results
+        const detail = results
+          .filter((result) => result.exitCode !== 0)
+          .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+          .join('\n')
+        if (checkRound > opts.config.loop.maxCheckRounds) {
+          const reason = `PR #${opts.pr.number} conflict resolution failed mandatory checks:\n${detail}`
+          const parked = parkAtNeedsHuman(opts, reason)
+          const message = `${reason}${parked ? '; parked the task at needs_human' : ''}`
+          log('error', message)
+          return { ok: false, message, iteration }
+        }
+      }
+      if (
+        unmerged.length > 0 &&
+        iteration >= opts.config.loop.conflictMaxIterations &&
+        !opts.manual
+      ) {
         const marked = markPrMergeConflict(opts, unmerged)
         const message = `unmerged paths remain after ${iteration} dispatches${marked ? '; task marked pr_merge_conflict' : ''}: ${unmerged.join(', ')}`
         log('error', message)
         return { ok: false, message, iteration }
       }
-      iteration++
-      try {
-        await stampIterationLabel({
-          cwd: wt.path,
-          remote: opts.config.forge.remote,
-          pr: opts.pr,
-          iteration,
-          exec: run,
-        })
-      } catch (err) {
-        log('warn', `iteration bump failed: ${errMsg(err)}`)
+      if (unmerged.length > 0) {
+        iteration++
+        try {
+          await stampIterationLabel({
+            cwd: wt.path,
+            remote: opts.config.forge.remote,
+            pr: opts.pr,
+            iteration,
+            exec: run,
+          })
+        } catch (err) {
+          log('warn', `iteration bump failed: ${errMsg(err)}`)
+        }
       }
 
       const ctx = {
@@ -245,8 +292,9 @@ export async function resolveConflict(
         worktree: wt.path,
         branch: wt.branch,
         baseBranch: opts.config.repo.baseBranch,
-        checks: opts.config.checks.commands,
+        checks: configuredCheckCommands(opts.config.checks),
         conflictFiles: unmerged,
+        ...(checkResults === undefined ? {} : { checkResults }),
         outPath: verdictPath,
       }
       const harness = mk(harnessConfig)
@@ -296,7 +344,19 @@ export async function resolveConflict(
         true,
       )
       if (!outcome.ok) {
-        const message = `agent failed: ${agentError || agentFailure(outcome)}`
+        const failedChecks = checkResults?.filter((result) => result.exitCode !== 0) ?? []
+        const checkDetail = failedChecks
+          .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+          .join('\n')
+        const reason =
+          failedChecks.length === 0
+            ? null
+            : `PR #${opts.pr.number} conflict resolution failed mandatory checks:\n${checkDetail}\nRepair agent failed: ${agentError || agentFailure(outcome)}`
+        const parked = reason === null ? false : parkAtNeedsHuman(opts, reason)
+        const message =
+          reason === null
+            ? `agent failed: ${agentError || agentFailure(outcome)}`
+            : `${reason}${parked ? '; parked the task at needs_human' : ''}`
         log('error', message)
         rmSync(verdictPath, { force: true })
         return { ok: false, message, iteration }
@@ -344,9 +404,15 @@ export async function resolveConflict(
       verdict?.verdict && verdict.verdict !== 'RESOLVED'
         ? `; agent verdict: ${verdict.verdict}`
         : ''
-    const message = ok
-      ? `resolved and pushed; PR is mergeable${classification}`
-      : `pushed; the forge reports ${status}${classification}`
+    const verification = checkResults?.length
+      ? `. Verification: ${checkResults.map((result) => `${result.command} passed`).join('; ')}`
+      : ''
+    const message =
+      !wt.conflicted && ok
+        ? `base merges cleanly; pushed the merge to update the PR${verification}`
+        : ok
+          ? `resolved and pushed; PR is mergeable${classification}${verification}`
+          : `pushed; the forge reports ${status}${classification}${verification}`
     const level =
       ok && (verdict?.verdict === undefined || verdict.verdict === 'RESOLVED') ? 'ok' : 'warn'
     log(level, message)
