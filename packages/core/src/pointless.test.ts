@@ -36,6 +36,9 @@ class FakePr implements PrDriver {
   readonly addedLabels: string[] = []
   readonly removedLabels: string[] = []
   readonly postedComments: string[] = []
+  readonly diffCalls: { cwd: string; number: number }[] = []
+  diff = ''
+  diffError: Error | null = null
 
   async createPr(_opts: CreatePrOptions): Promise<PullRequest> {
     throw new Error('unused')
@@ -43,14 +46,19 @@ class FakePr implements PrDriver {
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
   }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
+  }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     return []
   }
   async getMergeStatus(_cwd: string, _number: number) {
     return 'mergeable' as const
   }
-  async getPrDiff(_cwd: string, _number: number): Promise<string> {
-    return ''
+  async getPrDiff(cwd: string, number: number): Promise<string> {
+    this.diffCalls.push({ cwd, number })
+    if (this.diffError !== null) throw this.diffError
+    return this.diff
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -219,16 +227,21 @@ const pass = (diff: () => string = () => '') => {
 }
 
 describe('prDiffEmpty', () => {
-  test('is true when gh reports no diff and false otherwise', async () => {
-    const empty: Exec = async () => ({ exitCode: 0, stdout: '', stderr: '' })
-    const full: Exec = async () => ({ exitCode: 0, stdout: 'diff --git a/x b/x\n', stderr: '' })
-    expect(await prDiffEmpty('/repo', 7, empty)).toBe(true)
-    expect(await prDiffEmpty('/repo', 7, full)).toBe(false)
+  test('uses the PR driver and checks whether its diff is empty', async () => {
+    const driver = new FakePr()
+    expect(await prDiffEmpty('/repo', 7, driver)).toBe(true)
+    driver.diff = 'diff --git a/x b/x\n'
+    expect(await prDiffEmpty('/repo', 7, driver)).toBe(false)
+    expect(driver.diffCalls).toEqual([
+      { cwd: '/repo', number: 7 },
+      { cwd: '/repo', number: 7 },
+    ])
   })
 
-  test('throws when gh fails so a broken query never flags a PR', async () => {
-    const failing: Exec = async () => ({ exitCode: 1, stdout: '', stderr: 'gh: not logged in' })
-    await expect(prDiffEmpty('/repo', 7, failing)).rejects.toThrow(/not logged in/)
+  test('propagates driver errors so a broken query never flags a PR', async () => {
+    const driver = new FakePr()
+    driver.diffError = new Error('forge unavailable')
+    await expect(prDiffEmpty('/repo', 7, driver)).rejects.toThrow(/forge unavailable/)
   })
 })
 
@@ -327,7 +340,7 @@ describe('flagPointlessPrs', () => {
   test('clears a flagged PR once real commits arrive: label removed, back to pr_open, no comment', async () => {
     const over = opts()
     over.store.append('bd-1', { type: 'task.state', from: 'pr_open', to: 'pr_flagged' })
-    over.exec = pass(() => 'a real diff\n').exec
+    over.driver.diff = 'a real diff\n'
 
     const result = await flagPointlessPrs(over)
 
@@ -341,28 +354,25 @@ describe('flagPointlessPrs', () => {
 
   test('an unchanged head is skipped, so the same PR is not re-evaluated every tick', async () => {
     const over = opts()
-    const { exec, calls } = pass()
-    over.exec = exec
-
     const first = await flagPointlessPrs(over)
     expect(first).toEqual({ flagged: 1, cleared: 0 })
-    const diffsAfterFirst = calls.filter((c) => c.includes('diff')).length
+    const diffsAfterFirst = over.driver.diffCalls.length
 
     const again = await flagPointlessPrs(opts())
     expect(again).toEqual({ flagged: 0, cleared: 0 })
     expect(over.driver.postedComments).toHaveLength(1)
-    expect(calls.filter((c) => c.includes('diff')).length).toBe(diffsAfterFirst)
+    expect(over.driver.diffCalls).toHaveLength(diffsAfterFirst)
   })
 
   test('a PR whose work base already contains is flagged with the resolver verdict, whatever its diff', async () => {
     let judged = 0
     const over = opts({
-      exec: pass(() => 'a real diff\n').exec,
       makeHarnessFn: () => {
         judged++
         return fakeHarness()
       },
     })
+    over.driver.diff = 'a real diff\n'
     over.prs = [pr({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' })]
     const verdict = {
       verdict: 'CLOSE TASK' as const,

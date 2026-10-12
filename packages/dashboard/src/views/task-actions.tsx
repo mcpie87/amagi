@@ -1,5 +1,6 @@
-import { canReset, isTerminal, type TaskState } from '@amagi/core/events'
+import { canChatTask, canReset, isTerminal, type TaskState } from '@amagi/core/events'
 import type { ProjectedQuestion } from '@amagi/core/view'
+import { Link } from '@tanstack/react-router'
 import { type FormEvent, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard, useRunner } from '../store.tsx'
@@ -80,7 +81,7 @@ export function AnswerBox({
   }
 
   if (submitted) {
-    return <p className="mt-2 text-sm text-emerald-400">answered</p>
+    return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   return (
@@ -110,7 +111,7 @@ export function AnswerBox({
         <button
           type="submit"
           disabled={busy || text.trim() === ''}
-          className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
+          className="rounded bg-amber-ink px-3 py-1 text-sm font-medium text-on-solid disabled:opacity-50"
         >
           Answer
         </button>
@@ -334,7 +335,7 @@ function CloseButton({
               <button
                 type="submit"
                 disabled={busy || (reason === '__other' && custom.trim() === '')}
-                className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-emerald-500 disabled:opacity-50"
+                className="rounded bg-emerald-ink px-3 py-1 text-sm font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
               >
                 Mark done
               </button>
@@ -529,7 +530,7 @@ export function AttemptSwitcher({
           onClick={() => onSelect(n === current ? null : n)}
           className={`rounded-t px-3 py-1.5 text-sm ${
             viewing === n
-              ? 'border-b-2 border-sky-500 text-fg-strong'
+              ? 'border-b-2 border-accent text-fg-strong'
               : 'text-fg-muted hover:text-fg'
           }`}
         >
@@ -629,6 +630,72 @@ export function RecheckPrButton({
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
     </div>
+  )
+}
+
+/** Queues a conflicted PR for the existing conflict watcher to resolve. */
+export function ResolveConflictsButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (state !== 'pr_merge_conflict') return null
+
+  const queue = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/resolve-conflicts`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setResult({ kind: 'error', text: (await res.json())?.error ?? `HTTP ${res.status}` })
+      } else {
+        setResult({ kind: 'ok', text: 'queued on the PR conflict watcher' })
+      }
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ml-auto">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void queue()}
+        className="rounded border border-red-edge bg-red-soft px-3 py-1 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
+      >
+        {busy ? 'Queuing…' : 'Queue conflict resolution'}
+      </button>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** Opens the chat page on a conversation with an agent that carries the task end to end. */
+export function FullTriageButton({ taskId, state }: { taskId: string; state: TaskState | null }) {
+  if (!canChatTask(state)) return null
+  return (
+    <Link
+      to="/chat"
+      search={{ triage: taskId }}
+      className="rounded border border-sky-edge bg-sky-soft px-3 py-1 text-sm text-sky-ink hover:opacity-85"
+    >
+      Perform Full Triage
+    </Link>
   )
 }
 

@@ -192,7 +192,9 @@ export function startMentionWatcher({
           scanned++
           scannedNow++
           const mentions = comments.filter(
-            (c) => isAgentMention(c, config.forge.agentHandle) && !handled.has(c.id),
+            (c) =>
+              isAgentMention(c, config.forge.agentHandle, config.watchers.mention.allowedAuthors) &&
+              !handled.has(c.id),
           )
           recordAction(
             runId,
@@ -279,8 +281,8 @@ export function startMentionWatcher({
                     ? 'explanation posted'
                     : classifiedKind === 'add-a-task'
                       ? 'task logged and comment posted'
-                      : classifiedKind === 'take-down'
-                        ? 'take-down response posted'
+                      : classifiedKind === 'flag'
+                        ? 'flag response posted'
                         : classifiedKind === 'ambiguous'
                           ? 'clarification posted'
                           : 'response completed'

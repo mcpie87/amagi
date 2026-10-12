@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
 import { jsonLines } from '../../jsonl.ts'
+import { acquireSeat } from '../../seat-lock.ts'
 import { ClaudeHarness, ClaudeTranslator, DEFAULT_ALLOWED_TOOLS } from './claude.ts'
+import { setHarnessProcessCap } from './spawn.ts'
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'claude-stream.jsonl')
 
@@ -136,6 +138,18 @@ describe('ClaudeHarness argv', () => {
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe(DEFAULT_ALLOWED_TOOLS.join(' '))
   })
 
+  test('passes the output schema inline without its meta-schema URI', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'claude-schema-'))
+    const outputSchema = join(dir, 'schema.json')
+    writeFileSync(
+      outputSchema,
+      JSON.stringify({ $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object' }),
+    )
+    const argv = new ClaudeHarness().argv({ ...base, outputSchema }, null)
+    rmSync(dir, { recursive: true, force: true })
+    expect(argv[argv.indexOf('--json-schema') + 1]).toBe('{"type":"object"}')
+  })
+
   test('read-only mode only allows repository inspection tools', () => {
     const argv = new ClaudeHarness().argv({ ...base, permissions: 'read-only' }, null)
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('Read Glob Grep')
@@ -222,6 +236,35 @@ describe('ClaudeHarness process', () => {
       expect(outcomes.every((outcome) => outcome.ok)).toBe(true)
       expect(readFileSync(started, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(2)
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  test('a null seat skips the seat lock but still waits on the process cap', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-cap-spawn-'))
+    const bin = join(dir, 'claude')
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nsleep 0.2\nprintf '%s\\n' '{"type":"result","subtype":"success","result":"ok"}'\n`,
+    )
+    chmodSync(bin, 0o755)
+    const seat = `test-${randomUUID()}`
+    const held = await acquireSeat(seat)
+    const harness = new ClaudeHarness({ bin, seat })
+    setHarnessProcessCap(1)
+
+    try {
+      const first = harness.start({ cwd: dir, prompt: 'first', seat: null })
+      const second = harness.start({ cwd: dir, prompt: 'second', seat: null })
+      const statuses: string[] = []
+      for await (const event of second.events()) {
+        if (event.kind === 'status') statuses.push(event.message)
+      }
+      const outcomes = await Promise.all([first.done, second.done])
+      expect(statuses).toEqual(['waiting for a harness slot (1 running)'])
+      expect(outcomes.every((outcome) => outcome.ok)).toBe(true)
+    } finally {
+      setHarnessProcessCap(null)
+      held.release()
       rmSync(dir, { recursive: true, force: true })
     }
   })

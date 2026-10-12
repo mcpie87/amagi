@@ -203,7 +203,7 @@ export class OpencodeHarness implements Harness {
   }
 
   private spawn(argv: string[], opts: AgentStartOptions): AgentProcess {
-    const seat = opts.seat ?? this.seat ?? this.kind
+    const seat = opts.seat === null ? null : (opts.seat ?? this.seat ?? this.kind)
     opts = { ...opts, seat }
     const translator = new OpencodeTranslator()
     return spawnAgent(argv, opts, translator, {

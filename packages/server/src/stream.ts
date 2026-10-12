@@ -1,4 +1,4 @@
-import { AsyncQueue, type Store, type StoredEvent } from '@amagi/core'
+import { AsyncQueue, compactReplayEvent, type Store, type StoredEvent } from '@amagi/core'
 import type { Context } from 'hono'
 import { streamSSE } from 'hono/streaming'
 
@@ -13,9 +13,18 @@ export function streamClientCount(store: Store): number {
 
 type Tick = 'tick'
 
+const isTransientNotice = (event: StoredEvent): boolean =>
+  event.type === 'notify.idle' || event.type === 'notify.failed'
+
 export type EventStreamOptions = {
   taskId?: string
   sinceSeq: number
+  /**
+   * Replay the backlog as `compactReplayEvent` trims it, then send a `replayed`
+   * event carrying the last backlog seq, so the client knows which lines it
+   * must fetch per task and which will arrive live.
+   */
+  compact?: boolean
 }
 
 /**
@@ -23,7 +32,11 @@ export type EventStreamOptions = {
  * event appended while the backlog pages out is already queued, and the
  * `seq <= cursor` check drops it if that page carried it too.
  */
-export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: EventStreamOptions) {
+export function eventStream(
+  c: Context,
+  store: Store,
+  { taskId, sinceSeq, compact = false }: EventStreamOptions,
+) {
   const scope = { taskId }
 
   return streamSSE(c, async (stream) => {
@@ -44,18 +57,34 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
     }
     stream.onAbort(release)
 
-    const send = (event: StoredEvent) =>
-      stream.writeSSE({ id: String(event.seq), data: JSON.stringify(event) })
+    // JSON.stringify escapes newlines, so one `data:` line always carries the event.
+    const frame = (event: StoredEvent) => `id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`
 
     try {
       let cursor = sinceSeq
       for (;;) {
-        const page = store.events({ ...scope, sinceSeq: cursor, limit: BACKLOG_PAGE })
+        const page = store.events({
+          ...scope,
+          sinceSeq: cursor,
+          limit: BACKLOG_PAGE,
+          withoutAgentLog: compact,
+          withoutWatcherRuns: compact,
+        })
+        let chunk = ''
         for (const event of page) {
-          if (event.type !== 'notify.idle') await send(event)
+          const sent = compact ? compactReplayEvent(event) : isTransientNotice(event) ? null : event
+          if (sent !== null) chunk += frame(sent)
           cursor = event.seq
         }
+        if (chunk !== '') await stream.write(chunk)
         if (page.length < BACKLOG_PAGE || stream.aborted) break
+      }
+      if (compact) {
+        // The backlog skipped lines up to the store's head, not just up to the
+        // last event it sent. The cursor must stay put: an event appended since
+        // the last page is already queued live and would be dropped.
+        const replayed = Math.max(cursor, store.latestSeq())
+        await stream.writeSSE({ event: 'replayed', data: String(replayed) })
       }
 
       for await (const event of live) {
@@ -65,9 +94,9 @@ export function eventStream(c: Context, store: Store, { taskId, sinceSeq }: Even
           await stream.write(': ping\n\n')
           continue
         }
-        if (event.seq <= cursor && event.type !== 'notify.idle') continue
+        if (event.seq <= cursor && !isTransientNotice(event)) continue
         cursor = Math.max(cursor, event.seq)
-        await send(event)
+        await stream.write(frame(event))
       }
     } finally {
       release()

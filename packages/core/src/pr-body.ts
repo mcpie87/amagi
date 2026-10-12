@@ -1,5 +1,4 @@
 import type { TrackerTask } from './drivers/types.ts'
-import type { CheckResult } from './events.ts'
 import type { Exec } from './exec.ts'
 import { modelFooter } from './footer.ts'
 
@@ -13,16 +12,26 @@ export type PrChange = {
 
 /**
  * Resolves the ref the worktree branched from so the PR diff excludes base
- * changes: `origin/<base>` when a token fetch happened, else `<base>`.
+ * changes: `<remote>/<base>` when a token fetch happened, else `<base>`.
  */
-export async function diffBase(run: Exec, cwd: string, base: string): Promise<string> {
-  const remote = `origin/${base}`
-  const r = await run(['git', 'rev-parse', '--verify', '--quiet', remote], { cwd })
-  return r.exitCode === 0 ? remote : base
+export async function diffBase(
+  run: Exec,
+  cwd: string,
+  remote: string,
+  base: string,
+): Promise<string> {
+  const tracking = `${remote}/${base}`
+  const r = await run(['git', 'rev-parse', '--verify', '--quiet', tracking], { cwd })
+  return r.exitCode === 0 ? tracking : base
 }
 
-export async function changesSinceBase(run: Exec, cwd: string, base: string): Promise<PrChange[]> {
-  const ref = await diffBase(run, cwd, base)
+export async function changesSinceBase(
+  run: Exec,
+  cwd: string,
+  remote: string,
+  base: string,
+): Promise<PrChange[]> {
+  const ref = await diffBase(run, cwd, remote, base)
   const r = await run(['git', 'diff', '--numstat', `${ref}...HEAD`], { cwd })
   return r.stdout
     .split('\n')
@@ -124,13 +133,33 @@ const FILE_REF = /(?<![\w.-])[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}(?![
 /** Wraps file names and paths in backticks, leaving existing code spans alone. */
 export function backtickFileRefs(text: string): string {
   return text
-    .split(/(```[\s\S]*?```|`[^`\n]+`|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
+    .split(/(```[\s\S]*?```|`[^`\n]+`|https?:\/\/[^\s)>]+|\]\([^)]*\)|&lt;[^\n]*?&gt;)/g)
     .map((part, i) => (i % 2 === 1 ? part : part.replace(FILE_REF, '`$&`')))
     .join('')
 }
 
+function quoteUsageLimitDiagnostic(text: string): string {
+  return text.replace(
+    /(^|\n[ \t]*\n)([^\n]*(?:\n(?![ \t]*\n)[^\n]*)*)/g,
+    (block, separator: string, paragraph: string) => {
+      if (!/^You(?:’|')ve hit your usage limit\./i.test(paragraph)) return block
+      return `${separator}${paragraph
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n')}`
+    },
+  )
+}
+
 function renderDescriptionMarkdown(text: string): string {
-  return backtickFileRefs(text.replace(/</g, '&lt;').replace(/>/g, '&gt;')).replace(
+  const markdown = quoteUsageLimitDiagnostic(text).replace(
+    /(^|\n)( {0,3}>[ \t]?)/g,
+    (_match, lineStart: string, prefix: string) =>
+      `${lineStart}${prefix.replaceAll('>', '\u0000')}`,
+  )
+  return backtickFileRefs(
+    markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;').replaceAll('\u0000', '>'),
+  ).replace(
     /(^|\n)( {0,3})(#{1,6})(?=[ \t])/g,
     (_match, lineStart, indent: string, hashes: string) => {
       const level = Math.min(6, hashes.length + 2)
@@ -165,6 +194,18 @@ export type PrReviewSummary = {
     failureScenario: string
     reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
   }[]
+  followUps?: readonly {
+    id: string
+    title: string
+    path: string
+    line: number
+    evidence: string
+    failureScenario: string
+    covers?: string
+    proposalId?: string
+    proposalUrl?: string | null
+  }[]
+  proposalCreationSupported?: boolean
   history: string
 }
 
@@ -202,7 +243,6 @@ export function formatPrBody(
   /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
   fallbackSummary?: string | null,
   review?: PrReviewSummary,
-  verification?: readonly CheckResult[],
 ): string {
   const created = createdAgo(task.createdAt)
   const lines = [
@@ -233,19 +273,35 @@ export function formatPrBody(
       renderDescriptionMarkdown(normalizeWorktreeLinks(conclusionBody)),
     )
   }
-  if (verification !== undefined) {
-    lines.push(
-      '',
-      '### ✅ Verification',
-      '',
-      ...verification.map(
-        (result) =>
-          `- \`${result.command}\`: ${result.exitCode === 0 ? 'passed' : `failed (exit ${result.exitCode})`}`,
-      ),
-    )
-  }
   if (review !== undefined) {
     lines.push('', '### 🔎 Review', '', review.history)
+    const followUps = review.followUps ?? []
+    const covered = followUps.filter((finding) => finding.covers !== undefined)
+    if (followUps.length > 0) {
+      lines.push('', '### Follow-up findings', '')
+      if (review.proposalCreationSupported === false) {
+        lines.push('This tracker cannot create issues, so these follow-ups are recorded here only.')
+      }
+      for (const finding of followUps) {
+        const proposal =
+          finding.proposalId === undefined
+            ? finding.covers === undefined
+              ? ''
+              : `, covered by issue \`${finding.covers}\``
+            : finding.proposalUrl === null || finding.proposalUrl === undefined
+              ? `, proposed as \`${finding.proposalId}\``
+              : `, proposed as [\`${finding.proposalId}\`](${finding.proposalUrl})`
+        lines.push(
+          `- **\`${finding.id}\`: ${finding.title}** (${finding.path}:${finding.line}${proposal})\n  Evidence: ${finding.evidence}\n  Failure scenario: ${finding.failureScenario}`,
+        )
+      }
+    }
+    if (covered.length > 0) {
+      lines.push(
+        '',
+        `Covered issues: ${covered.map((finding) => `\`${finding.covers}\``).join(', ')}`,
+      )
+    }
     if (review.unresolved) {
       lines.push(
         '',

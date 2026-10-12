@@ -1,4 +1,11 @@
-import { HarnessKind, TaskState } from '@amagi/core'
+import {
+  Config,
+  ForgeKind,
+  HarnessKind,
+  MAX_HARNESS_PROCESSES,
+  TaskState,
+  WorkerRole,
+} from '@amagi/core'
 import * as z from 'zod'
 
 /**
@@ -14,6 +21,66 @@ export const TaskListQuery = z.object({
 })
 export type TaskListQuery = z.infer<typeof TaskListQuery>
 
+/** Narrows the diagnostics request snapshot; see `TimingFilter`. */
+export const TimingQuery = z.object({
+  request: z.string().optional(),
+  source: z.string().optional(),
+  method: z.string().optional(),
+  route: z.string().optional(),
+  from: z.coerce.number().int().min(0).optional(),
+  to: z.coerce.number().int().min(0).optional(),
+  minMs: z.coerce.number().min(0).optional(),
+  maxMs: z.coerce.number().min(0).optional(),
+})
+
+const InteractionKind = z.enum(['click', 'key', 'change', 'input'])
+
+/** Narrows the diagnostics interaction snapshot; see `InteractionFilter`. */
+export const InteractionQuery = z.object({
+  action: z.string().optional(),
+  page: z.string().optional(),
+  kind: InteractionKind.optional(),
+  from: z.coerce.number().int().min(0).optional(),
+  to: z.coerce.number().int().min(0).optional(),
+  minMs: z.coerce.number().min(0).optional(),
+  maxMs: z.coerce.number().min(0).optional(),
+})
+
+const text = z.string().max(500)
+
+/** A batch of interactions measured by the dashboard; see `InteractionSample`. */
+export const InteractionBatch = z.object({
+  interactions: z
+    .array(
+      z.object({
+        at: z.number().int().min(0),
+        kind: InteractionKind,
+        action: text,
+        context: text.nullable(),
+        route: text,
+        path: text,
+        paintMs: z.number().min(0).nullable(),
+        ms: z.number().min(0),
+        outcome: z.enum(['settled', 'superseded', 'timeout']),
+        requests: z
+          .array(
+            z.object({
+              method: z.string().max(16),
+              path: z.string().max(2000),
+              startMs: z.number().min(0),
+              ms: z.number().min(0).nullable(),
+              status: z.number().int().min(0).nullable(),
+            }),
+          )
+          .max(200),
+      }),
+    )
+    .max(500),
+})
+
+/** With a label, the issue list holds only the open issues carrying it. */
+export const IssueListQuery = z.object({ label: z.string().min(1).optional() })
+
 /** Every repo-scoped route starts with the workspace key. */
 export const RepoParam = z.object({ repo: z.string().min(1) })
 
@@ -22,6 +89,11 @@ export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string(
 export const RepoCommitParam = z.object({
   repo: z.string().min(1),
   hash: z.string().regex(/^[0-9a-f]{7,40}$/i),
+})
+export const RepoGitRequestParam = z.object({
+  repo: z.string().min(1),
+  id: z.string().min(1),
+  requestId: z.string().min(1),
 })
 export const RepoQuestionParam = z.object({
   repo: z.string().min(1),
@@ -45,8 +117,19 @@ export type EventQuery = z.infer<typeof EventQuery>
 export const StreamQuery = z.object({
   taskId: z.string().min(1).optional(),
   sinceSeq: z.coerce.number().int().min(0).default(0),
+  compact: z
+    .enum(['0', '1'])
+    .default('0')
+    .transform((value) => value === '1'),
 })
 export type StreamQuery = z.infer<typeof StreamQuery>
+
+export const AgentLogQuery = z.object({
+  attempt: z.coerce.number().int().min(1).default(1),
+  untilSeq: z.coerce.number().int().min(0),
+  limit: z.coerce.number().int().min(1).max(4000).default(4000),
+})
+export type AgentLogQuery = z.infer<typeof AgentLogQuery>
 
 export const QuestionQuery = z.object({
   taskId: z.string().min(1).optional(),
@@ -96,13 +179,17 @@ export type AnswerBody = z.infer<typeof AnswerBody>
  * prose and never interprets anything outside this set; an unknown verb is
  * rejected as a 400 before any work happens.
  */
-export const GitRequestVerb = z.enum(['commit'])
+export const GitRequestVerb = z.enum(['commit', 'merge-base', 'pr', 'push', 'comment', 'close'])
 export type GitRequestVerb = z.infer<typeof GitRequestVerb>
 
 export const GitRequestBody = z.object({
   verb: GitRequestVerb,
+  /** Commit body, comment text or close reason; content passed through, never interpreted. */
+  message: z.string().trim().min(1).max(20_000).optional(),
 })
 export type GitRequestBody = z.infer<typeof GitRequestBody>
+
+export const GitDecisionBody = z.object({ approve: z.boolean() })
 
 /** A message from the operator to the worker behind a parked task. */
 export const ChatBody = z.object({
@@ -110,11 +197,85 @@ export const ChatBody = z.object({
 })
 export type ChatBody = z.infer<typeof ChatBody>
 
+export const ChatPageBody = z.object({
+  conversationId: z.string().uuid(),
+  harness: HarnessKind,
+  model: z.string().trim().min(1).optional(),
+  customModel: z.boolean().optional(),
+  effort: z.string().trim().min(1).optional(),
+  message: z.string().trim().min(1).max(4000),
+  /** Binds the conversation to a task: the agent works in its worktree and may request git writes. */
+  taskId: z.string().min(1).optional(),
+  /** The harness session a task conversation resumes, as the previous turn's done event reported it. */
+  sessionId: z.string().min(1).optional(),
+  history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().max(50_000),
+      }),
+    )
+    .max(50)
+    .refine((history) => history.reduce((size, item) => size + item.content.length, 0) <= 200_000),
+})
+export type ChatPageBody = z.infer<typeof ChatPageBody>
+
+export const RepoChatIdParam = z.object({ repo: z.string().min(1), id: z.string().uuid() })
+
+export const ChatConversationBody = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    harness: HarnessKind,
+    model: z.string().max(500),
+    customModel: z.boolean().optional(),
+    effort: z.string().max(100),
+    taskId: z.string().min(1).optional(),
+    sessionId: z.string().min(1).optional(),
+    messages: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          role: z.enum(['user', 'assistant']),
+          content: z.string().max(100_000),
+        }),
+      )
+      .max(500)
+      .refine(
+        (messages) => messages.reduce((size, item) => size + item.content.length, 0) <= 1_000_000,
+      ),
+  })
+  .strict()
+export type ChatConversationBody = z.infer<typeof ChatConversationBody>
+
+export const ChecksBody = z.strictObject({
+  format: z.string().trim().min(1),
+  lint: z.string().trim().min(1),
+  test: z.string().trim().min(1),
+})
+
 export const SettingsBody = z
   .object({
     autoQueue: z.boolean().optional(),
+    autoRebase: z.boolean().optional(),
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
+    desktopFailureAlerts: z.boolean().optional(),
+    reviewEnabled: z.boolean().optional(),
+    reviewMaxRounds: z.number().int().min(1).optional(),
+    forgeKind: ForgeKind.optional(),
+    /**
+     * Git remote every forge call targets; must name an existing remote of the
+     * repo. Null matches it to the forge's host. Changing forgeKind alone also unpins it.
+     */
+    forgeRemote: z.string().trim().min(1).nullable().optional(),
+    /** A credential id picks it for that forge in this repo; null drops the pick. */
+    forgeCredentials: z
+      .object({
+        github: z.string().min(1).nullable().optional(),
+        gitlab: z.string().min(1).nullable().optional(),
+        forgejo: z.string().min(1).nullable().optional(),
+      })
+      .optional(),
   })
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'provide a setting',
@@ -123,15 +284,38 @@ export type SettingsBody = z.infer<typeof SettingsBody>
 
 const nonEmpty = (body: object) => Object.values(body).some((v) => v !== undefined)
 
+export const ForgeCredentialParam = z.object({ id: z.string().min(1) })
+
+/** A forge's web base URL, e.g. https://git.example.com or https://example.com/gitlab. */
+const ForgeUrl = z.url({ protocol: /^https?$/ }).trim()
+
+export const ForgeCredentialCreateBody = z.object({
+  kind: ForgeKind,
+  name: z.string().trim().min(1),
+  token: z.string().trim().min(1),
+  url: ForgeUrl.nullable().optional(),
+})
+
+/** A new token rotates the credential for every repo using it; a null url goes back to origin. */
+export const ForgeCredentialUpdateBody = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    token: z.string().trim().min(1).optional(),
+    url: ForgeUrl.nullable().optional(),
+  })
+  .refine(nonEmpty, { message: 'provide a name, token or url' })
+
 export const WorkerCreateBody = z.object({
   name: z.string().trim().min(1),
   kind: HarnessKind,
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
   seat: z.string().trim().min(1).optional(),
+  roles: z.array(WorkerRole).default(['implement']),
   count: z.number().int().min(1).max(16).default(1),
   seatCount: z.number().int().min(1).max(16).default(1),
   enabled: z.boolean().default(false),
+  difficulties: z.array(z.string().trim().min(1)).optional(),
 })
 export type WorkerCreateBody = z.infer<typeof WorkerCreateBody>
 
@@ -143,9 +327,11 @@ export const WorkerUpdateBody = z
     model: z.string().trim().min(1).nullable().optional(),
     effort: z.string().trim().min(1).nullable().optional(),
     seat: z.string().trim().min(1).nullable().optional(),
+    roles: z.array(WorkerRole).optional(),
     count: z.number().int().min(1).max(16).optional(),
     seatCount: z.number().int().min(1).max(16).optional(),
     enabled: z.boolean().optional(),
+    difficulties: z.array(z.string().trim().min(1)).nullable().optional(),
   })
   .refine(nonEmpty, { message: 'provide at least one field' })
 export type WorkerUpdateBody = z.infer<typeof WorkerUpdateBody>
@@ -188,6 +374,12 @@ export const SeatNamesUpdateBody = z
     message: 'seat names must be unique',
   })
 export type SeatNamesUpdateBody = z.infer<typeof SeatNamesUpdateBody>
+
+export const ProcessCapUpdateBody = z.object({
+  maxProcesses: z.number().int().min(1).max(MAX_HARNESS_PROCESSES),
+})
+
+export const ProfilesUpdateBody = z.object({ profiles: Config.shape.profiles.unwrap() })
 
 export const ParticipationBody = z
   .object({ workers: z.boolean().optional(), watchers: z.boolean().optional() })

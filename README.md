@@ -29,7 +29,7 @@ to the API at `http://127.0.0.1:7777`.
 
 ### Dashboard
 
-The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search workspace** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
+The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
 
 - **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button. An **Auto queue** toggle turns automatic dispatch on or off (when on, free slots are filled as tasks become claimable).
 - **Tasks** browses the tracker's issues in board or list view (the choice is remembered), with a search box, a status filter, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
@@ -87,7 +87,7 @@ picks the tracker, forge, harness and checks. The CLI (`run`, `status`, `clean`,
 `git rev-parse --show-toplevel`, reads and writes that repo's own store, and addresses the
 server's repo-scoped routes by that key.
 
-The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default). Forge access is token-only: export the bot's token into the Amagi process environment (`GH_TOKEN`/`GITHUB_TOKEN` for `github`, `FORGEJO_TOKEN` for `forgejo`) and Amagi uses it for `gh`, `tea` and the unattended `git push`/`fetch` with no `gh auth login` or `tea login` step. Harness agents never inherit forge credentials: token env vars are stripped and their `gh`/`tea` are pointed at empty Amagi-owned config dirs, so an agent that reaches for the forge fails closed instead of using the operator's stored login.
+The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default). Forge access is token-only: add the bot's token once under Settings, Repositories, Forge tokens, or export it into the Amagi process environment (`GH_TOKEN`/`GITHUB_TOKEN` for `github`, `GITLAB_TOKEN` for `gitlab`, `FORGEJO_TOKEN` for `forgejo`). Dashboard tokens are shared by every repository: a repo uses the token it picked under Forge for pull requests, else the only token for its forge, else the env var, so rotating a token reaches every repo using it. Dashboard tokens live in `$XDG_STATE_HOME/amagi/forge/tokens.json` (mode 0600), never in the repo config. Amagi uses the token for `gh`, `glab`, `tea` and the unattended `git push`/`fetch` with no `gh auth login`, `glab auth login` or `tea login` step. Harness agents never inherit forge credentials: token env vars are stripped and their `gh`/`glab`/`tea` are pointed at empty Amagi-owned config dirs, so an agent that reaches for the forge fails closed instead of using the operator's stored login.
 
 ## The task state machine
 
@@ -108,10 +108,12 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
 | `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, PR creation failed, agent crash, etc.) | — |
-| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge | — |
+| `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge and without an outcome label | — |
 | `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
 **Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times. When `[review].enabled`, checks must pass before each review; blocking findings get a bounded implementer fix round followed by checks and another review, all before the single commit. Acceptable reviews proceed to `pr_open`; exhausted round, token, progress, or cost budgets still open a PR with unresolved findings and `amagi/review-unresolved`. The runner parks on `awaiting_answer` whenever the agent asks a question. A task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
+
+A human closing a PR unmerged can say how the task ended with one of two labels, created on the forge alongside every amagi PR: `amagi/done` settles the task to `done` and closes its tracker issue as if the PR had merged; `amagi/rework` drops the worktree and branch, comments the PR link on the tracker issue and releases it, so a worker claims it again as a fresh attempt. A PR carrying neither or both is `abandoned`.
 
 ## The runner service
 
@@ -253,10 +255,14 @@ automatically is the global **Auto queue** setting (`loop.autoQueue`), not a
 per-worker one.
 
 A seat names the credential an agent uses. Amagi guarantees that at most one
-agent is live on a seat at a time, even when different workers, watchers, or a
-chat reply request it. A worker without an explicit seat uses its harness kind
-as the seat name. Enabled worker replicas can run up to their assigned seat's
-slot capacity; workers assigned to the same slot take turns.
+worker or watcher agent is live on a seat at a time. A worker without an
+explicit seat uses its harness kind as the seat name. Enabled worker replicas
+can run up to their assigned seat's slot capacity; workers assigned to the same
+slot take turns. Chat replies ignore seats.
+
+Separately, `harness.maxProcesses` caps how many agent processes run at once
+across every amagi on the host, chats included; a launch past the cap waits for
+one to exit.
 
 Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
 override them in a repo's `.amagi/config.toml` when needed. The `mention`,
@@ -265,7 +271,8 @@ can override their harness kind, model, effort, and seat. The
 registered-repository registry separately controls whether the server starts
 watchers for each repo.
 
-Every key is optional; the table below gives the schema and defaults.
+Every key except the repository's three project checks is optional; the table
+below gives the schema and defaults.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -281,7 +288,9 @@ Every key is optional; the table below gives the schema and defaults.
 | `seats[]` | table array | `[]` | Named credential seats, configured with `[[seats]]`; existing string entries remain one-slot seats. |
 | `seats[].name` | string | required | Stable seat identifier referenced by `worker[].seat`. |
 | `seats[].count` | integer | `1` | Number of concurrent slots provided by the credential seat. |
+| `harness.maxProcesses` | integer | `5` | Global-only hard cap (1 to 64) on agent processes running at once on the host: workers, watchers and chats. Editable from the dashboard fleet page. |
 | `watchers.mention.enabled` | boolean | `true` | Enable the per-repository agent-mention watcher. |
+| `watchers.mention.allowedAuthors` | string[] | `[]` | Exact forge usernames whose mentions may trigger responses. Empty or omitted disables mention-triggered responses. |
 | `watchers.mention.kind` | harness kind | `harness.implement.kind` | Harness for mention responses. |
 | `watchers.mention.model` | string | `harness.implement.model` | Model for mention responses. |
 | `watchers.mention.effort` | string | `harness.implement.effort` | Reasoning effort for mention responses. |
@@ -298,7 +307,7 @@ Every key is optional; the table below gives the schema and defaults.
 | `repo.setupCmd` | string \| null | `null` | Shell command run once in a fresh worktree (e.g. `"bun install"`) before the agent starts. |
 | `repo.persona` | string \| null | `null` | Git persona for commits/PRs: the name of a gitconfig fragment under `~/.config/git/personas/<name>.gitconfig` (e.g. `"agent-chise"`), included in each fresh worktree's own config so its `user.name`/`user.email` apply there without touching the main repo. |
 | `tracker.kind` | `"beads"` \| `"github"` \| `"forgejo"` | `"beads"` | Issue source. `github`/`forgejo` use the `gh`/`tea` CLIs and label an issue `amagi-claimed` in place of a real lease. |
-| `forge.kind` | `"github"` \| `"forgejo"` | `"github"` | Where pull requests are opened. `github` goes through `gh`, `forgejo` through a direct token-authenticated Forgejo API client; both are token-only and never require an interactive login. |
+| `forge.kind` | `"github"` \| `"gitlab"` \| `"forgejo"` | `"github"` | Where pull requests are opened; exactly one per repo, also pickable in the dashboard's repository settings. `github` uses `gh`; `gitlab` uses `glab` (merge requests, `glab api` for state, notes and labels); `forgejo` uses `tea` to create pull requests and post comments, with API reads for PR state and metadata. All are token-only and never require an interactive login. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
 | `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Fallback harness configuration for runs not routed through a worker. |
@@ -330,13 +339,19 @@ Every key is optional; the table below gives the schema and defaults.
 | `loop.contextOverrides.<harness>.maxTokens` | integer >= 0 | *(falls back to `loop.contextMaxTokens`)* | Per-harness hard limit, keyed by harness kind, for harnesses whose context window differs. |
 | `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
 | `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
-| `checks.commands` | string[] | `[]` | Shell commands run in order against the worktree after the agent stops; the first non-zero exit stops the run and triggers a fix round. |
+| `checks.format` | string | required per repo | Formatter command run first against the worktree. |
+| `checks.lint` | string | required per repo | Lint command run after formatting. |
+| `checks.test` | string | required per repo | Test command run after lint. |
+| `checks.commands` | string[] | `[]` | Additional shell commands run after format, lint, and test; the first non-zero exit stops the run and triggers a fix round. |
 | `notify.idle` | boolean | `true` | Send one notification when automatic dispatch drains the queue and no run is active. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |
 | `notify.ntfyServer` | string | `"https://ntfy.sh"` | ntfy server base URL, for self-hosted instances. |
 | `server.host` | string | `"127.0.0.1"` | Bind address for `amagi serve` and the address the CLI (`amagi ask`) talks to. |
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
+
+Declare `[checks]` in each repository's `.amagi/config.toml`. A global
+`[checks]` table is rejected.
 
 The server's registered-repository list is stored in
 `$XDG_STATE_HOME/amagi/registry.json` (or `~/.local/state/amagi/registry.json`).
@@ -370,6 +385,9 @@ kind = "github"
 remote = "origin"
 
 [checks]
+format = "just fmt"
+lint = "just lint"
+test = "just test"
 commands = ["just check"]
 ```
 
@@ -378,7 +396,8 @@ commands = ["just check"]
 | Variable | Effect |
 | --- | --- |
 | `GH_TOKEN` / `GITHUB_TOKEN` | The bot's GitHub token, exported into the Amagi process environment. Used for the `github` tracker/forge: `gh` runs against an Amagi-owned `GH_CONFIG_DIR` with this token (no `gh auth` state) and the remote is rewritten to push/fetch over HTTPS so an unattended run never prompts for an SSH passphrase. |
-| `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step) and uses it for the direct Forgejo PR API client. `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
+| `GITLAB_TOKEN` | The bot's GitLab token for the `gitlab` forge. `glab` runs against an Amagi-owned `GLAB_CONFIG_DIR` with this token (no `glab auth` state); the host comes from the repo's remote. |
+| `FORGEJO_TOKEN` | The bot's Forgejo token for the `forgejo` tracker/forge. Amagi provisions a dedicated tea login from it into its own XDG config profile (no `tea login` step). `GITEA_SERVER_URL` (or the repo's origin remote) supplies the server URL. |
 | `AMAGI_DB` | Overrides the SQLite store path (default: one per repo under `$XDG_STATE_HOME/amagi/repos/`). Mainly for tests and running multiple isolated instances. |
 | `AMAGI_TASK_TOKEN` | Set by the runner in the harness's environment; `amagi ask` uses it to authenticate its request to the server. Not meant to be set by hand. |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Standard XDG overrides that relocate the global config, the SQLite store, and the default worktree root, respectively. |

@@ -53,6 +53,11 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
     if (hit) return hit
+    if (cmd.includes('get-url') && cmd.includes('--push')) {
+      return { exitCode: 0, stdout: 'git@github.com:owner/repo.git\n', stderr: '' }
+    }
+    if (cmd.includes('--symref'))
+      return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls, inputs }
@@ -85,6 +90,9 @@ class FakeDriver implements PrDriver {
   }
   async getPr(_cwd: string, _number: number): Promise<PrState> {
     return 'open'
+  }
+  async getPrLabels(_cwd: string, _number: number): Promise<string[]> {
+    return []
   }
   async listOpenPrs(_cwd: string): Promise<PrInfo[]> {
     throw new Error('unused')
@@ -169,6 +177,12 @@ function fakeTracker(create: boolean): Tracker & { created: CreateTrackerTask[] 
     kind: 'fake',
     capabilities,
     created: [] as CreateTrackerTask[],
+    async openIds(): Promise<string[]> {
+      return []
+    },
+    async get(): Promise<TrackerTask | null> {
+      return null
+    },
     async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
       tracker.created.push(input)
       return {
@@ -242,10 +256,28 @@ function summaryHarness(
   }
 }
 
+function quickTaskHarness(
+  result: unknown,
+  prompts: string[] = [],
+  options: AgentStartOptions[] = [],
+): Harness {
+  const base = fakeHarness({ summary: 'add-a-task' })
+  const draft = fakeHarness({ summary: JSON.stringify(result) })
+  return {
+    ...base,
+    start: (opts: AgentStartOptions) => {
+      if (!opts.prompt.startsWith('Draft one issue')) return base.start(opts)
+      prompts.push(opts.prompt)
+      options.push(opts)
+      return draft.start(opts)
+    },
+  }
+}
+
 const config = () =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: '/wt' },
-    checks: { commands: [], format: null, lint: null },
+    checks: { commands: ['just check', 'just fresh-check'], format: null, lint: null },
   })
 
 describe('parseMentionKind', () => {
@@ -254,7 +286,7 @@ describe('parseMentionKind', () => {
     expect(parseMentionKind('FIX-PR')).toBe('fix-pr')
     expect(parseMentionKind('explain')).toBe('explain')
     expect(parseMentionKind('add-a-task')).toBe('add-a-task')
-    expect(parseMentionKind('take-down')).toBe('take-down')
+    expect(parseMentionKind('flag')).toBe('flag')
     expect(parseMentionKind('ambiguous')).toBe('ambiguous')
   })
 
@@ -287,16 +319,28 @@ describe('handled mentions', () => {
 
 describe('isAgentMention', () => {
   test('matches the handle case-insensitively, ignores the agent itself and non-mentions', () => {
-    expect(isAgentMention({ id: '1', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru')).toBe(
-      true,
-    )
     expect(
-      isAgentMention({ id: '2', user: 'alice', body: 'why, @Chise-Maru?' }, 'chise-maru'),
+      isAgentMention({ id: '1', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru', ['bob']),
     ).toBe(true)
     expect(
-      isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru'),
+      isAgentMention({ id: '2', user: 'alice', body: 'why, @Chise-Maru?' }, 'chise-maru', [
+        'alice',
+      ]),
+    ).toBe(true)
+    expect(
+      isAgentMention({ id: '3', user: 'chise-maru', body: '@chise-maru self' }, 'chise-maru', [
+        'chise-maru',
+      ]),
     ).toBe(false)
-    expect(isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru')).toBe(false)
+    expect(
+      isAgentMention({ id: '4', user: 'bob', body: 'no mention' }, 'chise-maru', ['bob']),
+    ).toBe(false)
+    expect(
+      isAgentMention({ id: '5', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru', ['Bob']),
+    ).toBe(false)
+    expect(isAgentMention({ id: '6', user: 'bob', body: '@chise-maru fix it' }, 'chise-maru')).toBe(
+      false,
+    )
   })
 
   test('matches the PR #102 relevance question, which is a mention but not a fix request', () => {
@@ -308,28 +352,50 @@ describe('isAgentMention', () => {
           body: '@chise-maru is still change still relevant compared to current repo state?',
         },
         'chise-maru',
+        ['mcpie87'],
       ),
     ).toBe(true)
   })
 })
 
 describe('listPrMentions', () => {
-  test('keeps human mentions of the handle, drops the agent and non-mentions', async () => {
+  test('keeps allowlisted mentions and drops disallowed authors, the agent, and non-mentions', async () => {
     const driver = new FakeDriver()
     driver.comments = [
       { id: '1', user: 'bob', body: '@chise-maru remove this file' },
       { id: '2', user: 'chise-maru', body: '@chise-maru self mention' },
       { id: '3', user: 'bob', body: 'no handle here' },
       { id: '4', user: 'alice', body: 'Why did you add this, @Chise-Maru?' },
+      { id: '5', user: 'mallory', body: '@chise-maru please change this' },
     ]
     const mentions = await listPrMentions({
       driver,
       cwd: '/repo',
       pr: pr(),
       handle: 'chise-maru',
+      allowedAuthors: ['bob', 'alice'],
     })
 
     expect(mentions.map((m) => m.id)).toEqual(['1', '4'])
+  })
+
+  test('returns no mentions when the allowlist is empty', async () => {
+    const driver = new FakeDriver()
+    driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru remove this file' }]
+
+    const mentions = await listPrMentions({
+      driver,
+      cwd: '/repo',
+      pr: pr(),
+      handle: 'chise-maru',
+      allowedAuthors: [],
+    })
+
+    expect(mentions).toEqual([])
+  })
+
+  test('the omitted configuration defaults the author allowlist to empty', () => {
+    expect(config().watchers.mention.allowedAuthors).toEqual([])
   })
 })
 
@@ -381,8 +447,8 @@ describe('respondToMention', () => {
 
     expect(kind).toBe('fix-pr')
     const merge = calls.find((call) => call[1] === 'merge' && call.includes('base-oid'))
-    expect(merge?.[3]).toContain('[am-1] am-1')
-    expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
+    expect(merge?.[(merge?.indexOf('-m') ?? -1) + 1]).toContain('[am-1] am-1')
+    expect(lintCommitMessage(merge?.[(merge?.indexOf('-m') ?? -1) + 1] ?? '')).toEqual([])
     expect(calls).toContainEqual([
       'git',
       'push',
@@ -390,7 +456,7 @@ describe('respondToMention', () => {
       'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
     expect(driver.posted).toEqual([
-      '@bob Fixed the parser edge case.\n\nVerification: just check passed; just fresh-check passed\n\n---\n\n<sub>Generated by amagi · claude · gpt-5 · effort high</sub>',
+      '@bob Fixed the parser edge case.\n\n---\n\n<sub>Generated by amagi · claude · gpt-5 · effort high</sub>',
     ])
     expect(order).toEqual(['push', 'comment'])
     expect(calls).toContainEqual(['git', 'commit', '-q', '-F', '-'])
@@ -485,7 +551,7 @@ describe('respondToMention', () => {
     expect(lintCommitMessage(inputs[0] ?? '')).toEqual([])
     expect(inputs[0]?.trim().split('\n').at(-1)).toBe('Generated by amagi · claude')
     const merge = calls.find((call) => call[1] === 'merge')
-    expect(lintCommitMessage(merge?.[3] ?? '')).toEqual([])
+    expect(lintCommitMessage(merge?.[(merge?.indexOf('-m') ?? -1) + 1] ?? '')).toEqual([])
   })
 
   test('does not push a fix-pr run after the agent commits inside the protected worktree', async () => {
@@ -542,7 +608,7 @@ describe('respondToMention', () => {
     expect(kind).toBe('fix-pr')
     expect(calls.some((c) => c[1] === 'commit')).toBe(false)
     expect(driver.posted).toEqual([
-      '@alice No change was made: The existing parser already handles this case.\n\nVerification: just check passed; just fresh-check passed',
+      '@alice No change was made: The existing parser already handles this case.',
     ])
   })
 
@@ -631,6 +697,10 @@ describe('respondToMention', () => {
     const outPath = join(tmpdir(), `amagi-explain-7-10.md`)
     writeFileSync(outPath, 'It drifts from base.\n')
     const { exec } = fake((c) => {
+      if (c[1] === 'merge-base') return { exitCode: 0, stdout: 'branch-point\n', stderr: '' }
+      if (c[1] === 'log') {
+        return { exitCode: 0, stdout: 'abc123 Relevant fix landed\n', stderr: '' }
+      }
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return fail('conflict')
       return undefined
@@ -660,6 +730,7 @@ describe('respondToMention', () => {
     expect(kind).toBe('explain')
     expect(prompts.join('\n')).toContain('does not merge cleanly into this PR')
     expect(prompts.join('\n')).toContain('drift')
+    expect(prompts.join('\n')).toContain('abc123 Relevant fix landed')
   })
 
   test('classification uses the mention watcher harness overrides', async () => {
@@ -690,9 +761,11 @@ describe('respondToMention', () => {
     })
   })
 
-  test('an add-a-task mention creates a tracker task and posts a confirmation', async () => {
+  test('an add-a-task mention creates an issue through the tracker and posts its URL', async () => {
     const tracker = fakeTracker(true)
     const driver = new FakeDriver()
+    const prompts: string[] = []
+    const options: AgentStartOptions[] = []
     const kind = await respondToMention({
       root: '/repo',
       repoName: 'amagi',
@@ -701,14 +774,55 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker,
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () =>
+        quickTaskHarness(
+          {
+            status: 'create',
+            title: 'Add tests',
+            context: 'Requested on PR #7',
+            goal: 'Cover the feature',
+            scope: 'Add tests',
+            assumptions: 'Use Bun',
+            acceptance: 'Tests pass',
+          },
+          prompts,
+          options,
+        ),
     })
 
     expect(kind).toBe('add-a-task')
     expect(tracker.created).toHaveLength(1)
-    expect(tracker.created[0]?.title).toContain('PR #7:')
-    expect(tracker.created[0]?.description).toContain('@bob')
+    expect(tracker.created[0]?.description).toContain('## Acceptance\nTests pass')
+    expect(prompts[0]).toContain('The service will create it through the configured tracker')
+    expect(prompts[0]).toContain('please track adding tests for this')
+    expect(options[0]?.permissions).toBe('read-only')
+    expect(options[0]?.cwd).toBe(tmpdir())
     expect(driver.posted).toEqual(['@bob Logged this as task bd-new.'])
+  })
+
+  test('a materially ambiguous task request asks one focused question without creating an issue', async () => {
+    const tracker = fakeTracker(true)
+    const driver = new FakeDriver()
+    const kind = await respondToMention({
+      root: '/repo',
+      repoName: 'amagi',
+      pr: pr(),
+      mention: { id: '4', user: 'bob', body: 'please track the migration' },
+      config: config(),
+      driver,
+      tracker,
+      makeHarnessFn: () =>
+        quickTaskHarness({
+          status: 'clarification',
+          question: 'Should this migrate the public API or the persisted data format?',
+        }),
+    })
+
+    expect(kind).toBe('add-a-task')
+    expect(tracker.created).toHaveLength(0)
+    expect(driver.posted).toEqual([
+      '@bob Should this migrate the public API or the persisted data format?',
+    ])
   })
 
   test('an add-a-task mention without a task-capable tracker explains it cannot', async () => {
@@ -721,7 +835,7 @@ describe('respondToMention', () => {
       config: config(),
       driver,
       tracker: fakeTracker(false),
-      makeHarnessFn: () => fakeHarness({ summary: 'add-a-task' }),
+      makeHarnessFn: () => quickTaskHarness({ status: 'create', title: 'Something' }),
     })
 
     expect(kind).toBe('add-a-task')
@@ -770,7 +884,7 @@ describe('respondToMention', () => {
   })
 
   test('a TAKE DOWN verdict posts the reason on the tracker issue and replies on the PR', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-1.md')
+    const outPath = join(tmpdir(), 'amagi-flag-7-1.md')
     writeFileSync(
       outPath,
       'TAKE DOWN\nThis PR reverses the base behavior and breaks existing callers.\n',
@@ -788,10 +902,10 @@ describe('respondToMention', () => {
         driver,
         tracker,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual([
         'This PR reverses the base behavior and breaks existing callers.',
       ])
@@ -805,7 +919,7 @@ describe('respondToMention', () => {
   })
 
   test('a KEEP verdict replies on the PR but does not comment on the tracker', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-2.md')
+    const outPath = join(tmpdir(), 'amagi-flag-7-2.md')
     writeFileSync(outPath, 'KEEP\nThe conflicts are trivial and the PR is fine.\n')
     const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
@@ -820,10 +934,10 @@ describe('respondToMention', () => {
         driver,
         tracker,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual(['The conflicts are trivial and the PR is fine.'])
       expect(tracker.comments).toEqual([])
     } finally {
@@ -831,8 +945,8 @@ describe('respondToMention', () => {
     }
   })
 
-  test('take-down without a tracker or task id still replies on the PR', async () => {
-    const outPath = join(tmpdir(), 'amagi-takedown-7-3.md')
+  test('flag without a tracker or task id still replies on the PR', async () => {
+    const outPath = join(tmpdir(), 'amagi-flag-7-3.md')
     writeFileSync(outPath, 'TAKE DOWN\nThe PR duplicates existing functionality.\n')
     const { exec } = fake((c) => (c.includes('rev-parse') ? fail('') : undefined))
     const driver = new FakeDriver()
@@ -845,10 +959,10 @@ describe('respondToMention', () => {
         config: config(),
         driver,
         exec,
-        makeHarnessFn: () => fakeHarness({ summary: 'take-down' }),
+        makeHarnessFn: () => fakeHarness({ summary: 'flag' }),
       })
 
-      expect(kind).toBe('take-down')
+      expect(kind).toBe('flag')
       expect(driver.posted).toEqual(['The PR duplicates existing functionality.'])
     } finally {
       rmSync(outPath, { force: true })

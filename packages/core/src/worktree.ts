@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { configHome, expandTilde, stateHome } from './paths.ts'
 import { findRegistryEntryByPath } from './registry.ts'
 
@@ -76,7 +76,19 @@ export type CreateWorktreeOptions = {
   /** Git persona name; the matching ~/.config/git/personas/<name>.gitconfig is included. */
   persona?: string | null
   exec?: Exec
+  onSetupStarted?: (command: string) => void
+  /** Called before a failed setup throws, so the failure is reported either way. */
+  onSetupFinished?: (report: SetupReport) => void
 }
+
+export type SetupReport = {
+  command: string
+  exitCode: number
+  durationMs: number
+  output: string
+}
+
+const SETUP_OUTPUT_TAIL = 4000
 
 /** Absolute path of the persona gitconfig, or null when it does not exist. */
 export function personaGitconfig(name: string): string | null {
@@ -153,7 +165,17 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
   await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
   if (opts.setupCmd) {
-    await execOk(run, ['sh', '-c', opts.setupCmd], { cwd: path })
+    const cmd = ['sh', '-c', opts.setupCmd]
+    opts.onSetupStarted?.(opts.setupCmd)
+    const started = Date.now()
+    const result = await run(cmd, { cwd: path })
+    opts.onSetupFinished?.({
+      command: opts.setupCmd,
+      exitCode: result.exitCode,
+      durationMs: Date.now() - started,
+      output: `${result.stdout}${result.stderr}`.slice(-SETUP_OUTPUT_TAIL),
+    })
+    if (result.exitCode !== 0) throw new CommandError(cmd, result)
   }
 
   return { path, branch }

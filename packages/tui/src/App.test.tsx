@@ -135,6 +135,7 @@ function streamMock(events: StoredEvent[], extra?: (url: string, init?: RequestI
       const response = extra(href, init)
       if (response !== undefined) return response
     }
+    if (href.endsWith('/api/repos/repo1/open-prs')) return json({ prs: [] })
     throw new Error(`unexpected fetch ${href}`)
   }) as unknown as typeof fetch
 }
@@ -162,6 +163,48 @@ describe('App', () => {
       expect(frame).toContain('mergeable')
       expect(frame).toContain('Stuck task')
       expect(frame).toContain('needs_human')
+      expect(frame).toContain('p PRs')
+    } finally {
+      instance.unmount()
+    }
+  })
+
+  test('opens the complete forge pull request list and returns to the overview', async () => {
+    globalThis.fetch = streamMock(EVENTS, (href) => {
+      if (href.endsWith('/api/repos/repo1/open-prs')) {
+        return json({
+          prs: [
+            {
+              number: 12,
+              title: 'Independent pull request',
+              body: '',
+              url: 'https://example.test/pull/12',
+              headRefName: 'feature/independent',
+              baseRefName: 'main',
+              mergeable: 'CONFLICTING',
+              mergeStateStatus: 'DIRTY',
+              headRefOid: null,
+              createdAt: '',
+              updatedAt: '',
+              labels: [],
+            },
+          ],
+        })
+      }
+      throw new Error(`unexpected fetch ${href}`)
+    })
+
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    try {
+      await waitFor(() => (instance.lastFrame() ?? '').includes('p PRs'))
+      instance.stdin.write('p')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('Independent pull request'))
+      expect(instance.lastFrame()).toContain('conflict')
+      expect(instance.lastFrame()).toContain('feature/independent → main')
+      expect(instance.lastFrame()).toContain('https://example.test/pull/12')
+
+      instance.stdin.write('\u001b')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
     } finally {
       instance.unmount()
     }

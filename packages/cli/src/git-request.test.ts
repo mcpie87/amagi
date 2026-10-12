@@ -26,7 +26,6 @@ beforeEach(() => {
   git(repo, ['config', 'user.name', 'Test'])
   git(repo, ['config', 'user.email', 'test@example.com'])
   writeFileSync(join(repo, 'README.md'), '# demo\n')
-  writeFileSync(join(repo, 'justfile'), 'check:\n  true\n\nfresh-check:\n  true\n')
   git(repo, ['add', '.'])
   git(repo, ['commit', '-q', '-m', 'init'])
   wt = mkdtempSync(join(tmpdir(), 'amagi-git-request-wt-'))
@@ -74,7 +73,7 @@ test('an unknown verb is rejected before any git write', async () => {
   const res = await fetch(`${baseUrl}/api/repos/repo1/tasks/am-bd1/git-requests`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'X-Amagi-Token': store.token('am-bd1') },
-    body: JSON.stringify({ verb: 'push' }),
+    body: JSON.stringify({ verb: 'rebase' }),
   })
   expect(res.status).toBe(400)
   expect(git(wt, ['status', '--porcelain']).stdout.trim()).not.toBe('')

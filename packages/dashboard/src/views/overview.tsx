@@ -6,131 +6,13 @@ import { Link } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { Badge } from '../badges.tsx'
-import { fmtRetryIn } from '../format.ts'
+import { useDateFormatPref } from '../date-format.ts'
+import { fmtAgo, fmtDateTime, fmtRetryIn } from '../format.ts'
+import { pollOk, usePoll } from '../hub-client.ts'
 import { useDashboard, useReadyQueue, useRunner } from '../store.tsx'
 import { EmptyState, Icon } from '../ui.tsx'
 import { CloseButtons } from './task-actions.tsx'
 import { WorkersPanel } from './workers.tsx'
-
-function RunButton() {
-  const { start, options } = useRunner()
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-  const harnesses = options?.harnesses ?? []
-  const [harness, setHarness] = useState('')
-  const [model, setModel] = useState('')
-  const [customModel, setCustomModel] = useState('')
-  const [effort, setEffort] = useState('')
-
-  const selected = harnesses.find((h) => h.name === harness)
-  const kind = selected?.kind
-  const models = kind === undefined ? [] : (options?.models[kind] ?? [])
-  const efforts = kind === undefined ? [] : (options?.efforts[kind] ?? [])
-
-  const switchHarness = (value: string) => {
-    setHarness(value)
-    setModel('')
-    setCustomModel('')
-    setEffort('')
-  }
-
-  const run = async () => {
-    setBusy(true)
-    setMessage(null)
-    const effectiveModel = model === 'custom' ? customModel.trim() : model
-    const res = await start(undefined, {
-      ...(harness === '' ? {} : { harness }),
-      ...(effectiveModel === '' ? {} : { model: effectiveModel }),
-      ...(effort === '' ? {} : { effort }),
-    })
-    setBusy(false)
-    setMessage(res.ok ? `run started: ${res.taskId}` : (res.error ?? 'launch failed'))
-  }
-
-  const field = 'rounded border border-line-strong bg-sunken px-2 py-1 text-sm text-fg-strong'
-  const label = 'mb-0.5 block text-xs text-fg-muted'
-
-  return (
-    <div className="flex flex-wrap items-end gap-2">
-      {message !== null && <span className="self-center text-sm text-fg-muted">{message}</span>}
-      <div>
-        <label className={label} htmlFor="run-harness">
-          Harness
-        </label>
-        <select
-          id="run-harness"
-          value={harness}
-          onChange={(e) => switchHarness(e.target.value)}
-          className={field}
-        >
-          <option value="">default ({options?.default?.kind ?? 'config'})</option>
-          {harnesses.map((h) => (
-            <option key={h.name} value={h.name}>
-              {h.name}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div>
-        <label className={label} htmlFor="run-model">
-          Model
-        </label>
-        <select
-          id="run-model"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className={field}
-        >
-          <option value="">
-            {selected?.model === undefined ? 'default (harness)' : `default (${selected.model})`}
-          </option>
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-          <option value="custom">(custom model)</option>
-        </select>
-        {model === 'custom' && (
-          <input
-            value={customModel}
-            onChange={(e) => setCustomModel(e.target.value)}
-            placeholder="model id"
-            className={`${field} mt-1 block w-full`}
-          />
-        )}
-      </div>
-      <div>
-        <label className={label} htmlFor="run-effort">
-          Effort
-        </label>
-        <select
-          id="run-effort"
-          value={effort}
-          onChange={(e) => setEffort(e.target.value)}
-          className={field}
-        >
-          <option value="">
-            {selected?.effort === undefined ? 'default (harness)' : `default (${selected.effort})`}
-          </option>
-          {efforts.map((e) => (
-            <option key={e} value={e}>
-              {e}
-            </option>
-          ))}
-        </select>
-      </div>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={run}
-        className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-on-solid hover:bg-sky-500 disabled:opacity-50"
-      >
-        Run next
-      </button>
-    </div>
-  )
-}
 
 const metricTone = {
   red: { box: 'border-red-edge bg-red-soft', value: 'text-red-ink' },
@@ -232,6 +114,9 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
   )
 }
 
+/** The forge call takes seconds, so a revisit shows the last list while it refreshes. */
+const lastMergeablePrs = new Map<string, PrInfo[]>()
+
 /**
  * Open PRs the forge reports as currently mergeable, the dashboard twin of the
  * check-prs CLI command. Polled, not streamed: the forge computes mergeability
@@ -240,33 +125,33 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
  */
 function MergeablePrsPanel() {
   const { selected } = useDashboard()
-  const [prs, setPrs] = useState<PrInfo[] | null>(null)
+  const dateFormat = useDateFormatPref()
+  const [prs, setPrs] = useState<PrInfo[] | null>(() =>
+    selected === null ? null : (lastMergeablePrs.get(selected) ?? null),
+  )
+
+  const result = usePoll(
+    selected === null ? null : `${apiBase}/api/repos/${selected}/mergeable-prs`,
+    10_000,
+  )
 
   useEffect(() => {
-    if (selected === null) return
-    let alive = true
-    const load = () => {
-      fetch(`${apiBase}/api/repos/${selected}/mergeable-prs`)
-        .then(async (res) => {
-          // A repo without a forge driver simply has no mergeable PRs to show.
-          if (res.status === 501) return []
-          if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
-          return (await res.json()).prs as PrInfo[]
-        })
-        .then((list) => {
-          if (alive) setPrs(list)
-        })
-        .catch(() => {
-          // A transient fetch failure keeps the last good list, not a spinner.
-        })
-    }
-    load()
-    const timer = setInterval(load, 10_000)
-    return () => {
-      alive = false
-      clearInterval(timer)
-    }
+    if (selected !== null) setPrs(lastMergeablePrs.get(selected) ?? null)
   }, [selected])
+
+  useEffect(() => {
+    if (selected === null || result === undefined) return
+    // A repo without a forge driver simply has no mergeable PRs to show.
+    if (result?.status === 501) {
+      lastMergeablePrs.set(selected, [])
+      setPrs([])
+    } else if (pollOk(result)) {
+      const list = (result.body as { prs: PrInfo[] }).prs
+      lastMergeablePrs.set(selected, list)
+      setPrs(list)
+    }
+    // A transient failure keeps the last good list, not a spinner.
+  }, [result, selected])
 
   if (selected === null || prs === null) return null
 
@@ -285,7 +170,7 @@ function MergeablePrsPanel() {
       ) : (
         <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {prs.map((p) => (
-            <li key={p.number} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+            <li key={p.url} className="flex items-center gap-3 px-4 py-2.5 text-sm">
               <a
                 href={p.url}
                 target="_blank"
@@ -298,6 +183,15 @@ function MergeablePrsPanel() {
               <span className="shrink-0 text-xs text-fg-faint">
                 {p.headRefName} &rarr; {p.baseRefName}
               </span>
+              {p.createdAt !== '' && (
+                <time
+                  dateTime={p.createdAt}
+                  title={fmtDateTime(new Date(p.createdAt), dateFormat)}
+                  className="shrink-0 text-xs text-fg-faint"
+                >
+                  created {fmtAgo(Date.parse(p.createdAt))}
+                </time>
+              )}
             </li>
           ))}
         </ul>
@@ -310,24 +204,11 @@ type UsageRate = { seat: string; calls: number; tokens: number }
 
 function SeatUsagePanel() {
   const [rates, setRates] = useState<UsageRate[] | null>(null)
+  const result = usePoll(`${apiBase}/api/usage-rates`, 10_000)
 
   useEffect(() => {
-    let alive = true
-    const load = () => {
-      fetch(`${apiBase}/api/usage-rates`)
-        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-        .then((data: { rates: UsageRate[] }) => {
-          if (alive) setRates(data.rates)
-        })
-        .catch(() => {})
-    }
-    load()
-    const timer = setInterval(load, 10_000)
-    return () => {
-      alive = false
-      clearInterval(timer)
-    }
-  }, [])
+    if (pollOk(result)) setRates((result.body as { rates: UsageRate[] }).rates)
+  }, [result])
 
   return (
     <section className="mb-6">
@@ -406,9 +287,8 @@ export function OverviewView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search runs…"
-            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-sky-600"
+            className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent"
           />
-          {selected !== null && <RunButton />}
         </div>
       </div>
 

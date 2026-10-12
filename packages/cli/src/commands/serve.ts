@@ -8,6 +8,7 @@ import {
   migrateFleet,
   RunService,
   repoRoot,
+  requestTimingsPath,
   Workspaces,
 } from '@amagi/core'
 import { portInUse, serve, streamClientCount } from '@amagi/server'
@@ -73,6 +74,15 @@ export const serveCommand = defineCommand({
       host: config.server.host,
       port: config.server.port,
       staticDir: join(dashboardDir, 'dist'),
+      timingsPath: requestTimingsPath(),
+      onRunnerUnavailable: (repo, detail) => {
+        // No repo config loads here, so the global channels carry the alert.
+        for (const notifier of makeNotifiers(config)) {
+          notifier
+            .notify(`${repo} cannot run work`, detail)
+            .catch((err: unknown) => console.warn(`notify ${notifier.kind}: ${String(err)}`))
+        }
+      },
       runnerFactory: (ws) => {
         return new RunService({
           store: ws.store,
@@ -100,6 +110,22 @@ export const serveCommand = defineCommand({
                 }
                 ws.store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
               }
+            }
+          },
+          onTaskFinished: async ({ task }) => {
+            if (task.state !== 'pr_open' || task.prUrl === null) return
+            const needsHuman =
+              task.reviewStopReason !== null && task.reviewStopReason !== 'acceptable'
+            const title = `${task.id} ${needsHuman ? 'needs human review' : 'done'}`
+            const reason = task.reviewStopReason ?? 'review disabled'
+            const body = `${task.title}\n${task.prUrl}\nReview stop reason: ${reason}`
+            for (const notifier of makeNotifiers(ws.config)) {
+              try {
+                await notifier.notify(title, body)
+              } catch (err) {
+                console.warn(`notify ${notifier.kind}: ${String(err)}`)
+              }
+              ws.store.append(null, { type: 'notify.sent', channel: notifier.kind, title })
             }
           },
           ...(ws.forge === null ? {} : { forge: ws.forge }),

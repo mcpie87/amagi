@@ -12,6 +12,7 @@ import {
   type TrackerTask,
   type WorkerActivity,
 } from '@amagi/core'
+import { startPoller } from './poller.ts'
 
 export type DoomGuardOptions = DoomOptions & {
   /** A live worker whose worktree diff has not changed for this long is a doom loop. */
@@ -100,8 +101,6 @@ export function startStallWatcher({
   doom,
   exec = defaultExec,
 }: StallWatcherOptions): StallWatcher {
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
   /** Cumulative across ticks, so the dashboard counters keep rising. */
   let recovered = 0
   let stoppedDoom = 0
@@ -435,15 +434,12 @@ export function startStallWatcher({
     activity = next
     finishRun(next.ok, next.error)
     currentRunId = null
-    if (!stopped) timer = setTimeout(() => void tick(), intervalMs)
   }
 
-  void tick()
+  const poller = startPoller(intervalMs, tick, true)
   return {
     stop() {
-      stopped = true
-      if (timer !== null) clearTimeout(timer)
-      timer = null
+      poller.stop()
       finishRun(false, 'watcher stopped')
       activity = { ...activity, status: 'off', nextRunAt: 0 }
     },

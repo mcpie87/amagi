@@ -14,6 +14,23 @@ export function fmtTokens(n: number): string {
   return String(n)
 }
 
+export function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let value = n
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[i]}`
+}
+
+export function fmtCpu(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s'
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
 export function fmtDuration(ms: number | null): string {
   if (ms === null) return 'in flight'
   const total = Math.round(ms / 1000)

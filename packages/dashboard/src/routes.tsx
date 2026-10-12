@@ -3,9 +3,12 @@ import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
 import { QueueView } from './views/board.tsx'
+import { ChatView } from './views/chat.tsx'
+import { DiagnosticsView } from './views/diagnostics.tsx'
 import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
 import { IssuesView } from './views/issues.tsx'
+import { ManualView } from './views/manual.tsx'
 import { OverviewView } from './views/overview.tsx'
 import { SeatsView } from './views/seats.tsx'
 import { SettingsView } from './views/settings.tsx'
@@ -16,6 +19,19 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   component: OverviewView,
+})
+export const chatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/chat',
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { triage?: string; repo?: string; chat?: string; thread?: string } => ({
+    ...(typeof search.triage === 'string' ? { triage: search.triage } : {}),
+    ...(typeof search.repo === 'string' ? { repo: search.repo } : {}),
+    ...(typeof search.chat === 'string' ? { chat: search.chat } : {}),
+    ...(typeof search.thread === 'string' ? { thread: search.thread } : {}),
+  }),
+  component: ChatView,
 })
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -46,10 +62,24 @@ const sessionsRoute = createRoute({
   path: '/sessions',
   component: SessionsView,
 })
-const settingsRoute = createRoute({
+const diagnosticsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/diagnostics',
+  component: DiagnosticsView,
+})
+export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings',
+  validateSearch: (search: Record<string, unknown>): { repo?: string } =>
+    typeof search.repo === 'string' ? { repo: search.repo } : {},
   component: SettingsView,
+})
+export const manualRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/manual',
+  validateSearch: (search: Record<string, unknown>): { page?: string } =>
+    typeof search.page === 'string' ? { page: search.page } : {},
+  component: ManualView,
 })
 const seatsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -74,13 +104,16 @@ export const gitCommitRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  chatRoute,
   boardRoute,
   issuesRoute,
   inboxRoute,
   activityRoute,
   sessionsRoute,
   settingsRoute,
+  diagnosticsRoute,
   seatsRoute,
+  manualRoute,
   taskRoute,
   gitRoute,
   gitCommitRoute,

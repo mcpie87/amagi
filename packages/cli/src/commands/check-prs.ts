@@ -98,7 +98,7 @@ export const checkPrsCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const driver = makePrDriver(config.forge.kind)
+    const driver = makePrDriver(config.forge.kind, config.forge.remote)
 
     let prs: PrInfo[]
     try {
@@ -153,6 +153,7 @@ export const checkPrsCommand = defineCommand({
         try {
           await syncPrPriorityLabel({
             cwd: root,
+            remote: config.forge.remote,
             number: pr.number,
             labels: pr.labels,
             // A PR whose bead is gone or closed carries no priority label.

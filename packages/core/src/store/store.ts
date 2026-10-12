@@ -8,6 +8,7 @@ import type {
   StoredEvent,
   TaskState,
 } from '../events.ts'
+import { isTerminal } from '../events.ts'
 import {
   emptyProjection,
   type ProjectedQuestion,
@@ -15,6 +16,7 @@ import {
   type ProjectedWatcherRun,
   type Projection,
   project,
+  projectAll,
 } from '../project.ts'
 
 export { InvalidTransitionError } from '../project.ts'
@@ -43,6 +45,8 @@ type RawTask = {
   review_round: number
   review_findings: string | null
   review_stop_reason: string | null
+  review_unresolved: number
+  review_skipped: string | null
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -84,6 +88,8 @@ const toTask = (r: RawTask): ProjectedTask => ({
   reviewRound: r.review_round,
   reviewFindings: r.review_findings === null ? null : (JSON.parse(r.review_findings) as Finding[]),
   reviewStopReason: r.review_stop_reason as ReviewStopReason | null,
+  reviewUnresolved: r.review_unresolved,
+  reviewSkipped: r.review_skipped,
   attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -132,6 +138,8 @@ const taskRow = (t: ProjectedTask): Row => ({
   review_round: t.reviewRound,
   review_findings: t.reviewFindings === null ? null : JSON.stringify(t.reviewFindings),
   review_stop_reason: t.reviewStopReason,
+  review_unresolved: t.reviewUnresolved,
+  review_skipped: t.reviewSkipped,
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({
@@ -162,6 +170,21 @@ function upsert(db: Database, table: string, key: string, row: Row): void {
 
 export type Listener = (event: StoredEvent) => void
 
+export type ChatConversation = {
+  id: string
+  title: string
+  harness: string
+  model: string
+  customModel?: boolean
+  effort: string
+  messages: { id: string; role: 'user' | 'assistant'; content: string }[]
+  taskId?: string
+  sessionId?: string
+  updatedAt: number
+}
+
+export type NewChatConversation = Omit<ChatConversation, 'updatedAt'>
+
 /**
  * Event log is the source of truth; `tasks` and `questions` are projections
  * maintained in the same transaction as the append. Anything derived must go
@@ -187,6 +210,49 @@ export class Store {
     const stored = { seq, ts, taskId, ...body } as StoredEvent
     for (const l of this.listeners) l(stored)
     return stored
+  }
+
+  recordLeaseLoss(taskId: string, sinceSeq: number, message: string): boolean {
+    const events: StoredEvent[] = []
+    this.db.exec('begin immediate')
+    try {
+      const task = this.task(taskId)
+      const replaced = this.db
+        .query(
+          "select 1 from events where task_id = ? and seq > ? and type = 'task.claimed' limit 1",
+        )
+        .get(taskId, sinceSeq)
+      if (task === null || isTerminal(task.state) || replaced !== null) {
+        this.db.exec('commit')
+        return false
+      }
+      const append = (body: EventBody) => {
+        const ts = Date.now()
+        const row = this.db
+          .query('insert into events (ts, task_id, type, body) values (?, ?, ?, ?) returning seq')
+          .get(ts, taskId, body.type, JSON.stringify(body)) as { seq: number }
+        this.apply(taskId, ts, body)
+        events.push({ seq: row.seq, ts, taskId, ...body } as StoredEvent)
+      }
+      if (task.state !== 'queued') append({ type: 'task.reclaimed', reason: message })
+      append({ type: 'error', message, fatal: false })
+      this.db.exec('commit')
+    } catch (err) {
+      this.db.exec('rollback')
+      throw err
+    }
+    for (const event of events) for (const listener of this.listeners) listener(event)
+    return true
+  }
+
+  claimReplaced(taskId: string, sinceSeq: number): boolean {
+    return (
+      this.db
+        .query(
+          "select 1 from events where task_id = ? and seq > ? and type = 'task.claimed' limit 1",
+        )
+        .get(taskId, sinceSeq) !== null
+    )
   }
 
   private apply(taskId: string | null, ts: number, body: EventBody): void {
@@ -294,20 +360,82 @@ export class Store {
     }))
   }
 
+  /**
+   * `withoutAgentLog` drops the agent.stream lines a dashboard keeps only in
+   * its log buffers, leaving usage and task chat, which it folds into state.
+   * Those lines are most of a long-lived store's bytes; `agentLog` serves them
+   * per task instead. `withoutWatcherRuns` likewise drops watcher history,
+   * which `watcherRuns` pages per watcher.
+   */
   events(
-    opts: { taskId?: string | undefined; sinceSeq?: number; limit?: number } = {},
+    opts: {
+      taskId?: string | undefined
+      sinceSeq?: number
+      limit?: number
+      withoutAgentLog?: boolean
+      withoutWatcherRuns?: boolean
+    } = {},
   ): StoredEvent[] {
     const since = opts.sinceSeq ?? 0
     const limit = opts.limit ?? 500
+    const logFilter =
+      (opts.withoutAgentLog
+        ? ` and (type != 'agent.stream' or json_extract(body, '$.event.kind') = 'usage'
+          or (task_id is not null and json_extract(body, '$.role') = 'chat'))`
+        : '') +
+      (opts.withoutWatcherRuns
+        ? ` and type not in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')`
+        : '')
     const rows = (
       opts.taskId
         ? this.db
-            .query('select * from events where task_id = ? and seq > ? order by seq limit ?')
+            .query(
+              `select * from events where task_id = ? and seq > ?${logFilter} order by seq limit ?`,
+            )
             .all(opts.taskId, since, limit)
-        : this.db.query('select * from events where seq > ? order by seq limit ?').all(since, limit)
+        : this.db
+            .query(`select * from events where seq > ?${logFilter} order by seq limit ?`)
+            .all(since, limit)
     ) as { seq: number; ts: number; task_id: string | null; body: string }[]
-
     return rows.map((r) => ({
+      seq: r.seq,
+      ts: r.ts,
+      taskId: r.task_id,
+      ...(JSON.parse(r.body) as EventBody),
+    }))
+  }
+
+  latestSeq(): number {
+    const row = this.db.query('select coalesce(max(seq), 0) as seq from events').get() as {
+      seq: number
+    }
+    return row.seq
+  }
+
+  /**
+   * The latest `limit` agent.stream events of one attempt of a task (attempts
+   * count up from 1 at each task.reset), in seq order, up to `untilSeq`.
+   */
+  agentLog(taskId: string, attempt: number, untilSeq: number, limit: number): StoredEvent[] {
+    const rows = this.db
+      .query(
+        `select * from events where task_id = ? and seq <= ?
+           and type in ('agent.stream', 'task.reset') order by seq`,
+      )
+      .all(taskId, untilSeq) as {
+      seq: number
+      ts: number
+      task_id: string | null
+      type: string
+      body: string
+    }[]
+    let seen = 1
+    const picked: typeof rows = []
+    for (const row of rows) {
+      if (row.type === 'task.reset') seen++
+      else if (seen === attempt) picked.push(row)
+    }
+    return picked.slice(-limit).map((r) => ({
       seq: r.seq,
       ts: r.ts,
       taskId: r.task_id,
@@ -358,27 +486,28 @@ export class Store {
     const rows = this.db
       .query(
         `select * from events where type in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')
+         and json_extract(body, '$.repo') = ? and json_extract(body, '$.name') = ?
          and seq < ? order by seq`,
       )
-      .all(beforeSeq) as { seq: number; ts: number; task_id: string | null; body: string }[]
-    let projection = emptyProjection()
-    for (const row of rows) {
-      const event = {
-        seq: row.seq,
-        ts: row.ts,
-        taskId: row.task_id,
-        ...(JSON.parse(row.body) as EventBody),
-      } as StoredEvent
-      if (
-        event.type === 'watcher.run.started' ||
-        event.type === 'watcher.action' ||
-        event.type === 'watcher.run.finished'
-      ) {
-        projection = project(projection, event)
-      }
-    }
+      .all(opts.repo, opts.name, beforeSeq) as {
+      seq: number
+      ts: number
+      task_id: string | null
+      body: string
+    }[]
+    const projection = projectAll(
+      emptyProjection(),
+      rows.map(
+        (row) =>
+          ({
+            seq: row.seq,
+            ts: row.ts,
+            taskId: row.task_id,
+            ...(JSON.parse(row.body) as EventBody),
+          }) as StoredEvent,
+      ),
+    )
     return Object.values(projection.watcherRuns)
-      .filter((run) => run.repo === opts.repo && run.name === opts.name)
       .sort((a, b) => b.startSeq - a.startSeq)
       .slice(0, opts.limit)
   }
@@ -386,6 +515,36 @@ export class Store {
   question(id: string): ProjectedQuestion | null {
     const row = this.db.query('select * from questions where id = ?').get(id) as RawQuestion | null
     return row ? toQuestion(row) : null
+  }
+
+  chatConversation(id: string): ChatConversation | null {
+    const row = this.db
+      .query('select body, updated_at from chat_conversations where id = ?')
+      .get(id) as { body: string; updated_at: number } | null
+    return row === null
+      ? null
+      : { ...(JSON.parse(row.body) as NewChatConversation), updatedAt: row.updated_at }
+  }
+
+  saveChatConversation(conversation: NewChatConversation): ChatConversation {
+    const updatedAt = Date.now()
+    this.db
+      .query(
+        `insert into chat_conversations (id, body, updated_at) values (?, ?, ?)
+         on conflict(id) do update set body = excluded.body, updated_at = excluded.updated_at`,
+      )
+      .run(conversation.id, JSON.stringify(conversation), updatedAt)
+    return { ...conversation, updatedAt }
+  }
+
+  createChatConversation(conversation: NewChatConversation): ChatConversation {
+    const updatedAt = Date.now()
+    this.db
+      .query('insert or ignore into chat_conversations (id, body, updated_at) values (?, ?, ?)')
+      .run(conversation.id, JSON.stringify(conversation), updatedAt)
+    const created = this.chatConversation(conversation.id)
+    if (created === null) throw new Error(`could not create chat session ${conversation.id}`)
+    return created
   }
 
   /**

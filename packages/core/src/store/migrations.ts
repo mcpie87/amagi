@@ -124,4 +124,21 @@ export const MIGRATIONS: readonly Migration[] = [
       `)
     },
   },
+  {
+    name: '011_review_outcome',
+    sql: `
+      alter table tasks add column review_unresolved integer not null default 0;
+      alter table tasks add column review_skipped text;
+    `,
+  },
+  {
+    name: '012_chat_conversations',
+    sql: `
+      create table chat_conversations (
+        id         text primary key,
+        body       text not null,
+        updated_at integer not null
+      );
+    `,
+  },
 ]

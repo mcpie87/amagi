@@ -6,6 +6,7 @@ import {
   commitMessage,
   commitSummary,
   explainMentionPrompt,
+  fixChecksPrompt,
   implementPrompt,
   implementSystemPrompt,
   MAX_EXPLAIN_ANSWER_CHARS,
@@ -112,6 +113,13 @@ describe('prTitle', () => {
 })
 
 describe('implementSystemPrompt', () => {
+  test('forbids weakening check tooling while allowing dependencies', () => {
+    const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
+    expect(prompt).toContain('Do not edit check tooling to make checks pass')
+    expect(prompt).toContain('package scripts')
+    expect(prompt).toContain('Dependency changes are allowed')
+  })
+
   test('tells the agent to document how to use new user-facing features', () => {
     const prompt = implementSystemPrompt({ task: task('Add a flag'), worktree: '/wt', branch: 'b' })
     expect(prompt).toContain('user-facing feature')
@@ -166,6 +174,13 @@ describe('implementSystemPrompt', () => {
   })
 })
 
+test('fixChecksPrompt tells the agent to restore check tooling', () => {
+  const prompt = fixChecksPrompt([{ command: 'just check', exitCode: 1, output: 'failed' }])
+  expect(prompt).toContain('Do not edit check tooling to make checks pass')
+  expect(prompt).toContain('Restore changes to justfiles')
+  expect(prompt).toContain('package scripts')
+})
+
 describe('implementPrompt', () => {
   test('embeds notes and comments so the agent sees them without bd', () => {
     const ctx = {
@@ -201,6 +216,12 @@ describe('classifyMentionPrompt', () => {
     expect(prompt).toContain('explain: the human is asking anything about the PR')
     expect(prompt).toContain('still relevant')
     expect(prompt).toContain('never ambiguous')
+    expect(prompt).toContain('flag: the human explicitly wants this PR closed or reverted')
+    expect(prompt).toContain('ambiguous: the comment is not a request at all')
+    expect(prompt).toContain('fix-pr, explain, add-a-task, flag, or ambiguous')
+    expect(prompt).toContain(
+      'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
+    )
   })
 
   test('routes an already-resolved question to explain', () => {
@@ -219,6 +240,7 @@ test('explain prompt answers an already-resolved question briefly', () => {
     pr: { number: 247, title: 'Old task', url: 'https://github.com/owner/repo/pull/247' },
     mention: { user: 'reviewer', body: "@chise-maru isn't this already resolved?" },
     diff: 'diff',
+    baseCommits: ['abc123 Fix the relevant behavior'],
     outPath: '/tmp/answer.md',
     conflicted: false,
   })
@@ -227,4 +249,8 @@ test('explain prompt answers an already-resolved question briefly', () => {
   expect(prompt).toContain('If it is resolved, stop there')
   expect(prompt).toContain(`${MAX_EXPLAIN_ANSWER_CHARS} characters`)
   expect(prompt).toContain('Do not recap the PR')
+  expect(prompt).toContain("Answer the human's actual question directly and first")
+  expect(prompt).toContain(
+    'Base commits landed since the PR branch point:\nabc123 Fix the relevant behavior',
+  )
 })

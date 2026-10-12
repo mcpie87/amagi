@@ -17,7 +17,10 @@ export const TASK_STATES = [
   'committed',
   'pr_open',
   'pr_flagged',
+  'pr_merge_conflict',
+  'pr_conflict_fixing',
   'retrying',
+  'chatting',
   'done',
   'no_pr',
   'needs_human',
@@ -43,12 +46,39 @@ export function isTerminal(state: TaskState): boolean {
 /**
  * Whether the operator may start a task over from scratch: any parked task,
  * or an in-flight one stuck before it got a worktree. Never done/abandoned
- * (the tracker issue is closed) nor a task with a PR, which would dangle.
+ * (the tracker issue is closed) nor a task with a live PR, which would dangle.
  */
 export function canReset(state: TaskState, hasWorktree: boolean): boolean {
-  if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr') return true
-  if (isTerminal(state) || state === 'pr_open' || state === 'pr_flagged') return false
+  if (state === 'cancelled' || state === 'needs_human' || state === 'no_pr' || state === 'chatting')
+    return true
+  if (
+    isTerminal(state) ||
+    state === 'pr_open' ||
+    state === 'pr_flagged' ||
+    state === 'pr_merge_conflict' ||
+    state === 'pr_conflict_fixing'
+  )
+    return false
   return !hasWorktree
+}
+
+/**
+ * Whether the operator may drive a task from the chat page in `state` (null
+ * when the task never ran): any task no worker or watcher is running, short of
+ * a closed one. A chat on an unrun, parked or conflicted task holds it in
+ * `chatting`; one on an open PR leaves it there.
+ */
+export function canChatTask(state: TaskState | null): boolean {
+  return (
+    state === null ||
+    state === 'needs_human' ||
+    state === 'no_pr' ||
+    state === 'cancelled' ||
+    state === 'chatting' ||
+    state === 'pr_open' ||
+    state === 'pr_flagged' ||
+    state === 'pr_merge_conflict'
+  )
 }
 
 /**
@@ -59,23 +89,30 @@ export function canReset(state: TaskState, hasWorktree: boolean): boolean {
  */
 const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   queued: ['worktree_ready'],
-  claimed: ['worktree_ready'],
+  claimed: ['worktree_ready', 'chatting'],
   worktree_ready: ['implementing'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
   awaiting_answer: ['implementing'],
   checks: ['implementing', 'reviewing', 'committed'],
-  reviewing: ['fixing', 'checks'],
-  fixing: ['reviewing', 'checks'],
-  retrying: ['implementing'],
+  reviewing: ['fixing', 'checks', 'retrying'],
+  fixing: ['reviewing', 'checks', 'retrying'],
+  retrying: ['implementing', 'reviewing', 'fixing'],
   committed: ['pr_open'],
-  pr_open: ['pr_flagged'],
+  pr_open: ['pr_flagged', 'pr_merge_conflict'],
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
-  pr_flagged: ['pr_open'],
+  pr_flagged: ['pr_open', 'pr_merge_conflict'],
+  pr_merge_conflict: ['pr_conflict_fixing', 'pr_open', 'chatting'],
+  pr_conflict_fixing: ['pr_merge_conflict', 'pr_open'],
+  // The operator's chat holds the task until an approved push puts the PR back
+  // under the watchers.
+  chatting: ['pr_open'],
 }
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   if (from === to) return false
+  // A PR watcher can reclassify legacy conflict parks once it sees the open PR.
+  if (from === 'needs_human' && to === 'pr_merge_conflict') return true
   // A parked or stopped task is retired by the operator's close action: a
   // stopped run parks as cancelled (worktree preserved), and instant close
   // then abandons it and deletes the worktree. A no_pr/needs_human task whose
@@ -206,6 +243,16 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('worktree.created'), path: z.string(), branch: z.string() }),
   z.object({ type: z.literal('worktree.removed'), path: z.string() }),
+  /** The repo's setupCmd began in a fresh worktree; the task stays claimed until it ends. */
+  z.object({ type: z.literal('setup.started'), command: z.string() }),
+  /** `output` is the tail of stdout and stderr, kept so a slow or failed setup can be diagnosed. */
+  z.object({
+    type: z.literal('setup.finished'),
+    command: z.string(),
+    exitCode: z.number().int(),
+    durationMs: z.number().int().nonnegative(),
+    output: z.string(),
+  }),
   z.object({
     type: z.literal('chat.message'),
     /** The operator's message to the worker; a chat run's answer streams as agent.stream. */
@@ -220,6 +267,8 @@ export const EventBody = z.discriminatedUnion('type', [
     model: z.string().nullable(),
     /** The reasoning effort the harness resolved at spawn, if known. */
     effort: z.string().nullable(),
+    /** Name of the fleet worker whose runner spawned the agent; unset for ad-hoc runs. */
+    worker: z.string().optional(),
     cwd: z.string(),
     resumed: z.boolean(),
     /** Unique watcher invocation key; task runs leave this unset. */
@@ -312,6 +361,16 @@ export const EventBody = z.discriminatedUnion('type', [
     type: z.literal('review.stopped'),
     reason: ReviewStopReason,
     unresolvedIds: z.array(z.string().min(1)),
+    findings: z.array(Finding).optional(),
+  }),
+  /** The run reached the review gate with no reviewer configured, so it went to commit unreviewed. */
+  z.object({ type: z.literal('review.skipped'), reason: z.string().min(1) }),
+  z.object({
+    type: z.literal('review.proposal-filed'),
+    findingId: z.string().min(1),
+    issueId: z.string().min(1),
+    title: z.string().min(1),
+    url: z.string().nullable(),
   }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
@@ -329,6 +388,24 @@ export const EventBody = z.discriminatedUnion('type', [
    * `<sha> <reflog subject>` (e.g. `"abc123 reset: moving to HEAD"` for a stash).
    */
   z.object({ type: z.literal('git.bypassed'), entries: z.array(z.string()) }),
+  /**
+   * A chat agent asked for an outward-facing git write (push, PR, comment,
+   * close). It waits for the operator, who approves or declines it in the chat.
+   */
+  z.object({
+    type: z.literal('git.request'),
+    requestId: z.string(),
+    verb: z.enum(['pr', 'push', 'comment', 'close']),
+    /** The comment body or close reason the agent supplied. */
+    message: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('git.request.decided'),
+    requestId: z.string(),
+    approved: z.boolean(),
+    /** What the orchestrator did, or why it failed, as told back to the agent. */
+    result: z.string(),
+  }),
   z.object({
     type: z.literal('question.asked'),
     questionId: z.string(),
@@ -360,6 +437,12 @@ export const EventBody = z.discriminatedUnion('type', [
     reason: z.string(),
   }),
   z.object({ type: z.literal('notify.sent'), channel: z.string(), title: z.string() }),
+  z.object({
+    type: z.literal('notify.failed'),
+    channel: z.string(),
+    title: z.string(),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal('notify.idle'), title: z.string(), body: z.string() }),
   z.object({
     type: z.literal('watcher.run.started'),
@@ -390,7 +473,7 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('mention.classified'),
     /** Which response path the classifier chose for the mention. */
-    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'take-down', 'ambiguous']),
+    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'flag', 'ambiguous']),
     /** The raw classifier reply; when the parse is wrong this is all that explains why. */
     reply: z.string(),
     /** The PR the mention was on. */

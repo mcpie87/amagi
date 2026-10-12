@@ -8,6 +8,7 @@ import { listWorktrees, removeWorktreeGit } from './test-util.ts'
 import {
   branchName,
   createWorktree,
+  type SetupReport,
   slugify,
   taskIdFromBranch,
   worktreeDirName,
@@ -138,8 +139,10 @@ describe('createWorktree', () => {
     expect(existsSync(join(repo, 'where.txt'))).toBe(false)
   })
 
-  test('a failing setup command is not swallowed', async () => {
-    expect(
+  test('a failing setup command is reported, then thrown', async () => {
+    const reports: SetupReport[] = []
+    const started: string[] = []
+    await expect(
       createWorktree({
         repoRoot: repo,
         repoName: 'amagi',
@@ -147,9 +150,17 @@ describe('createWorktree', () => {
         title: 'Add SSE endpoint',
         baseBranch: 'main',
         worktreeRoot: wtRoot,
-        setupCmd: 'exit 3',
+        setupCmd: 'echo resolving; echo no lockfile >&2; exit 3',
+        onSetupStarted: (command) => started.push(command),
+        onSetupFinished: (report) => reports.push(report),
       }),
     ).rejects.toThrow()
+    expect(started).toEqual(['echo resolving; echo no lockfile >&2; exit 3'])
+    expect(reports).toHaveLength(1)
+    expect(reports[0]?.exitCode).toBe(3)
+    expect(reports[0]?.output).toContain('resolving')
+    expect(reports[0]?.output).toContain('no lockfile')
+    expect(reports[0]?.durationMs).toBeGreaterThanOrEqual(0)
   })
 
   test('removal detaches the worktree', async () => {
