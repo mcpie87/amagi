@@ -18,6 +18,8 @@ just check                             # lint + typecheck + dashboard build + al
 
 `serve.test.ts` needs `packages/dashboard/dist`: run `just build-dashboard` first if it fails on missing files. `just fresh-check` wipes `node_modules`; it is a merge gate, do not run it while iterating.
 
+In an interactive session on the main checkout, see a UI change in the operator's running `just serve`: the dashboard on :5173 hot-reloads and the server restarts on save (`bun --watch`). Drive it with the `claude-in-chrome` skill. Start no second `serve`: it would lease real tasks.
+
 ## Layout
 
 - `packages/core/src`: everything that does work.
@@ -31,6 +33,8 @@ just check                             # lint + typecheck + dashboard build + al
 - `packages/cli/src`: the `amagi` CLI, one file per command in `commands/`.
 - `packages/dashboard/src`: React 19 + TanStack Router web UI. `routes.tsx` is only the route tree; each page lives in `views/*.tsx`, shared pieces in `layout.tsx`, `badges.tsx`, `format.ts`, `markdown.tsx`; `store.tsx` holds client state.
 - `packages/tui/src`: Ink terminal UI.
+
+Diagnostics (request and dashboard interaction timings): read `docs/diagnostics.md` before changing them or when investigating why the UI is slow.
 
 Tests sit next to the code as `*.test.ts`. `runner.test.ts` and `server/src/app.test.ts` are large: grep for the `describe`/`test` you need and read that range, not the whole file.
 

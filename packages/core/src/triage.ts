@@ -77,8 +77,12 @@ export function actionFromAnswer(answer: string, fallback: TriageActionType): Tr
 
   const match = matches[0]
   if (!match) return fallback
-  const before = answer.slice(Math.max(0, match.index - 80), match.index)
-  if (/\b(?:not|never|avoid|without|don't|dont)\b(?:\W+\w+){0,4}\W*$/i.test(before)) {
+  const normalized = answer.replace(/[‘’]/g, "'")
+  if (
+    /\b(?:no|not|never|avoid|without|cannot|can'?t|don'?t|doesn'?t|shouldn'?t|wouldn'?t|won'?t)\b/i.test(
+      normalized,
+    )
+  ) {
     return fallback
   }
   return match.action

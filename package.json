@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "serve": "bun run scripts/serve.ts",
-    "lint": "biome check . && bun run scripts/lint-commits.ts",
+    "lint": "biome check . && bun run scripts/lint-commits.ts && bun run scripts/lint-adrs.ts",
     "fmt": "biome check --write .",
     "typecheck": "tsc --noEmit",
     "test": "bun test --parallel=8"

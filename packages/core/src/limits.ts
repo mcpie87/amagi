@@ -4,3 +4,6 @@
  * Vite dev server) can import it without dragging in server-only code.
  */
 export const MAX_WORKERS = 16
+
+/** Upper bound on the host-wide harness process cap; shared by config, API and dashboard. */
+export const MAX_HARNESS_PROCESSES = 64

@@ -981,7 +981,7 @@ export function ManualView() {
       </header>
 
       <div className="flex flex-col gap-6 md:flex-row md:items-start">
-        <nav className="shrink-0 md:sticky md:top-[calc(var(--app-header-height)+1rem)] md:max-h-[calc(100vh-var(--app-header-height)-2rem)] md:w-64 md:overflow-y-auto">
+        <nav className="shrink-0 md:sticky md:top-4 md:max-h-[calc(100vh-2rem)] md:w-64 md:overflow-y-auto">
           <ul className="space-y-1">
             {PAGES.map((p) => (
               <li key={p.id}>

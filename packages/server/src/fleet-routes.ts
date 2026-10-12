@@ -90,6 +90,7 @@ export function createFleetRoutes({
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+        reviewEnabled: ws.config.review.enabled,
         reviewMaxRounds: ws.config.review.maxRounds,
         staleMaxParallel: hasStaleMaxParallel(ws.root),
         forgeKind: ws.config.forge.kind,
@@ -113,11 +114,23 @@ export function createFleetRoutes({
           ntfyTopic,
           ntfyServer,
           desktopFailureAlerts,
+          reviewEnabled,
           reviewMaxRounds,
           forgeKind,
           forgeRemote,
           forgeCredentials,
         } = c.req.valid('json')
+        if (reviewEnabled !== undefined || reviewMaxRounds !== undefined) {
+          const parsed = Config.safeParse({
+            ...ws.config,
+            review: {
+              ...ws.config.review,
+              ...(reviewEnabled === undefined ? {} : { enabled: reviewEnabled }),
+              ...(reviewMaxRounds === undefined ? {} : { maxRounds: reviewMaxRounds }),
+            },
+          })
+          if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
+        }
         const remotes = gitRemotes(ws.root)
         if (forgeRemote != null && !remotes.includes(forgeRemote)) {
           return c.json({ error: `no git remote named ${forgeRemote}` }, 400)
@@ -161,7 +174,14 @@ export function createFleetRoutes({
                   ...(desktopFailureAlerts === undefined ? {} : { desktopFailureAlerts }),
                 },
               }),
-          ...(reviewMaxRounds === undefined ? {} : { review: { maxRounds: reviewMaxRounds } }),
+          ...(reviewEnabled === undefined && reviewMaxRounds === undefined
+            ? {}
+            : {
+                review: {
+                  ...(reviewEnabled === undefined ? {} : { enabled: reviewEnabled }),
+                  ...(reviewMaxRounds === undefined ? {} : { maxRounds: reviewMaxRounds }),
+                },
+              }),
         })
         if (autoRebase !== undefined) ws.config.loop.autoRebase = autoRebase
         if (ntfyTopic !== undefined) ws.config.notify.ntfyTopic = ntfyTopic
@@ -169,6 +189,7 @@ export function createFleetRoutes({
         if (desktopFailureAlerts !== undefined) {
           ws.config.notify.desktopFailureAlerts = desktopFailureAlerts
         }
+        if (reviewEnabled !== undefined) ws.config.review.enabled = reviewEnabled
         if (reviewMaxRounds !== undefined) ws.config.review.maxRounds = reviewMaxRounds
         if (
           forgeKind !== undefined ||
@@ -194,6 +215,7 @@ export function createFleetRoutes({
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
+          reviewEnabled: ws.config.review.enabled,
           reviewMaxRounds: ws.config.review.maxRounds,
           forgeKind: ws.config.forge.kind,
           forgeRemote: ws.config.forge.remote,

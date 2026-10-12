@@ -226,6 +226,16 @@ describe('actionFromAnswer', () => {
     expect(actionFromAnswer('skip this task', 'implement')).toBe('skip')
     expect(actionFromAnswer('do not implement, close it', 'skip')).toBe('skip')
     expect(actionFromAnswer('do not implement', 'skip')).toBe('skip')
+    for (const answer of [
+      "don't close",
+      'don’t close',
+      'cannot close',
+      "can't close",
+      'close? no',
+      'do not under any circumstances close',
+    ]) {
+      expect(actionFromAnswer(answer, 'skip')).toBe('skip')
+    }
     expect(actionFromAnswer('implement or close it', 'skip')).toBe('skip')
   })
 

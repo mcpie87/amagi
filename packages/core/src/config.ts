@@ -5,12 +5,20 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import * as z from 'zod'
 import { matchForgeRemote } from './drivers/forge-cred.ts'
 import { FindingSeverity, findingSeverityAtOrAbove } from './events.ts'
-import { MAX_WORKERS } from './limits.ts'
+import { MAX_HARNESS_PROCESSES, MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
 export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
 export const ForgeKind = z.enum(['github', 'gitlab', 'forgejo'])
+
+export const ProfileConfig = z.object({
+  profile_name: z.string().trim().min(1),
+  harness: HarnessKind,
+  model: z.string().trim().min(1),
+  effort: z.string().trim().min(1),
+})
+export type ProfileConfig = z.infer<typeof ProfileConfig>
 
 export const DifficultyConfig = z.object({
   /**
@@ -166,6 +174,7 @@ export function resolveWorkerHarness(
 
 /** Resolves the assigned reviewer profile, when an enabled reviewer is configured. */
 export function reviewerWorkerConfig(config: Config): Config['harness']['implement'] | undefined {
+  if (!config.review.enabled) return undefined
   const worker = expandWorkers(config.worker, config.seats).find(
     (candidate) => candidate.enabled && candidate.roles.includes('review'),
   )
@@ -184,6 +193,14 @@ const MentionWatcherConfig = AgentWatcherConfig.extend({
 
 export const Config = z
   .object({
+    profiles: z
+      .array(ProfileConfig)
+      .refine(
+        (profiles) =>
+          new Set(profiles.map(({ profile_name }) => profile_name)).size === profiles.length,
+        { message: 'profile names must be unique' },
+      )
+      .default([]),
     /** Named credential seats offered by the dashboard fleet editor. */
     seats: z
       .array(SeatConfig)
@@ -242,6 +259,11 @@ export const Config = z
         definitions: z.record(z.string().min(1), HarnessConfig).default({}),
         implement: HarnessConfig.prefault({ kind: 'claude' }),
         triage: HarnessConfig.prefault({ kind: 'claude' }),
+        /**
+         * Hard cap on harness processes running at once across every amagi on
+         * the host, chats included. Global config only; each agent costs memory.
+         */
+        maxProcesses: z.number().int().min(1).max(MAX_HARNESS_PROCESSES).default(5),
       })
       .prefault({}),
     review: ReviewConfig.prefault({}),
@@ -428,6 +450,7 @@ export const Config = z
     if (
       config.review.enabled &&
       config.review.harness === undefined &&
+      reviewerWorkerConfig(config) === undefined &&
       defaultReviewerKind(config.harness.implement.kind) === undefined
     ) {
       ctx.addIssue({
@@ -472,16 +495,10 @@ export function reviewerHarnessConfig(config: Config): Config['harness']['implem
   return HarnessConfig.parse({ kind })
 }
 
-/**
- * The reviewer for a run, or undefined when review is off. An enabled fleet
- * worker with the review role turns review on and wins over [review.harness];
- * without one, review.enabled decides.
- */
+/** The repository must enable review; an enabled fleet reviewer wins over [review.harness]. */
 export function activeReviewerConfig(config: Config): Config['harness']['implement'] | undefined {
-  return (
-    reviewerWorkerConfig(config) ??
-    (config.review.enabled ? reviewerHarnessConfig(config) : undefined)
-  )
+  if (!config.review.enabled) return undefined
+  return reviewerWorkerConfig(config) ?? reviewerHarnessConfig(config)
 }
 
 export type AgentWatcherKind = 'mention' | 'prConflict'
@@ -580,6 +597,11 @@ export function loadConfig(repoRoot: string): LoadedConfig {
     throw new Error(`${globalConfigPath()}: [checks] belongs in the repo config`)
   }
   const repoToml = readToml(repoConfigPath(repoRoot))
+  if ('profiles' in repoToml) {
+    throw new Error(
+      `${repoConfigPath(repoRoot)}: [[profiles]] belongs in the global config (${globalConfigPath()}), not a repo config`,
+    )
+  }
   if ('worker' in repoToml) {
     throw new Error(
       `${repoConfigPath(repoRoot)}: [[worker]] belongs in the global config (${globalConfigPath()}), not a repo config`,
