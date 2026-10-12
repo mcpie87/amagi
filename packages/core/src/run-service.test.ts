@@ -104,6 +104,16 @@ class FakeTracker implements Tracker {
   async resolveGate(): Promise<void> {}
 }
 
+class ThrowOnceTracker extends FakeTracker {
+  claims = 0
+
+  override async claim(id?: string): Promise<TrackerTask | null> {
+    this.claims++
+    if (this.claims === 1) throw new Error('tracker unavailable')
+    return super.claim(id)
+  }
+}
+
 class FakeHarness implements Harness {
   readonly kind = 'fake'
 
@@ -506,6 +516,22 @@ describe('RunService', () => {
     expect((await service.status()).running).toEqual([TASK.id, TASK2.id])
     await service.stop(TASK.id)
     await service.stop(TASK2.id)
+    service.dispose()
+  })
+
+  test('auto queue logs a tracker error and retries after the idle backoff', async () => {
+    const tracker = new ThrowOnceTracker([TASK])
+    const harness = new BlockingHarness()
+    const service = makeService(tracker, harness, 1, config(), {
+      autoQueue: true,
+      autoQueueIdleMs: 10,
+      autoQueueActiveMs: 10,
+    })
+
+    await waitFor(() => harness.starts === 1)
+    expect(tracker.claims).toBe(2)
+    expect(store.task(TASK.id)?.state).toBe('implementing')
+    await service.stop(TASK.id)
     service.dispose()
   })
 
@@ -915,13 +941,12 @@ describe('RunService', () => {
     )
   })
 
-  test('review runs resolve their harness, model, and seat from an assigned reviewer', async () => {
-    const captured: Config['harness']['implement'][] = []
-    const service = new RunService({
-      store,
-      tracker: new FakeTracker([TASK]),
-      harness: new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n')),
-      config: config({
+  test.each([false, true])(
+    'repository review switch controls assigned reviewer: %s',
+    async (enabled) => {
+      const captured: Config['harness']['implement'][] = []
+      const runConfig = config({
+        review: { enabled },
         worker: [
           { id: 'implementer', name: 'Implementer', kind: 'claude', roles: ['implement'] },
           {
@@ -934,30 +959,46 @@ describe('RunService', () => {
             roles: ['review'],
           },
         ],
-      }),
-      repoRoot: repo,
-      repoName: 'demo',
-      forge: new FakePr(),
-      makeHarness: (cfg) => {
-        captured.push(cfg)
-        return cfg.kind === 'codex'
-          ? new FakeHarness(undefined, '{"findings":[]}')
-          : new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
-      },
-    })
-    const result = await service.start()
-    expect(result).toEqual({ ok: true, taskId: TASK.id })
-    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
-    expect(captured).toEqual([
-      expect.objectContaining({ kind: 'claude' }),
-      expect.objectContaining({
-        kind: 'codex',
-        model: 'review-model',
-        effort: 'high',
-        seat: 'review-seat',
-      }),
-    ])
-  })
+      })
+      const service = new RunService({
+        store,
+        tracker: new FakeTracker([TASK]),
+        harness: new FakeHarness((cwd) => {
+          writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+          runConfig.review.enabled = !enabled
+        }),
+        config: runConfig,
+        repoRoot: repo,
+        repoName: 'demo',
+        forge: new FakePr(),
+        makeHarness: (cfg) => {
+          captured.push(cfg)
+          return cfg.kind === 'codex'
+            ? new FakeHarness(undefined, '{"findings":[]}')
+            : new FakeHarness((cwd) => {
+                writeFileSync(join(cwd, 'hello.txt'), 'hi\n')
+                runConfig.review.enabled = !enabled
+              })
+        },
+      })
+      const result = await service.start()
+      expect(result).toEqual({ ok: true, taskId: TASK.id })
+      await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+      expect(captured).toEqual([
+        expect.objectContaining({ kind: 'claude' }),
+        ...(enabled
+          ? [
+              expect.objectContaining({
+                kind: 'codex',
+                model: 'review-model',
+                effort: 'high',
+                seat: 'review-seat',
+              }),
+            ]
+          : []),
+      ])
+    },
+  )
 
   test('review-only workers are not eligible for implementation runs', async () => {
     const tracker = new FakeTracker([TASK])

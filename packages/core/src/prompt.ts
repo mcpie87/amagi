@@ -222,6 +222,73 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
   ].join('\n')
 }
 
+export type TaskChatPromptContext = {
+  task: TrackerTask
+  worktree: string
+  branch: string
+  baseBranch: string
+  /** The repository's format, lint and test commands, in order. */
+  checks: readonly string[]
+  prUrl: string | null
+}
+
+/**
+ * The operator's chat agent on one task: it triages, implements, reviews and
+ * gets the work merged in a conversation, writing code itself but reaching git
+ * and the forge only through `amagi git-request`.
+ */
+export function taskChatSystemPrompt(ctx: TaskChatPromptContext): string {
+  const task = [
+    `Task ${ctx.task.id}: ${ctx.task.title}`,
+    ...(ctx.task.type === null ? [] : [`Type: ${ctx.task.type}`]),
+    '',
+    ctx.task.description.trim() || '(no description)',
+    ...(ctx.task.acceptanceCriteria ? ['', 'Acceptance:', ctx.task.acceptanceCriteria] : []),
+    ...(ctx.task.notes ? ['', 'Notes:', ctx.task.notes] : []),
+    ...(ctx.task.comments?.length ? ['', 'Comments:', ...ctx.task.comments] : []),
+  ]
+  return [
+    'You are chatting with the operator of amagi about one tracked task, inside a',
+    'dedicated git worktree for it. The operator reads every message you write.',
+    `Worktree: ${ctx.worktree}`,
+    `Branch: ${ctx.branch}`,
+    `Base branch: ${ctx.baseBranch}`,
+    `Pull request: ${ctx.prUrl ?? 'none yet'}`,
+    '',
+    ...task,
+    '',
+    'When asked for a full triage, carry the task end to end, reporting as you go:',
+    '1. Triage: read the code the task touches and decide whether to implement it,',
+    '   split it, close it as done or obsolete, or ask the operator. Say which and why.',
+    '2. Implement: make the change in this worktree, following the conventions of the',
+    '   surrounding code.',
+    `3. Check: run ${ctx.checks.length > 0 ? ctx.checks.map((c) => `\`${c}\``).join(', ') : 'the project formatter, lint and tests'} and fix every failure.`,
+    '   Never pipe check output through head/tail; redirect it to a file and grep it.',
+    '4. Review: read your own `git diff` as a strict reviewer would, for correctness,',
+    '   missed cases and needless code, and fix what you find. Report the findings.',
+    '5. Land it: commit, then open the pull request (or push to the existing one).',
+    '   If the pull request has merge conflicts, merge the base, resolve them, commit',
+    '   and push.',
+    '',
+    'Git and the forge are read-only to you: never commit, push, merge, stash or',
+    'reset yourself, and never edit issues with bd. Ask amagi instead, one verb at a',
+    'time, and read what it prints:',
+    '- `amagi git-request commit [--message "<summary>"]`: stages everything and',
+    '  commits it with the task subject; the message becomes the commit body. Runs',
+    '  immediately.',
+    '- `amagi git-request merge-base`: merges the latest base into this branch. Runs',
+    '  immediately; on conflicts it lists the files to resolve, then request a commit.',
+    '- `amagi git-request pr`: pushes the branch and opens the pull request.',
+    '- `amagi git-request push`: pushes new commits to the existing pull request.',
+    '- `amagi git-request comment --message "<text>"`: comments on the pull request,',
+    '  or on the task when there is none.',
+    '- `amagi git-request close --message "<reason>"`: closes the task.',
+    'pr, push, comment and close need the operator to approve them in the chat. After',
+    'requesting one, end your turn and say what you asked for; the decision and its',
+    'result arrive as the next message, and then you continue.',
+  ].join('\n')
+}
+
 /** Body of a commit made before the agent has reported what it did. */
 export const CHECKPOINT_COMMIT_SUMMARY =
   'Checkpoint of work in progress, requested by the agent mid-run. The final commit on\n' +

@@ -6,6 +6,10 @@ An orchestrator that turns tracker issues into pull requests: it leases a task, 
 
 ### Actors
 
+**Execution profile**:
+A named combination of harness, model and reasoning effort, shortened to profile. A profile describes how an agent runs, independently of its credential seat.
+_Avoid_: worker, seat, harness definition
+
 **Worker**:
 A named, configured lane in the fleet, carrying one harness, model, effort and seat. A worker is a definition that outlives the runners it spawns, and it has at most one agent alive at a time.
 _Avoid_: slot, runner, thread
@@ -19,7 +23,7 @@ A long-lived poller that sweeps forge state on a fixed tick and dispatches work 
 _Avoid_: worker, daemon, dedicated worker
 
 **Seat**:
-The credential an agent authenticates as, such as a single Claude subscription. At most one agent is ever live on a seat, whoever asked for it: a worker, a watcher, or a chat reply. Two workers may name the same seat, and then they take turns.
+The credential an agent authenticates as, such as a single Claude subscription. At most one worker or watcher agent is ever live on a seat. Two workers may name the same seat, and then they take turns. Chat replies ignore seats; like every agent they wait only on the host-wide harness process cap.
 _Avoid_: account, subscription, credential, lane
 
 **Fleet**:

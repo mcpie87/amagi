@@ -80,7 +80,7 @@ export type TimingSnapshot = {
   eventLoop: { lagMs: number; maxLagMs: number } | null
 }
 
-const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+export const TIMINGS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000
 const ANALYSIS_LIMIT = 5000
 const LIST_LIMIT = 50
@@ -139,7 +139,8 @@ const toSample = (r: Row): RequestSample => ({
   ms: r.ms,
 })
 
-function openTimingsDatabase(path: string): Database {
+/** Opens the diagnostics SQLite file; each timings class creates its own table in it. */
+export function openDiagnosticsDatabase(path: string): Database {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new Database(path, { create: true })
   db.exec('pragma journal_mode = WAL')
@@ -147,6 +148,11 @@ function openTimingsDatabase(path: string): Database {
   // consistent; a power loss costs only the last few samples.
   db.exec('pragma synchronous = NORMAL')
   db.exec('pragma busy_timeout = 5000')
+  return db
+}
+
+function openTimingsDatabase(path: string): Database {
+  const db = openDiagnosticsDatabase(path)
   db.exec(`
     create table if not exists requests (
       id         integer primary key autoincrement,
@@ -166,7 +172,7 @@ function openTimingsDatabase(path: string): Database {
   return db
 }
 
-const likeAny = (value: string): string => `%${value.replace(/[\\%_]/g, '\\$&')}%`
+export const likeAny = (value: string): string => `%${value.replace(/[\\%_]/g, '\\$&')}%`
 
 function whereClause(filter: TimingFilter): { sql: string; params: SQLQueryBindings[] } {
   const clauses: string[] = []
@@ -186,7 +192,7 @@ function whereClause(filter: TimingFilter): { sql: string; params: SQLQueryBindi
   return { sql: clauses.length === 0 ? '' : `where ${clauses.join(' and ')}`, params }
 }
 
-function percentile(sorted: number[], p: number): number {
+export function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)] ?? 0
 }
@@ -205,7 +211,7 @@ export class RequestTimings {
   /** `path` is a SQLite file; `:memory:` keeps samples only for this process. */
   constructor(
     path = ':memory:',
-    private readonly retentionMs = RETENTION_MS,
+    private readonly retentionMs = TIMINGS_RETENTION_MS,
   ) {
     this.db = openTimingsDatabase(path)
   }

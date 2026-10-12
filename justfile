@@ -12,10 +12,11 @@ install:
 # Run all checks: lint, typecheck, build, test
 check: lint typecheck build test
 
-# Lint and format-check the code, and the amagi commit messages not on main yet
+# Lint and format-check the code, the amagi commit messages not on main yet, and ADR numbering
 lint:
     bun x biome check .
     bun run scripts/lint-commits.ts
+    bun run scripts/lint-adrs.ts
 
 # Auto-fix formatting and lint issues
 fmt:
