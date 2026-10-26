@@ -10,10 +10,12 @@ import {
 import { forgeHostname, forgeToken, gitRemoteUrls, remoteHostname } from './drivers/forge-cred.ts'
 import { makePrDriver } from './drivers/pr.ts'
 import { errMsg } from './errors.ts'
+import { configuredCheckCommands } from './mandatory-checks.ts'
 import { expandTilde } from './paths.ts'
 import { isRepoRoot, type RegistryEntry } from './registry.ts'
 
-export type Diagnostic = { name: string; ok: boolean; detail?: string }
+/** `advisory` marks a check whose failure is shown but does not stop the repo claiming tasks. */
+export type Diagnostic = { name: string; ok: boolean; detail?: string; advisory?: true }
 
 const TRACKER_BIN: Record<string, string> = { beads: 'bd', github: 'gh', forgejo: 'tea' }
 const FORGE_BIN: Record<string, string> = { github: 'gh', gitlab: 'glab', forgejo: 'tea' }
@@ -51,47 +53,55 @@ function forgeRemoteCheck(root: string, kind: Config['forge']['kind'], remote: s
 
 /**
  * One check per distinct harness binary this repo can spawn: harness.implement,
- * every enabled fleet worker, the enabled agent watchers and the reviewer.
+ * every enabled fleet worker, the enabled agent watchers and the reviewer. A
+ * binary no implement worker or reviewer runs on is advisory: a claimed task
+ * never spawns it, so its absence must not stop claims.
  * Resolution mirrors the spawn: Bun.spawn with no shell, so an alias or shell
  * function the operator's shell knows about is not a harness amagi can run.
  */
 function harnessChecks(config: Config): Diagnostic[] {
-  const uses: { user: string; harness: Config['harness']['implement'] }[] = [
-    { user: 'harness.implement', harness: config.harness.implement },
+  const uses: { user: string; harness: Config['harness']['implement']; runs: boolean }[] = [
+    { user: 'harness.implement', harness: config.harness.implement, runs: false },
     ...config.worker
       .filter((worker) => worker.enabled)
       .map((worker) => ({
         user: `worker ${worker.name}`,
         harness: resolveWorkerHarness(config, worker),
+        runs:
+          worker.roles.includes('implement') ||
+          (config.review.enabled && worker.roles.includes('review')),
       })),
     ...(['mention', 'prConflict'] as const)
       .filter((watcher) => config.watchers[watcher].enabled)
       .map((watcher) => ({
         user: `${watcher} watcher`,
         harness: watcherHarnessConfig(config, watcher),
+        runs: false,
       })),
   ]
   if (config.review.enabled && reviewerWorkerConfig(config) === undefined) {
     try {
-      uses.push({ user: 'review', harness: reviewerHarnessConfig(config) })
+      uses.push({ user: 'review', harness: reviewerHarnessConfig(config), runs: true })
     } catch {
       // the config schema already rejects review.enabled with no reviewer harness
     }
   }
 
-  const usersByBin = new Map<string, string[]>()
-  for (const { user, harness } of uses) {
-    const bin = harness.bin ?? harness.kind
-    usersByBin.set(bin, [...(usersByBin.get(bin) ?? []), user])
+  const byBin = new Map<string, { users: string[]; runs: boolean }>()
+  for (const { user, harness, runs } of uses) {
+    const bin = [harness.bin ?? harness.kind].flat()[0] ?? harness.kind
+    const seen = byBin.get(bin)
+    byBin.set(bin, { users: [...(seen?.users ?? []), user], runs: runs || (seen?.runs ?? false) })
   }
-  return [...usersByBin].map(([bin, users]) => {
+  return [...byBin].map(([bin, { users, runs }]) => {
     const name = `harness ${bin}`
     const found = Bun.which(bin)
     if (found !== null) return { name, ok: true, detail: found }
     return {
       name,
       ok: false,
-      detail: `${bin} not on PATH (used by ${users.join(', ')}); shell aliases and functions are not visible, point bin at an executable`,
+      detail: `${bin} not on PATH (used by ${users.join(', ')}); shell aliases and functions are not visible, point bin at an executable or an argv list starting with one`,
+      ...(runs ? {} : { advisory: true as const }),
     }
   })
 }
@@ -180,13 +190,10 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
     })
   }
 
-  const { commands, format, lint, test } = config.checks
-  const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
-  const total = commands.length + gate.length
   checks.push({
     name: 'checks',
-    ok: total > 0,
-    detail: total === 0 ? 'none configured' : `${total} step(s)`,
+    ok: true,
+    detail: `${configuredCheckCommands(config.checks).length} step(s)`,
   })
 
   return Promise.resolve(checks)

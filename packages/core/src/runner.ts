@@ -27,6 +27,8 @@ import {
 } from './events.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
+import { headReflog, headReflogEntriesSince } from './git-bypass.ts'
+import { configuredCheckCommands } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -48,6 +50,7 @@ import {
   reclaimPrompt,
   verifyViabilityPrompt,
   verifyViabilitySystemPrompt,
+  WHOLE_TASK_FINAL_MESSAGE,
   whyNoChangesPrompt,
   withRestartHandoff,
 } from './prompt.ts'
@@ -122,6 +125,17 @@ function mergeAgentRuns(prev: AgentRun, next: AgentRun): AgentRun {
     model: next.model ?? prev.model,
     effort: next.effort ?? prev.effort,
   }
+}
+
+/**
+ * Merge a fix round: its summary replaces the task summary only when it is a
+ * full restatement with agent sections, so a one-line fix note never becomes
+ * the commit body or PR conclusion.
+ */
+function mergeFixRun(prev: AgentRun, next: AgentRun): AgentRun {
+  const merged = mergeAgentRuns(prev, next)
+  if (withAgentSections('', next.summary) !== null) return merged
+  return { ...merged, summary: prev.summary ?? merged.summary }
 }
 
 /** Worktree dir for agent-to-runner hand-off files; excluded from git, removed before commit. */
@@ -320,17 +334,6 @@ export type ReviewRoundResult = {
 
 type ReviewPrSummary = {
   run: AgentRun
-  unresolved: boolean
-  unresolvedIds: string[]
-  unresolvedFindings: {
-    id: string
-    severity: string
-    title: string
-    path: string
-    line: number
-    failureScenario: string
-    reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
-  }[]
   findings: ReviewFinding[]
   followUps: {
     id: string
@@ -367,9 +370,12 @@ class Lease {
   start(): void {
     const period = this.heartbeatMs ?? Math.max(30_000, Math.floor(this.tracker.leaseTtlMs / 3))
     this.timer = setInterval(() => {
-      void this.tracker.heartbeat(this.taskId).then((alive) => {
-        if (!alive) this.lost = true
-      })
+      this.tracker.heartbeat(this.taskId).then(
+        (alive) => {
+          if (!alive) this.lost = true
+        },
+        (err) => console.warn(`lease heartbeat failed for ${this.taskId}: ${String(err)}`),
+      )
     }, period)
     this.heartbeatTimer = setInterval(() => {
       this.store.heartbeat(this.taskId)
@@ -393,6 +399,7 @@ export class Runner {
   /** Set once the store flips the task to `cancelled`; guards the unwind. */
   private cancelled = false
   private retryNowRequested = false
+  private readonly checksAbort = new AbortController()
   private currentProcess: AgentProcess | null = null
   /** Running peak input context of a single model request in the current task run. */
   private peakContext = 0
@@ -563,7 +570,7 @@ export class Runner {
   private latestReviewerSession(taskId: string): string | null {
     return (
       this.deps.store
-        .events({ taskId, limit: 5000 })
+        .events({ taskId, limit: 1_000_000, withoutAgentLog: true })
         .filter(
           (event): event is Extract<StoredEvent, { type: 'agent.exited' }> =>
             event.type === 'agent.exited' && event.role === 'review' && event.sessionId !== null,
@@ -585,12 +592,13 @@ export class Runner {
   }
 
   /**
-   * Ask the run to stop: kill the owned agent process and unwind through the
+   * Ask the run to stop: kill the owned agent or check process and unwind through the
    * next phase boundary into the cancelled state, keeping the worktree.
    */
   cancel(): void {
     this.cancelled = true
     if (this.currentProcess !== null) void this.currentProcess.kill()
+    this.checksAbort.abort()
   }
 
   /**
@@ -836,12 +844,9 @@ export class Runner {
         break
       }
       if (blocking.length === 0) {
-        if (config.review.finalPass && !finalPassUsed) {
+        // A clean round with no room left for the confirmation pass still ends acceptable.
+        if (config.review.finalPass && !finalPassUsed && round < config.review.maxRounds) {
           finalPassUsed = true
-          if (round >= config.review.maxRounds) {
-            stopReason = 'rounds'
-            break
-          }
           finalPassPending = true
           continue
         }
@@ -892,35 +897,29 @@ export class Runner {
         `Write only a JSON array of FindingReply objects to ${replyPath}\nRequired schema: ${JSON.stringify(z.toJSONSchema(z.array(FindingReply)))}`,
         'Every blocking finding id must appear exactly once. Do not omit a finding. A wont-fix reply needs a specific reason.',
         `${SCRATCH_DIR}/ is runner scratch: write only that reply file there and touch nothing else in it.`,
+        WHOLE_TASK_FINAL_MESSAGE.join('\n'),
       ].join('\n\n')
       this.transition(task.id, 'fixing')
-      let fix: AgentRun & { stopped: boolean }
-      try {
-        fix = await this.runAgentWithRetry(
-          task.id,
-          run.sessionId,
-          {
-            cwd,
-            prompt,
-            permissions: config.harness.implement.permissions,
-            extraArgs: config.harness.implement.extraArgs,
-          },
-          'fix review',
-          lease,
-          budget,
-        )
-      } catch (error) {
-        if (budget.spentReason() !== null) {
-          stopReason = 'cost'
-          break
-        }
-        throw error
-      }
+      // A fix killed by the budget can leave half an edit behind, so its BudgetExhaustedError
+      // parks the task instead of ending review with the unchecked tree.
+      const fix = await this.runAgentWithRetry(
+        task.id,
+        run.sessionId,
+        {
+          cwd,
+          prompt,
+          permissions: config.harness.implement.permissions,
+          extraArgs: config.harness.implement.extraArgs,
+        },
+        'fix review',
+        lease,
+        budget,
+      )
       if (fix.stopped) return null
-      run = mergeAgentRuns(run, fix)
+      run = mergeFixRun(run, fix)
       const resumed = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
       if (resumed === null) return null
-      run = mergeAgentRuns(run, resumed)
+      run = mergeFixRun(run, resumed)
       let replies: FindingReply[]
       try {
         replies = z.array(FindingReply).parse(JSON.parse(readFileSync(replyPath, 'utf8')))
@@ -965,13 +964,26 @@ export class Runner {
       .events({ taskId: task.id, limit: 1_000_000 })
       .filter((event) => event.seq > reviewStartSeq)
     tokenCount = reviewTokens(finalEvents)
-    this.transition(task.id, 'checks')
     store.append(task.id, {
       type: 'review.stopped',
       reason: stopReason ?? 'rounds',
       unresolvedIds,
       findings: latestFindings,
     })
+    if (stopReason !== 'acceptable') {
+      this.transition(
+        task.id,
+        'needs_human',
+        [
+          `review ended unresolved (${stopReason ?? 'rounds'})${unresolvedIds.length > 0 ? `: ${unresolvedIds.join(', ')}` : ''}`,
+          failure,
+        ]
+          .filter(Boolean)
+          .join('; '),
+      )
+      return null
+    }
+    this.transition(task.id, 'checks')
     const minorFindings = latestFindings.filter(
       (finding) =>
         finding.scope === 'in-scope' &&
@@ -984,28 +996,11 @@ export class Runner {
       minorFindings.length > 0
         ? `Remaining minors/nits: ${minorFindings.map((finding) => `${finding.id} ${finding.title}`).join('; ')}.`
         : 'Remaining minors/nits: none.',
-      failure === null ? '' : `Unresolved review: ${failure}`,
     ]
       .filter(Boolean)
       .join('\n')
     return {
       run,
-      unresolved: stopReason !== 'acceptable',
-      unresolvedIds,
-      unresolvedFindings: latestFindings
-        .filter((finding) => unresolvedIds.includes(finding.id))
-        .map((finding) => {
-          const reply = priorReplies.find((entry) => entry.id === finding.id)
-          return {
-            id: finding.id,
-            severity: finding.severity,
-            title: finding.title,
-            path: finding.path,
-            line: finding.line,
-            failureScenario: finding.failureScenario,
-            reply: reply === undefined ? null : { outcome: reply.outcome, reason: reply.reason },
-          }
-        }),
       findings: latestFindings,
       followUps: [
         ...new Map(
@@ -1070,6 +1065,7 @@ export class Runner {
         this.deps.repoRoot,
         config.forge.remote,
         forgeToken(config.forge.kind, this.deps.repoRoot),
+        config.forge.kind,
       )
       if (Object.keys(tokenCfg).length > 0) {
         await execOk(this.exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
@@ -1245,11 +1241,7 @@ export class Runner {
     }
 
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
-      summary: commitSummary(
-        reviewSummary?.unresolved
-          ? withVerdictLine(current.summary ?? '', 'needs-human')
-          : current.summary,
-      ),
+      summary: commitSummary(current.summary),
       model: current.model,
       effort: current.effort,
     })
@@ -1286,7 +1278,7 @@ export class Runner {
         withVerdictLine(
           reason ??
             'the agent produced no changes and wrote no summary explaining why; treat ' +
-              'this as unverified rather than done — investigate before closing, it will ' +
+              'this as unverified rather than done; investigate before closing, it will ' +
               'not be closed automatically',
         ),
       )
@@ -1302,9 +1294,7 @@ export class Runner {
       budget,
       current.model,
       current.effort,
-      reviewSummary?.unresolved
-        ? withVerdictLine(current.summary ?? '', 'needs-human')
-        : current.summary,
+      current.summary,
       reviewSummary,
     )
     this.throwIfCancelled(task.id)
@@ -1534,18 +1524,12 @@ export class Runner {
         reviewSummary === undefined || reviewSummary === null
           ? undefined
           : {
-              unresolved: reviewSummary.unresolved,
-              unresolvedIds: reviewSummary.unresolvedIds,
-              unresolvedFindings: reviewSummary.unresolvedFindings,
               followUps: reviewSummary.followUps,
               proposalCreationSupported: reviewSummary.proposalCreationSupported,
               history: reviewSummary.history,
             },
       ),
-      labels: [
-        ...amagiLabels(current.type),
-        ...(reviewSummary?.unresolved ? ['amagi/review-unresolved'] : []),
-      ],
+      labels: amagiLabels(current.type),
     }
     try {
       const pr = await forge.createPr(opts)
@@ -1624,7 +1608,9 @@ export class Runner {
       return { sessionId, summary: null, model: null, effort: null }
     }
 
-    const question = store.unansweredQuestions(taskId)[0]
+    // An earlier run of this attempt can leave a question unanswered; the
+    // newest one is the one that parked this run.
+    const question = store.unansweredQuestions(taskId).at(-1)
     if (question === undefined) return { sessionId, summary: null, model: null, effort: null }
     store.append(taskId, { type: 'question.parked', questionId: question.id })
 
@@ -1709,12 +1695,21 @@ export class Runner {
         AMAGI_RUN_STATE: runState,
       },
     }
-    const reflogBefore = await this.headReflog(opts.cwd)
+    const reflogBefore = await headReflog(opts.cwd, this.exec)
     this.throwIfCancelled(taskId)
     const seqBefore = store.recentEvents(taskId, 1)[0]?.seq ?? 0
     const proc: AgentProcess =
       resumeFrom === null ? harness.start(spawn) : harness.resume(resumeFrom, spawn)
     this.currentProcess = proc
+    let exited = false
+    void proc.done.then(
+      () => {
+        exited = true
+      },
+      () => {
+        exited = true
+      },
+    )
     let budgetPausedForSeat = false
 
     // The store is the shared interrupt channel: `amagi stop` or the API parks
@@ -1792,7 +1787,7 @@ export class Runner {
             event: event.kind === 'usage' ? { ...event, seat: spawn.seat ?? harness.kind } : event,
           })
         }
-        if (this.observeContext(taskId, event)) {
+        if (this.observeContext(taskId, event, role)) {
           // Hard limit reached: stop the agent now rather than let it degrade.
           contextExceeded = true
           await proc.kill()
@@ -1844,17 +1839,19 @@ export class Runner {
       }
     } finally {
       if (budgetPausedForSeat) budget?.resume()
+      // A throw out of the stream loop (a failed store append) must not leave
+      // the agent editing the worktree and holding its seat.
+      if (!exited) {
+        try {
+          await proc.kill()
+        } catch {
+          // The original error matters more than a kill racing the process's own exit.
+        }
+      }
       if (this.currentProcess === proc) this.currentProcess = null
       clearInterval(cancelWatch)
       await this.recordGitBypass(taskId, opts.cwd, reflogBefore, seqBefore)
     }
-  }
-
-  /** HEAD reflog of `cwd` as `<sha> <subject>` lines, newest first; null when unreadable. */
-  private async headReflog(cwd: string): Promise<string[] | null> {
-    const r = await this.exec(['git', 'reflog', 'show', '--format=%H %gs', 'HEAD'], { cwd })
-    if (r.exitCode !== 0) return null
-    return r.stdout.split('\n').filter((l) => l !== '')
   }
 
   /**
@@ -1869,7 +1866,7 @@ export class Runner {
     sinceSeq: number,
   ): Promise<void> {
     try {
-      const after = await this.headReflog(cwd)
+      const after = await headReflog(cwd, this.exec)
       if (before === null || after === null) return
       const { store } = this.deps
       const sanctioned = new Set(
@@ -1877,9 +1874,9 @@ export class Runner {
           .events({ taskId, sinceSeq, limit: 1_000_000 })
           .flatMap((e) => (e.type === 'commit.created' ? [e.sha] : [])),
       )
-      const entries = after
-        .slice(0, Math.max(0, after.length - before.length))
-        .filter((line) => !sanctioned.has(line.split(' ', 1)[0] ?? ''))
+      const entries = headReflogEntriesSince(before, after).filter(
+        (line) => !sanctioned.has(line.split(' ', 1)[0] ?? ''),
+      )
       if (entries.length > 0) store.append(taskId, { type: 'git.bypassed', entries })
     } catch {
       // Best effort: the bypass check never fails the run.
@@ -1904,11 +1901,13 @@ export class Runner {
    * budget. Returns true when the hard limit was crossed, signalling the
    * caller to kill the agent.
    */
-  private observeContext(taskId: string, event: AgentEvent): boolean {
+  private observeContext(taskId: string, event: AgentEvent, role: AgentRole): boolean {
     if (event.kind !== 'context') return false
     const { store } = this.deps
     const { warnTokens, maxTokens } = this.contextLimits()
     const context = event.tokens
+    // The reviewer is its own session: its context must not raise the implementer's peak.
+    if (role === 'review') return context >= maxTokens
     if (context <= this.peakContext) return false
     this.peakContext = context
     store.append(taskId, { type: 'run.context', contextTokens: context })
@@ -2112,9 +2111,7 @@ export class Runner {
   }
 
   private checkCommands(): string[] {
-    const { format, lint, test, commands } = this.deps.config.checks
-    const gate = [format, lint, test].filter((c): c is string => c !== null && c !== '')
-    return [...gate, ...commands]
+    return configuredCheckCommands(this.deps.config.checks)
   }
 
   private async preflight(taskId: string, cwd: string): Promise<void> {
@@ -2124,7 +2121,8 @@ export class Runner {
     )
     const results: CheckResult[] = []
     for (const command of commands) {
-      const result = await this.exec(['sh', '-c', command], { cwd })
+      const result = await this.runCheckCommand(taskId, cwd, command)
+      if (this.isCancelled(taskId)) throw new RunCancelledError(taskId)
       const check = {
         command,
         exitCode: result.exitCode,
@@ -2140,7 +2138,7 @@ export class Runner {
     }
   }
 
-  private async runChecks(cwd: string): Promise<CheckResult[]> {
+  private async runChecks(taskId: string, cwd: string): Promise<CheckResult[]> {
     let changedTooling: string[]
     try {
       const { forge, repo } = this.deps.config
@@ -2166,7 +2164,7 @@ export class Runner {
     }
     const results: CheckResult[] = []
     for (const command of this.checkCommands()) {
-      const r = await this.exec(['sh', '-c', command], { cwd })
+      const r = await this.runCheckCommand(taskId, cwd, command)
       results.push({
         command,
         exitCode: r.exitCode,
@@ -2175,6 +2173,21 @@ export class Runner {
       if (r.exitCode !== 0) break
     }
     return results
+  }
+
+  private async runCheckCommand(taskId: string, cwd: string, command: string) {
+    const cancelWatch = setInterval(() => {
+      if (this.deps.store.task(taskId)?.state === 'cancelled') this.checksAbort.abort()
+    }, 500)
+    try {
+      return await this.exec(['sh', '-c', command], {
+        cwd,
+        timeoutMs: this.deps.config.checks.timeoutSec * 1000,
+        signal: this.checksAbort.signal,
+      })
+    } finally {
+      clearInterval(cancelWatch)
+    }
   }
 
   private async runCheckRounds(
@@ -2192,7 +2205,8 @@ export class Runner {
     for (let round = 0; round <= config.loop.maxCheckRounds; round++) {
       this.throwIfCancelled(task.id)
       this.transition(task.id, 'checks')
-      const results = await this.runChecks(cwd)
+      const results = await this.runChecks(task.id, cwd)
+      if (this.isCancelled(task.id)) throw new RunCancelledError(task.id)
       this.throwIfBudgetExhausted(task.id, budget)
       const ok = results.every((result) => result.exitCode === 0)
       store.append(task.id, { type: 'checks.finished', ok, results })
@@ -2212,13 +2226,13 @@ export class Runner {
             return null
           }
           if (action === 'rebase') {
-            const rebased = await this.updateFromBase(cwd)
-            if (!rebased) {
-              this.transition(
-                task.id,
-                'needs_human',
-                'project checks still failing; updating the worktree to the latest base failed',
-              )
+            const result = await this.updateFromBase(cwd)
+            if (result !== 'updated') {
+              const reason =
+                result === 'autostash-conflict'
+                  ? 'project checks still failing; local changes conflicted while updating the worktree to the latest base'
+                  : 'project checks still failing; updating the worktree to the latest base failed'
+              this.transition(task.id, 'needs_human', reason)
               return null
             }
           }
@@ -2245,12 +2259,12 @@ export class Runner {
         budget,
       )
       if (fix.stopped) return null
-      run = mergeAgentRuns(run, fix)
+      run = mergeFixRun(run, fix)
       if (lease.isLost) throw new LeaseLostError(task.id)
 
       const resumed = await this.parkAndResume(task.id, run.sessionId, cwd, lease, budget)
       if (resumed === null) return null
-      run = mergeAgentRuns(run, resumed)
+      run = mergeFixRun(run, resumed)
     }
     return null
   }
@@ -2314,42 +2328,39 @@ export class Runner {
    * Brings the worktree up to date with the latest base branch, preserving the
    * agent's uncommitted changes. A stale worktree (checks that pass on a fresh
    * base, or a recipe the base added after this worktree was created) is the
-   * usual reason checks fail that a fresh base would pass. False when anything
-   * fails (network, conflicts), leaving the worktree untouched.
+   * usual reason checks fail that a fresh base would pass.
    */
-  private async updateFromBase(cwd: string): Promise<boolean> {
+  private async updateFromBase(cwd: string): Promise<'updated' | 'failed' | 'autostash-conflict'> {
     const { config } = this.deps
     const tokenCfg = await gitTokenConfig(
       this.exec,
       this.deps.repoRoot,
       config.forge.remote,
       forgeToken(config.forge.kind, this.deps.repoRoot),
+      config.forge.kind,
     )
     const fetch = await this.exec(['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
       cwd,
       env: tokenCfg,
     })
-    if (fetch.exitCode !== 0) return false
-
-    const dirty = (await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== ''
-    const stashed =
-      dirty && (await this.exec(['git', 'stash', 'push', '-u'], { cwd })).exitCode === 0
-    if (dirty && !stashed) return false
+    if (fetch.exitCode !== 0) return 'failed'
 
     const rebase = await this.exec(
-      ['git', 'rebase', `${config.forge.remote}/${config.repo.baseBranch}`],
+      ['git', 'rebase', '--autostash', `${config.forge.remote}/${config.repo.baseBranch}`],
       { cwd },
     )
+    if (
+      /(?:applying autostash resulted in conflicts|local changes are stashed, however applying them\s+resulted in conflicts)/i.test(
+        `${rebase.stdout}\n${rebase.stderr}`,
+      )
+    ) {
+      return 'autostash-conflict'
+    }
     if (rebase.exitCode !== 0) {
       await this.exec(['git', 'rebase', '--abort'], { cwd })
-      if (stashed) await this.exec(['git', 'stash', 'pop'], { cwd })
-      return false
+      return 'failed'
     }
-    if (stashed) {
-      const pop = await this.exec(['git', 'stash', 'pop'], { cwd })
-      if (pop.exitCode !== 0) return false
-    }
-    return true
+    return 'updated'
   }
 
   /** Returns false when the agent changed nothing, which is a failure worth surfacing. */

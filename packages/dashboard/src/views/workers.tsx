@@ -161,7 +161,9 @@ function WorkerSlot({
  */
 function AutoQueueToggle() {
   const { status } = useRunner()
-  const { selected } = useDashboard()
+  const { selected, repos } = useDashboard()
+  // Auto queue only fills slots while the repo's workers may claim work at all.
+  const dispatchOff = repos?.find((repo) => repo.key === selected)?.workers === false
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fromStatus = status?.autoQueue ?? false
@@ -201,9 +203,11 @@ function AutoQueueToggle() {
         disabled={busy || runnerRepo === null}
         onClick={() => void toggle()}
         title={
-          on
-            ? 'free runner slots get filled automatically as tasks become claimable'
-            : 'dispatch is manual: click Run next (or retry) to start a task'
+          on && dispatchOff
+            ? 'auto queue is on, but workers are disabled for this repository, so nothing is dispatched'
+            : on
+              ? 'free runner slots get filled automatically as tasks become claimable'
+              : 'dispatch is manual: click Run next (or retry) to start a task'
         }
         className={`rounded px-3 py-1 text-sm font-medium disabled:opacity-50 ${
           on
@@ -211,7 +215,7 @@ function AutoQueueToggle() {
             : 'border border-line-strong bg-surface text-fg-muted hover:bg-raised'
         }`}
       >
-        Auto queue: {on ? 'on' : 'off'}
+        Auto queue: {on ? (dispatchOff ? 'on (workers off)' : 'on') : 'off'}
       </button>
     </div>
   )

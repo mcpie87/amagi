@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
 import { apiBase } from './api.ts'
 import { type FromHub, Hub, type PollResult, type StreamStatus, type ToHub } from './hub.ts'
+import { hubRequest } from './interactions.ts'
 
 export type { PollResult, StreamStatus }
 
 const listeners = new Set<(message: FromHub) => void>()
 const lastPoll = new Map<string, PollResult>()
 const pollCounts = new Map<string, number>()
+/** Interaction timings waiting on the hub's answer to a refresh this page asked for. */
+const pendingRefreshes = new Map<string, ((status: number) => void)[]>()
 let port: MessagePort | null = null
 
 function connect(): MessagePort {
@@ -25,7 +28,12 @@ function send(message: ToHub): void {
   if (port === null) {
     port = connect()
     port.onmessage = (event: MessageEvent<FromHub>) => {
-      if (event.data.type === 'poll') lastPoll.set(event.data.url, event.data.result)
+      if (event.data.type === 'poll') {
+        const { url, result } = event.data
+        lastPoll.set(url, result)
+        for (const done of pendingRefreshes.get(url) ?? []) done(result?.status ?? 0)
+        pendingRefreshes.delete(url)
+      }
       for (const listener of listeners) listener(event.data)
     }
     window.addEventListener('pagehide', () => port?.postMessage({ type: 'bye' } satisfies ToHub))
@@ -68,6 +76,8 @@ export function resyncRepo(repo: string): void {
 
 /** Polls `url` now instead of at its next tick; every tab following it gets the answer. */
 export function refreshPoll(url: string): void {
+  const done = hubRequest(url)
+  if (done !== null) pendingRefreshes.set(url, [...(pendingRefreshes.get(url) ?? []), done])
   send({ type: 'refresh', url })
 }
 

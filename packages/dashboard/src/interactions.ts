@@ -287,6 +287,16 @@ function trackBody(response: Response, done: (status: number) => void): void {
   }, 0)
 }
 
+let trackHubRequest: ((url: string) => ((status: number) => void) | null) | null = null
+
+/**
+ * Starts timing a GET the shared hub makes on this page's behalf (it runs in a
+ * SharedWorker, outside the patched fetch). Null when no interaction is open.
+ */
+export function hubRequest(url: string): ((status: number) => void) | null {
+  return trackHubRequest?.(url) ?? null
+}
+
 /**
  * Times every human interaction with the dashboard (clicks, key presses,
  * picker changes, typing) and uploads the samples to the Diagnostics page.
@@ -324,6 +334,8 @@ export function installInteractionTracking(route: () => string): void {
       if (buffer.length >= FLUSH_BATCH) flush()
     },
   })
+
+  trackHubRequest = (hubUrl) => tracker.request('GET', requestOf(hubUrl).path)
 
   window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const { method, path } = requestOf(input, init)

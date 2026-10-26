@@ -34,8 +34,11 @@ export const HarnessConfig = z.object({
   kind: HarnessKind,
   /** Credential seat shared by every process using this subscription. */
   seat: z.string().min(1).optional(),
-  /** Command used to invoke the harness. Defaults to the harness name. */
-  bin: z.string().min(1).optional(),
+  /**
+   * Command used to invoke the harness, or an argv prefix ending in it (a
+   * wrapper such as bwrap). Defaults to the harness name.
+   */
+  bin: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
   model: z.string().optional(),
   /** Reasoning effort (e.g. low/medium/high/xhigh for claude), passed through. */
   effort: z.string().optional(),
@@ -421,6 +424,8 @@ export const Config = z
     checks: z
       .object({
         commands: z.array(z.string()).default([]),
+        /** Seconds one check command may run before its process tree is killed and it fails. */
+        timeoutSec: z.number().int().min(1).max(86_400).default(1800),
         /** Repository formatter. It runs before lint, tests, and extra commands. */
         format: z.string().nullable().default(null),
         /** Repository lint check. It runs after format and before tests. */

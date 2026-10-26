@@ -55,6 +55,9 @@ class FakePr implements PrDriver {
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     return ''
   }
+  async getPrChanges() {
+    return { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 }
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }

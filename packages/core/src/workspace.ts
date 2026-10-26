@@ -1,6 +1,6 @@
 import { BeadsService } from './beads-service.ts'
 import { type Config, loadConfig, writeConfig } from './config.ts'
-import { diagnoseRepo } from './diagnose.ts'
+import { type Diagnostic, diagnoseRepo } from './diagnose.ts'
 import { makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { type PrForge, prForgeRouter } from './drivers/pr-route.ts'
 import { BeadsTracker } from './drivers/tracker/beads.ts'
@@ -41,6 +41,14 @@ export type Workspace = {
   prForge: ((prUrl: string | null) => PrForge) | null
 }
 
+export type WorkspaceLookup =
+  | { status: 'ready'; workspace: Workspace }
+  | { status: 'missing' }
+  | { status: 'unavailable'; error: unknown }
+
+/** How long a readiness diagnosis serves claim gates before it is re-run. */
+const READINESS_TTL_MS = 30_000
+
 export type WorkspacesOptions = {
   registryPath?: string
   /** Overridable so tests use in-memory databases. */
@@ -58,6 +66,7 @@ export type WorkspacesOptions = {
  */
 export class Workspaces {
   private readonly cache = new Map<string, Workspace>()
+  private readonly readinessCache = new Map<string, { at: number; checks: Diagnostic[] }>()
 
   constructor(private readonly opts: WorkspacesOptions = {}) {}
 
@@ -77,6 +86,21 @@ export class Workspaces {
     const workspace = this.build(entry)
     this.cache.set(key, workspace)
     return workspace
+  }
+
+  /**
+   * Like `get`, but a repo whose workspace cannot be built (e.g. its config
+   * fails to load) comes back as unavailable instead of throwing, so fleet-wide
+   * loops can skip it. A config-load error also shows as a failed `config`
+   * readiness check.
+   */
+  lookup(key: string): WorkspaceLookup {
+    try {
+      const workspace = this.get(key)
+      return workspace === null ? { status: 'missing' } : { status: 'ready', workspace }
+    } catch (error) {
+      return { status: 'unavailable', error }
+    }
   }
 
   /** Refresh watcher switches from disk so the server supervisor can apply edits live. */
@@ -115,6 +139,7 @@ export class Workspaces {
     const entry = this.list().find((candidate) => candidate.key === key)
     if (entry === undefined) return false
     writeConfig(entry.path, { checks })
+    this.readinessCache.delete(key)
     const cached = this.cache.get(key)
     if (cached !== undefined) Object.assign(cached.config.checks, checks)
     return true
@@ -128,6 +153,7 @@ export class Workspaces {
   remove(key: string): boolean {
     const removed = removeRegistryEntry(key, this.opts.registryPath)
     this.cache.delete(key)
+    this.readinessCache.delete(key)
     return removed
   }
 
@@ -140,9 +166,25 @@ export class Workspaces {
     return updateRegistryGitIdentity(key, gitIdentity, this.opts.registryPath)
   }
 
-  /** Readiness diagnostics for one registered repo. */
-  diagnose(entry: RegistryEntry) {
-    return diagnoseRepo(entry)
+  /** Readiness diagnostics for one registered repo; also refreshes what `readiness` serves. */
+  async diagnose(entry: RegistryEntry): Promise<Diagnostic[]> {
+    const checks = await diagnoseRepo(entry)
+    this.readinessCache.set(entry.key, { at: Date.now(), checks })
+    return checks
+  }
+
+  /**
+   * Readiness for a claim gate: the latest diagnosis while it is younger than
+   * READINESS_TTL_MS, since a diagnosis spawns processes and claims are polled.
+   */
+  async readiness(key: string): Promise<Diagnostic[]> {
+    const cached = this.readinessCache.get(key)
+    if (cached !== undefined && Date.now() - cached.at < READINESS_TTL_MS) return cached.checks
+    const entry = this.list().find((candidate) => candidate.key === key)
+    if (entry === undefined) {
+      return [{ name: 'repository', ok: false, detail: `${key} is not registered` }]
+    }
+    return this.diagnose(entry)
   }
 
   close(): void {
@@ -175,6 +217,7 @@ function liveForge(config: Config): PrDriver {
     listOpenPrs: (cwd) => current().listOpenPrs(cwd),
     getMergeStatus: (cwd, number) => current().getMergeStatus(cwd, number),
     getPrDiff: (cwd, number) => current().getPrDiff(cwd, number),
+    getPrChanges: (cwd, number) => current().getPrChanges(cwd, number),
     listComments: (cwd, number) => current().listComments(cwd, number),
     postComment: (cwd, number, body) => current().postComment(cwd, number, body),
     closePr: (cwd, number, reason) => current().closePr(cwd, number, reason),

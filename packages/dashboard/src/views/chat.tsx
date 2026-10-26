@@ -632,10 +632,8 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   const { state, resyncStream } = useDashboard()
   const { triage: triageTarget } = useSearch({ from: chatRoute.id })
   const navigate = useNavigate()
-  // StrictMode replays effects; one click must start exactly one triage.
+  // StrictMode replays effects; one click must open exactly one triage thread.
   const startedTriage = useRef<string | null>(null)
-  // The send handler is recreated each render; effects call the latest one.
-  const sendRef = useRef<(thread: ChatThread, message: string) => Promise<void>>(async () => {})
   const [threads, setThreads] = useState<ChatThread[]>(() =>
     repo === null ? [] : readThreads(repo),
   )
@@ -644,6 +642,8 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   const [options, setOptions] = useState<ChatOptions | null>(null)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  // State lags a render: an approve and a send in the same tick would both see `sending` false.
+  const sendingRef = useRef(false)
   const [activity, setActivity] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showJump, setShowJump] = useState(false)
@@ -695,8 +695,9 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
 
   useEffect(() => () => abortRef.current?.abort(), [])
 
+  // Written once a turn ends, not on every streamed chunk.
   useEffect(() => {
-    if (repo === null) return
+    if (repo === null || sending) return
     try {
       localStorage.setItem(
         storageKey(repo),
@@ -705,7 +706,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
     } catch {
       // The conversation remains available for this page visit if storage is full.
     }
-  }, [repo, threads])
+  }, [repo, threads, sending])
 
   useEffect(() => {
     if (repo === null || threadTarget === undefined) return
@@ -756,13 +757,15 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
     ) {
       return
     }
+    let active = true
     const timer = window.setInterval(() => {
       fetch(
         `${apiBase}/api/repos/${encodeURIComponent(repo)}/chat/${encodeURIComponent(threadTarget)}`,
       )
         .then((res) => (res.ok ? (res.json() as Promise<ChatThread>) : null))
         .then((thread) => {
-          if (thread === null) return
+          // A poll answered after a send started would replace the streaming reply with the old snapshot.
+          if (thread === null || !active) return
           const sharedThread = { ...thread, shared: true }
           const previousSnapshot = sharedSnapshots.current.get(sharedThread.id)
           setThreads((current) =>
@@ -789,12 +792,16 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
         })
         .catch(() => {})
     }, 3000)
-    return () => window.clearInterval(timer)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
   }, [repo, threadTarget, activeId, sending, sharedLoaded])
 
   // The task page's full triage button lands here with ?triage=<id>: open a
-  // thread bound to the task and send the opening request. The param is
-  // dropped so a reload does not start a second conversation.
+  // thread bound to the task with the opening request in the composer. The
+  // operator sends it: any link, an agent-written one included, can carry the
+  // param. It is dropped so a reload does not open a second thread.
   useEffect(() => {
     if (triageTarget === undefined || repo === null || options === null) return
     if (startedTriage.current === triageTarget) return
@@ -812,8 +819,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
     activeIdRef.current = thread.id
     setActiveId(thread.id)
     setError(null)
-    void sendRef.current(
-      thread,
+    setText(
       `Perform a full triage of ${triageTarget}: triage it, implement it, check and review your work, then land it through amagi git requests.`,
     )
   }, [triageTarget, repo, options, navigate])
@@ -959,7 +965,8 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   }
 
   const sendMessage = async (thread: ChatThread, message: string) => {
-    if (sending || repo === null) return
+    if (sendingRef.current || repo === null) return
+    sendingRef.current = true
     setError(null)
     setActivity('Thinking…')
     setSending(true)
@@ -1099,6 +1106,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null
+        sendingRef.current = false
         setSending(false)
         setActivity(null)
       }
@@ -1106,7 +1114,6 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
       if (thread.taskId !== undefined) resyncStream()
     }
   }
-  sendRef.current = sendMessage
 
   const decideGitRequest = async (thread: ChatThread, request: GitRequest, approve: boolean) => {
     if (repo === null || thread.taskId === undefined) return
@@ -1146,7 +1153,10 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   }
 
   return (
-    <SidebarProvider className="relative -mx-4 -my-6 h-[100dvh] min-h-0 overflow-hidden bg-app sm:-mx-6">
+    <SidebarProvider
+      shortcut={false}
+      className="relative -mx-4 -my-6 h-[100dvh] min-h-0 overflow-hidden bg-app sm:-mx-6"
+    >
       <Sidebar collapsible="offcanvas">
         <SidebarHeader className="pl-12">
           <SidebarMenu>

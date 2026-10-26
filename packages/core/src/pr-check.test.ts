@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
+import type { PrDriver } from './drivers/pr.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import {
@@ -15,7 +16,6 @@ import {
   type PrInfo,
   prepareConflictWorktree,
   pushConflictFix,
-  removePrLabel,
   resolvePrPriorities,
   stampIterationLabel,
   syncPrPriorityLabel,
@@ -29,14 +29,10 @@ type Call = readonly string[]
 function fake(routes: (cmd: Call) => ExecResult | undefined): {
   exec: Exec
   calls: Call[]
-  inputs: unknown[]
 } {
   const calls: Call[] = []
-  const inputs: unknown[] = []
-  const exec: Exec = async (cmd, opts) => {
+  const exec: Exec = async (cmd) => {
     calls.push(cmd)
-    if (cmd.includes('api') && opts?.stdin !== undefined)
-      inputs.push(JSON.parse(String(opts.stdin)))
     if (cmd.includes('origin/main^{commit}'))
       return { exitCode: 0, stdout: 'base-oid\n', stderr: '' }
     const hit = routes(cmd)
@@ -48,26 +44,29 @@ function fake(routes: (cmd: Call) => ExecResult | undefined): {
       return { exitCode: 0, stdout: 'ref: refs/heads/main\tHEAD\n', stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { exec, calls, inputs }
+  return { exec, calls }
 }
 
-const addLabelsCall = (n: number): Call => [
-  'gh',
-  'api',
-  '--method',
-  'POST',
-  `repos/{owner}/{repo}/issues/${n}/labels`,
-  '--input',
-  '-',
-]
-
-const removeLabelCall = (n: number, label: string): Call => [
-  'gh',
-  'api',
-  '--method',
-  'DELETE',
-  `repos/{owner}/{repo}/issues/${n}/labels/${encodeURIComponent(label)}`,
-]
+function labelDriver(): {
+  driver: Pick<PrDriver, 'addLabel' | 'removeLabel'>
+  added: string[]
+  removed: string[]
+} {
+  const added: string[] = []
+  const removed: string[] = []
+  return {
+    driver: {
+      async addLabel(_cwd, _number, label) {
+        added.push(label)
+      },
+      async removeLabel(_cwd, _number, label) {
+        removed.push(label)
+      },
+    },
+    added,
+    removed,
+  }
+}
 
 const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
 const fail = (stderr: string): ExecResult => ({ exitCode: 1, stdout: '', stderr })
@@ -240,58 +239,55 @@ describe('iterations', () => {
   })
 
   test('stamps the first iteration on an amagi PR with no prior label', async () => {
-    const { exec, calls, inputs } = fake(() => undefined)
+    const { driver, added, removed } = labelDriver()
     const stamped = await stampIterationLabel({
       cwd: '/repo',
-      remote: 'origin',
       pr: pr({ labels: ['amagi'] }),
-      exec,
+      driver,
     })
 
     expect(stamped).toEqual({ taskId: 'am-1', iteration: 1 })
-    expect(calls).toContainEqual(addLabelsCall(7))
-    expect(inputs).toEqual([{ labels: ['amagi/iterations:1'] }])
+    expect(added).toEqual(['amagi/iterations:1'])
+    expect(removed).toEqual([])
   })
 
   test('stamps the next iteration and drops the stale label', async () => {
-    const { exec, calls, inputs } = fake(() => undefined)
+    const { driver, added, removed } = labelDriver()
     const stamped = await stampIterationLabel({
       cwd: '/repo',
-      remote: 'origin',
       pr: pr({ labels: ['amagi/iterations:2'] }),
-      exec,
+      driver,
     })
 
     expect(stamped).toEqual({ taskId: 'am-1', iteration: 3 })
-    expect(inputs).toEqual([{ labels: ['amagi/iterations:3'] }])
-    expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
+    expect(added).toEqual(['amagi/iterations:3'])
+    expect(removed).toEqual(['amagi/iterations:2'])
   })
 
-  test('drops the previous count even when the PR snapshot predates it', async () => {
-    const { exec, calls } = fake(() => undefined)
+  test('skips a present label and drops the previous count even when the snapshot lacks it', async () => {
+    const { driver, added, removed } = labelDriver()
     await stampIterationLabel({
       cwd: '/repo',
-      remote: 'origin',
-      pr: pr({ labels: ['amagi'] }),
+      pr: pr({ labels: ['amagi/iterations:1', 'amagi/iterations:3'] }),
       iteration: 3,
-      exec,
+      driver,
     })
 
-    expect(calls).toContainEqual(removeLabelCall(7, 'amagi/iterations:2'))
-    expect(calls).not.toContainEqual(removeLabelCall(7, 'amagi/iterations:3'))
+    expect(added).toEqual([])
+    expect(removed).toEqual(['amagi/iterations:1', 'amagi/iterations:2'])
   })
 
   test('leaves non-amagi PRs untouched', async () => {
-    const { exec, calls } = fake(() => undefined)
+    const { driver, added, removed } = labelDriver()
     const stamped = await stampIterationLabel({
       cwd: '/repo',
-      remote: 'origin',
       pr: pr({ headRefName: 'feature/foo' }),
-      exec,
+      driver,
     })
 
     expect(stamped).toBeNull()
-    expect(calls).toEqual([])
+    expect(added).toEqual([])
+    expect(removed).toEqual([])
   })
 })
 
@@ -410,56 +406,45 @@ describe('resolvePrPriorities', () => {
 
 describe('syncPrPriorityLabel', () => {
   test('removes stale P* labels and adds the current one', async () => {
-    const { exec, calls, inputs } = fake(() => undefined)
+    const { driver, added, removed } = labelDriver()
     await syncPrPriorityLabel({
       cwd: '/repo',
-      remote: 'origin',
       number: 7,
+      driver,
       labels: ['amagi', 'P1', 'P3'],
       priority: 2,
-      exec,
     })
 
-    expect(calls).toContainEqual(removeLabelCall(7, 'P1'))
-    expect(calls).toContainEqual(removeLabelCall(7, 'P3'))
-    expect(inputs).toEqual([{ labels: ['P2'] }])
+    expect(removed).toEqual(['P1', 'P3'])
+    expect(added).toEqual(['P2'])
   })
 
   test('leaves a matching label alone', async () => {
-    const { exec, calls } = fake(() => undefined)
+    const { driver, added, removed } = labelDriver()
     await syncPrPriorityLabel({
       cwd: '/repo',
-      remote: 'origin',
       number: 7,
+      driver,
       labels: ['amagi', 'P4'],
       priority: 4,
-      exec,
     })
 
-    expect(calls).toEqual([])
+    expect(added).toEqual([])
+    expect(removed).toEqual([])
   })
 
   test('removes any P* label when the bead is unlinked', async () => {
-    const { exec, calls } = fake(() => undefined)
+    const { driver, added, removed } = labelDriver()
     await syncPrPriorityLabel({
       cwd: '/repo',
-      remote: 'origin',
       number: 7,
+      driver,
       labels: ['amagi', 'P2'],
       priority: null,
-      exec,
     })
 
-    expect(calls).toEqual([removeLabelCall(7, 'P2')])
-  })
-})
-
-describe('removePrLabel', () => {
-  test('a label already gone from the PR is not an error, any other failure is', async () => {
-    const gone = fake(() => fail('gh: Label does not exist (HTTP 404)'))
-    await removePrLabel(gone.exec, '/repo', 'origin', 7, 'P2')
-    const denied = fake(() => fail('gh: Resource not accessible (HTTP 403)'))
-    await expect(removePrLabel(denied.exec, '/repo', 'origin', 7, 'P2')).rejects.toThrow(/HTTP 403/)
+    expect(added).toEqual([])
+    expect(removed).toEqual(['P2'])
   })
 })
 
@@ -473,6 +458,7 @@ describe('prepareConflictWorktree', () => {
     const wt = await prepareConflictWorktree({
       repoRoot: '/repo',
       remote: 'origin',
+      forgeKind: 'github',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -489,8 +475,8 @@ describe('prepareConflictWorktree', () => {
       'worktree',
       'add',
       '-b',
-      'amagi/pr-7-conflict',
-      '/wt/amagi-pr-7',
+      'amagi/origin-pr-7-conflict',
+      '/wt/amagi-origin-pr-7',
       'origin/amagi/am-1-do-the-thing',
     ])
     expect(calls).toContainEqual([
@@ -501,8 +487,8 @@ describe('prepareConflictWorktree', () => {
       'base-oid',
     ])
     expect(wt).toEqual({
-      path: '/wt/amagi-pr-7',
-      branch: 'amagi/pr-7-conflict',
+      path: '/wt/amagi-origin-pr-7',
+      branch: 'amagi/origin-pr-7-conflict',
       conflicted: true,
       baseOid: 'base-oid',
     })
@@ -517,6 +503,7 @@ describe('prepareConflictWorktree', () => {
     const wt = await prepareConflictWorktree({
       repoRoot: '/repo',
       remote: 'origin',
+      forgeKind: 'github',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -541,6 +528,7 @@ describe('prepareConflictWorktree', () => {
     await prepareConflictWorktree({
       repoRoot: '/repo',
       remote: 'origin',
+      forgeKind: 'github',
       repoName: 'amagi',
       worktreeRoot: '/wt',
       baseBranch: 'main',
@@ -555,7 +543,7 @@ describe('prepareConflictWorktree', () => {
 
   test('aborts a stale merge and resets a reused worktree to the PR head', async () => {
     const root = mkdtempSync(join(tmpdir(), 'amagi-wt-'))
-    const path = join(root, 'amagi-pr-7')
+    const path = join(root, 'amagi-origin-pr-7')
     mkdirSync(path, { recursive: true })
     try {
       const { exec, calls } = fake((c) => {
@@ -568,6 +556,7 @@ describe('prepareConflictWorktree', () => {
       const wt = await prepareConflictWorktree({
         repoRoot: '/repo',
         remote: 'origin',
+        forgeKind: 'github',
         repoName: 'amagi',
         worktreeRoot: root,
         baseBranch: 'main',
@@ -579,7 +568,7 @@ describe('prepareConflictWorktree', () => {
       expect(calls).toContainEqual(['git', 'reset', '--hard', 'origin/amagi/am-1-do-the-thing'])
       expect(wt).toEqual({
         path,
-        branch: 'amagi/pr-7-conflict',
+        branch: 'amagi/origin-pr-7-conflict',
         conflicted: true,
         baseOid: 'base-oid',
       })
@@ -608,6 +597,7 @@ describe('prepareConflictWorktree', () => {
       await prepareConflictWorktree({
         repoRoot: '/repo',
         remote: 'origin',
+        forgeKind: 'github',
         repoName: 'amagi',
         worktreeRoot: '/wt',
         baseBranch: 'main',
@@ -637,10 +627,11 @@ describe('pushConflictFix', () => {
   test('pushes the local branch to the PR head ref', async () => {
     const { exec, calls } = fake(() => undefined)
     await pushConflictFix({
-      cwd: '/wt/amagi-pr-7',
-      branch: 'amagi/pr-7-conflict',
+      cwd: '/wt/amagi-origin-pr-7',
+      branch: 'amagi/origin-pr-7-conflict',
       headRef: 'amagi/am-1-do-the-thing',
       remote: 'origin',
+      forgeKind: 'github',
       exec,
     })
 
@@ -648,7 +639,7 @@ describe('pushConflictFix', () => {
       'git',
       'push',
       'origin',
-      'amagi/pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
+      'amagi/origin-pr-7-conflict:refs/heads/amagi/am-1-do-the-thing',
     ])
   })
 
@@ -675,10 +666,11 @@ describe('pushConflictFix', () => {
     })
     await expect(
       pushConflictFix({
-        cwd: '/wt/amagi-pr-7',
-        branch: 'amagi/pr-7-conflict',
+        cwd: '/wt/amagi-origin-pr-7',
+        branch: 'amagi/origin-pr-7-conflict',
         headRef: 'trunk',
         remote: 'origin',
+        forgeKind: 'github',
         exec,
       }),
     ).rejects.toThrow('remote default branch trunk')
@@ -707,10 +699,11 @@ describe('pushConflictFix', () => {
     })
     await expect(
       pushConflictFix({
-        cwd: '/wt/amagi-pr-7',
-        branch: 'amagi/pr-7-conflict',
+        cwd: '/wt/amagi-origin-pr-7',
+        branch: 'amagi/origin-pr-7-conflict',
         headRef: 'trunk',
         remote: 'origin',
+        forgeKind: 'github',
         exec,
       }),
     ).rejects.toThrow('remote default branch trunk')

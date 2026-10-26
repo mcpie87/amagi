@@ -1,6 +1,6 @@
-import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { type BeadsBlocker, HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
 import { Link } from '@tanstack/react-router'
-import type { Dependency, Issue } from './issue-model.ts'
+import type { Issue } from './issue-model.ts'
 
 const DEPENDENCY_TONE = {
   red: {
@@ -24,7 +24,7 @@ function DependencyList({
   items,
   tone,
 }: {
-  items: Dependency[]
+  items: BeadsBlocker[]
   tone: keyof typeof DEPENDENCY_TONE
 }) {
   return (
@@ -55,7 +55,7 @@ export function Blockers({ issue }: { issue: Issue }) {
   const humanOnly = blocking.filter((d) => d.labels.includes(HUMAN_ONLY_LABEL))
   const tasks = blocking.filter((d) => !d.labels.includes(HUMAN_ONLY_LABEL))
 
-  const group = (title: string, items: Dependency[], tone: 'red' | 'amber') => (
+  const group = (title: string, items: BeadsBlocker[], tone: 'red' | 'amber') => (
     <div>
       <h3
         className={`mb-1 text-xs font-semibold uppercase tracking-wide ${DEPENDENCY_TONE[tone].heading}`}

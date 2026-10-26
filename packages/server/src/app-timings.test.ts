@@ -51,7 +51,8 @@ test('applies the query as a filter and rejects malformed bounds', async () => {
 test('stores posted dashboard interactions without timing the upload as a request', async () => {
   ws = testWorkspaces(['repo1'])
   const timings = new RequestTimings()
-  const app = createApp({ workspaces: ws.workspaces, timings })
+  const secret = 'operator-secret-for-tests'
+  const app = createApp({ workspaces: ws.workspaces, timings, secret })
   const interaction: Omit<InteractionSample, 'id'> = {
     at: Date.now(),
     kind: 'click',
@@ -68,7 +69,7 @@ test('stores posted dashboard interactions without timing the upload as a reques
   const post = (body: unknown) =>
     app.request('/api/diagnostics/interactions', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'X-Amagi-Secret': secret },
       body: JSON.stringify(body),
     })
   expect((await post({ interactions: [interaction] })).status).toBe(204)

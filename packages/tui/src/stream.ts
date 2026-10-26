@@ -74,7 +74,7 @@ export function subscribeToStream(
       for (const raw of parsed.events) {
         try {
           const event = JSON.parse(raw.data) as StoredEvent
-          sinceSeq = event.seq + 1
+          sinceSeq = event.seq
           onEvent(event)
         } catch {
           // a malformed event must not drop the stream

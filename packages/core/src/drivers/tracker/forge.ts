@@ -92,9 +92,16 @@ export abstract class ForgeTracker implements Tracker {
   protected abstract createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue>
 
   async ready(limit = 20): Promise<TrackerTask[]> {
-    return (await this.listOpen(limit))
-      .filter((i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'))
-      .map(toTask)
+    // Filtered here, not in the query: tea cannot exclude labels, and GitHub's search index lags
+    // label edits, so a just-claimed issue could come back. Widen the window until enough remain
+    // or every open issue has been listed.
+    for (let window = Math.max(limit, 1); ; window *= 2) {
+      const issues = await this.listOpen(window)
+      const ready = issues.filter(
+        (i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'),
+      )
+      if (ready.length >= limit || issues.length < window) return ready.slice(0, limit).map(toTask)
+    }
   }
 
   async claim(id?: string): Promise<TrackerTask | null> {
@@ -113,15 +120,16 @@ export abstract class ForgeTracker implements Tracker {
   }
 
   async createTask(input: CreateTrackerTask): Promise<TrackerTask> {
-    if (input.priority !== null || input.dependencies.length > 0 || input.parent !== null) {
-      throw new Error(
-        `${this.kind} tracker cannot create issues with priority, dependencies or parent`,
-      )
+    if (input.dependencies.length > 0) {
+      throw new Error(`${this.kind} tracker cannot create issues with dependencies`)
     }
-    const body =
-      input.acceptanceCriteria === null
-        ? input.description
-        : `${input.description}\n\n## Acceptance\n${input.acceptanceCriteria}`
+    // Forge issues have no priority or parent field, so both are kept as lines in the body.
+    const body = [
+      input.description,
+      ...(input.acceptanceCriteria === null ? [] : [`## Acceptance\n${input.acceptanceCriteria}`]),
+      ...(input.parent === null ? [] : [`Parent: #${input.parent}`]),
+      ...(input.priority === null ? [] : [`Priority: P${input.priority}`]),
+    ].join('\n\n')
     return toTask(await this.createIssue(input, body))
   }
 
@@ -324,26 +332,36 @@ export class ForgejoTracker extends ForgeTracker {
   }
 
   protected async listOpen(limit: number): Promise<ForgeIssue[]> {
-    const out = await execOk(
-      this.exec,
-      [
-        'tea',
-        'issues',
-        'list',
-        ...teaRepoArgs(this.cwd, this.remote),
-        '--state',
-        'open',
-        '--limit',
-        String(limit),
-        '--fields',
-        TEA_FIELDS,
-        '--output',
-        'json',
-      ],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
-    )
-    const parsed = JSON.parse(out)
-    return (Array.isArray(parsed) ? parsed : []).map(teaIssue)
+    // tea does not paginate and Forgejo caps a page at 50 issues by default.
+    const pageSize = Math.min(limit, 50)
+    const env = await teaEnv(this.exec, this.cwd, this.remote)
+    const issues: ForgeIssue[] = []
+    for (let page = 1; issues.length < limit; page++) {
+      const out = await execOk(
+        this.exec,
+        [
+          'tea',
+          'issues',
+          'list',
+          ...teaRepoArgs(this.cwd, this.remote),
+          '--state',
+          'open',
+          '--limit',
+          String(pageSize),
+          '--page',
+          String(page),
+          '--fields',
+          TEA_FIELDS,
+          '--output',
+          'json',
+        ],
+        { cwd: this.cwd, env },
+      )
+      const parsed = JSON.parse(out)
+      if (!Array.isArray(parsed) || parsed.length === 0) break
+      issues.push(...parsed.map(teaIssue))
+    }
+    return issues.slice(0, limit)
   }
 
   protected async getIssue(id: string): Promise<ForgeIssue | null> {

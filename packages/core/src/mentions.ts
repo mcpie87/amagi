@@ -1,16 +1,17 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import { type Config, watcherHarnessConfig } from './config.ts'
 import type { PrComment, PrDriver } from './drivers/pr.ts'
 import type { AgentOutcome, AgentProcess, AgentUsage, Tracker } from './drivers/types.ts'
-import { agentFailure } from './errors.ts'
-import type { AgentEvent } from './events.ts'
+import { agentFailure, errMsg } from './errors.ts'
+import { type AgentEvent, canTransition } from './events.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { commitFooter, modelFooter } from './footer.ts'
 import { withHeadReflogBypassCheck } from './git-bypass.ts'
+import { configuredCheckCommands, runMandatoryWorkerChecks } from './mandatory-checks.ts'
 import { cacheHome } from './paths.ts'
 import { type PrBodyMeta, taskIdFromPrBody } from './pr-body.ts'
 import { type PrInfo, prepareConflictWorktree, pushConflictFix } from './pr-check.ts'
@@ -21,6 +22,7 @@ import {
   commitMessage,
   explainMentionPrompt,
   explainMentionSystemPrompt,
+  fixChecksPrompt,
   flagPrompt,
   flagSystemPrompt,
   MAX_EXPLAIN_ANSWER_CHARS,
@@ -36,21 +38,35 @@ import { taskIdFromBranch } from './worktree.ts'
 
 export type { MentionKind } from './prompt.ts'
 
-/** Parse of the classifier's reply; only an exact known kind matches, anything else is ambiguous. */
-export function parseMentionKind(reply: string): MentionKind {
-  const kind = reply.trim().toLowerCase()
-  return MENTION_KINDS.some(({ kind: knownKind }) => knownKind === kind)
-    ? (kind as MentionKind)
-    : 'ambiguous'
+/**
+ * Parse of the classifier's comma-separated reply into kinds, deduplicated and
+ * in handler order. Each item must equal a known kind exactly; anything else is
+ * dropped. flag excludes every other kind, and ambiguous applies only when
+ * nothing else matched.
+ */
+export function parseMentionKinds(reply: string): MentionKind[] {
+  const items = new Set(reply.split(',').map((item) => item.trim().toLowerCase()))
+  const kinds = MENTION_KINDS.map(({ kind }) => kind).filter(
+    (kind) => kind !== 'ambiguous' && items.has(kind),
+  )
+  if (kinds.includes('flag')) return ['flag']
+  return kinds.length === 0 ? ['ambiguous'] : kinds
 }
 
-export function mentionsPath(repoName: string): string {
-  return join(cacheHome(), 'amagi', 'mentions', `${repoName}.json`)
+/** Handled-mention ids per registry repo key: repo names are not unique across the registry. */
+export function mentionsPath(repo: string): string {
+  return join(cacheHome(), 'amagi', 'mentions', `${repo}.json`)
 }
 
-export function readHandledMentions(path: string): Set<string> {
+/**
+ * Reads `legacyPath` (the file named after the repo directory) while `path`
+ * does not exist yet, so mentions answered before the move to repo keys stay
+ * handled. The legacy file is never removed: a same-named repo may still need it.
+ */
+export function readHandledMentions(path: string, legacyPath?: string): Set<string> {
   try {
-    return new Set(JSON.parse(readFileSync(path, 'utf8')) as string[])
+    const from = legacyPath !== undefined && !existsSync(path) ? legacyPath : path
+    return new Set(JSON.parse(readFileSync(from, 'utf8')) as string[])
   } catch {
     return new Set()
   }
@@ -106,9 +122,9 @@ export type MentionProgress = {
   tool: string | null
 }
 
-/** The classifier's choice plus its raw reply, for the watcher to record as an event. */
+/** The classifier's choices plus its raw reply, for the watcher to record as an event. */
 export type MentionClassified = {
-  kind: MentionKind
+  kinds: MentionKind[]
   reply: string
 }
 
@@ -130,8 +146,16 @@ export type RespondToMentionOptions = {
   store?: Store
   /** Called with live progress while a response is produced, for a status line. */
   onProgress?: (progress: MentionProgress) => void
-  /** Called once classification settles, with the chosen kind and the raw reply. */
+  /** Called once classification settles, with the chosen kinds and the raw reply. */
   onClassified?: (classified: MentionClassified) => void
+  /**
+   * Persisted handled-mention ids. Each finished kind of a multi-kind mention
+   * is recorded here as `<mention id>#<kind>`, so a retry after a later
+   * handler failed skips the ones that already posted or pushed.
+   */
+  handled?: Set<string>
+  /** Persists `handled`; called after each finished kind of a multi-kind mention. */
+  saveHandled?: () => void
   /** Called when an agent moves HEAD outside the expected commit operation. */
   onGitBypassed?: (entries: string[]) => void
 }
@@ -258,12 +282,13 @@ async function prWorktree(opts: RespondToMentionOptions, run: Exec, mergeMessage
   return prepareConflictWorktree({
     repoRoot: opts.root,
     remote: opts.config.forge.remote,
+    forgeKind: opts.config.forge.kind,
     repoName: opts.repoName,
     worktreeRoot: opts.config.repo.worktreeRoot,
     baseBranch: opts.config.repo.baseBranch,
     pr: opts.pr,
     persona: opts.config.repo.persona,
-    ...(mergeMessage === undefined ? {} : { mergeMessage }),
+    ...(mergeMessage === undefined ? {} : { mergeMessage, deferCommit: true }),
     exec: run,
   })
 }
@@ -289,7 +314,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
   const outPath = join(tmpdir(), `amagi-fix-pr-${opts.pr.number}-${opts.mention.id}.md`)
   try {
     p.phase('fixing in worktree')
-    const { outcome, proc } = await withHeadReflogBypassCheck(
+    const { outcome, proc, checks } = await withHeadReflogBypassCheck(
       wt.path,
       run,
       async () => {
@@ -299,32 +324,77 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
           worktree: wt.path,
           branch: wt.branch,
           baseBranch: opts.config.repo.baseBranch,
-          checks: opts.config.checks.commands,
+          checks: configuredCheckCommands(opts.config.checks),
           outPath,
           conflicted: wt.conflicted,
         }
-        const proc = startImplementHarness(
-          mk,
-          harnessConfig,
-          wt.path,
-          respondToMentionPrompt(ctx),
-          respondToMentionSystemPrompt(ctx),
-          opts.repo,
-          { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
-        )
-        return {
-          outcome: await p.agent(proc, 'fixing in worktree', {
+        let prompt = respondToMentionPrompt(ctx)
+        let checks: import('./events.ts').CheckResult[] = []
+        for (let round = 0; ; round++) {
+          const proc = startImplementHarness(
+            mk,
+            harnessConfig,
+            wt.path,
+            prompt,
+            respondToMentionSystemPrompt(ctx),
+            opts.repo,
+            { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
+          )
+          const outcome = await p.agent(proc, 'fixing in worktree', {
             role: 'implement',
             harness: harnessConfig.kind,
             source: `PR #${opts.pr.number} mention fix-pr`,
             cwd: wt.path,
-          }),
-          proc,
+          })
+          if (!outcome.ok) return { outcome, proc, checks }
+          checks = await runMandatoryWorkerChecks(
+            run,
+            wt.path,
+            opts.config.checks,
+            wt.baseOid,
+            true,
+          )
+          if (taskId !== null)
+            opts.store?.append(taskId, {
+              type: 'checks.finished',
+              ok: checks.every((result) => result.exitCode === 0),
+              results: checks,
+            })
+          if (
+            checks.every((result) => result.exitCode === 0) ||
+            round >= opts.config.loop.maxCheckRounds
+          ) {
+            return { outcome, proc, checks }
+          }
+          prompt = `${fixChecksPrompt(checks)}\n\n${respondToMentionPrompt(ctx)}`
         }
       },
       opts.onGitBypassed,
       true,
     )
+    if (!checks.every((result) => result.exitCode === 0)) {
+      const detail = checks
+        .filter((result) => result.exitCode !== 0)
+        .map((result) => `$ ${result.command}\nexit ${result.exitCode}\n${result.output.trim()}`)
+        .join('\n')
+      const taskRow = taskId === null ? null : (opts.store?.task(taskId) ?? null)
+      if (
+        taskId !== null &&
+        taskRow !== null &&
+        opts.store !== undefined &&
+        canTransition(taskRow.state, 'needs_human')
+      ) {
+        opts.store.append(taskId, {
+          type: 'task.state',
+          from: taskRow.state,
+          to: 'needs_human',
+          reason: `PR #${opts.pr.number} mention fix failed mandatory checks:\n${detail}${outcome.ok ? '' : `\nRepair agent failed: ${agentFailure(outcome)}`}`,
+        })
+      }
+      throw new Error(
+        `mandatory checks still fail after repair attempts:\n${detail}${outcome.ok ? '' : `\nRepair agent failed: ${agentFailure(outcome)}`}`,
+      )
+    }
     if (!outcome.ok) {
       throw new Error(`agent failed: ${agentFailure(outcome)}`)
     }
@@ -337,6 +407,7 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
       branch: wt.branch,
       headRef: opts.pr.headRefName,
       remote: opts.config.forge.remote,
+      forgeKind: opts.config.forge.kind,
       exec: run,
     })
     const { kind, model, effort } = watcherHarnessConfig(opts.config, 'mention')
@@ -438,6 +509,7 @@ async function respondToExplain(
           }),
           explainMentionSystemPrompt(),
           opts.repo,
+          { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
         )
         return {
           outcome: await p.agent(proc, 'explaining', {
@@ -492,19 +564,29 @@ async function askClarification(opts: RespondToMentionOptions, p: Progress): Pro
 }
 
 /** Lets the LLM decide the response path, rather than assuming a fixed one. */
-async function classifyMention(opts: RespondToMentionOptions, p: Progress): Promise<MentionKind> {
+async function classifyMention(opts: RespondToMentionOptions, p: Progress): Promise<MentionKind[]> {
   const mk = opts.makeHarnessFn ?? makeHarness
   const harnessConfig = watcherHarnessConfig(opts.config, 'mention')
-  // A throwaway cwd: classification needs no repo context and must not touch one.
   p.phase('classifying')
-  const proc = startImplementHarness(
-    mk,
-    harnessConfig,
-    tmpdir(),
-    classifyMentionPrompt({ pr: opts.pr, mention: opts.mention }),
-    classifyMentionSystemPrompt(),
-    opts.repo,
-  )
+  // Context only sharpens routing; a forge hiccup must not block every mention on the PR.
+  const changes = await opts.driver.getPrChanges(opts.root, opts.pr.number).catch((err) => {
+    console.warn(`mention classification #${opts.pr.number}: no PR changes: ${errMsg(err)}`)
+    return { baseSha: null, headSha: opts.pr.headRefOid, changedFiles: [], fileCount: 0 }
+  })
+  // A throwaway cwd and no tools: classification routes on forge metadata alone.
+  const proc = mk(harnessConfig).start({
+    cwd: tmpdir(),
+    prompt: classifyMentionPrompt({ pr: opts.pr, changes, mention: opts.mention }),
+    systemPrompt: classifyMentionSystemPrompt(),
+    model: harnessConfig.model,
+    effort: harnessConfig.effort,
+    ...(harnessConfig.seat === undefined ? {} : { seat: harnessConfig.seat }),
+    permissions: 'read-only',
+    allowedTools: [],
+    ...(opts.repo === undefined
+      ? {}
+      : { seatActivity: { repo: opts.repo, watcher: 'mention-watcher' } }),
+  })
   const outcome = await p.agent(proc, 'classifying', {
     role: 'triage',
     harness: harnessConfig.kind,
@@ -515,9 +597,9 @@ async function classifyMention(opts: RespondToMentionOptions, p: Progress): Prom
     throw new Error(`classifier failed: ${agentFailure(outcome)}`)
   }
   const reply = outcome.summary ?? ''
-  const kind = parseMentionKind(reply)
-  opts.onClassified?.({ kind, reply })
-  return kind
+  const kinds = parseMentionKinds(reply)
+  opts.onClassified?.({ kinds, reply })
+  return kinds
 }
 
 function quickTaskPrompt(
@@ -630,6 +712,7 @@ async function respondToFlag(opts: RespondToMentionOptions, run: Exec, p: Progre
           }),
           flagSystemPrompt(),
           opts.repo,
+          { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
         )
         return p.agent(proc, 'judging', {
           role: 'triage',
@@ -666,28 +749,54 @@ async function respondToFlag(opts: RespondToMentionOptions, run: Exec, p: Progre
   await opts.tracker.comment(taskId, reason)
 }
 
-/** Responds to a single mention. Throws when the response fails so the caller can retry. */
-export async function respondToMention(opts: RespondToMentionOptions): Promise<MentionKind> {
-  const run = opts.exec ?? defaultExec
-  const p = new Progress(opts.onProgress, opts.store)
-  const kind = await classifyMention(opts, p)
+async function runMentionKind(
+  kind: MentionKind,
+  opts: RespondToMentionOptions,
+  run: Exec,
+  p: Progress,
+): Promise<void> {
+  const locked = (fn: () => Promise<void>) =>
+    withPrWriteLock(opts.root, opts.config.forge.remote, opts.pr.headRefName, fn)
   switch (kind) {
     case 'fix-pr':
-      await withPrWriteLock(opts.root, opts.config.forge.remote, opts.pr.headRefName, () =>
-        respondToFix(opts, run, p),
-      )
-      return 'fix-pr'
+      return locked(() => respondToFix(opts, run, p))
     case 'explain':
-      await respondToExplain(opts, run, p)
-      return 'explain'
+      return locked(() => respondToExplain(opts, run, p))
     case 'flag':
-      await respondToFlag(opts, run, p)
-      return 'flag'
+      return locked(() => respondToFlag(opts, run, p))
     case 'add-a-task':
-      await respondToAddTask(opts, p)
-      return 'add-a-task'
+      return respondToAddTask(opts, p)
     case 'ambiguous':
-      await askClarification(opts, p)
-      return 'ambiguous'
+      return askClarification(opts, p)
   }
+}
+
+/**
+ * Responds to a single mention, running a handler for every kind it was
+ * classified as, in MENTION_KINDS order. Throws on the first failed handler
+ * so the caller can retry. A multi-kind retry reuses the kinds recorded on
+ * the first attempt instead of reclassifying, and skips the finished ones.
+ */
+export async function respondToMention(opts: RespondToMentionOptions): Promise<MentionKind[]> {
+  const run = opts.exec ?? defaultExec
+  const p = new Progress(opts.onProgress, opts.store)
+  const kindsKey = `${opts.mention.id}#kinds=`
+  const recorded = [...(opts.handled ?? [])].find((id) => id.startsWith(kindsKey))
+  const kinds =
+    recorded === undefined
+      ? await classifyMention(opts, p)
+      : parseMentionKinds(recorded.slice(kindsKey.length))
+  const record = (entry: string): void => {
+    if (kinds.length < 2 || opts.handled === undefined) return
+    opts.handled.add(entry)
+    opts.saveHandled?.()
+  }
+  if (recorded === undefined) record(`${kindsKey}${kinds.join(',')}`)
+  for (const kind of kinds) {
+    const done = `${opts.mention.id}#${kind}`
+    if (opts.handled?.has(done)) continue
+    await runMentionKind(kind, opts, run, p)
+    record(done)
+  }
+  return kinds
 }

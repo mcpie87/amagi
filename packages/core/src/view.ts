@@ -65,14 +65,22 @@ export function compactReplayEvent(event: StoredEvent): StoredEvent | null {
   }
 }
 
+/** A mention.classified event stored before multi-kind routing, with its one `kind`, as a `kinds` list. */
+function withMentionKinds(event: StoredEvent): StoredEvent {
+  if (event.type !== 'mention.classified' || 'kinds' in event) return event
+  const { kind, ...rest } = event as StoredEvent & { kind: string }
+  return { ...rest, kinds: [kind] } as StoredEvent
+}
+
 /**
  * Folds a batch of events in one pass: the log and each touched task's slice
  * are copied once per batch rather than once per event, which keeps a full
  * replay linear.
  */
-export function reduceBatch(state: DashboardState, batch: readonly StoredEvent[]): DashboardState {
-  const last = batch.at(-1)
+export function reduceBatch(state: DashboardState, stored: readonly StoredEvent[]): DashboardState {
+  const last = stored.at(-1)
   if (last === undefined) return state
+  const batch = stored.map(withMentionKinds)
   const projection = projectAll(state, batch)
   const byTask = { ...state.byTask }
   const grown = new Set<string>()

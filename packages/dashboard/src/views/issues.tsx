@@ -488,27 +488,44 @@ export function IssuesView() {
       void navigate({ to: '/issues', search: {}, replace: true })
     }
     setError(null)
+    // A slow answer for the previous repo must not land after the switch.
+    let active = true
     fetch(`${apiBase}/api/repos/${selected}/issues`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
         return res.json() as Promise<Issue[]>
       })
-      .then(setIssues)
-      .catch((err: unknown) => setError(errMsg(err)))
+      .then((loaded) => {
+        if (active) setIssues(loaded)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(errMsg(err))
+      })
+    return () => {
+      active = false
+    }
   }, [selected, refresh, navigate])
 
   useEffect(() => {
     if (selected === null) return
     void refresh
+    let active = true
     fetch(`${apiBase}/api/repos/${selected}/epics/close-eligible`)
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
         return res.json() as Promise<EligibleEpic[]>
       })
-      .then(setEligibleEpics)
+      .then((epics) => {
+        if (active) setEligibleEpics(epics)
+      })
       // An unavailable or unreachable tracker means no epic surface, not a
       // broken tasks view: the issue fetch above reports connectivity.
-      .catch(() => setEligibleEpics([]))
+      .catch(() => {
+        if (active) setEligibleEpics([])
+      })
+    return () => {
+      active = false
+    }
   }, [selected, refresh])
 
   const saved = () => {

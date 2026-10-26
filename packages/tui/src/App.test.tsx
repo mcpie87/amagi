@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import type { StoredEvent, TrackerTask } from '@amagi/core'
+import type { ReadyTask, StoredEvent } from '@amagi/core'
 import { render } from 'ink-testing-library'
 import { createElement } from 'react'
 import { App } from './App.tsx'
@@ -75,7 +75,7 @@ const RUNNER = {
   ],
 }
 
-const READY: TrackerTask[] = [
+const READY: ReadyTask[] = [
   {
     id: 'am-9',
     title: 'Claimable chore',
@@ -84,6 +84,7 @@ const READY: TrackerTask[] = [
     priority: 2,
     type: 'task',
     url: null,
+    claimSkip: { state: 'waiting', reason: 'every implement seat is busy' },
   },
 ]
 
@@ -160,6 +161,7 @@ describe('App', () => {
       expect(frame).toContain('mention-watcher')
       expect(frame).toContain('Fix the thing')
       expect(frame).toContain('Claimable chore')
+      expect(frame).toContain('waiting: every implement seat is busy')
       expect(frame).toContain('mergeable')
       expect(frame).toContain('Stuck task')
       expect(frame).toContain('needs_human')
@@ -253,11 +255,11 @@ describe('App', () => {
     }
   })
 
-  test('answering an option posts it with the task token', async () => {
+  test('answering an option posts it with the operator secret', async () => {
     const posted: { url: string; body: unknown }[] = []
     globalThis.fetch = streamMock(EVENTS, (href, init) => {
-      if (href.endsWith('/api/repos/repo1/tasks/am-1')) {
-        return new Response(JSON.stringify({ token: 'secret' }), { status: 200 })
+      if (href.endsWith('/api/session')) {
+        return new Response(JSON.stringify({ secret: 'secret' }), { status: 200 })
       }
       if (href.includes('/answer')) {
         posted.push({ url: href, body: JSON.parse(init?.body as string) })
@@ -280,6 +282,28 @@ describe('App', () => {
         'http://amagi.test/api/repos/repo1/tasks/am-1/questions/q-1/answer',
       )
       expect(posted[0]?.body).toEqual({ answer: 'npm', via: 'cli' })
+    } finally {
+      instance.unmount()
+    }
+  })
+
+  test('an answer that cannot reach the server shows the error and keeps the TUI up', async () => {
+    globalThis.fetch = streamMock(EVENTS, (href) => {
+      if (href.endsWith('/api/session')) throw new TypeError('Unable to connect')
+      throw new Error(`unexpected fetch ${href}`)
+    })
+
+    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    try {
+      await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
+      instance.stdin.write('\t')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('Fix the thing'))
+      instance.stdin.write('\r')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('Which registry?'))
+
+      instance.stdin.write('1')
+      await waitFor(() => (instance.lastFrame() ?? '').includes('Unable to connect'))
+      expect(instance.lastFrame()).toContain('Which registry?')
     } finally {
       instance.unmount()
     }

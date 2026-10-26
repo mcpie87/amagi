@@ -1,5 +1,5 @@
-import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { TaskState } from '@amagi/core/events'
+import type { ReadyTask } from '@amagi/core/run-service'
 import { type ProjectedTask, reviewBadge } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { Badge, mergeLabel } from '../badges.tsx'
@@ -76,7 +76,7 @@ function ReviewLine({ task }: { task: ProjectedTask }) {
 }
 
 /** One waiting task from the tracker's FCFS ready queue. */
-function ReadyCard({ task }: { task: TrackerTask }) {
+function ReadyCard({ task }: { task: ReadyTask }) {
   return (
     <div className="rounded border border-line-strong bg-sunken px-3 py-2">
       <span className="block text-xs text-fg-faint">{task.id}</span>
@@ -86,6 +86,11 @@ function ReadyCard({ task }: { task: TrackerTask }) {
           .filter(Boolean)
           .join(' · ') || '\u00a0'}
       </span>
+      {task.claimSkip !== undefined && (
+        <span className="mt-1 block break-words text-xs text-fg-muted">
+          {task.claimSkip.state}: {task.claimSkip.reason}
+        </span>
+      )}
     </div>
   )
 }

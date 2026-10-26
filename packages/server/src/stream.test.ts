@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import type { Store, StoredEvent } from '@amagi/core'
+import { Store, type StoredEvent } from '@amagi/core'
 import { type AppType, createApp } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
 let ws: TestWorkspaces
-let store: import('@amagi/core').Store
+let store: Store
 let app: AppType
 
 const claim = (id: string) =>
@@ -218,6 +218,75 @@ describe('GET /api/repos/repo1/stream', () => {
     const sentinel = noise(601)
     const [next] = await stream.take(1)
     expect(next?.event.seq).toBe(sentinel.seq)
+
+    await stream.close()
+  })
+
+  /** Another process sharing the database: its appends never reach this store's subscribers. */
+  const otherProcess = () => new Store(store.db)
+
+  test('slots events another process appended in before the next live one', async () => {
+    const stream = sse(await app.request('/api/repos/repo1/stream?compact=1'))
+    const [marker] = await stream.take(1)
+    expect(marker?.name).toBe('replayed')
+
+    const claimed = otherProcess().append('bd-1', {
+      type: 'task.claimed',
+      title: 'work on bd-1',
+      tracker: 'beads',
+    })
+    const live = store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+
+    const seqs = (await stream.take(2)).map((f) => f.event.seq)
+    expect(seqs).toEqual([claimed.seq, live.seq])
+
+    await stream.close()
+  })
+
+  test('a compact connect still delivers what another process appended as the replay ended', async () => {
+    claim('bd-1')
+    // Lands after the last backlog page was read, below the replayed mark.
+    const read = store.events.bind(store)
+    let late: StoredEvent | undefined
+    store.events = ((opts: Parameters<Store['events']>[0]) => {
+      const page = read(opts)
+      late ??= otherProcess().append('bd-1', {
+        type: 'task.state',
+        from: 'claimed',
+        to: 'worktree_ready',
+      })
+      return page
+    }) as Store['events']
+
+    const stream = sse(await app.request('/api/repos/repo1/stream?compact=1'))
+    const [claimed, marker] = await stream.take(2)
+    if (late === undefined) throw new Error('the other process never appended')
+    expect(claimed?.event.type).toBe('task.claimed')
+    expect(marker?.event as unknown).toBe(late.seq)
+
+    const live = store.append('bd-1', {
+      type: 'task.state',
+      from: 'worktree_ready',
+      to: 'implementing',
+    })
+    const seqs = (await stream.take(2)).map((f) => f.event.seq)
+    expect(seqs).toEqual([late.seq, live.seq])
+
+    await stream.close()
+  })
+
+  test("delivers another process's events while the server itself is quiet", async () => {
+    claim('bd-1')
+    const stream = sse(await app.request('/api/repos/repo1/stream?taskId=bd-1'))
+    await stream.take(1)
+
+    const state = otherProcess().append('bd-1', {
+      type: 'task.state',
+      from: 'claimed',
+      to: 'worktree_ready',
+    })
+    const [pushed] = await stream.take(1)
+    expect(pushed?.event.seq).toBe(state.seq)
 
     await stream.close()
   })

@@ -151,6 +151,7 @@ describe('state machine', () => {
     expect(canTransition('needs_human', 'pr_merge_conflict')).toBe(true)
     expect(canTransition('pr_merge_conflict', 'pr_open')).toBe(true)
     expect(canTransition('pr_merge_conflict', 'pr_conflict_fixing')).toBe(true)
+    expect(canTransition('pr_open', 'pr_conflict_fixing')).toBe(true)
     expect(canTransition('pr_conflict_fixing', 'pr_merge_conflict')).toBe(true)
     expect(canTransition('pr_conflict_fixing', 'pr_open')).toBe(true)
     expect(canTransition('pr_merge_conflict', 'done')).toBe(true)

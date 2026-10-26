@@ -159,7 +159,7 @@ export class ClaudeTranslator {
 }
 
 export type ClaudeHarnessOptions = {
-  bin?: string | undefined
+  bin?: string | string[] | undefined
   seat?: string
 }
 
@@ -167,12 +167,12 @@ export class ClaudeHarness implements Harness {
   readonly kind = 'claude'
   // --append-system-prompt applies per invocation; the session file does not store it.
   readonly replacesSystemPromptOnResume = true
-  private readonly bin: string
+  private readonly bin: string[]
   private readonly seat: string | undefined
   private readonly defaultEffort: string | null
 
   constructor(opts: ClaudeHarnessOptions = {}) {
-    this.bin = opts.bin ?? 'claude'
+    this.bin = [opts.bin ?? 'claude'].flat()
     this.seat = opts.seat
     // claude does not report effort over the stream, so the harness reads the
     // same settings file claude reads to know what effort is in effect.
@@ -197,7 +197,7 @@ export class ClaudeHarness implements Harness {
     // claude has no `model list` subcommand; `-p "/model"` runs the slash
     // command non-interactively (a free local_command, no API call) and its
     // reply names the available models.
-    const cmd = [this.bin, '-p', '/model']
+    const cmd = [...this.bin, '-p', '/model']
     const result = await exec(cmd)
     if (result.exitCode !== 0) throw new CommandError(cmd, result)
     return parseClaudeModelHint(result.stdout)
@@ -212,7 +212,9 @@ export class ClaudeHarness implements Harness {
   }
 
   argv(opts: AgentStartOptions, sessionId: string | null): string[] {
-    const argv = [this.bin, '-p', opts.prompt, '--output-format', 'stream-json', '--verbose']
+    // The prompt goes over stdin: one argv element is capped at MAX_ARG_STRLEN
+    // (~128 KB), which a mention prompt with a PR diff can exceed.
+    const argv = [...this.bin, '-p', '--output-format', 'stream-json', '--verbose']
 
     if (sessionId !== null) argv.push('--resume', sessionId)
     if (opts.model) argv.push('--model', opts.model)
@@ -254,6 +256,7 @@ export class ClaudeHarness implements Harness {
       env: opts.effort ? { CLAUDE_EFFORT: opts.effort } : {},
       model: () => translator.model,
       effort: opts.effort ?? this.defaultEffort,
+      stdin: opts.prompt,
     })
   }
 }

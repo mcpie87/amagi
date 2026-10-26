@@ -1,4 +1,4 @@
-import { exec as defaultExec, type Exec, execOk } from '../../exec.ts'
+import { CommandError, exec as defaultExec, type Exec, execOk } from '../../exec.ts'
 import type {
   CreateTrackerTask,
   GateRef,
@@ -176,6 +176,10 @@ export class BeadsTracker implements Tracker {
   }
 
   async ready(limit = 20): Promise<TrackerTask[]> {
+    return (await this.readyRows(limit)).map(toTask)
+  }
+
+  private async readyRows(limit: number): Promise<BdIssue[]> {
     const out = await this.bd([
       'ready',
       '--json',
@@ -191,7 +195,7 @@ export class BeadsTracker implements Tracker {
       '--exclude-label',
       PROPOSED_LABEL,
     ])
-    return parseIssues(out).map(toTask)
+    return parseIssues(out)
   }
 
   async list(limit = 200): Promise<BeadsIssue[]> {
@@ -248,7 +252,25 @@ export class BeadsTracker implements Tracker {
     if (id !== undefined) {
       const issue = await this.getIssue(id)
       if (issue === null || issue.labels.includes(PROPOSED_LABEL)) return null
-      await this.bd(['update', id, '--status', 'in_progress'])
+      // bd --claim refuses an in_progress issue with no assignee (a claim made
+      // by status alone, or a crashed one), so take it by compare-and-set on
+      // the empty assignee; exit 13 means another actor got there first.
+      const orphanedBy =
+        issue.status === 'in_progress' && issue.assignee === null ? this.actor : undefined
+      const cmd = this.args(
+        orphanedBy !== undefined
+          ? ['update', id, '--assignee', orphanedBy, '--if-assignee', '']
+          : ['update', id, '--claim'],
+      )
+      const result = await this.exec(cmd, { cwd: this.cwd })
+      if (result.exitCode !== 0) {
+        const contested =
+          orphanedBy !== undefined
+            ? result.exitCode === 13
+            : result.stderr.includes('already claimed')
+        if (contested) return null
+        throw new CommandError(cmd, result)
+      }
       return this.get(id)
     }
     const out = await this.bd([
@@ -270,11 +292,13 @@ export class BeadsTracker implements Tracker {
     if (claimed !== undefined) return toTask(claimed)
     // bd 1.3.0's ready --claim skips open issues already assigned to the
     // claiming actor, even though `bd ready` lists them, so a queue of such
-    // issues would report nothing ready forever. Claim the first by id.
-    const ready = await this.ready(1)
-    const first = ready[0]
-    if (first === undefined) return null
-    return this.claim(first.id)
+    // issues would report nothing ready forever. Claim the first claimable by id.
+    for (const row of await this.readyRows(20)) {
+      if (row.assignee && row.assignee !== this.actor) continue
+      const claimedById = await this.claim(row.id)
+      if (claimedById !== null) return claimedById
+    }
+    return null
   }
 
   async get(id: string): Promise<TrackerTask | null> {

@@ -23,6 +23,7 @@ import {
   parseThemeImport,
   THEME_COLOR_ROLES,
 } from '../theme-colors.ts'
+import { ConfigSettings } from './config-settings.tsx'
 import { FleetWorkersSettings } from './fleet.tsx'
 import { ProfilesSettings } from './profiles-settings.tsx'
 import {
@@ -326,7 +327,7 @@ export function SettingsView() {
   const { repos, refreshRepos, selected } = useDashboard()
   const { repo: linkedRepo } = useSearch({ from: settingsRoute.id })
   const [activeTab, setActiveTab] = useState<
-    'general' | 'appearance' | 'profiles' | 'workers' | 'repositories'
+    'general' | 'configuration' | 'appearance' | 'profiles' | 'workers' | 'repositories'
   >(linkedRepo === undefined ? 'general' : 'repositories')
   const [selectedRepo, setSelectedRepo] = useState<string | null>(linkedRepo ?? null)
   useEffect(() => {
@@ -335,6 +336,7 @@ export function SettingsView() {
     setActiveTab('repositories')
   }, [linkedRepo])
   const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [autoRebase, setAutoRebase] = useState(false)
   const [rebaseBusy, setRebaseBusy] = useState(false)
   const [rebaseResult, setRebaseResult] = useState<string | null>(null)
@@ -358,36 +360,41 @@ export function SettingsView() {
     if (selected === null) return
     let active = true
     setLoaded(false)
+    setLoadError(null)
     setNtfyError(null)
     setNtfySaved(false)
     setRebaseResult(null)
     setDesktopResult(null)
     setNtfyTestResult(null)
     fetch(`${apiBase}/api/repos/${selected}/settings`)
-      .then((res) =>
-        res.ok
-          ? (res.json() as Promise<{
-              autoRebase: boolean
-              staleMaxParallel: boolean
-              ntfyTopic: string | null
-              ntfyServer: string
-              desktopFailureAlerts: boolean
-            }>)
-          : null,
-      )
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { error?: string } | null
+          throw new Error(body?.error ?? `HTTP ${res.status}`)
+        }
+        return res.json() as Promise<{
+          autoRebase: boolean
+          staleMaxParallel: boolean
+          ntfyTopic: string | null
+          ntfyServer: string
+          desktopFailureAlerts: boolean
+        }>
+      })
       .then((body) => {
         if (!active) return
-        setAutoRebase(body?.autoRebase ?? false)
+        setAutoRebase(body.autoRebase)
         setLoaded(true)
-        setStaleMaxParallel(body?.staleMaxParallel ?? false)
-        setNtfyTopic(body?.ntfyTopic ?? '')
-        setNtfyServer(body?.ntfyServer ?? 'https://ntfy.sh')
-        setSavedNtfyTopic(body?.ntfyTopic ?? '')
-        setSavedNtfyServer(body?.ntfyServer ?? 'https://ntfy.sh')
-        setDesktopFailureAlerts(body?.desktopFailureAlerts ?? false)
+        setStaleMaxParallel(body.staleMaxParallel)
+        setNtfyTopic(body.ntfyTopic ?? '')
+        setNtfyServer(body.ntfyServer)
+        setSavedNtfyTopic(body.ntfyTopic ?? '')
+        setSavedNtfyServer(body.ntfyServer)
+        setDesktopFailureAlerts(body.desktopFailureAlerts)
       })
-      .catch(() => {
-        if (active) setLoaded(true)
+      // Defaults rendered as editable controls would read as the saved settings.
+      .catch((err: unknown) => {
+        if (active)
+          setLoadError(err instanceof Error ? err.message : 'could not reach the amagi server')
       })
     return () => {
       active = false
@@ -479,6 +486,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General'],
+            ['configuration', 'Configuration'],
             ['appearance', 'Appearance'],
             ['profiles', 'Profiles'],
             ['workers', 'Workers'],
@@ -504,6 +512,18 @@ export function SettingsView() {
         ))}
       </div>
       <div
+        id="settings-panel-configuration"
+        role="tabpanel"
+        aria-labelledby="settings-tab-configuration"
+        hidden={activeTab !== 'configuration'}
+      >
+        {selected === null ? (
+          <p className="mt-6 text-fg-faint">no repository selected</p>
+        ) : (
+          activeTab === 'configuration' && <ConfigSettings repo={selected} />
+        )}
+      </div>
+      <div
         id="settings-panel-appearance"
         role="tabpanel"
         aria-labelledby="settings-tab-appearance"
@@ -517,6 +537,11 @@ export function SettingsView() {
         aria-labelledby="settings-tab-general"
         hidden={activeTab !== 'general'}
       >
+        {loadError !== null && (
+          <p role="alert" className="mt-6 text-sm text-red-ink">
+            Could not load settings for {selected}: {loadError}
+          </p>
+        )}
         {selected !== null && loaded && (
           <div className="mt-6 rounded-lg border border-line bg-surface p-4">
             <h2 className="mb-1 text-sm text-fg-muted">Automatic rebasing</h2>

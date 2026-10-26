@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { stateHome } from './paths.ts'
@@ -61,8 +62,8 @@ function isLiveRun(e: unknown): e is LiveRun {
 function writeLiveRuns(path: string, runs: LiveRun[]): void {
   mkdirSync(dirname(path), { recursive: true })
   // Temp file + rename so a concurrent reader never sees a half-written file.
-  const tmp = `${path}.tmp`
-  writeFileSync(tmp, JSON.stringify(runs))
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
+  writeFileSync(tmp, JSON.stringify(runs), { flag: 'wx' })
   renameSync(tmp, path)
 }
 

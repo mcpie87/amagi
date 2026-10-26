@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -15,6 +15,7 @@ import {
   type PrInfo,
   type PrState,
   type PullRequest,
+  prForgeRouter,
   Store,
   type Tracker,
 } from '@amagi/core'
@@ -99,6 +100,9 @@ class FakePr implements PrDriver {
   }
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     return this.diff
+  }
+  async getPrChanges() {
+    return { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 }
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -188,18 +192,23 @@ function fakeHarness(onStart: (opts: Parameters<Harness['start']>[0]) => void): 
 let cacheDir: string
 const watchers: ReturnType<typeof startPrConflictWatcher>[] = []
 
+const TOKEN_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN'] as const
+const savedState = process.env.XDG_STATE_HOME
+
 beforeEach(() => {
-  delete process.env.GH_TOKEN
-  delete process.env.GITHUB_TOKEN
+  for (const name of TOKEN_ENV) delete process.env[name]
   cacheDir = mkdtempSync(join(tmpdir(), 'amagi-conflict-watch-'))
   process.env.XDG_CACHE_HOME = cacheDir
+  // Keeps forge tokens and live runs away from the operator's real state dir.
+  process.env.XDG_STATE_HOME = cacheDir
 })
 
-afterEach(() => {
-  for (const w of watchers.splice(0)) w.stop()
-  delete process.env.GH_TOKEN
-  delete process.env.GITHUB_TOKEN
+afterEach(async () => {
+  await Promise.all(watchers.splice(0).map((w) => w.stop()))
+  for (const name of TOKEN_ENV) delete process.env[name]
   delete process.env.XDG_CACHE_HOME
+  if (savedState === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = savedState
   rmSync(cacheDir, { recursive: true, force: true })
 })
 
@@ -226,7 +235,7 @@ const start = (
 }
 
 const stateFile = (): Record<string, { headOid: string; baseOid?: string }> =>
-  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'demo.json'), 'utf8') as string)
+  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'conflicts', 'amagi.json'), 'utf8') as string)
 
 const counter = (w: ReturnType<typeof startPrConflictWatcher>, label: string): number =>
   w.activity().counters.find((c) => c.label === label)?.value ?? 0
@@ -367,6 +376,36 @@ test('a queued PR bypasses the unchanged conflict cache and is recorded', async 
   ).toBe(true)
 })
 
+test('a queued PR survives a failed forge scan and runs on the next tick', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  let started = 0
+  const listOpenPrs = driver.listOpenPrs.bind(driver)
+  let failList = false
+  driver.listOpenPrs = async (cwd) => {
+    if (failList) {
+      failList = false
+      throw new Error('forge down')
+    }
+    return listOpenPrs(cwd)
+  }
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  failList = true
+  w.queue(7)
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  w.queue(7)
+  await Bun.sleep(60)
+  expect(started).toBe(2)
+})
+
 test('a queued PR gets one dispatch after reaching the automatic iteration limit', async () => {
   const store = new Store(openDatabase(':memory:'))
   const driver = new FakePr()
@@ -492,10 +531,64 @@ test('a manually queued conflict stays fixing until the resolution attempt finis
   releaseResolution?.()
   await Bun.sleep(100)
 
-  expect(store.task('am-1')?.state).toBe('pr_merge_conflict')
+  expect(store.task('am-1')?.state).toBe('pr_open')
+})
+
+test('a forced run on a clean PR goes through fixing and a failed attempt returns it to pr_open', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append('am-1', { type: 'task.state', from: null, to })
+  }
+  store.append('am-1', {
+    type: 'pr.created',
+    url: 'https://github.com/owner/repo/pull/7',
+    number: 7,
+  })
+  const driver = new FakePr()
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  let started = 0
+  const watcher = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    store,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(50)
+  expect(started).toBe(0)
+
+  driver.mergeStatus = 'conflicted'
+  watcher.queue(7, 'https://github.com/owner/repo/pull/7')
+  await Bun.sleep(100)
+
+  expect(started).toBe(1)
+  expect(
+    store
+      .events()
+      .some((event) => event.type === 'task.state' && event.to === 'pr_conflict_fixing'),
+  ).toBe(true)
+  expect(store.task('am-1')?.state).toBe('pr_open')
+})
+
+test('a PR stays pending from queue until its resolution returns', async () => {
+  const driver = new FakePr()
+  driver.prs = [pr({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  let started = 0
+  const watcher = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver,
+    intervalMs: 60_000,
+  })
+  await Bun.sleep(50)
+
+  expect(watcher.queue(7)).toBe(true)
+  expect(watcher.queue(7)).toBe(false)
+  await Bun.sleep(100)
+
+  expect(started).toBe(1)
+  expect(watcher.queue(7)).toBe(true)
 })
 
 test('a task PR left on the previously configured forge is scanned and resolved there', async () => {
+  process.env.GH_TOKEN = 'gh-token'
   const store = new Store(openDatabase(':memory:'))
   store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
   for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
@@ -529,6 +622,7 @@ test('a task PR left on the previously configured forge is scanned and resolved 
 })
 
 test('GitLab task conflicts are resolved even when the selected forge scan fails', async () => {
+  process.env.GITLAB_TOKEN = 'gl-token'
   const store = new Store(openDatabase(':memory:'))
   store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
   for (const to of [
@@ -579,6 +673,7 @@ test('GitLab task conflicts are resolved even when the selected forge scan fails
 })
 
 test('UNKNOWN status refresh cycles independently on every task forge', async () => {
+  process.env.GH_TOKEN = 'gh-token'
   const store = new Store(openDatabase(':memory:'))
   store.append('am-1', { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
   for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
@@ -608,6 +703,138 @@ test('UNKNOWN status refresh cycles independently on every task forge', async ()
   for (const driver of [primary, gitlab]) {
     expect([...new Set(driver.mergeStatusCalls)].sort((a, b) => a - b)).toEqual([7, 8, 9, 10])
   }
+})
+
+const prTaskOn = (store: Store, id: string, url: string, number: number): void => {
+  store.append(id, { type: 'task.claimed', title: 'pr work', tracker: 'beads' })
+  for (const to of ['worktree_ready', 'implementing', 'checks', 'committed', 'pr_open'] as const) {
+    store.append(id, { type: 'task.state', from: null, to })
+  }
+  store.append(id, { type: 'pr.created', url, number })
+}
+
+const forgeRemotes = [
+  { name: 'origin', url: 'https://github.com/owner/repo.git' },
+  { name: 'gitlab', url: 'https://gitlab.com/owner/repo.git' },
+]
+
+test('one tick resolves conflicting PRs on two forges through their own remote and token', async () => {
+  process.env.GH_TOKEN = 'gh-token'
+  process.env.GITLAB_TOKEN = 'gl-token'
+  const store = new Store(openDatabase(':memory:'))
+  const githubUrl = 'https://github.com/owner/repo/pull/7'
+  const gitlabUrl = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  prTaskOn(store, 'am-1', githubUrl, 7)
+  prTaskOn(store, 'am-2', gitlabUrl, 7)
+  const primary = new FakePr()
+  primary.prs = [pr({ url: githubUrl })]
+  const gitlab = new FakePr()
+  gitlab.prs = [pr({ url: gitlabUrl, headRefName: 'amagi/am-2-other-thing' })]
+  const cfg = config()
+  const base = fakeExec()
+  const calls: { cmd: readonly string[]; env: Record<string, string> | undefined }[] = []
+  const exec: Exec = async (cmd, opts) => {
+    calls.push({ cmd, env: opts?.env })
+    const remote = forgeRemotes.find((r) => r.name === cmd.at(-1))
+    if (cmd.includes('get-url') && remote !== undefined) {
+      return { exitCode: 0, stdout: `${remote.url}\n`, stderr: '' }
+    }
+    return base(cmd, opts)
+  }
+  let started = 0
+  start(exec, () => fakeHarness(() => started++), {
+    driver: primary,
+    store,
+    config: cfg,
+    forgeFor: prForgeRouter(
+      '/repo',
+      cfg,
+      primary,
+      () => gitlab,
+      () => forgeRemotes,
+    ),
+  })
+  await Bun.sleep(80)
+
+  expect(started).toBe(2)
+  const pushes = calls.filter(({ cmd }) => cmd[1] === 'push')
+  expect(pushes.map(({ cmd }) => cmd.slice(2))).toEqual([
+    ['origin', 'amagi/origin-pr-7-conflict:refs/heads/amagi/am-1-do-the-thing'],
+    ['gitlab', 'amagi/gitlab-pr-7-conflict:refs/heads/amagi/am-2-other-thing'],
+  ])
+  expect(pushes.map(({ env }) => env?.GIT_CONFIG_KEY_0)).toEqual([
+    'url.https://x-access-token:gh-token@github.com/.insteadOf',
+    'url.https://x-access-token:gl-token@gitlab.com/.insteadOf',
+  ])
+  expect(Object.keys(stateFile()).sort()).toEqual(['7', 'gitlab:gitlab#7'])
+})
+
+test('a task forge without a token is skipped without failing the tick', async () => {
+  process.env.GH_TOKEN = 'gh-token'
+  const store = new Store(openDatabase(':memory:'))
+  const gitlabUrl = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  prTaskOn(store, 'am-1', gitlabUrl, 7)
+  const primary = new FakePr()
+  const gitlab = new FakePr()
+  let listed = 0
+  gitlab.listOpenPrs = async () => {
+    listed++
+    return [pr({ url: gitlabUrl })]
+  }
+  const cfg = config()
+  const w = start(fakeExec(), () => fakeHarness(() => {}), {
+    driver: primary,
+    store,
+    config: cfg,
+    forgeFor: prForgeRouter(
+      '/repo',
+      cfg,
+      primary,
+      () => gitlab,
+      () => forgeRemotes,
+    ),
+  })
+  await Bun.sleep(60)
+
+  expect(listed).toBe(0)
+  expect(w.activity().ok).toBe(true)
+  expect(w.activity().log?.map((entry) => entry.message)).toContain(
+    'skipped gitlab:gitlab: no gitlab token configured',
+  )
+})
+
+test('a queued PR on a tokenless forge stays queued until the token arrives', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const gitlabUrl = 'https://gitlab.com/owner/repo/-/merge_requests/7'
+  prTaskOn(store, 'am-1', gitlabUrl, 7)
+  const primary = new FakePr()
+  const gitlab = new FakePr()
+  gitlab.prs = [pr({ url: gitlabUrl, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' })]
+  const cfg = config()
+  let started = 0
+  const w = start(fakeExec(), () => fakeHarness(() => started++), {
+    driver: primary,
+    store,
+    config: cfg,
+    intervalMs: 60_000,
+    forgeFor: prForgeRouter(
+      '/repo',
+      cfg,
+      primary,
+      () => gitlab,
+      () => forgeRemotes,
+    ),
+  })
+  await Bun.sleep(60)
+
+  expect(w.queue(7, gitlabUrl)).toBe(true)
+  await Bun.sleep(60)
+  expect(started).toBe(0)
+
+  process.env.GITLAB_TOKEN = 'gl-token'
+  expect(w.queue(7, gitlabUrl)).toBe(false)
+  await Bun.sleep(60)
+  expect(started).toBe(1)
 })
 
 test('a queued PR is resolved when automatic conflict filtering excludes it', async () => {
@@ -666,6 +893,65 @@ test('re-attempts a conflicting PR once the base branch moves, even on the same 
   expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base2' })
 })
 
+test('same-named repos keep separate conflict state', async () => {
+  let started = 0
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  start(fakeExec(), () => fakeHarness(() => started++), { driver })
+  await Bun.sleep(60)
+  expect(started).toBe(1)
+
+  start(fakeExec(), () => fakeHarness(() => started++), { driver, repo: 'demo-2' })
+  await Bun.sleep(60)
+  expect(started).toBe(2)
+})
+
+test('a watcher restarted mid-resolution waits for the old tick instead of resolving twice', async () => {
+  let started = 0
+  let resolving = false
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const git = fakeExec()
+  const exec: Exec = async (cmd, opts) => {
+    if (cmd.includes('merge')) {
+      resolving = true
+      await gate
+    }
+    return git(cmd, opts)
+  }
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  const harness = () => fakeHarness(() => started++)
+
+  const first = start(exec, harness, { driver })
+  for (let i = 0; i < 500 && !resolving; i++) await Bun.sleep(10)
+  expect(resolving).toBe(true)
+  void first.stop()
+  start(exec, harness, { driver })
+  await Bun.sleep(50)
+  release?.()
+
+  await Bun.sleep(100)
+  expect(started).toBe(1)
+})
+
+test('conflict state saved under the repo name before the move to repo keys still counts', async () => {
+  let started = 0
+  const driver = new FakePr()
+  driver.prs = [pr()]
+  mkdirSync(join(cacheDir, 'amagi', 'conflicts'), { recursive: true })
+  writeFileSync(
+    join(cacheDir, 'amagi', 'conflicts', 'demo.json'),
+    JSON.stringify({ '7': { headOid: 'deadbeef', baseOid: 'base1' } }),
+  )
+  start(fakeExec(), () => fakeHarness(() => started++), { driver })
+  await Bun.sleep(60)
+  expect(started).toBe(0)
+  expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', baseOid: 'base1' })
+})
+
 test('a PR whose work base already contains is flagged once and not re-dispatched when base moves', async () => {
   let started = 0
   let base = 'base1'
@@ -696,7 +982,7 @@ test('a PR whose work base already contains is flagged once and not re-dispatche
   await Bun.sleep(60)
   expect(started).toBe(1)
   expect(store.task('bd-1')?.state).toBe('pr_flagged')
-  expect(driver.addedLabels).toEqual(['amagi/needs-closing'])
+  expect(driver.addedLabels).toEqual(['amagi/iterations:1', 'amagi/needs-closing'])
   expect(driver.postedComments).toEqual(['Landed as #42.'])
 
   base = 'base2'
@@ -897,7 +1183,7 @@ function fakeExecForPointless(): Exec {
 }
 
 const pointlessStateFile = (): Record<string, { headOid: string; flagged: boolean }> =>
-  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'pointless', 'demo.json'), 'utf8') as string)
+  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'pointless', 'amagi.json'), 'utf8') as string)
 
 test('an amagi PR with an empty diff gets labelled, commented on and parked in pr_flagged', async () => {
   const store = new Store(openDatabase(':memory:'))

@@ -40,7 +40,7 @@ Tests sit next to the code as `*.test.ts`. `runner.test.ts` and `server/src/app.
 
 ## Conventions
 
-- When adding or changing a configuration setting, update its dashboard Settings controls and API in the same task. A setting is complete when users can view and edit it in the GUI.
+- When adding or changing a configuration setting, update its dashboard Settings controls and API in the same task. A setting is complete when users can view and edit it in the GUI. A plain value usually needs only an entry in `core/src/settings.ts` and a field in `dashboard/src/views/config-settings.tsx`. Exempt: `server.host` and `server.port` are shown read-only, since a GUI edit could lock the dashboard out or expose the API.
 
 - Match the surrounding code; reuse helpers in `core/src` (`exec.ts`, `errors.ts`, `format.ts`, `paths.ts`) before writing new ones.
 - Comments only for non-obvious constraints, never to narrate a change.

@@ -29,7 +29,11 @@ const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
 export type ChatRouteDeps = {
   workspaces: Workspaces
   harnessFor?: (ws: Workspace, config: ChatHarnessConfig) => Harness
+  /** Kill switches for chat agents running in a task worktree, keyed by taskChatKey. */
+  liveTaskChats: Map<string, () => Promise<void>>
 }
+
+export const taskChatKey = (ws: Workspace, taskId: string): string => `${ws.key}/task/${taskId}`
 
 function transcript(history: { role: 'user' | 'assistant'; content: string }[], message: string) {
   if (history.length === 0) return message
@@ -58,7 +62,7 @@ function chatEfforts(config: ChatHarnessConfig): string[] {
   ]
 }
 
-export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
+export function createChatRoutes({ workspaces, harnessFor, liveTaskChats }: ChatRouteDeps) {
   const busy = new Set<string>()
 
   return new Hono()
@@ -295,6 +299,8 @@ export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
               taskId !== undefined && sessionId !== undefined
                 ? harness.resume(sessionId, opts)
                 : harness.start(opts)
+            const live = proc
+            if (taskId !== undefined) liveTaskChats.set(taskChatKey(ws, taskId), () => live.kill())
             for await (const event of proc.events()) {
               if (stream.aborted) break
               if (event.kind === 'text') reply += event.text
@@ -320,6 +326,7 @@ export function createChatRoutes({ workspaces, harnessFor }: ChatRouteDeps) {
               })
             }
           } finally {
+            if (taskId !== undefined) liveTaskChats.delete(taskChatKey(ws, taskId))
             ws.store.saveChatConversation({
               ...conversation,
               ...(finalSessionId === undefined ? {} : { sessionId: finalSessionId }),

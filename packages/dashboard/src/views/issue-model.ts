@@ -1,34 +1,20 @@
+import type { BeadsBlocker, BeadsIssue } from '@amagi/core/drivers/tracker/beads'
 import { apiBase } from '../api.ts'
 
-export type Dependency = {
-  id: string
-  title: string
-  /** Tracker status of the blocker: open/in_progress/blocked/closed. */
-  status: string
-  /** Human-only blockers carry the `human` label and need an operator, not an agent. */
-  labels: string[]
+export type Issue = BeadsIssue & {
+  /** Issues this one blocks; only the single-issue detail endpoint reports them. */
+  dependents?: BeadsBlocker[]
 }
 
-export type Issue = {
-  id: string
-  title: string
-  description: string
-  acceptanceCriteria: string | null
-  status: 'open' | 'in_progress' | 'blocked' | 'closed'
-  priority: number | null
-  url?: string | null
-  type: string | null
-  assignee: string | null
-  labels: string[]
-  parent: string | null
-  dependencies: Dependency[]
-  /** Issues this one blocks; only the single-issue detail endpoint reports them. */
-  dependents?: Dependency[]
-}
+/** Thrown by fetchIssue when the repo's tracker has no issue detail view (HTTP 501). */
+export class IssueDetailUnsupported extends Error {}
 
 /** One issue with its blockers and dependents, from the tracker's detail view. */
 export async function fetchIssue(repo: string, id: string): Promise<Issue> {
   const res = await fetch(`${apiBase}/api/repos/${repo}/issues/${id}`)
-  if (!res.ok) throw new Error((await res.json()).error ?? `HTTP ${res.status}`)
+  if (!res.ok) {
+    const message = (await res.json()).error ?? `HTTP ${res.status}`
+    throw res.status === 501 ? new IssueDetailUnsupported(message) : new Error(message)
+  }
   return res.json() as Promise<Issue>
 }

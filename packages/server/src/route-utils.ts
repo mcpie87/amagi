@@ -49,12 +49,10 @@ export class RepoError extends Error {
 
 /** Resolves a repo param to its workspace, throwing a RepoError on failure. */
 export function resolveWorkspace(workspaces: Workspaces, repo: string): Workspace {
-  let ws: Workspace | null
-  try {
-    ws = workspaces.get(repo)
-  } catch (err) {
-    throw new RepoError(500, `repo ${repo}: ${errMsg(err)}`)
+  const lookup = workspaces.lookup(repo)
+  if (lookup.status === 'unavailable') {
+    throw new RepoError(500, `repo ${repo}: ${errMsg(lookup.error)}`)
   }
-  if (ws === null) throw new RepoError(404, `unknown repository ${repo}`)
-  return ws
+  if (lookup.status === 'missing') throw new RepoError(404, `unknown repository ${repo}`)
+  return lookup.workspace
 }

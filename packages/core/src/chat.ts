@@ -1,5 +1,5 @@
 import type { Config } from './config.ts'
-import type { Harness } from './drivers/types.ts'
+import type { AgentProcess, Harness } from './drivers/types.ts'
 import { agentFailure, errMsg } from './errors.ts'
 import type { Store } from './store/store.ts'
 
@@ -22,6 +22,7 @@ export type ChatDeps = {
 export class ChatService {
   /** Tasks with a chat run in flight, so overlapping messages do not fork the session. */
   private readonly busy = new Set<string>()
+  private readonly procs = new Map<string, AgentProcess>()
 
   constructor(private readonly deps: ChatDeps) {}
 
@@ -50,6 +51,11 @@ export class ChatService {
     return { ok: true }
   }
 
+  /** Kills the task's in-flight chat agent, if any, e.g. before its worktree is removed. */
+  async stop(taskId: string): Promise<void> {
+    await this.procs.get(taskId)?.kill()
+  }
+
   private async respond(
     taskId: string,
     cwd: string,
@@ -66,6 +72,7 @@ export class ChatService {
         permissions: config.harness.implement.permissions,
         extraArgs: config.harness.implement.extraArgs,
       })
+      this.procs.set(taskId, proc)
       let started = false
       for await (const event of proc.events()) {
         if (!started && event.kind !== 'status') {
@@ -109,6 +116,7 @@ export class ChatService {
       const message = errMsg(err)
       store.append(taskId, { type: 'error', message: `chat failed: ${message}`, fatal: false })
     } finally {
+      this.procs.delete(taskId)
       this.busy.delete(taskId)
     }
   }

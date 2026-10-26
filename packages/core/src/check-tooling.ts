@@ -16,8 +16,11 @@ export async function changedCheckTooling(
   cwd: string,
   run: Exec,
   baseRef: string,
+  preparedMerge = false,
 ): Promise<string[]> {
-  const common = await run(['git', 'merge-base', baseRef, 'HEAD'], { cwd })
+  const common = preparedMerge
+    ? { exitCode: 0, stdout: baseRef }
+    : await run(['git', 'merge-base', baseRef, 'HEAD'], { cwd })
   const base = common.stdout.trim()
   if (common.exitCode !== 0 || base === '') {
     throw new Error('could not resolve the task base for check tooling')

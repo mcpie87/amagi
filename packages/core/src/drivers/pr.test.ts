@@ -77,13 +77,19 @@ describe('gitTokenConfig', () => {
 
   test('has no config without a token so git keeps the ssh remote', async () => {
     expect(
-      await gitTokenConfig(remote('git@github.com:x/y.git').exec, '/repo', 'origin', null),
+      await gitTokenConfig(
+        remote('git@github.com:x/y.git').exec,
+        '/repo',
+        'origin',
+        null,
+        'github',
+      ),
     ).toEqual({})
   })
 
   test('rewrites the remote to an https token url', async () => {
     const { exec, calls } = remote('git@github.com:mcpie87/amagi.git')
-    const auth = await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc')
+    const auth = await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc', 'github')
     expect(auth).toEqual({
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: 'url.https://x-access-token:ghp_abc@github.com/.insteadOf',
@@ -92,8 +98,15 @@ describe('gitTokenConfig', () => {
     expect(calls[0]).toEqual(['git', 'remote', 'get-url', 'origin'])
   })
 
+  test('is empty when the remote points away from the forge host', async () => {
+    const { exec } = remote('https://evil.example/x/y.git')
+    expect(await gitTokenConfig(exec, '/repo', 'origin', 'ghp_abc', 'github')).toEqual({})
+  })
+
   test('is empty when the remote cannot be parsed', async () => {
-    expect(await gitTokenConfig(remote('not-a-remote').exec, '/repo', 'origin', 'tok')).toEqual({})
+    expect(
+      await gitTokenConfig(remote('not-a-remote').exec, '/repo', 'origin', 'tok', 'github'),
+    ).toEqual({})
   })
 })
 
@@ -402,6 +415,35 @@ describe('githubPr', () => {
     expect(calls).toHaveLength(2)
   })
 
+  test('reads base and head shas and changed files from gh', async () => {
+    const { exec, calls } = fake(() =>
+      ok(
+        JSON.stringify({
+          baseRefOid: 'base-sha',
+          headRefOid: 'head-sha',
+          files: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }],
+          changedFiles: 140,
+        }),
+      ),
+    )
+    const changes = await makePrDriver('github', 'origin', exec).getPrChanges('/repo', 7)
+
+    expect(calls[0]).toEqual([
+      'gh',
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'baseRefOid,headRefOid,files,changedFiles',
+    ])
+    expect(changes).toEqual({
+      baseSha: 'base-sha',
+      headSha: 'head-sha',
+      changedFiles: ['src/a.ts', 'src/b.ts'],
+      fileCount: 140,
+    })
+  })
+
   test('fetches the pr diff from gh', async () => {
     const { exec, calls } = fake((c) =>
       c.includes('diff') ? ok('diff --git a/x b/x\n') : undefined,
@@ -435,6 +477,16 @@ describe('githubPr', () => {
       'repos/{owner}/{repo}/issues/7/labels/amagi%2Fneeds-closing',
     ])
   })
+
+  test('removing a label already gone from the pr is not an error, any other failure is', async () => {
+    const fail = (stderr: string): ExecResult => ({ exitCode: 1, stdout: '', stderr })
+    const gone = fake(() => fail('gh: Label does not exist (HTTP 404)'))
+    await makePrDriver('github', 'origin', gone.exec).removeLabel('/repo', 7, 'P2')
+    const denied = fake(() => fail('gh: Resource not accessible (HTTP 403)'))
+    await expect(
+      makePrDriver('github', 'origin', denied.exec).removeLabel('/repo', 7, 'P2'),
+    ).rejects.toThrow(/HTTP 403/)
+  })
 })
 
 describe('forgejoPr', () => {
@@ -464,7 +516,7 @@ describe('forgejoPr', () => {
     const { exec, calls, invocations } = remote()
     await withFetch(
       (path, method) => {
-        if (path === 'repos/owner/repo/pulls?state=open' && method === 'GET') {
+        if (path === 'repos/owner/repo/pulls?state=open&limit=50&page=1' && method === 'GET') {
           return new Response(
             JSON.stringify([
               {
@@ -475,9 +527,6 @@ describe('forgejoPr', () => {
             ]),
             { status: 200 },
           )
-        }
-        if (path === 'repos/owner/repo/labels' && method === 'GET') {
-          return new Response(JSON.stringify([{ id: 42, name: 'amagi' }]), { status: 200 })
         }
         if (path.endsWith('/labels')) return new Response('{}', { status: 201 })
         return new Response('[]', { status: 200 })
@@ -545,72 +594,155 @@ describe('forgejoPr', () => {
     expect(state).toBe('merged')
   })
 
-  test('lists open PRs through the forgejo api', async () => {
+  test('lists open PRs across pages through the forgejo api', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
+    const pr = (number: number) => ({
+      number,
+      title: 'Do the thing',
+      body: 'Task: am-1',
+      html_url: `https://git.example.com/owner/repo/pulls/${number}`,
+      head: { ref: 'amagi/am-1' },
+      base: { ref: 'main' },
+      mergeable: true,
+      created_at: '2026-09-20T10:00:00Z',
+      updated_at: '2026-09-21T10:00:00Z',
+    })
     const prs = await withFetch(
       (path) => {
-        if (path === 'repos/owner/repo/pulls?state=open') {
-          return new Response(
-            JSON.stringify([
-              {
-                number: 3,
-                title: 'Do the thing',
-                body: 'Task: am-1',
-                html_url: 'https://git.example.com/owner/repo/pulls/3',
-                head: { ref: 'amagi/am-1' },
-                base: { ref: 'main' },
-                mergeable: true,
-                mergeable_state: 'clean',
-                created_at: '2026-09-20T10:00:00Z',
-                updated_at: '2026-09-21T10:00:00Z',
-              },
-            ]),
-            { status: 200 },
-          )
+        if (path === 'repos/owner/repo/pulls?state=open&limit=50&page=1') {
+          return new Response(JSON.stringify(Array.from({ length: 50 }, (_, i) => pr(i + 1))), {
+            headers: { 'x-total-count': '51' },
+          })
         }
-        return new Response('[]', { status: 200 })
+        if (path === 'repos/owner/repo/pulls?state=open&limit=50&page=2') {
+          return new Response(JSON.stringify([pr(51)]), { headers: { 'x-total-count': '51' } })
+        }
+        return new Response('[]', { status: 500 })
       },
       () => makePrDriver('forgejo', 'origin', exec).listOpenPrs('/wt'),
     )
 
-    expect(prs).toEqual([
-      {
-        number: 3,
-        title: 'Do the thing',
-        body: 'Task: am-1',
-        url: 'https://git.example.com/owner/repo/pulls/3',
-        headRefName: 'amagi/am-1',
-        baseRefName: 'main',
-        headRefOid: null,
-        createdAt: '2026-09-20T10:00:00Z',
-        mergeable: 'MERGEABLE',
-        mergeStateStatus: 'CLEAN',
-        updatedAt: '2026-09-21T10:00:00Z',
-        labels: [],
-      },
-    ])
+    expect(prs).toHaveLength(51)
+    expect(prs[50]).toEqual({
+      number: 51,
+      title: 'Do the thing',
+      body: 'Task: am-1',
+      url: 'https://git.example.com/owner/repo/pulls/51',
+      headRefName: 'amagi/am-1',
+      baseRefName: 'main',
+      headRefOid: null,
+      createdAt: '2026-09-20T10:00:00Z',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      updatedAt: '2026-09-21T10:00:00Z',
+      labels: [],
+    })
   })
 
-  test('resolves the merge status from the forgejo api', async () => {
+  test('reports a conflict only when mergeable is false and a local merge-tree agrees', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const status = async (pr: Record<string, unknown>, mergeTreeExit = 0) => {
+      const { exec } = fake((cmd) => {
+        if (cmd.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
+        if (cmd.includes('merge-tree')) return { exitCode: mergeTreeExit, stdout: '', stderr: '' }
+        return undefined
+      })
+      return withFetch(
+        () => new Response(JSON.stringify(pr)),
+        () => makePrDriver('forgejo', 'origin', exec).getMergeStatus('/wt', 3),
+      )
+    }
+    const shas = { head: { ref: 'amagi/am-1', sha: 'h1' }, base: { ref: 'main', sha: 'b1' } }
+    expect(await status({ mergeable: true, ...shas })).toBe('mergeable')
+    expect(await status({ mergeable: false, ...shas }, 1)).toBe('conflicted')
+    expect(await status({ mergeable: false, ...shas })).toBe('unknown')
+    expect(await status({ mergeable: false, draft: true, ...shas }, 1)).toBe('unknown')
+    expect(await status({ mergeable: false, ...shas }, 128)).toBe('unknown')
+  })
+
+  test('fetches a base commit missing locally before the merge-tree verdict', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    let fetched = false
+    const { exec, invocations } = fake((cmd) => {
+      if (cmd.includes('get-url')) return ok('git@git.example.com:owner/repo.git')
+      if (cmd.includes('cat-file')) return { exitCode: fetched ? 0 : 1, stdout: '', stderr: '' }
+      if (cmd.includes('fetch')) {
+        fetched = true
+        return ok('')
+      }
+      if (cmd.includes('merge-tree')) {
+        return fetched
+          ? { exitCode: 1, stdout: '', stderr: '' }
+          : { exitCode: 128, stdout: '', stderr: 'fatal: bad object b1' }
+      }
+      return undefined
+    })
+    const pr = {
+      mergeable: false,
+      head: { ref: 'amagi/am-1', sha: 'h1' },
+      base: { ref: 'main', sha: 'b1' },
+    }
+    const status = await withFetch(
+      () => new Response(JSON.stringify(pr)),
+      () => makePrDriver('forgejo', 'origin', exec).getMergeStatus('/wt', 3),
+    )
+    expect(status).toBe('conflicted')
+    const fetch = invocations.find((c) => c.cmd.includes('fetch'))
+    expect(fetch?.cmd).toEqual(['git', 'fetch', '--no-tags', 'origin', 'refs/heads/main'])
+    expect(fetch?.env?.GIT_CONFIG_VALUE_0).toBe('git@git.example.com:')
+  })
+
+  test('collects conversation, paged review, and per-review inline comments', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
-    const mergeable = await withFetch(
-      () =>
-        new Response(JSON.stringify({ mergeable: true, mergeable_state: 'clean' }), {
-          status: 200,
-        }),
-      () => makePrDriver('forgejo', 'origin', exec).getMergeStatus('/wt', 3),
+    const review = (id: number, comments_count: number) => ({
+      id,
+      user: { login: 'rev' },
+      body: '',
+      comments_count,
+    })
+    const comments = await withFetch(
+      (path) => {
+        if (path === 'repos/owner/repo/issues/3/comments') {
+          return new Response(JSON.stringify([{ id: 1, user: { login: 'op' }, body: 'hi' }]))
+        }
+        if (path === 'repos/owner/repo/pulls/3/reviews?limit=50&page=1') {
+          return new Response(
+            JSON.stringify(Array.from({ length: 50 }, (_, i) => review(i + 100, 0))),
+          )
+        }
+        if (path === 'repos/owner/repo/pulls/3/reviews?limit=50&page=2') {
+          return new Response(JSON.stringify([review(200, 1)]))
+        }
+        if (path === 'repos/owner/repo/pulls/3/reviews?limit=50&page=3') {
+          return new Response('[]')
+        }
+        if (path === 'repos/owner/repo/pulls/3/reviews/200/comments') {
+          return new Response(JSON.stringify([{ id: 9, user: { login: 'rev' }, body: 'nit' }]))
+        }
+        return new Response('not found', { status: 404 })
+      },
+      () => makePrDriver('forgejo', 'origin', exec).listComments('/wt', 3),
     )
-    const conflicted = await withFetch(
-      () =>
-        new Response(JSON.stringify({ mergeable: false, mergeable_state: 'has_conflicts' }), {
-          status: 200,
-        }),
-      () => makePrDriver('forgejo', 'origin', exec).getMergeStatus('/wt', 3),
-    )
-    expect(mergeable).toBe('mergeable')
-    expect(conflicted).toBe('conflicted')
+    expect(comments).toHaveLength(53)
+    expect(comments[0]).toEqual({ id: '1', user: 'op', body: 'hi' })
+    expect(comments.at(-1)).toEqual({ id: '9', user: 'rev', body: 'nit' })
+  })
+
+  test('tolerates a missing comment endpoint but surfaces a server error', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const list = (status: number) =>
+      withFetch(
+        (path) =>
+          path.startsWith('repos/owner/repo/issues/3/comments')
+            ? new Response('[]')
+            : new Response('boom', { status }),
+        () => makePrDriver('forgejo', 'origin', exec).listComments('/wt', 3),
+      )
+    expect(await list(404)).toEqual([])
+    await expect(list(500)).rejects.toThrow(/500/)
   })
 
   test('fetches the pr diff through the forgejo api', async () => {
@@ -626,22 +758,53 @@ describe('forgejoPr', () => {
     expect(diff).toBe('diff --git a/x b/x\n')
   })
 
-  test('closes the pr through the forgejo api', async () => {
+  test('reads base and head shas and changed files through the forgejo api', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
-    let patched = false
+    const changes = await withFetch(
+      (path) => {
+        if (path === 'repos/owner/repo/pulls/3') {
+          return new Response(
+            JSON.stringify({ base: { sha: 'base-sha' }, head: { sha: 'head-sha' } }),
+          )
+        }
+        if (path === 'repos/owner/repo/pulls/3/files?limit=100') {
+          return new Response(JSON.stringify([{ filename: 'src/a.ts' }]), {
+            headers: { 'x-total-count': '120' },
+          })
+        }
+        return new Response('boom', { status: 500 })
+      },
+      () => makePrDriver('forgejo', 'origin', exec).getPrChanges('/wt', 3),
+    )
+
+    expect(changes).toEqual({
+      baseSha: 'base-sha',
+      headSha: 'head-sha',
+      changedFiles: ['src/a.ts'],
+      fileCount: 120,
+    })
+  })
+
+  test('closes the pr through the forgejo api after posting the reason', async () => {
+    process.env.FORGEJO_TOKEN = 'fj_tok'
+    const { exec } = remote()
+    const writes: unknown[] = []
     await withFetch(
       (path, method, body) => {
+        if (path === 'repos/owner/repo/issues/3/comments' && method === 'POST') {
+          writes.push(body)
+          return new Response('{}', { status: 201 })
+        }
         if (path === 'repos/owner/repo/pulls/3' && method === 'PATCH') {
-          patched = true
-          expect(body).toEqual({ state: 'closed' })
+          writes.push(body)
           return new Response(JSON.stringify({ state: 'closed' }), { status: 200 })
         }
         return new Response('{}', { status: 200 })
       },
       () => makePrDriver('forgejo', 'origin', exec).closePr('/wt', 3, 'pointless'),
     )
-    expect(patched).toBe(true)
+    expect(writes).toEqual([{ body: 'pointless' }, { state: 'closed' }])
   })
 
   test('throws a clear error without a token', async () => {
@@ -657,18 +820,25 @@ describe('forgejoPr', () => {
   test('adds and removes a label on an existing pull request', async () => {
     process.env.FORGEJO_TOKEN = 'fj_tok'
     const { exec } = remote()
+    const edits: unknown[] = []
     await withFetch(
-      (path, method) => {
-        if (path === 'repos/owner/repo/labels' && method === 'GET') {
-          return new Response(JSON.stringify([{ id: 5, name: 'amagi/needs-closing' }]), {
-            status: 200,
-          })
+      (path, method, body) => {
+        // A server capped below our limit answers short pages that are not the last.
+        if (path === 'repos/owner/repo/labels?limit=50&page=1' && method === 'GET') {
+          return new Response(
+            JSON.stringify(Array.from({ length: 30 }, (_, i) => ({ id: i + 100, name: `l${i}` }))),
+          )
+        }
+        if (path === 'repos/owner/repo/labels?limit=50&page=2' && method === 'GET') {
+          return new Response(JSON.stringify([{ id: 5, name: 'amagi/needs-closing' }]))
         }
         if (path === 'repos/owner/repo/issues/3/labels' && method === 'POST') {
+          edits.push(body)
           return new Response('{}', { status: 200 })
         }
         if (path === 'repos/owner/repo/issues/3/labels/5' && method === 'DELETE') {
-          return new Response('', { status: 204 })
+          edits.push('deleted 5')
+          return new Response(null, { status: 204 })
         }
         return new Response('{}', { status: 200 })
       },
@@ -678,6 +848,7 @@ describe('forgejoPr', () => {
         await driver.removeLabel('/wt', 3, 'amagi/needs-closing')
       },
     )
+    expect(edits).toEqual([{ labels: [5] }, 'deleted 5'])
   })
 })
 
@@ -702,7 +873,7 @@ describe('gitlabPr', () => {
     process.env.GITLAB_TOKEN = 'glpat-abc'
     let created = false
     const { exec, calls, invocations } = fake((c) => {
-      if (c.includes('get-url')) return ok('git@gitlab.example.com:owner/repo.git')
+      if (c.includes('get-url')) return ok('git@gitlab.com:owner/repo.git')
       if (c[0] === 'glab' && c[1] === 'mr' && c[2] === 'create') {
         created = true
         return ok('')
@@ -730,8 +901,8 @@ describe('gitlabPr', () => {
     ])
     expect(invocations.find((c) => c.cmd.includes('push'))?.env).toEqual({
       GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'url.https://x-access-token:glpat-abc@gitlab.example.com/.insteadOf',
-      GIT_CONFIG_VALUE_0: 'git@gitlab.example.com:',
+      GIT_CONFIG_KEY_0: 'url.https://x-access-token:glpat-abc@gitlab.com/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'git@gitlab.com:',
     })
     expect(calls.find((c) => c[1] === 'mr' && c[2] === 'create')).toEqual([
       'glab',
@@ -803,6 +974,31 @@ describe('gitlabPr', () => {
     expect(await makePrDriver('gitlab', 'origin', exec).listComments('/repo', 7)).toEqual([
       { id: '1', user: 'mcpie', body: '@chise-maru explain' },
     ])
+  })
+
+  test('reads diff refs and changed files of a merge request', async () => {
+    const { exec } = fake((c) => {
+      if (c[2] === 'projects/:id/merge_requests/7') {
+        return ok(
+          JSON.stringify(
+            mr({
+              diff_refs: { base_sha: 'base-sha', head_sha: 'head-sha' },
+              changes_count: '1000+',
+            }),
+          ),
+        )
+      }
+      if (c[2] === 'projects/:id/merge_requests/7/diffs?per_page=100') {
+        return ok(JSON.stringify([{ new_path: 'src/a.ts' }]))
+      }
+      return undefined
+    })
+    expect(await makePrDriver('gitlab', 'origin', exec).getPrChanges('/repo', 7)).toEqual({
+      baseSha: 'base-sha',
+      headSha: 'head-sha',
+      changedFiles: ['src/a.ts'],
+      fileCount: 1000,
+    })
   })
 
   test('closes with the reason as a note, and edits labels in place', async () => {

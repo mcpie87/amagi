@@ -53,7 +53,7 @@ describe('Hub', () => {
     const only = tab()
     hub.receive(only, { type: 'stream', repo: 'r' })
     sources[0]?.on.message(event(3, { type: 'task.claimed' }))
-    sources[0]?.on.error()
+    sources[0]?.on.error(false)
 
     expect(only.got).toContainEqual({ type: 'replayed', repo: 'r', seq: 3 })
 
@@ -63,6 +63,18 @@ describe('Hub', () => {
 
     hub.receive(only, { type: 'bye' })
     expect(sources[1]?.closed).toBe(true)
+  })
+
+  test('a stream the browser closed is reopened from the last seq', async () => {
+    const { hub, sources, tab } = setup()
+    const only = tab()
+    hub.receive(only, { type: 'stream', repo: 'r' })
+    sources[0]?.on.message(event(4, { type: 'task.claimed' }))
+    sources[0]?.on.error(true)
+
+    await Bun.sleep(1_100)
+    expect(sources[1]?.url).toBe('/api/repos/r/stream?sinceSeq=4')
+    hub.receive(only, { type: 'bye' })
   })
 
   test('tabs polling one url share a single request', async () => {

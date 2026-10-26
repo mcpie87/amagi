@@ -221,6 +221,26 @@ describe('actionFromAnswer', () => {
     expect(actionFromAnswer('skip for now', 'skip')).toBe('skip')
   })
 
+  test('matches whole words and inflections and never maps to ask', () => {
+    expect(actionFromAnswer('Break it into smaller tasks', 'implement')).toBe('implement')
+    expect(actionFromAnswer('skip this task', 'implement')).toBe('skip')
+    expect(actionFromAnswer('just ask me later', 'skip')).toBe('skip')
+    expect(actionFromAnswer('Proceed with implementation', 'skip')).toBe('implement')
+    expect(actionFromAnswer('Closing as duplicate', 'skip')).toBe('close')
+    expect(actionFromAnswer('Implement it, no rush', 'skip')).toBe('implement')
+  })
+
+  test('ignores an action negated just before it', () => {
+    expect(actionFromAnswer('do not implement, close it', 'skip')).toBe('close')
+    for (const answer of ["don't close", 'don\u2019t close', "can't close", 'do not implement']) {
+      expect(actionFromAnswer(answer, 'skip')).toBe('skip')
+    }
+  })
+
+  test('falls back when several actions are named', () => {
+    expect(actionFromAnswer('implement or close it', 'skip')).toBe('skip')
+  })
+
   test('falls back when nothing matches', () => {
     expect(actionFromAnswer('investigate more', 'skip')).toBe('skip')
   })

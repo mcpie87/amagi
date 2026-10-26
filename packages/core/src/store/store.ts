@@ -275,6 +275,11 @@ export class Store {
       const question = after.questions[event.questionId]
       if (question) upsert(this.db, 'questions', 'id', questionRow(question))
     }
+    if (event.type === 'task.reset') {
+      for (const question of Object.values(after.questions)) {
+        upsert(this.db, 'questions', 'id', questionRow(question))
+      }
+    }
   }
 
   /** Loads the rows the event may touch into a projection, from SQL. */
@@ -295,6 +300,11 @@ export class Store {
         .query('select * from questions where id = ?')
         .get(event.questionId) as RawQuestion | null
       if (row) projection.questions[row.id] = toQuestion(row)
+    }
+    if (event.type === 'task.reset' && event.taskId !== null) {
+      for (const question of this.openQuestions(event.taskId)) {
+        projection.questions[question.id] = question
+      }
     }
     return projection
   }
@@ -414,22 +424,34 @@ export class Store {
 
   /**
    * The latest `limit` agent.stream events of one attempt of a task (attempts
-   * count up from 1 at each task.reset), in seq order, up to `untilSeq`.
+   * count up from 1 at each task.reset), in seq order, after `sinceSeq` and up
+   * to `untilSeq`.
    */
-  agentLog(taskId: string, attempt: number, untilSeq: number, limit: number): StoredEvent[] {
+  agentLog(
+    taskId: string,
+    attempt: number,
+    untilSeq: number,
+    limit: number,
+    sinceSeq = 0,
+  ): StoredEvent[] {
+    const resetsBefore = this.db
+      .query(
+        "select count(*) as n from events where task_id = ? and seq <= ? and type = 'task.reset'",
+      )
+      .get(taskId, sinceSeq) as { n: number }
     const rows = this.db
       .query(
-        `select * from events where task_id = ? and seq <= ?
+        `select * from events where task_id = ? and seq > ? and seq <= ?
            and type in ('agent.stream', 'task.reset') order by seq`,
       )
-      .all(taskId, untilSeq) as {
+      .all(taskId, sinceSeq, untilSeq) as {
       seq: number
       ts: number
       task_id: string | null
       type: string
       body: string
     }[]
-    let seen = 1
+    let seen = 1 + resetsBefore.n
     const picked: typeof rows = []
     for (const row of rows) {
       if (row.type === 'task.reset') seen++
@@ -483,13 +505,26 @@ export class Store {
     beforeSeq?: number
   }): ProjectedWatcherRun[] {
     const beforeSeq = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER
+    // A watcher's ticks are sequential, so the page's runs and their events
+    // begin at its oldest run start. On a later page the start that marks the
+    // newest run interrupted sits at beforeSeq, outside the window, so such a
+    // run reads as still open.
+    const starts = this.db
+      .query(
+        `select seq from events where type = 'watcher.run.started'
+         and json_extract(body, '$.repo') = ? and json_extract(body, '$.name') = ?
+         and seq < ? order by seq desc limit ?`,
+      )
+      .all(opts.repo, opts.name, beforeSeq, opts.limit) as { seq: number }[]
+    const fromSeq = starts.at(-1)?.seq
+    if (fromSeq === undefined) return []
     const rows = this.db
       .query(
         `select * from events where type in ('watcher.run.started', 'watcher.action', 'watcher.run.finished')
          and json_extract(body, '$.repo') = ? and json_extract(body, '$.name') = ?
-         and seq < ? order by seq`,
+         and seq >= ? and seq < ? order by seq`,
       )
-      .all(opts.repo, opts.name, beforeSeq) as {
+      .all(opts.repo, opts.name, fromSeq, beforeSeq) as {
       seq: number
       ts: number
       task_id: string | null
@@ -621,14 +656,17 @@ export class Store {
     return rows.map(toQuestion)
   }
 
-  /** Questions still expecting an answer, including ones whose await poll timed out. */
+  /**
+   * Questions still expecting an answer, including ones whose await poll timed
+   * out, asked since their task's last reset (a reset starts a new attempt and
+   * leaves the earlier ones unanswered for good). Oldest first.
+   */
   unansweredQuestions(taskId?: string): ProjectedQuestion[] {
+    const sql = `select q.* from questions q join tasks t on t.id = q.task_id
+      where q.answer is null and q.asked_at >= t.created_at${taskId ? ' and q.task_id = ?' : ''}
+      order by q.asked_at, q.rowid`
     const rows = (
-      taskId
-        ? this.db
-            .query('select * from questions where answer is null and task_id = ? order by asked_at')
-            .all(taskId)
-        : this.db.query('select * from questions where answer is null order by asked_at').all()
+      taskId ? this.db.query(sql).all(taskId) : this.db.query(sql).all()
     ) as RawQuestion[]
     return rows.map(toQuestion)
   }

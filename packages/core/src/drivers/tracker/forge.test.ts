@@ -68,13 +68,25 @@ const TEA_COMMENTS_ANSWERED = `[
 
 type Call = readonly string[]
 
+/** Serves a list call the way the host does: one page of at most --limit issues. */
+function listPage(cmd: Call, stdout: string): string {
+  const limitAt = cmd.indexOf('--limit')
+  if (limitAt === -1) return stdout
+  const issues: unknown = JSON.parse(stdout)
+  if (!Array.isArray(issues)) return stdout
+  const limit = Number(cmd[limitAt + 1])
+  const pageAt = cmd.indexOf('--page')
+  const start = pageAt === -1 ? 0 : (Number(cmd[pageAt + 1]) - 1) * limit
+  return JSON.stringify(issues.slice(start, start + limit))
+}
+
 function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
   const calls: Call[] = []
   const exec: Exec = async (cmd, opts) => {
     calls.push(cmd)
     if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
     const hit = routes(cmd)
-    if (hit) return hit
+    if (hit) return { ...hit, stdout: listPage(cmd, hit.stdout) }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   return { exec, calls }
@@ -196,7 +208,9 @@ describe('GithubTracker', () => {
       'task',
     ])
     expect(calls).toContainEqual(['<stdin>', 'Why\n\n## Acceptance\nDone'])
-    await expect(tracker.createTask({ ...input, priority: 1 })).rejects.toThrow(
+    await tracker.createTask({ ...input, acceptanceCriteria: null, priority: 1, parent: '2' })
+    expect(calls).toContainEqual(['<stdin>', 'Why\n\nParent: #2\n\nPriority: P1'])
+    await expect(tracker.createTask({ ...input, dependencies: ['2'] })).rejects.toThrow(
       /cannot create issues/,
     )
     await expect(tracker.updateTask('3', { title: 'x' })).rejects.toThrow(
@@ -262,3 +276,25 @@ describe('ForgejoTracker', () => {
     expect(await tracker.gateResolved({ id: '7#q-2', advisory: true })).toBe(true)
   })
 })
+
+for (const Driver of [GithubTracker, ForgejoTracker]) {
+  test(`${Driver.name} claims the next eligible issue past newer claimed ones`, async () => {
+    const issues = Array.from({ length: 121 }, (_, i) => ({
+      number: 121 - i,
+      index: 121 - i,
+      title: 'task',
+      body: '',
+      state: 'open',
+      labels: i < 120 ? [{ name: CLAIM_LABEL }] : [],
+    }))
+    const { exec, calls } = fake((cmd) => {
+      if (cmd.includes('list')) return ok(JSON.stringify(issues))
+      if (cmd.includes('view') || cmd.includes('--fields')) return ok(JSON.stringify(issues[120]))
+      return undefined
+    })
+    const task = await new Driver({ cwd: '/repo', remote: 'origin', exec }).claim()
+
+    expect(task?.id).toBe('1')
+    expect(calls.find((c) => c.includes('edit'))).toContain('1')
+  })
+}

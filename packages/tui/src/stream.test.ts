@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { parseSseChunk } from './stream.ts'
+import { parseSseChunk, subscribeToStream } from './stream.ts'
 
 const frame = (seq: number, body: object): string =>
   `id: ${seq}\ndata: ${JSON.stringify({ seq, ts: 1000, taskId: 'am-1', ...body })}\n\n`
@@ -40,5 +40,29 @@ describe('parseSseChunk', () => {
   test('joins multi-line data fields with a newline, per the SSE spec', () => {
     const { events } = parseSseChunk('data: line one\ndata: line two\n\n')
     expect(events[0]?.data).toBe('line one\nline two')
+  })
+})
+
+describe('subscribeToStream', () => {
+  test('resumes from the last seen seq, which the server reads as exclusive', async () => {
+    const asked: string[] = []
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        asked.push(new URL(req.url).searchParams.get('sinceSeq') ?? '')
+        return new Response(frame(5, { type: 'task.claimed', title: 'x', tracker: 'beads' }), {
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      },
+    })
+    const handle = subscribeToStream(`http://127.0.0.1:${server.port}`, 'repo1', {}, () => {})
+    try {
+      const deadline = Date.now() + 5_000
+      while (asked.length < 2 && Date.now() < deadline) await Bun.sleep(20)
+      expect(asked.slice(0, 2)).toEqual(['0', '5'])
+    } finally {
+      handle.close()
+      await server.stop(true)
+    }
   })
 })

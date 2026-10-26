@@ -1,27 +1,28 @@
+import type { PrChanges } from './drivers/pr.ts'
 import type { TrackerTask } from './drivers/types.ts'
-import type { CheckResult } from './events.ts'
+import { type CheckResult, MENTION_KIND_NAMES, type MentionKind } from './events.ts'
 import { commitFooter } from './footer.ts'
 import type { PrBodyMeta } from './pr-body.ts'
 import { NOT_VIABLE_VERDICTS, parseVerdict, VERDICTS, verdictPromptLines } from './verdict.ts'
 
 export { reviewPrompt } from './review-pack.ts'
 
-export const MENTION_KINDS = [
-  { kind: 'fix-pr', description: 'the human wants code in this PR changed' },
-  {
-    kind: 'explain',
-    description:
-      'the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
-  },
-  {
-    kind: 'add-a-task',
-    description: 'the human wants a new task tracked in the issue tracker, not done in this PR',
-  },
-  { kind: 'flag', description: 'the human explicitly wants this PR closed or reverted' },
-  { kind: 'ambiguous', description: 'the comment is not a request at all' },
-] as const
+const MENTION_KIND_DESCRIPTIONS: Record<MentionKind, string> = {
+  explain:
+    'the human is asking anything about the PR, such as why or how something was done, or whether a change is still relevant, needed, or applies',
+  'fix-pr': 'the human wants code in this PR changed',
+  'add-a-task': 'the human wants a new task tracked in the issue tracker, not done in this PR',
+  flag: 'the human explicitly wants this PR closed or reverted',
+  ambiguous: 'the comment is not a request at all',
+}
 
-export type MentionKind = (typeof MENTION_KINDS)[number]['kind']
+/** The classifier vocabulary, in handler order: explain answers against the PR before fix-pr changes it. */
+export const MENTION_KINDS = MENTION_KIND_NAMES.map((kind) => ({
+  kind,
+  description: MENTION_KIND_DESCRIPTIONS[kind],
+}))
+
+export type { MentionKind }
 
 export type PromptContext = {
   task: TrackerTask
@@ -58,12 +59,7 @@ export function implementSystemPrompt(ctx: PromptContext): string {
           '  Run the formatter and lint check yourself before finishing and fix every',
           '  failure; you do not need to run the slow ones to discover them.',
         ]
-      : [
-          '- Before finishing, run the project formatter then its lint check on your',
-          '  changes (e.g. `just fmt` then `just lint`) and fix every failure. The',
-          '  orchestrator runs the same commands as a mandatory gate and blocks the',
-          '  pull request on them.',
-        ]),
+      : []),
     '- While iterating, run the narrowest test that covers your change, not the whole suite.',
     '- Never pipe check or lint output through head/tail: it aborts the tool',
     '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
@@ -84,9 +80,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '   when no pull request is opened. Write it against the actual change',
     `   (\`git diff ${base}\`), not against what you intended: open with the problem as a`,
     '   reader who has not seen the code would understand it, then what the change does',
-    '   about it and why that matters rather than which mechanism it uses. Keep',
-    '   verification details out of this summary; the runner checks the change before',
-    '   committing. Do not list the changed files: the diff already shows them.',
+    '   about it and why that matters rather than which mechanism it uses. Describe',
+    '   the change the task asked for: tests you added or adjusted support it and are',
+    '   not the change itself. Do not list the changed files: the diff already shows them.',
     '2. Only if your changes add a user-facing feature (new CLI command or flag, new',
     '   config option, new API endpoint): a `### How to use` section saying how to',
     '   trigger it and what it does.',
@@ -95,7 +91,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '   task: what the changes do file by file and anything the reviewer needs to know',
     '   (deviations from the task, what was left out, why a file that looks unrelated',
     '   was touched).',
-    '   If useful, report verification separately in a `### Verification` section.',
+    'Leave verification out of the whole message: no checks or tests you ran and no',
+    'results. The orchestrator runs the checks itself before committing.',
     'Whenever the summary or Conclusion refers to more than one file, use a markdown',
     'bullet list with one file per line. Put each path in `backticks`; you may add a',
     'short note after it. Never join multiple file paths with commas in a sentence.',
@@ -210,6 +207,16 @@ export function answerPrompt(question: string, answer: string): string {
   ].join('\n')
 }
 
+/**
+ * A fix round's final message replaces the implement run's as the commit and
+ * PR summary, so it has to cover the whole task again, not the round's delta.
+ */
+export const WHOLE_TASK_FINAL_MESSAGE = [
+  'Your final message replaces your earlier one as the commit and PR summary: write',
+  'it again in full in the same format (summary, `### Conclusion`, verdict) for the',
+  'whole change against the base, not only this fix.',
+] as const
+
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
   const failed = results.filter((r) => r.exitCode !== 0)
   const blocks = failed.map((r) => `$ ${r.command}\nexit ${r.exitCode}\n${r.output.trim()}`)
@@ -217,6 +224,7 @@ export function fixChecksPrompt(results: readonly CheckResult[]): string {
     'The project checks failed on your changes. Fix them, then stop.',
     'Do not edit check tooling to make checks pass. Restore changes to justfiles,',
     'package scripts, lint or typecheck config, and check scripts.',
+    ...WHOLE_TASK_FINAL_MESSAGE,
     '',
     ...blocks,
   ].join('\n')
@@ -341,6 +349,7 @@ export type ConflictPromptContext = {
   checks: readonly string[]
   /** Paths still unmerged; the re-dispatch list when an earlier pass left conflicts. */
   conflictFiles?: readonly string[]
+  checkResults?: readonly CheckResult[]
   outPath?: string
 }
 
@@ -394,13 +403,12 @@ export function resolveConflictPrompt(ctx: ConflictPromptContext): string {
       '',
     )
   }
-  if (ctx.checks.length > 0) {
-    parts.push(
-      '',
-      'Run the project checks and make sure they pass before stopping:',
-      ...ctx.checks.map((c) => `- ${c}`),
-    )
-  }
+  parts.push(
+    '',
+    'Run the project checks and make sure they pass before stopping:',
+    ...ctx.checks.map((c) => `- ${c}`),
+  )
+  if (ctx.checkResults !== undefined) parts.push('', fixChecksPrompt(ctx.checkResults))
   parts.push(
     '',
     'The runner stages and commits the resolved merge. Stop when the conflicts are resolved.',
@@ -463,13 +471,11 @@ export function respondToMentionPrompt(ctx: MentionPromptContext): string {
       'Resolve the merge conflicts first, then address the feedback.',
     )
   }
-  if (ctx.checks.length > 0) {
-    parts.push(
-      '',
-      'Run the project checks and make sure they pass before stopping:',
-      ...ctx.checks.map((c) => `- ${c}`),
-    )
-  }
+  parts.push(
+    '',
+    'Run the project checks and make sure they pass before stopping:',
+    ...ctx.checks.map((c) => `- ${c}`),
+  )
   parts.push(
     '',
     'Address the feedback with the smallest change that satisfies it, then stop. The dispatcher will commit and push your changes.',
@@ -500,32 +506,49 @@ export function explainMentionSystemPrompt(): string {
 }
 
 export type MentionClassifyContext = {
-  pr: { number: number; title: string; url: string }
+  pr: { number: number; title: string; body: string; url: string }
+  changes: PrChanges
   mention: { user: string; body: string }
 }
+
+/** Keeps a huge PR from bloating a routing prompt; the handler sees the full diff. */
+const MAX_CLASSIFY_FILES = 100
 
 export function classifyMentionSystemPrompt(): string {
   return [
     'You are a classifier for comments on a pull request.',
     'Do not use any tools. Do not modify any files.',
-    'Reply with exactly one token, nothing else.',
+    'Reply with a comma-separated list of kinds, nothing else.',
   ].join('\n')
 }
 
 export function classifyMentionPrompt(ctx: MentionClassifyContext): string {
   const kinds = MENTION_KINDS.map(({ kind }) => kind)
+  const files = ctx.changes.changedFiles.slice(0, MAX_CLASSIFY_FILES)
+  const hidden = Math.max(ctx.changes.fileCount, ctx.changes.changedFiles.length) - files.length
   return [
     `A human (@${ctx.mention.user}) commented on PR #${ctx.pr.number} "${ctx.pr.title}":`,
     '',
     ctx.mention.body.trim(),
     '',
-    'Classify the comment into exactly one of:',
+    'PR description:',
+    ctx.pr.body.trim() || '(empty)',
+    '',
+    `Base: ${ctx.changes.baseSha ?? '(unknown)'}`,
+    `Head: ${ctx.changes.headSha ?? '(unknown)'}`,
+    'Changed files:',
+    ...(files.length === 0 && hidden === 0 ? ['(none)'] : files.map((f) => `- ${f}`)),
+    ...(hidden > 0 ? [`(${hidden} more not shown)`] : []),
+    '',
+    'Classify the comment into every kind that applies:',
     ...MENTION_KINDS.map(({ kind, description }) => `- ${kind}: ${description}`),
     '',
+    'A comment can ask for several things: one that asks a question and also asks for a code change is explain, fix-pr.',
     'Any question about this PR is explain, never ambiguous, even if it is not asking why or how something was done. For example, "is this change still relevant?" and "is this already resolved?" are explain. Use ambiguous only for comments that are not requests at all.',
     'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
+    'flag and ambiguous always stand alone.',
     '',
-    `Reply with exactly one token: ${kinds.join(', ').replace(/, ([^,]*)$/, ', or $1')}.`,
+    `Reply with the applicable kinds, comma-separated, chosen from: ${kinds.join(', ')}.`,
   ].join('\n')
 }
 

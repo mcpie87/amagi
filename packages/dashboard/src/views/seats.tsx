@@ -399,8 +399,8 @@ export function SeatsView() {
                             taskId={holder.taskId}
                             attempt={
                               holder.repo === selectedRepo
-                                ? (state.tasks[holder.taskId]?.attempt ?? 1)
-                                : 1
+                                ? (state.tasks[holder.taskId]?.attempt ?? holder.attempt ?? 1)
+                                : (holder.attempt ?? 1)
                             }
                           />
                         </div>

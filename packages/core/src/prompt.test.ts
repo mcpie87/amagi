@@ -148,7 +148,6 @@ describe('implementSystemPrompt', () => {
       checks: ['just fmt', 'just lint', 'just check'],
     })
     expect(prompt).toContain('`just fmt`, `just lint`, `just check`')
-    expect(prompt).not.toContain('e.g. `just fmt`')
   })
 
   test('a clean tree is not a valid outcome for investigation-style tasks', () => {
@@ -169,8 +168,9 @@ describe('implementSystemPrompt', () => {
     expect(prompt).toContain('Never join multiple file paths with commas in a sentence')
     expect(prompt).toContain('mandatory')
     expect(prompt).toContain('deviations from')
-    expect(prompt).toContain('verification details out of this summary')
-    expect(prompt).toContain('report verification separately in a `### Verification` section')
+    expect(prompt).toContain('tests you added or adjusted support it')
+    expect(prompt).toContain('Leave verification out of the whole message')
+    expect(prompt).not.toContain('### Verification')
   })
 })
 
@@ -179,6 +179,12 @@ test('fixChecksPrompt tells the agent to restore check tooling', () => {
   expect(prompt).toContain('Do not edit check tooling to make checks pass')
   expect(prompt).toContain('Restore changes to justfiles')
   expect(prompt).toContain('package scripts')
+})
+
+test('fixChecksPrompt asks for the whole-task final message again, not the fix delta', () => {
+  const prompt = fixChecksPrompt([{ command: 'just check', exitCode: 1, output: 'failed' }])
+  expect(prompt).toContain('replaces your earlier one as the commit and PR summary')
+  expect(prompt).toContain('not only this fix')
 })
 
 describe('implementPrompt', () => {
@@ -210,7 +216,18 @@ describe('implementPrompt', () => {
 describe('classifyMentionPrompt', () => {
   test('maps questions about a change still being relevant to explain, not ambiguous', () => {
     const prompt = classifyMentionPrompt({
-      pr: { number: 102, title: 'Revert PR #36', url: 'https://github.com/owner/repo/pull/102' },
+      pr: {
+        number: 102,
+        title: 'Revert PR #36',
+        body: 'Reverts the earlier change.',
+        url: 'https://github.com/owner/repo/pull/102',
+      },
+      changes: {
+        baseSha: 'base123',
+        headSha: 'head456',
+        changedFiles: ['src/feature.ts'],
+        fileCount: 1,
+      },
       mention: { user: 'mcpie87', body: '@chise-maru is this change still relevant?' },
     })
     expect(prompt).toContain('explain: the human is asking anything about the PR')
@@ -218,15 +235,36 @@ describe('classifyMentionPrompt', () => {
     expect(prompt).toContain('never ambiguous')
     expect(prompt).toContain('flag: the human explicitly wants this PR closed or reverted')
     expect(prompt).toContain('ambiguous: the comment is not a request at all')
-    expect(prompt).toContain('fix-pr, explain, add-a-task, flag, or ambiguous')
+    expect(prompt).toContain('chosen from: explain, fix-pr, add-a-task, flag, ambiguous.')
+    expect(prompt).toContain('explain, fix-pr.')
+    expect(prompt).toContain('flag and ambiguous always stand alone.')
     expect(prompt).toContain(
       'A direct demand to close or revert this PR is flag; a neutral question about its relevance is explain.',
     )
   })
 
+  test('renders the PR description, base and head shas, and changed files', () => {
+    const files = Array.from({ length: 100 }, (_, i) => `src/f${i}.ts`)
+    const prompt = classifyMentionPrompt({
+      pr: { number: 7, title: 'T', body: 'Adds the parser.', url: 'https://x/pull/7' },
+      changes: { baseSha: 'base123', headSha: 'head456', changedFiles: files, fileCount: 250 },
+      mention: { user: 'bob', body: '@chise-maru why?' },
+    })
+
+    expect(prompt).toContain('PR description:\nAdds the parser.')
+    expect(prompt).toContain('Base: base123\nHead: head456\nChanged files:\n- src/f0.ts')
+    expect(prompt).toContain('- src/f99.ts\n(150 more not shown)')
+  })
+
   test('routes an already-resolved question to explain', () => {
     const prompt = classifyMentionPrompt({
-      pr: { number: 247, title: 'Old task', url: 'https://github.com/owner/repo/pull/247' },
+      pr: {
+        number: 247,
+        title: 'Old task',
+        body: '',
+        url: 'https://github.com/owner/repo/pull/247',
+      },
+      changes: { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 },
       mention: { user: 'reviewer', body: "@chise-maru isn't this already resolved?" },
     })
 

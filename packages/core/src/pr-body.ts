@@ -49,7 +49,8 @@ export async function changesSinceBase(
 /** Headings an agent appends to the task description to document the PR. */
 const SECTION_HEADING = /^###\s+(How to use|Conclusion)\s*$/gm
 
-function stripPreflightSection(text: string): string {
+/** Drops the runner's Pre-flight steps and any agent Verification report. */
+function stripInternalSections(text: string): string {
   const headings = [...text.matchAll(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)].map((m) => ({
     index: m.index ?? 0,
     level: m[1]?.length ?? 1,
@@ -60,7 +61,7 @@ function stripPreflightSection(text: string): string {
 
   for (const [i, heading] of headings.entries()) {
     if (heading.index < cursor) continue
-    if (!/^Pre-flight(?:\s+\([^\r\n]*\))?$/i.test(heading.title)) continue
+    if (!/^(?:Pre-flight(?:\s+\([^\r\n]*\))?|Verification)$/i.test(heading.title)) continue
     result += text.slice(cursor, heading.index)
     const next = headings.slice(i + 1).find((candidate) => candidate.level <= heading.level)
     cursor = next?.index ?? text.length
@@ -120,7 +121,9 @@ export function withAgentSections(
   const agent = splitDescription(finalMessage)
   if (agent.howToUse === null && agent.conclusion === null) return null
   const task = splitDescription(description)
-  const sections = renderSections(agent.howToUse, agent.conclusion)
+  const conclusion =
+    agent.conclusion === null ? null : stripInternalSections(agent.conclusion).trim()
+  const sections = renderSections(agent.howToUse, conclusion === '' ? null : conclusion)
   return {
     description: task.summary === '' ? sections : `${task.summary}\n\n${sections}`,
     summary: agent.summary,
@@ -183,17 +186,6 @@ export type PrBodyMeta = {
 }
 
 export type PrReviewSummary = {
-  unresolved: boolean
-  unresolvedIds: readonly string[]
-  unresolvedFindings: readonly {
-    id: string
-    severity: string
-    title: string
-    path: string
-    line: number
-    failureScenario: string
-    reply: { outcome: 'fixed' | 'wont-fix'; reason: string } | null
-  }[]
   followUps?: readonly {
     id: string
     title: string
@@ -251,8 +243,8 @@ export function formatPrBody(
     `**Task:** \`${task.id}\`${created === null ? '' : ` · ${created}`}`,
   ]
   const { summary: descriptionSummary, howToUse, conclusion } = splitDescription(task.description)
-  const summary = stripPreflightSection(descriptionSummary).trim()
-  const body = summary !== '' ? summary : (fallbackSummary?.trim() ?? '')
+  const summary = stripInternalSections(descriptionSummary).trim()
+  const body = summary !== '' ? summary : stripInternalSections(fallbackSummary ?? '').trim()
   lines.push('', '### 📝 Summary', '', renderDescriptionMarkdown(normalizeWorktreeLinks(body)))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
   if (changes.length > 0) {
@@ -264,8 +256,8 @@ export function formatPrBody(
       lines.push(`- \`${change.path}\` ${stat}`)
     }
   }
-  const conclusionBody = conclusion ?? fallbackSummary
-  if (conclusionBody !== null && conclusionBody !== undefined && conclusionBody.trim() !== '') {
+  const conclusionBody = stripInternalSections(conclusion ?? fallbackSummary ?? '').trim()
+  if (conclusionBody !== '') {
     lines.push(
       '',
       '### 🧠 Conclusion',
@@ -300,30 +292,6 @@ export function formatPrBody(
       lines.push(
         '',
         `Covered issues: ${covered.map((finding) => `\`${finding.covers}\``).join(', ')}`,
-      )
-    }
-    if (review.unresolved) {
-      lines.push(
-        '',
-        '### ⚠️ Unresolved findings',
-        '',
-        review.unresolvedIds.length > 0
-          ? review.unresolvedIds
-              .map((id) => {
-                const finding = review.unresolvedFindings.find((entry) => entry.id === id)
-                if (finding === undefined) return `- \`${id}\``
-                return [
-                  `- **\`${finding.id}\` ${finding.severity}: ${finding.title}** (${finding.path}:${finding.line})`,
-                  `  ${finding.failureScenario}`,
-                  ...(finding.reply === null
-                    ? []
-                    : [`  Implementer reply (${finding.reply.outcome}): ${finding.reply.reason}`]),
-                ].join('\n')
-              })
-              .join('\n')
-          : '- Review ended before all findings could be resolved.',
-        '',
-        'Verdict: needs-human',
       )
     }
   }

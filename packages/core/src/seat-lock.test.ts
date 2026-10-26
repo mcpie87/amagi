@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { childPids, killTree } from './process.ts'
@@ -14,6 +22,18 @@ afterEach(() => {
 function tempDirectory(): string {
   directory = mkdtempSync(join(tmpdir(), 'amagi-seat-lock-'))
   return directory
+}
+
+function seatPath(path: string, seat: string): string {
+  return join(path, Buffer.from(seat, 'utf8').toString('hex'))
+}
+
+/** Takes the seat's allocator lock as another live process would. */
+function holdAllocator(path: string, seat: string): string {
+  const allocator = join(seatPath(path, seat), 'allocator')
+  mkdirSync(allocator)
+  writeFileSync(join(allocator, 'owner.json'), JSON.stringify({ pid: process.pid }))
+  return allocator
 }
 
 describe('seat locks', () => {
@@ -55,6 +75,37 @@ describe('seat locks', () => {
     const lease = await third
     held[1]?.release()
     lease.release()
+  })
+
+  test('elects a holder only while it holds the allocator lock', async () => {
+    const path = tempDirectory()
+    const first = await acquireSeat('codex', { directory: path })
+    let secondHeld = false
+    const second = acquireSeat('codex', { directory: path }).then((lease) => {
+      secondHeld = true
+      return lease
+    })
+    await Bun.sleep(50)
+    const allocator = holdAllocator(path, 'codex')
+
+    first.release()
+    await Bun.sleep(100)
+    expect(secondHeld).toBe(false)
+    rmSync(allocator, { recursive: true, force: true })
+    ;(await second).release()
+  })
+
+  test('releases the holder only while it holds the allocator lock', async () => {
+    const path = tempDirectory()
+    const lease = await acquireSeat('codex', { directory: path })
+    const holder = join(seatPath(path, 'codex'), 'holder.json')
+    const allocator = holdAllocator(path, 'codex')
+
+    lease.release()
+    expect(existsSync(holder)).toBe(true)
+    rmSync(allocator, { recursive: true, force: true })
+    await Bun.sleep(100)
+    expect(existsSync(holder)).toBe(false)
   })
 
   test('serves queued callers in arrival order', async () => {

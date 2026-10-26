@@ -163,6 +163,42 @@ describe('createWorktree', () => {
     expect(reports[0]?.durationMs).toBeGreaterThanOrEqual(0)
   })
 
+  const failingSetup = () =>
+    createWorktree({
+      repoRoot: repo,
+      repoName: 'amagi',
+      taskId: 'bd-a1b2',
+      title: 'Add SSE endpoint',
+      baseBranch: 'main',
+      worktreeRoot: wtRoot,
+      setupCmd: 'exit 3',
+    })
+
+  test('a failing setup removes the worktree and branch it added', async () => {
+    await expect(failingSetup()).rejects.toThrow()
+    expect(existsSync(join(wtRoot, worktreeDirName('amagi', 'bd-a1b2', 'Add SSE endpoint')))).toBe(
+      false,
+    )
+    expect(await listWorktrees(repo)).toHaveLength(1)
+    const branch = await exec(
+      ['git', 'rev-parse', '--verify', '--quiet', 'refs/heads/amagi/bd-a1b2-add-sse-endpoint'],
+      { cwd: repo },
+    )
+    expect(branch.exitCode).not.toBe(0)
+  })
+
+  test('a failing setup keeps an adopted branch and worktree', async () => {
+    await execOk(exec, ['git', 'branch', 'amagi/bd-a1b2-add-sse-endpoint'], { cwd: repo })
+    await expect(failingSetup()).rejects.toThrow()
+    await execOk(exec, ['git', 'rev-parse', '--verify', 'amagi/bd-a1b2-add-sse-endpoint'], {
+      cwd: repo,
+    })
+
+    const wt = await create()
+    await expect(failingSetup()).rejects.toThrow()
+    expect(existsSync(wt.path)).toBe(true)
+  })
+
   test('removal detaches the worktree', async () => {
     const wt = await create()
     await removeWorktreeGit(repo, wt.path, { force: true })

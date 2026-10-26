@@ -1,11 +1,35 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { PrDriver, ProjectedTask, RunServiceApi } from '@amagi/core'
-import { writeConfig } from '@amagi/core'
+import { saveRegistry, writeConfig } from '@amagi/core'
 import { portInUse, serve } from './serve.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
 
 let ws: TestWorkspaces
 let server: ReturnType<typeof serve> | null = null
+
+/** Registers a repo named `broken` whose config fails to load (no checks declared). */
+function addBrokenRepo(): void {
+  const repos = ws.workspaces.list()
+  const dir = dirname(repos[0]?.path ?? '')
+  mkdirSync(join(dir, 'broken', '.amagi'), { recursive: true })
+  writeFileSync(join(dir, 'broken', '.amagi', 'config.toml'), '[repo]\nbaseBranch = "main"\n')
+  saveRegistry(
+    [
+      ...repos,
+      {
+        key: 'broken',
+        name: 'broken',
+        path: join(dir, 'broken'),
+        workers: true,
+        watchers: false,
+        gitIdentity: null,
+      },
+    ],
+    join(dir, 'registry.json'),
+  )
+}
 
 afterEach(async () => {
   await server?.stop(true)
@@ -41,6 +65,18 @@ test('serves dashboard assets with SPA fallback', async () => {
 
   const api = await fetch(`http://127.0.0.1:${server.port}/api/health`)
   expect(api.status).toBe(200)
+})
+
+test('refuses a foreign Host on the socket, static assets included', async () => {
+  ws = testWorkspaces(['repo1'])
+  const dir = `${import.meta.dir}/../../dashboard/dist`
+  server = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0, staticDir: dir })
+
+  const base = `http://127.0.0.1:${server.port}`
+  const evil = { host: 'evil.example' }
+  expect((await fetch(`${base}/`, { headers: evil })).status).toBe(403)
+  expect((await fetch(`${base}/api/health`, { headers: evil })).status).toBe(403)
+  expect((await fetch(`${base}/api/health`)).status).toBe(200)
 })
 
 test('portInUse tracks whether the port is bound', async () => {
@@ -101,6 +137,47 @@ test('registry participation flags gate auto-queue and reconcile pollers live', 
   expect(
     ((await (await fetch(endpoint)).json()) as { workers: { name: string }[] }).workers,
   ).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'stall-watcher' })]))
+})
+
+test('runner supervisor skips and reports a repo whose config cannot load', () => {
+  ws = testWorkspaces(['healthy'])
+  ws.workspaces.updateParticipation('healthy', { workers: true, watchers: false })
+  addBrokenRepo()
+  const created: string[] = []
+  const alerts: string[] = []
+
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runnerFactory: (workspace) => {
+      created.push(workspace.key)
+      return { setAutoQueue: () => {} } as unknown as RunServiceApi
+    },
+    onRunnerUnavailable: (repo, detail) => alerts.push(`${repo}: ${detail}`),
+  })
+
+  expect(created).toEqual(['healthy'])
+  expect(alerts).toEqual([expect.stringContaining('broken: ')])
+})
+
+test('a supplied runner whose repo config cannot load starts with auto-queue off', () => {
+  ws = testWorkspaces(['healthy'])
+  ws.workspaces.updateParticipation('healthy', { workers: true, watchers: false })
+  addBrokenRepo()
+  const autoQueue: boolean[] = []
+
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runner: {
+      setAutoQueue: (enabled: boolean) => autoQueue.push(enabled),
+    } as unknown as RunServiceApi,
+    runnerRepo: 'broken',
+  })
+
+  expect(autoQueue).toEqual([false])
 })
 
 test('watcher enable switches reconcile from config on the next supervisor scan', async () => {

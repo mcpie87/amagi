@@ -239,19 +239,26 @@ export async function acquireSeat(seat: string, options: SeatLockOptions = {}): 
       const now = new Date()
       utimesSync(ticketPath(dir, id), now, now)
     }
-    const holders = Array.from({ length: capacity }, (_, slot) => readHolder(dir, slot))
-    const holderIds = new Set(holders.flatMap((holder) => (holder ? [holder.id] : [])))
-    const waiting = queuedTickets(dir, holderIds).filter((ticket) => !holderIds.has(ticket.id))
-    const freeSlots = holders.flatMap((holder, slot) => (holder ? [] : [slot]))
-    // Every waiter sorts the same queue, so the n-th waiter alone claims the n-th free slot.
-    const position = waiting.findIndex((ticket) => ticket.id === id)
-    const ticket = waiting[position]
-    const slot = freeSlots[position]
-    if (ticket !== undefined && slot !== undefined) {
+    // Another process may queue a ticket that sorts ahead of ours between reading the queue and
+    // writing the holder file, so the election must run under the allocator lock.
+    const elected = await withAllocator(dir, deadline, () => {
+      const holders = Array.from({ length: capacity }, (_, slot) => readHolder(dir, slot))
+      const holderIds = new Set(holders.flatMap((holder) => (holder ? [holder.id] : [])))
+      const waiting = queuedTickets(dir, holderIds).filter((ticket) => !holderIds.has(ticket.id))
+      const freeSlots = holders.flatMap((holder, slot) => (holder ? [] : [slot]))
+      // Every waiter sorts the same queue, so the n-th waiter alone claims the n-th free slot.
+      const position = waiting.findIndex((ticket) => ticket.id === id)
+      const ticket = waiting[position]
+      const slot = freeSlots[position]
+      if (ticket === undefined || slot === undefined) return undefined
       const nextHolder: SeatHolder = { ...ticket, startedAt: Date.now() }
       writeAtomic(holderPath(dir, slot), nextHolder)
-      return lease(seat, dir, slot, nextHolder)
-    }
+      return { slot, holder: nextHolder }
+    }).catch((err: unknown) => {
+      if (Date.now() < deadline) throw err
+      return undefined
+    })
+    if (elected) return lease(seat, dir, elected.slot, elected.holder)
     if (!waitingNotified) {
       waitingNotified = true
       options.onWaiting?.(`waiting for seat ${seat}`)
@@ -281,8 +288,13 @@ function lease(seat: string, dir: string, slot: number, ticket: SeatTicket): Sea
     release(): void {
       if (released) return
       released = true
-      const currentHolder = readJson<SeatHolder>(holderPath(dir, slot))
-      if (currentHolder?.id === currentTicket.id) rmSync(holderPath(dir, slot), { force: true })
+      // Once our bound agent dies a waiter may elect itself into this slot, so the check and the
+      // removal must not interleave with an election. The work runs synchronously when the
+      // allocator is free; under contention it completes after release() returns.
+      void withAllocator(dir, Number.POSITIVE_INFINITY, () => {
+        const currentHolder = readJson<SeatHolder>(holderPath(dir, slot))
+        if (currentHolder?.id === currentTicket.id) rmSync(holderPath(dir, slot), { force: true })
+      }).catch(() => undefined)
       rmSync(ticketPath(dir, currentTicket.id), { force: true })
     },
   }

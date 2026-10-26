@@ -127,6 +127,7 @@ export type StreamQuery = z.infer<typeof StreamQuery>
 export const AgentLogQuery = z.object({
   attempt: z.coerce.number().int().min(1).default(1),
   untilSeq: z.coerce.number().int().min(0),
+  sinceSeq: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(4000).default(4000),
 })
 export type AgentLogQuery = z.infer<typeof AgentLogQuery>
@@ -257,6 +258,7 @@ export const SettingsBody = z
   .object({
     autoQueue: z.boolean().optional(),
     autoRebase: z.boolean().optional(),
+    epicCloseEnabled: z.boolean().optional(),
     ntfyTopic: z.string().trim().optional(),
     ntfyServer: z.string().trim().min(1).optional(),
     desktopFailureAlerts: z.boolean().optional(),

@@ -31,6 +31,7 @@ import {
   type RepoInfo,
   RunnerProvider,
   repoBlockers,
+  repoWarnings,
   useConnection,
   useDashboard,
   useRunner,
@@ -332,15 +333,30 @@ function BlockedBanner() {
   const repo = repos?.find((r) => r.key === selected)
   if (repo === undefined) return null
   const blockers = repoBlockers(repo)
-  if (blockers.length === 0) return null
+  const warnings = repoWarnings(repo)
+  if (blockers.length === 0 && warnings.length === 0) return null
+  const blocked = blockers.length > 0
   return (
-    <div role="alert" className="border-b border-red-edge bg-red-soft px-4 py-3 sm:px-6">
-      <div className="mx-auto max-w-6xl text-sm text-red-ink">
-        <p className="font-semibold">{repo.name} is blocked and will not run work.</p>
+    <div
+      role="alert"
+      className={`border-b px-4 py-3 sm:px-6 ${blocked ? 'border-red-edge bg-red-soft' : 'border-amber-edge bg-amber-soft'}`}
+    >
+      <div className={`mx-auto max-w-6xl text-sm ${blocked ? 'text-red-ink' : 'text-amber-ink'}`}>
+        <p className="font-semibold">
+          {blocked
+            ? `${repo.name} is blocked and will not run work.`
+            : `${repo.name} has warnings; it still runs work.`}
+        </p>
         <ul className="mt-1 space-y-0.5">
           {blockers.map((check) => (
             <li key={check.name}>
               {check.name}
+              {check.detail ? `: ${check.detail}` : ''}
+            </li>
+          ))}
+          {warnings.map((check) => (
+            <li key={check.name}>
+              {check.name} (warning)
               {check.detail ? `: ${check.detail}` : ''}
             </li>
           ))}
@@ -570,7 +586,7 @@ function AppSidebar() {
 }
 
 export function RootLayout() {
-  const { repos } = useDashboard()
+  const { repos, reposError } = useDashboard()
   const attention = useAttentionCount()
   // Chat renders a full-bleed sidebar that must sit flush against the nav, so it drops the column cap.
   const fullBleed = useRouterState({ select: (state) => state.location.pathname === '/chat' })
@@ -583,13 +599,19 @@ export function RootLayout() {
   }, [attention])
 
   useEffect(() => {
+    let timer: number | undefined
     const onIdleNotification = (event: Event) => {
       const detail = (event as CustomEvent<{ title: string; body: string }>).detail
       setIdleNotice(detail)
-      window.setTimeout(() => setIdleNotice(null), 8000)
+      // A newer notice gets its own full 8s instead of being cut short by the previous timer.
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => setIdleNotice(null), 8000)
     }
     window.addEventListener('amagi:idle-notification', onIdleNotification)
-    return () => window.removeEventListener('amagi:idle-notification', onIdleNotification)
+    return () => {
+      window.removeEventListener('amagi:idle-notification', onIdleNotification)
+      window.clearTimeout(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -648,7 +670,11 @@ export function RootLayout() {
             className={`mx-auto w-full flex-1 px-4 py-6 sm:px-6${fullBleed ? '' : ' pt-16 md:pt-6 max-w-6xl'}`}
           >
             {repos === null ? (
-              <p className="text-fg-faint">loading repositories...</p>
+              <p className="text-fg-faint">
+                {reposError === null
+                  ? 'loading repositories...'
+                  : `could not load repositories (${reposError}), retrying...`}
+              </p>
             ) : repos.length === 0 ? (
               <section className="mx-auto max-w-xl pt-12">
                 <h1 className="text-xl font-semibold">Add a repository to start</h1>

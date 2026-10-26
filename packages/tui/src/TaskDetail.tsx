@@ -1,6 +1,7 @@
 import {
   agentLogStore,
   type DashboardState,
+  errMsg,
   FINDING_SEVERITIES,
   fmtDuration,
   fmtTokens,
@@ -14,7 +15,7 @@ import {
 } from '@amagi/core'
 import { Box, Text, useInput } from 'ink'
 import { useMemo, useState, useSyncExternalStore } from 'react'
-import { fetchTaskToken, submitAnswer } from './answer.ts'
+import { fetchOperatorSecret, submitAnswer } from './answer.ts'
 
 const STATE_COLOR: Partial<Record<TaskState, string>> = {
   awaiting_answer: 'yellow',
@@ -99,23 +100,20 @@ export function TaskDetail({
   ].join(', ')
 
   async function answer(questionId: string, text: string): Promise<void> {
+    const failed = (error: string) =>
+      setMode({ kind: 'answering', questionId, draft: text, busy: false, error })
     setMode({ kind: 'answering', questionId, draft: text, busy: true, error: null })
-    const token = await fetchTaskToken(baseUrl, repo, taskId)
-    if (token === null) {
-      setMode({
-        kind: 'answering',
-        questionId,
-        draft: text,
-        busy: false,
-        error: 'could not fetch the task token',
-      })
-      return
-    }
-    const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, token, text)
-    if (outcome.kind === 'error') {
-      setMode({ kind: 'answering', questionId, draft: text, busy: false, error: outcome.message })
-    } else {
-      setMode({ kind: 'browse' })
+    try {
+      const secret = await fetchOperatorSecret(baseUrl)
+      if (secret === null) {
+        failed('could not fetch the operator secret')
+        return
+      }
+      const outcome = await submitAnswer(baseUrl, repo, taskId, questionId, secret, text)
+      if (outcome.kind === 'error') failed(outcome.message)
+      else setMode({ kind: 'browse' })
+    } catch (err) {
+      failed(errMsg(err))
     }
   }
 

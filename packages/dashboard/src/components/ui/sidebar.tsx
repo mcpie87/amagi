@@ -45,6 +45,7 @@ function useSidebar() {
 }
 
 function SidebarProvider({
+  shortcut = true,
   defaultOpen = true,
   open: openProp,
   onOpenChange: setOpenProp,
@@ -53,6 +54,8 @@ function SidebarProvider({
   children,
   ...props
 }: React.ComponentProps<'div'> & {
+  /** False for a provider nested in another, so one Ctrl+B does not toggle both sidebars. */
+  shortcut?: boolean
   defaultOpen?: boolean
   open?: boolean
   onOpenChange?: (open: boolean) => void
@@ -90,6 +93,7 @@ function SidebarProvider({
 
   // Adds a keyboard shortcut to toggle the sidebar.
   React.useEffect(() => {
+    if (!shortcut) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === SIDEBAR_KEYBOARD_SHORTCUT && (event.metaKey || event.ctrlKey)) {
         event.preventDefault()
@@ -99,7 +103,7 @@ function SidebarProvider({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [toggleSidebar])
+  }, [toggleSidebar, shortcut])
 
   // We add a state so that we can do data-state="expanded" or "collapsed".
   // This makes it easier to style the sidebar with Tailwind classes.

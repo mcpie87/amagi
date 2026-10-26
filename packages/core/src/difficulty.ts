@@ -55,13 +55,18 @@ export async function claimEligible(
   return null
 }
 
-/** The level whose name appears in the classifier's reply, or null. */
+/**
+ * The longest level whose name appears in the classifier's reply, or null, so
+ * overlapping names ("complex", "very complex") resolve to the more specific one.
+ * A reply that is exactly a level always resolves to it.
+ */
 export function parseDifficulty(reply: string, levels: readonly string[]): string | null {
   const lower = reply.toLowerCase()
+  let best: string | null = null
   for (const level of levels) {
-    if (lower.includes(level.toLowerCase())) return level
+    if (lower.includes(level.toLowerCase()) && level.length > (best?.length ?? 0)) best = level
   }
-  return null
+  return best
 }
 
 /**

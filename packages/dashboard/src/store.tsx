@@ -1,7 +1,6 @@
 import { agentLogKey, agentLogStore } from '@amagi/core/agent-log'
-import type { TrackerTask } from '@amagi/core/drivers/types'
 import type { StoredEvent } from '@amagi/core/events'
-import type { RunnerStatus } from '@amagi/core/run-service'
+import type { ReadyTask, RunnerStatus } from '@amagi/core/run-service'
 import { type DashboardState, initialDashboardState, reduceBatch } from '@amagi/core/view'
 import {
   createContext,
@@ -13,6 +12,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { refreshSession } from './api.ts'
 import {
   followRepo,
   pollOk,
@@ -32,16 +32,23 @@ export type RepoInfo = {
   workers: boolean
   /** Whether the server runs background pollers and watchers for this repo. */
   watchers: boolean
-  ready: { name: string; ok: boolean; detail?: string }[]
+  ready: { name: string; ok: boolean; detail?: string; advisory?: true }[]
 }
 
 /** Failed readiness checks: a repo with any of these cannot run work and needs the operator. */
 export function repoBlockers(repo: RepoInfo): RepoInfo['ready'] {
-  return repo.ready.filter((check) => !check.ok)
+  return repo.ready.filter((check) => !check.ok && check.advisory !== true)
+}
+
+/** Failed advisory checks: worth fixing, but the repo still claims and runs work. */
+export function repoWarnings(repo: RepoInfo): RepoInfo['ready'] {
+  return repo.ready.filter((check) => !check.ok && check.advisory === true)
 }
 
 export type DashboardValue = {
   repos: RepoInfo[] | null
+  /** Why the latest repos poll failed; the last good list stays in `repos`. */
+  reposError: string | null
   selected: string | null
   selectRepo: (key: string) => void
   refreshRepos: () => void
@@ -57,6 +64,7 @@ export type DashboardValue = {
 
 const ReposContext = createContext<DashboardValue>({
   repos: null,
+  reposError: null,
   selected: null,
   selectRepo: () => {},
   refreshRepos: () => {},
@@ -67,7 +75,7 @@ const ReposContext = createContext<DashboardValue>({
 const StreamContext = createContext<DashboardState>(initialDashboardState())
 
 /** The repo's unclaimed ready queue, FCFS from the tracker. */
-const ReadyQueueContext = createContext<TrackerTask[]>([])
+const ReadyQueueContext = createContext<ReadyTask[]>([])
 
 /**
  * The seq the selected repo's compact replay covered, or null until it
@@ -87,7 +95,7 @@ function readStored(): string | null {
 
 const reposUrl = `${apiBase}/api/repos`
 const refreshRepos = () => refreshPoll(reposUrl)
-const noTasks: TrackerTask[] = []
+const noTasks: ReadyTask[] = []
 
 /**
  * One event stream per selected repository, shared by every tab through the
@@ -99,6 +107,7 @@ const noTasks: TrackerTask[] = []
  */
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [repos, setRepos] = useState<RepoInfo[] | null>(null)
+  const [reposError, setReposError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(readStored)
   const resyncStream = useCallback(() => {
     if (selected !== null) resyncRepo(selected)
@@ -108,8 +117,19 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const reposPoll = usePoll(reposUrl, 15_000)
   useEffect(() => {
     if (reposPoll === undefined) return
-    const list = pollOk(reposPoll) ? (reposPoll.body as RepoInfo[]) : []
-    setRepos(list)
+    // A failed poll (every `bun --watch` restart) must not empty the list and unmount the open page.
+    if (reposPoll === null) {
+      setReposError('server unreachable')
+      return
+    }
+    if (!pollOk(reposPoll)) {
+      setReposError('the server answered with an error')
+      return
+    }
+    const list = reposPoll.body as RepoInfo[]
+    setReposError(null)
+    // An unchanged list keeps its identity, so effects keyed on it (one `bd list` per repo) do not rerun.
+    setRepos((prev) => (JSON.stringify(prev) === JSON.stringify(list) ? prev : list))
     setSelected((prev) =>
       prev !== null && list.some((r) => r.key === prev) ? prev : (list[0]?.key ?? null),
     )
@@ -142,7 +162,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   return (
     <ReposContext.Provider
-      value={{ repos, selected, selectRepo, refreshRepos, addRepo, resyncStream }}
+      value={{ repos, reposError, selected, selectRepo, refreshRepos, addRepo, resyncStream }}
     >
       {selected === null ? (
         <StreamContext.Provider value={initialDashboardState()}>{children}</StreamContext.Provider>
@@ -158,7 +178,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceBatch, undefined, initialDashboardState)
   const queuePoll = usePoll(`${apiBase}/api/repos/${repo}/ready-queue`, 4000)
-  const readyQueue = pollOk(queuePoll) ? (queuePoll.body as TrackerTask[]) : noTasks
+  const readyQueue = pollOk(queuePoll) ? (queuePoll.body as ReadyTask[]) : noTasks
   const [connection, setConnection] = useState<StreamStatus>('connecting')
   const latestSeqRef = useRef(0)
   const attemptsRef = useRef(new Map<string, number>())
@@ -234,7 +254,10 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
       }
     }
     const unfollow = followRepo(repo, {
-      status: setConnection,
+      status: (status) => {
+        if (status === 'connected') void refreshSession()
+        setConnection(status)
+      },
       events: (data) => {
         for (const item of data) receive(item)
       },
@@ -261,6 +284,8 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
   )
 }
 
+const OTHER_REPO_LOG_POLL_MS = 4000
+
 /** The replayed seq each agent log buffer was backfilled up to. */
 const backfills = new Map<string, number>()
 
@@ -270,21 +295,63 @@ function forgetBackfills(repo: string): void {
 
 /**
  * Fills a task's agent log buffer with the lines the compact replay left out.
- * A repo other than the streamed one has no live lines, so it gets everything
- * stored so far.
+ * A repo other than the streamed one has no live lines, so its log is polled
+ * instead: everything stored so far, then the lines added since.
  */
 export function useAgentLogBackfill(repo: string, taskId: string, attempt: number): void {
   const replay = useContext(ReplayContext)
-  const untilSeq = replay === null || replay.repo !== repo ? Number.MAX_SAFE_INTEGER : replay.seq
+  const streamed = replay !== null && replay.repo === repo
+  const untilSeq = streamed ? replay.seq : Number.MAX_SAFE_INTEGER
   useEffect(() => {
-    if (untilSeq === null) return
+    if (streamed) return
+    const key = agentLogKey(repo, taskId, attempt)
+    let alive = true
+    let sinceSeq = 0
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = () => {
+      fetch(
+        `${apiBase}/api/repos/${repo}/tasks/${encodeURIComponent(taskId)}/agent-log?attempt=${attempt}&untilSeq=${Number.MAX_SAFE_INTEGER}&sinceSeq=${sinceSeq}`,
+      )
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          return res.json() as Promise<StoredEvent[]>
+        })
+        .then((events) => {
+          if (!alive) return
+          const lines = events.flatMap((event) => (event.type === 'agent.stream' ? [event] : []))
+          if (sinceSeq === 0) {
+            // The buffer may hold lines from an earlier visit or stream.
+            agentLogStore.get(key).clear()
+            agentLogStore.backfill(key, lines)
+          } else {
+            for (const line of lines) agentLogStore.append(key, line.role, line.ts, line.event)
+          }
+          sinceSeq = events.at(-1)?.seq ?? sinceSeq
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (alive) timer = setTimeout(poll, OTHER_REPO_LOG_POLL_MS)
+        })
+    }
+    poll()
+    return () => {
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [streamed, repo, taskId, attempt])
+  useEffect(() => {
+    if (!streamed || untilSeq === null) return
     const key = agentLogKey(repo, taskId, attempt)
     if (backfills.get(key) === untilSeq) return
     backfills.set(key, untilSeq)
     fetch(
       `${apiBase}/api/repos/${repo}/tasks/${encodeURIComponent(taskId)}/agent-log?attempt=${attempt}&untilSeq=${untilSeq}`,
     )
-      .then((res) => (res.ok ? (res.json() as Promise<StoredEvent[]>) : []))
+      .then((res) => {
+        // Thrown, not read as empty, so the catch below forgets the key and a remount asks again.
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json() as Promise<StoredEvent[]>
+      })
       .then((events) => {
         // A reconnect since the request cleared the buffer and asked again.
         if (backfills.get(key) !== untilSeq) return
@@ -294,7 +361,7 @@ export function useAgentLogBackfill(repo: string, taskId: string, attempt: numbe
         )
       })
       .catch(() => backfills.delete(key))
-  }, [repo, taskId, attempt, untilSeq])
+  }, [streamed, repo, taskId, attempt, untilSeq])
 }
 
 export function useDashboard(): DashboardValue & { state: DashboardState } {
@@ -302,7 +369,7 @@ export function useDashboard(): DashboardValue & { state: DashboardState } {
 }
 
 /** The repo's unclaimed ready queue, first-created first. */
-export function useReadyQueue(): TrackerTask[] {
+export function useReadyQueue(): ReadyTask[] {
   return useContext(ReadyQueueContext)
 }
 
@@ -319,17 +386,17 @@ export type RunnerApi = {
 
 /** Per-launch overrides, matching RunBody. Omitted fields use config defaults. */
 export type RunOptions = {
-  harness?: string
+  workerId?: string
   model?: string
   effort?: string
 }
 
 export type RunOptionsInfo = {
-  harnesses: { name: string; kind: string; model?: string; effort?: string }[]
+  harnesses: { name: string; workerId: string; kind: string; model?: string; effort?: string }[]
   models: Record<string, string[]>
   efforts: Record<string, string[]>
-  /** The configured default harness (config.harness.implement), for labeling. */
-  default: { kind: string; model?: string; effort?: string } | null
+  /** Id of the first enabled worker, which a launch without workerId runs on. */
+  default: string | null
 }
 
 const RunnerContext = createContext<RunnerApi>({
@@ -380,7 +447,7 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           ...(taskId === undefined ? {} : { taskId }),
-          ...(opts?.harness === undefined ? {} : { harness: opts.harness }),
+          ...(opts?.workerId === undefined ? {} : { workerId: opts.workerId }),
           ...(opts?.model === undefined ? {} : { model: opts.model }),
           ...(opts?.effort === undefined ? {} : { effort: opts.effort }),
         }),
@@ -438,6 +505,7 @@ export type SeatState = {
   holder: {
     repo: string
     taskId?: string
+    attempt?: number
     title?: string
     watcher?: string
     status?: string

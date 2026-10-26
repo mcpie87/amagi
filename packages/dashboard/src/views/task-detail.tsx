@@ -31,9 +31,9 @@ import { useDateFormatPref } from '../date-format.ts'
 import { fmtDateTime, fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import { taskRoute } from '../routes.tsx'
-import { useDashboard, useRunner } from '../store.tsx'
+import { useDashboard, useReadyQueue, useRunner } from '../store.tsx'
 import { Blockers, Unblocks } from './issue-dependencies.tsx'
-import { fetchIssue, type Issue } from './issue-model.ts'
+import { fetchIssue, type Issue, IssueDetailUnsupported } from './issue-model.ts'
 import {
   AnswerBox,
   AttemptSwitcher,
@@ -120,22 +120,28 @@ const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
 function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
   const [issue, setIssue] = useState<Issue | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [unsupported, setUnsupported] = useState(false)
 
   useEffect(() => {
     let active = true
     setIssue(null)
     setError(null)
+    setUnsupported(false)
     fetchIssue(repo, issueId)
       .then((detail) => {
         if (active) setIssue(detail)
       })
       .catch((err: unknown) => {
-        if (active) setError(errMsg(err))
+        if (!active) return
+        if (err instanceof IssueDetailUnsupported) setUnsupported(true)
+        else setError(errMsg(err))
       })
     return () => {
       active = false
     }
   }, [repo, issueId])
+
+  if (unsupported) return null
 
   return (
     <>
@@ -549,6 +555,7 @@ export function TaskDetailView() {
   const { id } = useParams({ from: taskRoute.id })
   const { state: liveState, selected } = useDashboard()
   const { status } = useRunner()
+  const claimSkip = useReadyQueue().find((ready) => ready.id === id)?.claimSkip
   // null follows the current attempt, so a reset moves the view along with it.
   const [viewAttempt, setViewAttempt] = useState<number | null>(null)
   const currentAttempt = liveState.tasks[id]?.attempt ?? 1
@@ -591,6 +598,11 @@ export function TaskDetailView() {
           &larr; overview
         </Link>
         <p className="mt-4 text-fg-faint">No events yet for {id}.</p>
+        {claimSkip !== undefined && (
+          <p className="mt-2 text-sm text-fg-muted">
+            {claimSkip.state}: {claimSkip.reason}
+          </p>
+        )}
         {selected !== null && (
           <div className="mt-3">
             <FullTriageButton taskId={id} state={null} />
@@ -627,6 +639,11 @@ export function TaskDetailView() {
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{task.title}</h1>
         <Badge state={task.state} />
+        {!past && claimSkip !== undefined && (
+          <span className="text-sm text-fg-muted">
+            {claimSkip.state}: {claimSkip.reason}
+          </span>
+        )}
         {waitingSeat !== null && (
           <span className="text-sm text-fg-muted">waiting for seat {waitingSeat}</span>
         )}

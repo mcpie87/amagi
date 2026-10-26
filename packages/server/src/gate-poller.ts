@@ -36,6 +36,8 @@ export function startGatePoller({
           advisory: false,
         })
         if (!resolved) continue
+        // The web answer handler resolves the gate right after recording the real answer.
+        if (!store.unansweredQuestions().some((q) => q.id === question.id)) continue
         store.append(question.taskId, {
           type: 'question.answered',
           questionId: question.id,

@@ -261,7 +261,75 @@ describe('BeadsTracker', () => {
     expect(task?.id).toBe('tst-lmc')
     expect(task?.status).toBe('in_progress')
     const update = calls.find((c) => c.includes('update'))
-    expect(update?.slice(0, 4)).toEqual(['bd', 'update', 'tst-lmc', '--status'])
+    expect(update?.slice(0, 4)).toEqual(['bd', 'update', 'tst-lmc', '--claim'])
+  })
+
+  test('a by-id claim takes an unassigned in_progress issue by compare-and-set', async () => {
+    const orphaned = READY_JSON.replace('"status": "open"', '"status": "in_progress"')
+    const { exec, calls } = fake((c) => (c.includes('show') ? ok(orphaned) : undefined))
+    const task = await new BeadsTracker({ cwd: '/repo', exec, actor: 'amagi' }).claim('tst-lmc')
+
+    expect(task?.id).toBe('tst-lmc')
+    expect(calls.find((c) => c.includes('update'))).toEqual([
+      'bd',
+      '--actor',
+      'amagi',
+      'update',
+      'tst-lmc',
+      '--assignee',
+      'amagi',
+      '--if-assignee',
+      '',
+    ])
+  })
+
+  test('a by-id claim bd refuses for another reason throws', async () => {
+    const { exec } = fake((c) =>
+      c.includes('update')
+        ? { exitCode: 1, stdout: '', stderr: 'issue not claimable: status blocked' }
+        : c.includes('show')
+          ? ok(READY_JSON)
+          : undefined,
+    )
+    await expect(new BeadsTracker({ cwd: '/repo', exec }).claim('tst-lmc')).rejects.toThrow(
+      /not claimable/,
+    )
+  })
+
+  test('the fallback claim passes over issues held by other actors', async () => {
+    const issue = (id: string, assignee?: string) => ({
+      ...JSON.parse(READY_JSON.replace('tst-lmc', id))[0],
+      ...(assignee ? { assignee } : {}),
+    })
+    const { exec, calls } = fake((c) => {
+      if (c.includes('update') && c.includes('tst-a')) {
+        return { exitCode: 1, stdout: '', stderr: 'issue already claimed by c' }
+      }
+      if (c.includes('show'))
+        return ok(JSON.stringify([issue(c.includes('tst-a') ? 'tst-a' : 'tst-b')]))
+      if (c.includes('--claim') && c.includes('ready')) return ok('[]')
+      if (c.includes('ready')) {
+        return ok(
+          JSON.stringify([issue('tst-o', 'other'), issue('tst-a'), issue('tst-b', 'amagi')]),
+        )
+      }
+      return undefined
+    })
+    const tracker = new BeadsTracker({ cwd: '/repo', exec, actor: 'amagi' })
+
+    expect((await tracker.claim())?.id).toBe('tst-b')
+    expect(calls.some((c) => c.includes('tst-o'))).toBe(false)
+  })
+
+  test('a by-id claim held by another actor yields null instead of taking it over', async () => {
+    const { exec } = fake((c) =>
+      c.includes('update')
+        ? { exitCode: 1, stdout: '', stderr: 'Error updating tst-lmc: issue already claimed by a' }
+        : c.includes('show')
+          ? ok(READY_JSON)
+          : undefined,
+    )
+    expect(await new BeadsTracker({ cwd: '/repo', exec }).claim('tst-lmc')).toBeNull()
   })
 
   test('epics, milestones and gates are never handed out as work', async () => {

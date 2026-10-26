@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { diagnoseRepo } from './diagnose.ts'
+import { type Diagnostic, diagnoseRepo } from './diagnose.ts'
 import type { RegistryEntry } from './registry.ts'
+import { Workspaces } from './workspace.ts'
 
 let dir: string
 let repo: string
@@ -110,9 +111,28 @@ describe('diagnoseRepo', () => {
         name: 'harness amagi-no-such-harness',
         ok: false,
         detail:
-          'amagi-no-such-harness not on PATH (used by harness.implement, mention watcher, prConflict watcher); shell aliases and functions are not visible, point bin at an executable',
+          'amagi-no-such-harness not on PATH (used by harness.implement, mention watcher, prConflict watcher); shell aliases and functions are not visible, point bin at an executable or an argv list starting with one',
+        advisory: true,
       },
     ])
+  })
+
+  test('a missing harness an implement worker runs on blocks claims', async () => {
+    mkdirSync(join(dir, 'config', 'amagi'), { recursive: true })
+    writeFileSync(
+      join(dir, 'config', 'amagi', 'config.toml'),
+      '[[worker]]\nid = "w-1"\nname = "W"\nkind = "claude"\nenabled = true\n',
+    )
+    writeFileSync(
+      join(repo, '.amagi', 'config.toml'),
+      '[harness.implement]\nkind = "claude"\nbin = "amagi-no-such-harness"\n\n' +
+        '[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n',
+    )
+    const check = (await diagnoseRepo(entry())).find(
+      (c) => c.name === 'harness amagi-no-such-harness',
+    )
+    expect(check?.ok).toBe(false)
+    expect(check?.advisory).toBeUndefined()
   })
 
   test('accepts a harness bin given as a path to an executable', async () => {
@@ -127,5 +147,31 @@ describe('diagnoseRepo', () => {
     )
     const check = (await diagnoseRepo(entry())).find((c) => c.name === `harness ${wrapper}`)
     expect(check).toEqual({ name: `harness ${wrapper}`, ok: true, detail: wrapper })
+  })
+
+  test('resolves the first element of a harness bin argv prefix', async () => {
+    mkdirSync(join(repo, '.amagi'), { recursive: true })
+    writeFileSync(
+      join(repo, '.amagi', 'config.toml'),
+      '[harness.implement]\nkind = "claude"\nbin = ["amagi-no-such-wrapper", "--flag", "claude"]\n\n' +
+        '[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n',
+    )
+    const names = (await diagnoseRepo(entry()))
+      .filter((c) => c.name.startsWith('harness '))
+      .map((c) => c.name)
+    expect(names).toEqual(['harness amagi-no-such-wrapper'])
+  })
+})
+
+describe('Workspaces.readiness', () => {
+  test('serves the latest diagnosis until the next diagnose refreshes it', async () => {
+    const workspaces = new Workspaces({ registryPath: join(dir, 'registry.json') })
+    const registered = workspaces.add(repo)
+    const configOk = (checks: Diagnostic[]) => checks.find((c) => c.name === 'config')?.ok
+    expect(configOk(await workspaces.readiness(registered.key))).toBe(true)
+    writeFileSync(join(repo, '.amagi', 'config.toml'), 'not toml [')
+    expect(configOk(await workspaces.readiness(registered.key))).toBe(true)
+    await workspaces.diagnose(registered)
+    expect(configOk(await workspaces.readiness(registered.key))).toBe(false)
   })
 })

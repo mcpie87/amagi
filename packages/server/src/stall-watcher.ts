@@ -48,6 +48,8 @@ export const STALLED_STATES: readonly TaskState[] = [
   'claimed',
   'worktree_ready',
   'implementing',
+  'reviewing',
+  'fixing',
   'awaiting_answer',
   'checks',
   'retrying',
@@ -59,7 +61,7 @@ export const STALLED_STATES: readonly TaskState[] = [
  * worker can be spotted. `awaiting_answer` is excluded: the worker is parked
  * waiting on a human, so static tool/diff streams are expected there.
  */
-export const DOOM_STATES: readonly TaskState[] = ['implementing', 'checks', 'retrying']
+export const DOOM_STATES: readonly TaskState[] = ['implementing', 'fixing', 'checks', 'retrying']
 
 /** Event tail the doom guard analyzes per task each tick; covers the tool window. */
 const RECENT_EVENTS_LIMIT = 2000
@@ -297,12 +299,16 @@ export function startStallWatcher({
     runs++
     currentRunId = `${Date.now()}-${runs}`
     currentRunFinalized = false
-    store.append(null, {
-      type: 'watcher.run.started',
-      repo,
-      name: 'stall-watcher',
-      runId: currentRunId,
-    })
+    try {
+      store.append(null, {
+        type: 'watcher.run.started',
+        repo,
+        name: 'stall-watcher',
+        runId: currentRunId,
+      })
+    } catch (err) {
+      console.warn(`stall watcher history: ${errMsg(err)}`)
+    }
     logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,

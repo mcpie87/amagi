@@ -100,18 +100,18 @@ Every task moves through a fixed set of states (`packages/core/src/events.ts`), 
 | `implementing` | The implement harness is running | `awaiting_answer`, `checks` |
 | `awaiting_answer` | The agent called `amagi ask` and is parked on a human answer | `implementing` |
 | `checks` | Running `checks.commands` against the worktree | `implementing` (checks failed, retrying), `reviewing` (checks passed with review enabled), `committed` (checks passed with review disabled) |
-| `reviewing` | The read-only reviewer inspects the current change | `fixing` (blocking findings), `checks` (review ends) |
+| `reviewing` | The read-only reviewer inspects the current change | `fixing` (blocking findings), `checks` (review ends acceptable); an unresolved review parks in `needs_human` |
 | `fixing` | The implementer answers findings and updates the change | `checks` |
 | `committed` | Changes committed to the branch | `pr_open` |
 | `pr_open` | Pull request opened against `repo.baseBranch` | `pr_flagged` |
 | `pr_flagged` | The PR's diff against base is empty; flagged with `amagi/needs-closing` and parked for the operator to close. Non-terminal: the watcher clears it back to `pr_open` if real commits arrive | `pr_open` |
 | `done` | Terminal: task complete | — |
 | `no_pr` | Terminal: the agent produced no changes, so the task looks already done or needs no PR. The reason is the agent's own explanation (asked of it when it left none), so the operator knows why. Surfaced to the user and **not closed until a human verifies and closes it explicitly** | — |
-| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, PR creation failed, agent crash, etc.) | — |
+| `needs_human` | Terminal: stuck, needs manual attention (failed checks past the retry budget, review ended unresolved, PR creation failed, agent crash, etc.) | - |
 | `abandoned` | Terminal: task withdrawn, either by the operator's close action or by a PR closing without a merge and without an outcome label | — |
 | `cancelled` | Terminal: the operator interrupted the run (`amagi stop` or the dashboard's stop action); the agent process was killed, the tracker lease released, and the worktree preserved for the reclaim path (`amagi continue`) | — |
 
-**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times. When `[review].enabled`, checks must pass before each review; blocking findings get a bounded implementer fix round followed by checks and another review, all before the single commit. Acceptable reviews proceed to `pr_open`; exhausted round, token, progress, or cost budgets still open a PR with unresolved findings and `amagi/review-unresolved`. The runner parks on `awaiting_answer` whenever the agent asks a question. A task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
+**Current status:** the runner (`packages/core/src/runner.ts`) drives `claimed` through `pr_open`, looping `implementing` <-> `checks` up to `loop.maxCheckRounds` times. When `[review].enabled`, checks must pass before each review; blocking findings get a bounded implementer fix round followed by checks and another review, all before the single commit. Acceptable reviews proceed to `pr_open`; a review that ends any other way (round, token, progress or cost budget exhausted, reviewer failure, invalid fix replies) parks the task in `needs_human` with nothing committed and no PR, naming the stop reason and the unresolved finding ids. The runner parks on `awaiting_answer` whenever the agent asks a question. A task that reaches `pr_open` stops there rather than continuing to `done`, unless the server is running: `amagi serve` polls open task PRs and settles a task to `done` when its PR merges or `abandoned` when it closes without a merge.
 
 A human closing a PR unmerged can say how the task ended with one of two labels, created on the forge alongside every amagi PR: `amagi/done` settles the task to `done` and closes its tracker issue as if the PR had merged; `amagi/rework` drops the worktree and branch, comments the PR link on the tracker issue and releases it, so a worker claims it again as a fresh attempt. A PR carrying neither or both is `abandoned`.
 
@@ -343,6 +343,7 @@ below gives the schema and defaults.
 | `checks.lint` | string | required per repo | Lint command run after formatting. |
 | `checks.test` | string | required per repo | Test command run after lint. |
 | `checks.commands` | string[] | `[]` | Additional shell commands run after format, lint, and test; the first non-zero exit stops the run and triggers a fix round. |
+| `checks.timeoutSec` | integer 1-86400 | `1800` | How long one check command may run before its process tree is killed and the check fails; covers task checks and the conflict, mention, rebase and commit checks. |
 | `notify.idle` | boolean | `true` | Send one notification when automatic dispatch drains the queue and no run is active. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
 | `notify.ntfyTopic` | string \| null | `null` | [ntfy](https://ntfy.sh) topic to publish task events to. Unset disables ntfy notifications. |
@@ -415,6 +416,8 @@ permissions = "bypass"
 ```
 
 `permissions = "bypass"` passes `--auto` to OpenCode. The agent runs in Amagi's dedicated worktree, but OpenCode's own permission checks are otherwise disabled.
+
+`bin` also takes an argv prefix, so a wrapper that would otherwise live in a shell alias needs no script: `bin = ["bwrap", "--ro-bind", "/", "/", "claude"]`. Amagi spawns it without a shell and appends the harness arguments.
 
 ### Harness and model selection
 

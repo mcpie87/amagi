@@ -11,10 +11,11 @@ describe('harness process cap setting', () => {
   let home: string
   let workspaces: TestWorkspaces
   let app: AppType
+  const secret = 'operator-secret-for-tests'
   const save = (body: unknown) =>
     app.request('/api/harness-process-cap', {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'X-Amagi-Secret': secret },
       body: JSON.stringify(body),
     })
 
@@ -22,7 +23,7 @@ describe('harness process cap setting', () => {
     home = mkdtempSync(join(tmpdir(), 'amagi-process-cap-'))
     process.env.XDG_CONFIG_HOME = home
     workspaces = testWorkspaces([])
-    app = createApp({ workspaces: workspaces.workspaces })
+    app = createApp({ workspaces: workspaces.workspaces, secret })
   })
 
   afterEach(() => {

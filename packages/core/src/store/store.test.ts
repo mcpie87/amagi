@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import type { StoredEvent } from '../events.ts'
+import { emptyProjection, projectAll } from '../project.ts'
 import { openDatabase } from './db.ts'
 import { InvalidTransitionError, Store } from './store.ts'
 
@@ -327,16 +328,53 @@ describe('Store', () => {
       })
     line('first attempt')
     store.append('bd-1', { type: 'task.reset', reason: 'retry' })
-    line('a')
+    const a = line('a').seq
     line('b')
     const until = line('c').seq
     line('after')
-    const texts = (attempt: number, limit: number) =>
+    const texts = (attempt: number, limit: number, since?: number) =>
       store
-        .agentLog('bd-1', attempt, until, limit)
+        .agentLog('bd-1', attempt, until, limit, since)
         .map((e) => (e.type === 'agent.stream' && e.event.kind === 'text' ? e.event.text : e.type))
     expect(texts(1, 10)).toEqual(['first attempt'])
     expect(texts(2, 2)).toEqual(['b', 'c'])
+    expect(texts(2, 10, a)).toEqual(['b', 'c'])
+    expect(texts(1, 10, a)).toEqual([])
+  })
+
+  test('a reset resolves the open questions of the task in SQL as in the reducer', () => {
+    claim()
+    claim('bd-2')
+    const ask = (id: string, questionId: string) =>
+      store.append(id, {
+        type: 'question.asked',
+        questionId,
+        question: 'which registry?',
+        options: [],
+        gateRef: null,
+      })
+    ask('bd-1', 'q-old')
+    store.append('bd-1', { type: 'question.timedout', questionId: 'q-old' })
+    ask('bd-1', 'q-open')
+    ask('bd-2', 'q-other')
+    // A reset in the same millisecond as an ask would count it as asked since.
+    store.db.query("update questions set asked_at = asked_at - 1000 where task_id = 'bd-1'").run()
+    store.append('bd-1', { type: 'task.reset', reason: 'retry' })
+    ask('bd-1', 'q-new')
+
+    const sql = store
+      .openQuestions()
+      .map((q) => q.id)
+      .sort()
+    const reduced = projectAll(emptyProjection(), store.events({ limit: 999 })).questions
+    expect(sql).toEqual(['q-new', 'q-other'])
+    expect(
+      Object.values(reduced)
+        .filter((q) => q.resolvedAt === null)
+        .map((q) => q.id)
+        .sort(),
+    ).toEqual(sql)
+    expect(store.unansweredQuestions('bd-1').map((q) => q.id)).toEqual(['q-new'])
   })
 
   test('tasks can be filtered by state', () => {
@@ -436,6 +474,36 @@ describe('Store', () => {
     expect(runs[1]?.error).toContain('interrupted')
     const other = store.watcherRuns({ repo: 'repo', name: 'mention-watcher', limit: 5 })
     expect(other[0]?.endedAt).toBeNull()
+  })
+
+  test('a page holds only its own runs, the oldest still closed by the start after it', () => {
+    const watcher = { repo: 'repo', name: 'pr-conflict-watcher' }
+    store.append(null, { type: 'watcher.run.started', ...watcher, runId: 'a' })
+    store.append(null, { type: 'watcher.run.finished', ...watcher, runId: 'a', ok: true })
+    store.append(null, { type: 'watcher.run.started', ...watcher, runId: 'b' })
+    store.append(null, {
+      type: 'watcher.action',
+      ...watcher,
+      runId: 'b',
+      targetType: 'pr',
+      targetId: '7',
+      result: 'scanned',
+      level: 'info',
+    })
+    store.append(null, {
+      type: 'watcher.run.started',
+      repo: 'repo',
+      name: 'mention-watcher',
+      runId: 'm',
+    })
+    store.append(null, { type: 'watcher.run.started', ...watcher, runId: 'c' })
+
+    const runs = store.watcherRuns({ ...watcher, limit: 2 })
+    expect(runs.map((r) => [r.runId, r.ok, r.actions.length])).toEqual([
+      ['c', null, 0],
+      ['b', false, 1],
+    ])
+    expect(runs[1]?.error).toContain('interrupted')
   })
 
   test('watcherRuns folds durable run and action events and pages complete runs newest first', () => {

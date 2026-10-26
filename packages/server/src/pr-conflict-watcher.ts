@@ -61,13 +61,33 @@ export type PrConflictWatcherOptions = {
 }
 
 export type PrConflictWatcher = {
-  stop(): void
+  /** Resolves once this watcher's in-flight tick has finished. */
+  stop(): Promise<void>
   activity(): WorkerActivity
-  /** Queues a manual resolution; `prUrl` routes it to the forge the PR lives on. */
-  queue(prNumber: number, prUrl?: string | null): void
+  /**
+   * Queues a manual resolution; `prUrl` routes it to the forge the PR lives on.
+   * False when the PR is already queued or its resolution is still running.
+   */
+  queue(prNumber: number, prUrl?: string | null): boolean
 }
 
+/** `pending` when the PR was already queued or is still resolving; false when no watcher runs. */
+export type ConflictQueueResult = 'queued' | 'pending' | false
+
 const DEFAULT_INTERVAL_MS = 300_000
+
+/** True while an operator chat or a live worker process is working on the task. */
+export function taskBusy(store: Store, repo: string, taskId: string): boolean {
+  return (
+    store.activeChatAgents().some((agent) => agent.taskId === taskId) ||
+    loadLiveRuns().some(
+      (live) => live.repoKey === repo && live.taskId === taskId && pidAlive(live.pid),
+    )
+  )
+}
+
+/** The tick each repo's PR watcher is running, shared across restarts of the watcher. */
+const inFlight = new Map<string, Promise<void>>()
 
 /**
  * The shared PR watcher: one listOpenPrs per tick feeds the conflict and
@@ -117,6 +137,8 @@ export function startPrConflictWatcher({
   const unknownCursors = new Map<string, number>()
   /** Conflict-watch state keys queued for a manual resolution run. */
   const queuedPrs = new Set<string>()
+  /** Queued keys whose resolution has not finished yet; a repeat queue of one is a no-op. */
+  const pendingPrs = new Set<string>()
   const counters = (): WorkerActivity['counters'] => [
     { label: 'scanned', value: scanned },
     { label: 'conflicting', value: conflicting },
@@ -155,7 +177,7 @@ export function startPrConflictWatcher({
   ): Promise<void> {
     const baseRefs = [...new Set(prs.map((p) => p.baseRefName))]
     const { kind, remote } = forge.config.forge
-    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
+    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root), kind)
     for (const base of baseRefs) {
       await execOk(run, ['git', 'fetch', remote, base], {
         cwd: root,
@@ -204,7 +226,7 @@ export function startPrConflictWatcher({
   /** The base branch's remote head, so a base move re-arms PRs already attempted. */
   async function baseHeadOid(run: Exec, forge: PrForge): Promise<string> {
     const { kind, remote } = forge.config.forge
-    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
+    const tokenCfg = await gitTokenConfig(run, root, remote, forgeToken(kind, root), kind)
     const ref = `refs/heads/${forge.config.repo.baseBranch}`
     const out = await execOk(run, ['git', 'ls-remote', remote, ref], {
       cwd: root,
@@ -233,11 +255,10 @@ export function startPrConflictWatcher({
       try {
         await syncPrPriorityLabel({
           cwd: root,
-          remote: forge.config.forge.remote,
           number: pr.number,
+          driver: forge.driver,
           labels: pr.labels,
           priority: pri.linked ? pri.priority : null,
-          ...(exec === undefined ? {} : { exec }),
         })
       } catch (err) {
         logEvent(`PR #${pr.number}: priority label sync failed: ${errMsg(err)}`, 'error')
@@ -331,8 +352,8 @@ export function startPrConflictWatcher({
         console.warn(`merge-tree observation: ${errMsg(err)}`)
       }
     }
-    const statePath = conflictWatchPath(repoName)
-    const state = readConflictWatch(statePath)
+    const statePath = conflictWatchPath(repo)
+    const state = readConflictWatch(statePath, conflictWatchPath(repoName))
     const nextState: ConflictWatchState = {}
     const conflicts = forgeConfig.watchers.prConflict.enabled
       ? prs.filter((p) => isConflicting(p, forgeConfig.repo.baseBranch))
@@ -372,7 +393,7 @@ export function startPrConflictWatcher({
       })
       if (candidates.length > 0) {
         const { remote, kind } = forgeConfig.forge
-        const auth = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
+        const auth = await gitTokenConfig(run, root, remote, forgeToken(kind, root), kind)
         await execOk(
           run,
           [
@@ -401,10 +422,7 @@ export function startPrConflictWatcher({
             id !== null &&
             store.task(id)?.state === 'pr_open' &&
             store.task(id)?.prUrl === pr.url &&
-            !store.activeChatAgents().some((agent) => agent.taskId === id) &&
-            !loadLiveRuns().some(
-              (live) => live.repoKey === repo && live.taskId === id && pidAlive(live.pid),
-            )
+            !taskBusy(store, repo, id)
           const key = stateKey(forge, pr.number)
           const pair = `${pr.headRefOid}:${base}`
           if (!idle() || rebaseAttempts.get(key) === pair) continue
@@ -445,6 +463,10 @@ export function startPrConflictWatcher({
       const manual = queuedNow.has(key)
       const headOid = pr.headRefOid ?? ''
       const seen = state[key]
+      if (stopped) {
+        if (seen !== undefined) nextState[key] = seen
+        continue
+      }
       const taskId = taskIdFromPrBranch(pr.headRefName)
       const task = taskId === null ? null : store.task(taskId)
       // The operator's chat holds the task and resolves its conflicts itself.
@@ -456,6 +478,19 @@ export function startPrConflictWatcher({
         store.append(task.id, { type: 'pr.status', mergeStatus: 'conflicted' })
       }
       const observedTask = task === null ? null : store.task(task.id)
+      if (manual && observedTask !== null && taskBusy(store, repo, observedTask.id)) {
+        recordPrLog(pr, 'skipped queued resolution: a chat or live run is working on the task')
+        if (observedTask.state === 'pr_conflict_fixing') {
+          store.append(observedTask.id, {
+            type: 'task.state',
+            from: observedTask.state,
+            to: observedTask.prMergeStatus === 'conflicted' ? 'pr_merge_conflict' : 'pr_open',
+            reason: `Conflict resolution for PR #${pr.number} skipped: the task is busy`,
+          })
+        }
+        if (seen !== undefined) nextState[key] = seen
+        continue
+      }
       if (manual && observedTask !== null) {
         if (
           observedTask.state !== 'pr_conflict_fixing' &&
@@ -514,8 +549,13 @@ export function startPrConflictWatcher({
         onLog: (level, message) => recordPrLog(pr, message, level === 'error' ? 'error' : 'info'),
         onGitBypassed: (entries) => store.append(null, { type: 'git.bypassed', entries }),
       })
+      if (manual) pendingPrs.delete(key)
       const resolvedTask = task === null ? null : store.task(task.id)
-      const settledState = result.ok ? 'pr_open' : 'pr_merge_conflict'
+      // A forced run on a PR that never conflicted must not park it as conflicted when it fails.
+      const settledState =
+        result.ok || (!isConflict && resolvedTask?.prMergeStatus !== 'conflicted')
+          ? 'pr_open'
+          : 'pr_merge_conflict'
       if (
         resolvedTask?.state === 'pr_conflict_fixing' &&
         canTransition(resolvedTask.state, settledState)
@@ -526,7 +566,9 @@ export function startPrConflictWatcher({
           to: settledState,
           reason: result.ok
             ? `Conflict resolution completed for PR #${pr.number}`
-            : `PR #${pr.number} remains conflicted after resolution attempt: ${result.message}`,
+            : settledState === 'pr_open'
+              ? `Conflict resolution failed for PR #${pr.number}: ${result.message}`
+              : `PR #${pr.number} remains conflicted after resolution attempt: ${result.message}`,
         })
       }
       if (isConflict) {
@@ -586,7 +628,10 @@ export function startPrConflictWatcher({
         .filter((p) => nextState[stateKey(forge, p.number)]?.contained === true)
         .map((p) => [p.number, nextState[stateKey(forge, p.number)]?.verdict ?? null]),
     )
+    if (stopped)
+      return { scanned: prs.length, conflicting: conflicts.length, resolvedNow, warnings }
     const pointless = await flagPointlessPrs({
+      repo,
       store,
       tracker,
       driver: forgeDriver,
@@ -621,7 +666,11 @@ export function startPrConflictWatcher({
   async function tick(): Promise<void> {
     runs++
     const runId = `${Date.now()}-${runs}`
-    store.append(null, { type: 'watcher.run.started', repo, name: 'pr-conflict-watcher', runId })
+    try {
+      store.append(null, { type: 'watcher.run.started', repo, name: 'pr-conflict-watcher', runId })
+    } catch (err) {
+      console.warn(`pr conflict watcher history: ${errMsg(err)}`)
+    }
     logEvent(`run ${runs} started`)
     const next: WorkerActivity = {
       ...activity,
@@ -635,16 +684,23 @@ export function startPrConflictWatcher({
       intervalMs,
       status: 'active',
     }
+    const queuedNow = new Set(queuedPrs)
+    queuedPrs.clear()
     try {
       const run = exec ?? defaultExec
-      const queuedNow = new Set(queuedPrs)
-      queuedPrs.clear()
       let scannedNow = 0
       let conflictingNow = 0
       let resolvedNow = 0
       const warnings: string[] = []
       const scanErrors: string[] = []
       for (const forge of forgesToScan()) {
+        const { kind, remote } = forge.config.forge
+        if (forge.key !== PRIMARY_FORGE && forgeToken(kind, root) === null) {
+          logEvent(`skipped ${kind}:${remote}: no ${kind} token configured`)
+          for (const key of queuedNow)
+            if (ownsKey(forge, key) && pendingPrs.has(key)) queuedPrs.add(key)
+          continue
+        }
         try {
           const result = await scanForge(forge, run, runId, queuedNow)
           scannedNow += result.scanned
@@ -652,7 +708,10 @@ export function startPrConflictWatcher({
           resolvedNow += result.resolvedNow
           warnings.push(...result.warnings)
         } catch (err) {
-          const message = `${forge.config.forge.kind}:${forge.config.forge.remote}: ${errMsg(err)}`
+          // A failed scan never ran the operator's queued request: keep it for the next tick.
+          for (const key of queuedNow)
+            if (ownsKey(forge, key) && pendingPrs.has(key)) queuedPrs.add(key)
+          const message = `${kind}:${remote}: ${errMsg(err)}`
           scanErrors.push(message)
           logEvent(`forge scan failed: ${message}`, 'error')
         }
@@ -680,6 +739,9 @@ export function startPrConflictWatcher({
       next.detail = 'scan failed'
       logEvent(`run ${runs} failed: ${next.error}`, 'error')
       console.warn(`pr conflict watch: ${next.error}`)
+    } finally {
+      // A queued PR the scan skipped or no longer lists must not stay pending forever.
+      for (const key of queuedNow) if (!queuedPrs.has(key)) pendingPrs.delete(key)
     }
     next.counters = counters()
     next.log = log
@@ -698,10 +760,35 @@ export function startPrConflictWatcher({
     }
   }
 
-  const poller = startPoller(intervalMs, tick, true)
+  let current: Promise<void> = Promise.resolve()
+  const poller = startPoller(
+    intervalMs,
+    async () => {
+      // A watcher toggled off and on again must not tick alongside the one the old instance is
+      // finishing: both would dispatch the same resolution and flag the same PR.
+      const run = (inFlight.get(repo) ?? Promise.resolve())
+        .catch(() => {})
+        .then(() => (stopped ? undefined : tick()))
+      inFlight.set(repo, run)
+      current = run
+      try {
+        await run
+      } finally {
+        if (inFlight.get(repo) === run) inFlight.delete(repo)
+      }
+    },
+    true,
+  )
   return {
     queue(prNumber, prUrl = null) {
-      queuedPrs.add(stateKey(forgeFor(prUrl), prNumber))
+      const key = stateKey(forgeFor(prUrl), prNumber)
+      if (pendingPrs.has(key)) {
+        // Still waiting after a failed scan: retry the scan now instead of on the next interval.
+        if (queuedPrs.has(key)) poller.trigger()
+        return false
+      }
+      pendingPrs.add(key)
+      queuedPrs.add(key)
       const runId = `queued-${Date.now()}`
       store.append(null, {
         type: 'watcher.action',
@@ -715,11 +802,13 @@ export function startPrConflictWatcher({
         level: 'info',
       })
       poller.trigger()
+      return true
     },
     stop() {
       stopped = true
       poller.stop()
       activity = { ...activity, status: 'off', nextRunAt: 0 }
+      return current.catch(() => {})
     },
     activity: () => activity,
   }

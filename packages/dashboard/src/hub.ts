@@ -26,7 +26,8 @@ export type Port = { postMessage(message: FromHub): void }
 
 export type SourceHandlers = {
   open(): void
-  error(): void
+  /** `closed`: the browser gave up (an error status, not a dropped connection) and will not retry. */
+  error(closed: boolean): void
   replayed(seq: number): void
   message(data: string): void
 }
@@ -36,7 +37,7 @@ export type Connect = (url: string, on: SourceHandlers) => { close(): void }
 export const connectEventSource: Connect = (url, on) => {
   const source = new EventSource(url)
   source.addEventListener('open', on.open)
-  source.addEventListener('error', on.error)
+  source.addEventListener('error', () => on.error(source.readyState === EventSource.CLOSED))
   source.addEventListener('replayed', (event) => on.replayed(Number((event as MessageEvent).data)))
   source.addEventListener('message', (event) => on.message((event as MessageEvent).data))
   return source
@@ -55,7 +56,12 @@ type Feed = {
   latestSeq: number
   replayed: number | null
   status: StreamStatus
+  reopen: ReturnType<typeof setTimeout> | undefined
+  reopenMs: number
 }
+
+const REOPEN_MIN_MS = 1_000
+const REOPEN_MAX_MS = 30_000
 
 type Poll = {
   ports: Set<Port>
@@ -98,6 +104,7 @@ export class Hub {
       case 'resync': {
         const feed = this.feeds.get(message.repo)
         if (feed === undefined) return
+        clearTimeout(feed.reopen)
         feed.source.close()
         this.endReplay(message.repo, feed)
         this.open(message.repo, feed)
@@ -131,6 +138,8 @@ export class Hub {
         latestSeq: 0,
         replayed: null,
         status: 'connecting',
+        reopen: undefined,
+        reopenMs: REOPEN_MIN_MS,
       }
       this.feeds.set(repo, feed)
       this.open(repo, feed)
@@ -153,6 +162,7 @@ export class Hub {
   private unstream(port: Port, repo: string): void {
     const feed = this.feeds.get(repo)
     if (feed === undefined || !feed.ports.delete(port) || feed.ports.size > 0) return
+    clearTimeout(feed.reopen)
     feed.source.close()
     this.feeds.delete(repo)
   }
@@ -162,10 +172,20 @@ export class Hub {
     feed.source = this.connect(
       `${this.apiBase}/api/repos/${repo}/stream?sinceSeq=${feed.latestSeq}${compact ? '&compact=1' : ''}`,
       {
-        open: () => this.setStatus(repo, feed, 'connected'),
-        error: () => {
+        open: () => {
+          feed.reopenMs = REOPEN_MIN_MS
+          this.setStatus(repo, feed, 'connected')
+        },
+        error: (closed) => {
           this.endReplay(repo, feed)
           this.setStatus(repo, feed, 'reconnecting')
+          if (!closed) return
+          // A closed EventSource never reconnects by itself: open a new one from the last seq.
+          clearTimeout(feed.reopen)
+          feed.reopen = setTimeout(() => {
+            if (this.feeds.get(repo) === feed) this.open(repo, feed)
+          }, feed.reopenMs)
+          feed.reopenMs = Math.min(feed.reopenMs * 2, REOPEN_MAX_MS)
         },
         replayed: (seq) => {
           feed.replayed = seq

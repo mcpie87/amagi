@@ -1,7 +1,7 @@
 import { canChatTask, canReset, isTerminal, type TaskState } from '@amagi/core/events'
 import type { ProjectedQuestion } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
-import { type FormEvent, useEffect, useState } from 'react'
+import { type FormEvent, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { useDashboard, useRunner } from '../store.tsx'
 import { Icon } from '../ui.tsx'
@@ -24,29 +24,13 @@ export function AnswerBox({
   taskId: string
   question: ProjectedQuestion
 }) {
-  const [token, setToken] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitted, setSubmitted] = useState(false)
 
-  useEffect(() => {
-    let alive = true
-    fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}`)
-      .then((r) => (r.ok ? (r.json() as Promise<{ token?: string }>) : null))
-      .then((body) => {
-        if (alive) setToken(body?.token ?? null)
-      })
-      .catch(() => {
-        if (alive) setToken(null)
-      })
-    return () => {
-      alive = false
-    }
-  }, [repo, taskId])
-
   const send = async (answer: string) => {
-    if (token === null || answer.trim() === '' || busy) return
+    if (answer.trim() === '' || busy) return
     setBusy(true)
     setError(null)
     try {
@@ -54,7 +38,7 @@ export function AnswerBox({
         `${apiBase}/api/repos/${repo}/tasks/${taskId}/questions/${question.id}/answer`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
+          headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ answer, via: 'web' }),
         },
       )
@@ -70,14 +54,6 @@ export function AnswerBox({
   const submit = (event: FormEvent) => {
     event.preventDefault()
     void send(text)
-  }
-
-  if (token === null) {
-    return <p className="mt-2 text-sm text-fg-faint">answer box unavailable</p>
-  }
-
-  if (submitted) {
-    return <p className="mt-2 text-sm text-emerald-ink">answered</p>
   }
 
   if (submitted) {
@@ -143,6 +119,13 @@ export function ReclaimButton({
   }
 
   const reclaim = async () => {
+    if (
+      !window.confirm(
+        `Reclaim ${taskId}? A run still working on it is stopped and the task goes back to the queue.`,
+      )
+    ) {
+      return
+    }
     setBusy(true)
     setResult(null)
     try {

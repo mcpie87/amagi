@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { configHome, expandTilde, stateHome } from './paths.ts'
@@ -90,6 +90,16 @@ export type SetupReport = {
 
 const SETUP_OUTPUT_TAIL = 4000
 
+/** Names of the git personas the operator keeps under ~/.config/git/personas; never their contents. */
+export function gitPersonas(): string[] {
+  const dir = join(configHome(), 'git', 'personas')
+  if (!existsSync(dir)) return []
+  return readdirSync(dir)
+    .filter((file) => file.endsWith('.gitconfig'))
+    .map((file) => file.slice(0, -'.gitconfig'.length))
+    .sort()
+}
+
 /** Absolute path of the persona gitconfig, or null when it does not exist. */
 export function personaGitconfig(name: string): string | null {
   const file = join(configHome(), 'git', 'personas', `${name}.gitconfig`)
@@ -151,6 +161,8 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
   const branch = branchName(opts.taskId, opts.title)
   const path = join(opts.worktreeRoot, worktreeDirName(opts.repoName, opts.taskId, opts.title))
 
+  let added = false
+  let branchAdded = false
   if (!existsSync(path)) {
     // A wiped worktree dir (temp cleanup, reboot) leaves a stale registration
     // that `git worktree add` rejects; prune it first so the re-add succeeds.
@@ -160,22 +172,38 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
       ? ['git', 'worktree', 'add', path, branch]
       : ['git', 'worktree', 'add', '-b', branch, path, opts.baseBranch]
     await execOk(run, args, { cwd: opts.repoRoot })
+    added = true
+    branchAdded = !exists
   }
 
-  await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
+  try {
+    await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
-  if (opts.setupCmd) {
-    const cmd = ['sh', '-c', opts.setupCmd]
-    opts.onSetupStarted?.(opts.setupCmd)
-    const started = Date.now()
-    const result = await run(cmd, { cwd: path })
-    opts.onSetupFinished?.({
-      command: opts.setupCmd,
-      exitCode: result.exitCode,
-      durationMs: Date.now() - started,
-      output: `${result.stdout}${result.stderr}`.slice(-SETUP_OUTPUT_TAIL),
-    })
-    if (result.exitCode !== 0) throw new CommandError(cmd, result)
+    if (opts.setupCmd) {
+      const cmd = ['sh', '-c', opts.setupCmd]
+      opts.onSetupStarted?.(opts.setupCmd)
+      const started = Date.now()
+      const result = await run(cmd, { cwd: path })
+      opts.onSetupFinished?.({
+        command: opts.setupCmd,
+        exitCode: result.exitCode,
+        durationMs: Date.now() - started,
+        output: `${result.stdout}${result.stderr}`.slice(-SETUP_OUTPUT_TAIL),
+      })
+      if (result.exitCode !== 0) throw new CommandError(cmd, result)
+    }
+  } catch (err) {
+    // The caller records the worktree only after this returns, so a worktree
+    // this call added would otherwise leak; an adopted one may hold work.
+    if (added) {
+      await run(['git', 'worktree', 'remove', '--force', path], { cwd: opts.repoRoot }).catch(
+        () => undefined,
+      )
+      if (branchAdded) {
+        await run(['git', 'branch', '-D', branch], { cwd: opts.repoRoot }).catch(() => undefined)
+      }
+    }
+    throw err
   }
 
   return { path, branch }

@@ -11,13 +11,13 @@ import {
   type PrComment,
   type PrInfo,
   readHandledMentions,
-  repoName,
   repoRoot,
   respondToMention,
   saveHandledMentions,
 } from '@amagi/core'
 import { defineCommand } from 'citty'
 import { bold, dim, green, red } from '../format.ts'
+import { currentRepo } from '../repo.ts'
 
 export const respondToMentionsCommand = defineCommand({
   meta: {
@@ -35,7 +35,9 @@ export const respondToMentionsCommand = defineCommand({
   async run({ args }) {
     const root = repoRoot()
     const { config } = loadConfig(root)
-    const name = repoName(root)
+    // Key and name as the server resolves them, so both share one handled-mention file.
+    const { key, name, store } = currentRepo()
+    store.close()
     const driver = makePrDriver(config.forge.kind, config.forge.remote)
     const tracker = makeTracker(config, root)
     const handle = config.forge.agentHandle
@@ -50,6 +52,7 @@ export const respondToMentionsCommand = defineCommand({
           `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is the forge CLI installed and authenticated?)`,
         ),
       )
+      process.exitCode = 1
       return
     }
     if (prs.length === 0) {
@@ -57,8 +60,12 @@ export const respondToMentionsCommand = defineCommand({
       return
     }
 
-    const path = mentionsPath(name)
-    const handled = readHandledMentions(path)
+    const path = mentionsPath(key)
+    const legacyPath = mentionsPath(name)
+    const handled = readHandledMentions(path, legacyPath)
+    // Merged with the file so a concurrent mention watcher keeps its ids.
+    const saveHandled = () =>
+      saveHandledMentions(path, new Set([...readHandledMentions(path, legacyPath), ...handled]))
     let total = 0
 
     const progressLine = (p: MentionProgress): string => {
@@ -84,6 +91,7 @@ export const respondToMentionsCommand = defineCommand({
         })
       } catch (err) {
         console.log(red(`#${pr.number}: failed to read comments: ${errMsg(err)}`))
+        process.exitCode = 1
         continue
       }
       if (mentions.length === 0) continue
@@ -107,7 +115,7 @@ export const respondToMentionsCommand = defineCommand({
           if (tty) process.stdout.write('\r\x1b[K')
         }
         try {
-          const kind = await respondToMention({
+          const kinds = await respondToMention({
             root,
             repoName: name,
             pr,
@@ -116,14 +124,17 @@ export const respondToMentionsCommand = defineCommand({
             driver,
             tracker,
             onProgress: render,
+            handled,
+            saveHandled,
           })
           clearLine()
           handled.add(mention.id)
-          saveHandledMentions(path, handled)
-          console.log(green(`  responded (${kind})`))
+          saveHandled()
+          console.log(green(`  responded (${kinds.join(', ')})`))
         } catch (err) {
           clearLine()
           console.log(red(`  failed: ${errMsg(err)}`))
+          process.exitCode = 1
         }
       }
     }

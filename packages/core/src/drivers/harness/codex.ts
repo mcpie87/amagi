@@ -315,7 +315,7 @@ export class CodexTranslator {
 }
 
 export type CodexHarnessOptions = {
-  bin?: string | undefined
+  bin?: string | string[] | undefined
   seat?: string
 }
 
@@ -327,11 +327,11 @@ export class CodexHarness implements Harness {
   // `exec resume` drops `-c developer_instructions`: the thread keeps the
   // developer message recorded when it started.
   readonly replacesSystemPromptOnResume = false
-  private readonly bin: string
+  private readonly bin: string[]
   private readonly seat: string | undefined
 
   constructor(opts: CodexHarnessOptions = {}) {
-    this.bin = opts.bin ?? 'codex'
+    this.bin = [opts.bin ?? 'codex'].flat()
     this.seat = opts.seat
   }
 
@@ -365,7 +365,7 @@ export class CodexHarness implements Harness {
   }
 
   argv(opts: AgentStartOptions, sessionId: string | null): string[] {
-    const argv = [this.bin, 'exec', '--json']
+    const argv = [...this.bin, 'exec', '--json']
 
     if (sessionId !== null) {
       argv.push('resume', sessionId)
@@ -399,8 +399,8 @@ export class CodexHarness implements Harness {
 
     if (opts.outputSchema) argv.push('--output-schema', opts.outputSchema)
 
-    argv.push(...(opts.extraArgs ?? []))
-    argv.push(opts.prompt)
+    // `-` reads the prompt from stdin, past the per-argument MAX_ARG_STRLEN cap.
+    argv.push(...(opts.extraArgs ?? []), '-')
     return argv
   }
 
@@ -417,6 +417,7 @@ export class CodexHarness implements Harness {
         // is all the harness knows.
         model: () => opts.model ?? null,
         effort: opts.effort ?? null,
+        stdin: opts.prompt,
       },
     )
   }

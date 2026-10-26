@@ -6,6 +6,7 @@ import {
   reviewerWorkerConfig,
   type WorkerConfig,
 } from './config.ts'
+import type { Diagnostic } from './diagnose.ts'
 import { claimEligible, claimGate } from './difficulty.ts'
 import type { PrDriver } from './drivers/pr.ts'
 import type { Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -122,6 +123,11 @@ export type WorkerCounter = { label: string; value: number }
 export type StartResult = { ok: true; taskId: string } | { ok: false; status: 409; error: string }
 export type StopResult = { ok: true; taskId: string } | { ok: false; status: 404; error: string }
 
+/** Why automatic dispatch is not claiming a ready task, as of its latest pass. */
+export type ClaimSkip = { state: 'not-ready' | 'waiting' | 'gated'; reason: string }
+/** A ready-queue entry, with why the dispatcher skipped it when it has a reason. */
+export type ReadyTask = TrackerTask & { claimSkip?: ClaimSkip }
+
 /**
  * Manual dispatch targets a named worker; model and effort may override its profile.
  */
@@ -145,6 +151,8 @@ export interface RunServiceApi {
   retryNow(taskId: string): Promise<StopResult>
   /** Live automatic-dispatch toggle; a fresh launch loop starts or stops. */
   setAutoQueue(enabled: boolean): void
+  /** Why automatic dispatch left this ready task unclaimed; null when it has no reason on record. */
+  claimSkip?(taskId: string): ClaimSkip | null
   /** Stops the automatic-dispatch loop, for server shutdown. */
   dispose?(): void
 }
@@ -171,6 +179,8 @@ export type RunServiceOptions = {
   autoQueueActiveMs?: number
   /** Called once when automatic dispatch finds no claimable work and no run is active. */
   onQueueDrained?: () => void | Promise<void>
+  /** Repository readiness checks; any failed check that is not advisory refuses every claim. */
+  readiness?: () => Promise<Diagnostic[]>
   /** Called after each runner finishes, with its final projected task. */
   onTaskFinished?: (result: NonNullable<RunOnceResult>) => void | Promise<void>
   /**
@@ -207,6 +217,11 @@ export class RunService implements RunServiceApi {
   private autoQueueTimer: ReturnType<typeof setTimeout> | null = null
   private autoQueuePolling = false
   private idleNotified = false
+  /** The latest automatic dispatch pass: a skip on every ready task, then per-task ones. */
+  private skips: { all: ClaimSkip | null; tasks: Map<string, ClaimSkip> } = {
+    all: null,
+    tasks: new Map(),
+  }
   private stopped = false
   private readonly seats: Map<string, string>
 
@@ -231,10 +246,29 @@ export class RunService implements RunServiceApi {
     this.autoQueue = enabled
     if (enabled) {
       this.scheduleAutoQueuePoll(0)
-    } else if (this.autoQueueTimer !== null) {
-      clearTimeout(this.autoQueueTimer)
-      this.autoQueueTimer = null
+    } else {
+      this.skips = { all: null, tasks: new Map() }
+      if (this.autoQueueTimer !== null) {
+        clearTimeout(this.autoQueueTimer)
+        this.autoQueueTimer = null
+      }
     }
+  }
+
+  claimSkip(taskId: string): ClaimSkip | null {
+    return this.skips.tasks.get(taskId) ?? this.skips.all
+  }
+
+  /**
+   * Replaces the recorded skips, only for a dispatcher pick (auto queue on, no
+   * task or worker named): a manual start speaks for one task or worker, not the queue.
+   */
+  private recordSkips(
+    dispatching: boolean,
+    all: ClaimSkip | null,
+    tasks = new Map<string, ClaimSkip>(),
+  ): void {
+    if (dispatching) this.skips = { all, tasks }
   }
 
   /** Stops the auto-queue loop; the runner stays usable for manual launch/stop. */
@@ -413,6 +447,18 @@ export class RunService implements RunServiceApi {
   }
 
   private async tryStart(taskId?: string, opts?: RunOptions): Promise<StartResult> {
+    const dispatching = this.autoQueue && taskId === undefined && opts?.workerId === undefined
+    const failed = ((await this.opts.readiness?.()) ?? []).filter(
+      (check) => !check.ok && check.advisory !== true,
+    )
+    if (failed.length > 0) {
+      const checks = failed.map((check) =>
+        check.detail === undefined ? check.name : `${check.name} (${check.detail})`,
+      )
+      const error = `repository is not ready: ${checks.join('; ')}`
+      this.recordSkips(dispatching, { state: 'not-ready', reason: error })
+      return { ok: false, status: 409, error }
+    }
     if (taskId !== undefined && this.runs.has(taskId)) {
       return { ok: false, status: 409, error: `task ${taskId} is already running` }
     }
@@ -422,7 +468,16 @@ export class RunService implements RunServiceApi {
         : this.workers().find(
             (worker) => worker.id === opts.workerId && worker.roles.includes('implement'),
           )
-    if (selected === undefined) return { ok: false, status: 409, error: 'no available worker' }
+    if (selected === undefined) {
+      const staffed = this.workers().some(
+        (worker) => worker.enabled && worker.roles.includes('implement'),
+      )
+      this.recordSkips(dispatching, {
+        state: 'waiting',
+        reason: staffed ? 'every implement seat is busy' : 'no enabled implement worker',
+      })
+      return { ok: false, status: 409, error: 'no available worker' }
+    }
     if (!selected.enabled)
       return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
     const seat = this.workerSeat(selected)
@@ -433,7 +488,7 @@ export class RunService implements RunServiceApi {
     const hold = `${this.opts.repoName}/pending`
     this.seats.set(seat, hold)
     try {
-      return await this.claimAndLaunch(selected, taskId, opts)
+      return await this.claimAndLaunch(selected, taskId, opts, dispatching)
     } finally {
       if (this.seats.get(seat) === hold) this.seats.delete(seat)
     }
@@ -443,17 +498,16 @@ export class RunService implements RunServiceApi {
     selected: WorkerConfig,
     taskId: string | undefined,
     opts: RunOptions | undefined,
+    dispatching: boolean,
   ): Promise<StartResult> {
     const implement = this.resolveHarness(selected, opts)
     const holdKey = usageHoldKey(implement.kind, implement.model ?? null, implement.seat)
     const activeHold = readUsageHold(holdKey)
     if (activeHold) {
       const expiry = new Date(activeHold.expiresAt).toLocaleString()
-      return {
-        ok: false,
-        status: 409,
-        error: `${activeHold.harness}+${activeHold.model} usage limit hold until ${expiry}`,
-      }
+      const error = `${activeHold.harness}+${activeHold.model} usage limit hold until ${expiry}`
+      this.recordSkips(dispatching, { state: 'waiting', reason: error })
+      return { ok: false, status: 409, error }
     }
     if (taskId !== undefined) {
       const ready = await this.opts.tracker.ready()
@@ -471,9 +525,12 @@ export class RunService implements RunServiceApi {
       return { ok: true, taskId: task.id }
     }
     const skipped: string[] = []
-    const task = await claimEligible(this.opts.tracker, this.opts.config, selected, (t, reason) =>
-      skipped.push(`${t.id}: ${reason}`),
-    )
+    const gated = new Map<string, ClaimSkip>()
+    const task = await claimEligible(this.opts.tracker, this.opts.config, selected, (t, reason) => {
+      skipped.push(`${t.id}: ${reason}`)
+      gated.set(t.id, { state: 'gated', reason })
+    })
+    this.recordSkips(dispatching, null, gated)
     if (task === null) {
       const detail = skipped.length > 0 ? ` (skipped: ${skipped.join('; ')})` : ''
       return { ok: false, status: 409, error: `no ready task to claim${detail}` }
@@ -545,6 +602,11 @@ export class RunService implements RunServiceApi {
           console.warn(`completion notification failed for ${task.id}: ${String(err)}`)
         }
         return result
+      })
+      // An unhandled rejection exits Bun, taking every repo's runs with it.
+      .catch((err) => {
+        console.error(`run for ${task.id} failed: ${String(err)}`)
+        return null
       })
       .finally(() => {
         this.runs.delete(task.id)

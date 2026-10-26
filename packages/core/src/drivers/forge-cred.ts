@@ -447,25 +447,38 @@ export function parseRemote(url: string): { base: string; ownerRepo: string } | 
  * The insteadOf rewrite pair that makes a remote authenticate with the token:
  * `from` is the configured URL prefix, `to` the same prefix carrying the token
  * as basic auth. Git rewrites any URL starting with `from` to start with `to`,
- * keeping the rest (and the .git suffix) intact.
+ * keeping the rest (and the .git suffix) intact. An ssh remote's `to` is
+ * `base` (the forge web URL) when given, else https on the ssh host without
+ * its port, since the ssh port never serves https.
  */
-export function gitRewrite(url: string, token: string): { from: string; to: string } | null {
+export function gitRewrite(
+  url: string,
+  token: string,
+  base: string | null = null,
+): { from: string; to: string } | null {
   const t = url.trim()
   const scp = t.match(/^([^@/:]+@)?([^/:]+):(.+)$/)
   const urlish = t.match(/^([a-z][a-z0-9+.-]*):\/\/([^/]*)(\/.*)?$/i)
+  const sshTo = (host: string): string => {
+    if (base === null) return `https://x-access-token:${token}@${host}/`
+    const b = new URL(base)
+    return `${b.protocol}//x-access-token:${token}@${b.host}${b.pathname.replace(/\/+$/, '')}/`
+  }
   if (scp !== null && urlish === null) {
     if (scp[3] === '') return null
-    return { from: `${scp[1] ?? ''}${scp[2]}:`, to: `https://x-access-token:${token}@${scp[2]}/` }
+    return { from: `${scp[1] ?? ''}${scp[2]}:`, to: sshTo(scp[2] ?? '') }
   }
   if (urlish !== null) {
-    const scheme = urlish[1] === 'ssh' ? 'https' : urlish[1]
     const hostPart = urlish[2] ?? ''
     const path = urlish[3] ?? ''
     if (hostPart === '' || path === '') return null
     const bare = hostPart.includes('@') ? hostPart.slice(hostPart.lastIndexOf('@') + 1) : hostPart
     return {
       from: `${urlish[1]}://${hostPart}/`,
-      to: `${scheme}://x-access-token:${token}@${bare}/`,
+      to:
+        urlish[1] === 'ssh'
+          ? sshTo(bare.replace(/:\d+$/, ''))
+          : `${urlish[1]}://x-access-token:${token}@${bare}/`,
     }
   }
   return null
@@ -473,18 +486,24 @@ export function gitRewrite(url: string, token: string): { from: string; to: stri
 
 /**
  * Git config environment entries so push/fetch over `remote` authenticate
- * with the forge token without exposing it in process argv. Empty without a
- * token (or an unparseable remote), so git keeps its remote and prompts.
+ * with the `kind` forge's token without exposing it in process argv. Empty
+ * without a token, for an unparseable remote, or when the remote points
+ * anywhere but that forge's host, so git keeps its remote and prompts.
  */
 export async function gitTokenConfig(
   exec: Exec,
   cwd: string,
   remote: string,
   token: string | null,
+  kind: ForgeKind,
 ): Promise<Record<string, string>> {
   if (token === null) return {}
   const url = await execOk(exec, ['git', 'remote', 'get-url', remote], { cwd }).catch(() => '')
-  const rewrite = gitRewrite(url.trim(), token)
+  // The remote URL lives in repo config an agent can edit, so it must never pick where the token goes.
+  // A Forgejo token from the environment names no host: then the remote is all there is to go on.
+  const host = forgeHostname(kind, cwd)
+  if (host !== null && remoteHostname(url) !== host) return {}
+  const rewrite = gitRewrite(url.trim(), token, forgeUrl(kind, cwd))
   if (rewrite === null) return {}
   return {
     GIT_CONFIG_COUNT: '1',

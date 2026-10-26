@@ -2,16 +2,12 @@ import { errorOf } from '@amagi/core'
 
 export type AnswerOutcome = { kind: 'ok' } | { kind: 'error'; message: string }
 
-/** The task token gates the answer endpoint; the task detail is the only channel that hands it out. */
-export async function fetchTaskToken(
-  baseUrl: string,
-  repo: string,
-  taskId: string,
-): Promise<string | null> {
-  const res = await fetch(`${baseUrl}/api/repos/${repo}/tasks/${taskId}`)
+/** The operator secret gates mutating routes; the session endpoint hands it to local clients. */
+export async function fetchOperatorSecret(baseUrl: string): Promise<string | null> {
+  const res = await fetch(`${baseUrl}/api/session`)
   if (!res.ok) return null
-  const body = (await res.json()) as { token?: string }
-  return body.token ?? null
+  const body = (await res.json()) as { secret?: string }
+  return body.secret ?? null
 }
 
 export async function submitAnswer(
@@ -19,14 +15,14 @@ export async function submitAnswer(
   repo: string,
   taskId: string,
   questionId: string,
-  token: string,
+  secret: string,
   answer: string,
 ): Promise<AnswerOutcome> {
   const res = await fetch(
     `${baseUrl}/api/repos/${repo}/tasks/${taskId}/questions/${questionId}/answer`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'X-Amagi-Token': token },
+      headers: { 'content-type': 'application/json', 'X-Amagi-Secret': secret },
       body: JSON.stringify({ answer, via: 'cli' }),
     },
   )

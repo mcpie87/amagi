@@ -1,4 +1,5 @@
 import {
+  BeadsTracker,
   type Config,
   dropLiveRun,
   fmtDuration,
@@ -7,10 +8,12 @@ import {
   loadConfig,
   makeHarness,
   makeTracker,
+  PROPOSED_LABEL,
   Runner,
   recordLiveRun,
   repoName,
   repoRoot,
+  type Tracker,
   updateLiveRun,
   type WorkerConfig,
 } from '@amagi/core'
@@ -84,9 +87,10 @@ export async function workOneTask(opts: {
     )
   }
 
+  const tracker = makeTracker(config, root)
   const runner = new Runner({
     store,
-    tracker: makeTracker(config, root),
+    tracker,
     harness: makeHarness(implement),
     config: { ...config, harness: { ...config.harness, implement } },
     repoRoot: root,
@@ -200,7 +204,12 @@ export async function workOneTask(opts: {
     if (taskId === undefined) console.log(dim(`claiming next ready task in ${key}...`))
     const result = await runner.runOnce(taskId)
     if (result === null) {
-      console.log(dim(taskId === undefined ? 'nothing ready to work on' : `unknown task ${taskId}`))
+      if (taskId === undefined) {
+        console.log(dim('nothing ready to work on'))
+        return
+      }
+      console.log(dim(await unclaimableReason(tracker, taskId)))
+      process.exitCode = 1
       return
     }
 
@@ -236,3 +245,16 @@ export const runCommand = defineCommand({
     })
   },
 })
+
+/** Why claiming a named task gave nothing back. Forge trackers do not expose labels here. */
+async function unclaimableReason(tracker: Tracker, taskId: string): Promise<string> {
+  if (tracker instanceof BeadsTracker) {
+    const issue = await tracker.getIssue(taskId).catch(() => null)
+    if (issue === null) return `unknown task ${taskId}`
+    if (issue.labels.includes(PROPOSED_LABEL))
+      return `task ${taskId} is a proposal, accept it first`
+    return `task ${taskId} is held by someone else`
+  }
+  if ((await tracker.get(taskId).catch(() => null)) === null) return `unknown task ${taskId}`
+  return `task ${taskId} is held by someone else or still a proposal`
+}

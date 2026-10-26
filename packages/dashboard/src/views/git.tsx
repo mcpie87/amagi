@@ -1,18 +1,9 @@
 import { Link, useParams } from '@tanstack/react-router'
 import hljs from 'highlight.js/lib/core'
-import bash from 'highlight.js/lib/languages/bash'
-import css from 'highlight.js/lib/languages/css'
-import go from 'highlight.js/lib/languages/go'
-import javascript from 'highlight.js/lib/languages/javascript'
-import json from 'highlight.js/lib/languages/json'
-import markdown from 'highlight.js/lib/languages/markdown'
-import python from 'highlight.js/lib/languages/python'
-import rust from 'highlight.js/lib/languages/rust'
-import typescript from 'highlight.js/lib/languages/typescript'
-import xml from 'highlight.js/lib/languages/xml'
 import { useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { fmtDateTime } from '../format.ts'
+import { useLanguage } from '../markdown.tsx'
 import { gitCommitRoute, gitRoute } from '../routes.tsx'
 import { useDashboard } from '../store.tsx'
 
@@ -24,17 +15,6 @@ type DiffRow = {
   newLine: number | null
   text: string
 }
-
-hljs.registerLanguage('bash', bash)
-hljs.registerLanguage('css', css)
-hljs.registerLanguage('go', go)
-hljs.registerLanguage('javascript', javascript)
-hljs.registerLanguage('json', json)
-hljs.registerLanguage('markdown', markdown)
-hljs.registerLanguage('python', python)
-hljs.registerLanguage('rust', rust)
-hljs.registerLanguage('typescript', typescript)
-hljs.registerLanguage('xml', xml)
 
 function useGitData<T>(path: string | null) {
   const [data, setData] = useState<T | null>(null)
@@ -230,16 +210,20 @@ function DiffLine({
   language: string | undefined
   side?: 'left' | 'right'
 }) {
+  useLanguage(language)
   const kind = row?.kind ?? 'empty'
-  const number = row === null ? '' : side === 'right' ? row.newLine : row.oldLine
   return (
-    <div className={`diff-line diff-${kind} grid min-w-max grid-cols-[3.5rem_3.5rem_1fr]`}>
+    <div
+      className={`diff-line diff-${kind} grid min-w-max ${side === undefined ? 'grid-cols-[3.5rem_3.5rem_1fr]' : 'grid-cols-[3.5rem_1fr]'}`}
+    >
       <span className="select-none border-r border-line px-2 text-right text-fg-faint">
-        {side === 'right' && row?.kind === 'context' ? '' : (row?.oldLine ?? '')}
+        {(side === 'right' ? row?.newLine : row?.oldLine) ?? ''}
       </span>
-      <span className="select-none border-r border-line px-2 text-right text-fg-faint">
-        {number ?? ''}
-      </span>
+      {side === undefined && (
+        <span className="select-none border-r border-line px-2 text-right text-fg-faint">
+          {row?.newLine ?? ''}
+        </span>
+      )}
       <code
         className="diff-code px-3"
         // biome-ignore lint/security/noDangerouslySetInnerHtml: highlightedLine escapes the diff text.

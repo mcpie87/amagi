@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from './config.ts'
@@ -59,6 +59,9 @@ class FakePr implements PrDriver {
     this.diffCalls.push({ cwd, number })
     if (this.diffError !== null) throw this.diffError
     return this.diff
+  }
+  async getPrChanges() {
+    return { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 }
   }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -169,6 +172,7 @@ const writeVerdict = (raw: string): void => {
 }
 
 type FlagOpts = {
+  repo: string
   store: Store
   tracker: ReturnType<typeof fakeTracker>
   driver: FakePr
@@ -187,6 +191,7 @@ const opts = (over: Partial<FlagOpts> = {}): FlagOpts => {
   const tracker = fakeTracker()
   const { exec } = pass()
   return {
+    repo: 'amagi',
     store,
     tracker,
     driver,
@@ -214,7 +219,7 @@ afterEach(() => {
 })
 
 const stateFile = (): Record<string, { headOid: string; flagged: boolean }> =>
-  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'pointless', 'demo.json'), 'utf8') as string)
+  JSON.parse(readFileSync(join(cacheDir, 'amagi', 'pointless', 'amagi.json'), 'utf8') as string)
 
 const pass = (diff: () => string = () => '') => {
   const calls: Call[] = []
@@ -362,6 +367,23 @@ describe('flagPointlessPrs', () => {
     expect(again).toEqual({ flagged: 0, cleared: 0 })
     expect(over.driver.postedComments).toHaveLength(1)
     expect(over.driver.diffCalls).toHaveLength(diffsAfterFirst)
+  })
+
+  test('same-named repos keep separate state, so each flags its own PR', async () => {
+    expect(await flagPointlessPrs(opts())).toEqual({ flagged: 1, cleared: 0 })
+    expect(await flagPointlessPrs(opts({ repo: 'demo-2' }))).toEqual({ flagged: 1, cleared: 0 })
+  })
+
+  test('state saved under the repo name before the move to repo keys still counts', async () => {
+    const over = opts()
+    mkdirSync(join(cacheDir, 'amagi', 'pointless'), { recursive: true })
+    writeFileSync(
+      join(cacheDir, 'amagi', 'pointless', 'demo.json'),
+      JSON.stringify({ '7': { headOid: 'deadbeef', flagged: true } }),
+    )
+    expect(await flagPointlessPrs(over)).toEqual({ flagged: 0, cleared: 0 })
+    expect(over.driver.postedComments).toEqual([])
+    expect(stateFile()['7']).toEqual({ headOid: 'deadbeef', flagged: true })
   })
 
   test('a PR whose work base already contains is flagged with the resolver verdict, whatever its diff', async () => {

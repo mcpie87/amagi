@@ -1,13 +1,18 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
 import { BeadsTracker, errMsg, InteractionTimings, loadLiveRuns, RequestTimings } from '@amagi/core'
+import { hostAllowed } from './access.ts'
 import { createApp } from './app.ts'
 import { startBeadsGcPoller } from './beads-gc-poller.ts'
 import { type EpicClosePoller, startEpicClosePoller } from './epic-close-poller.ts'
 import { type GatePoller, startGatePoller } from './gate-poller.ts'
 import { type MentionWatcher, startMentionWatcher } from './mention-watcher.ts'
 import type { Poller } from './poller.ts'
-import { type PrConflictWatcher, startPrConflictWatcher } from './pr-conflict-watcher.ts'
+import {
+  type ConflictQueueResult,
+  type PrConflictWatcher,
+  startPrConflictWatcher,
+} from './pr-conflict-watcher.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
 import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
 
@@ -108,8 +113,11 @@ function startRepoPollers(
     const keys = new Set(entries.filter((entry) => entry.watchers).map((e) => e.key))
     if (runner !== undefined && runnerRepo !== undefined) {
       const entry = byKey.get(runnerRepo)
-      const ws = entry ? workspaces.get(runnerRepo) : null
-      const enabled = entry?.workers === true && ws?.config.loop.autoQueue === true
+      const lookup = entry ? workspaces.lookup(runnerRepo) : null
+      const enabled =
+        entry?.workers === true &&
+        lookup?.status === 'ready' &&
+        lookup.workspace.config.loop.autoQueue
       if (enabled !== autoQueueAllowed) {
         autoQueueAllowed = enabled
         runner.setAutoQueue(enabled)
@@ -270,11 +278,14 @@ function startRepoPollers(
     ])
   return {
     workers,
-    queueConflictResolution(repo: string, prNumber: number, prUrl: string | null): boolean {
+    queueConflictResolution(
+      repo: string,
+      prNumber: number,
+      prUrl: string | null,
+    ): ConflictQueueResult {
       const watcher = pollers.get(repo)?.conflict
       if (watcher === null || watcher === undefined) return false
-      watcher.queue(prNumber, prUrl)
-      return true
+      return watcher.queue(prNumber, prUrl) ? 'queued' : 'pending'
     },
     stop() {
       clearInterval(supervisor)
@@ -340,9 +351,9 @@ export function serve({
     }
     for (const entry of entries) {
       if (runners.has(entry.key)) {
-        const workspace = workspaces.get(entry.key)
-        if (workspace !== null) {
-          const enabled = workspace.config.loop.autoQueue && entry.workers
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status === 'ready') {
+          const enabled = lookup.workspace.config.loop.autoQueue && entry.workers
           if (runnerAutoQueue.get(entry.key) !== enabled) {
             runners.get(entry.key)?.setAutoQueue(enabled)
             runnerAutoQueue.set(entry.key, enabled)
@@ -352,8 +363,10 @@ export function serve({
       }
       if (runnerFactory === undefined) continue
       try {
-        const workspace = workspaces.get(entry.key)
-        if (workspace !== null) {
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status === 'unavailable') throw lookup.error
+        if (lookup.status === 'ready') {
+          const workspace = lookup.workspace
           const service = runnerFactory(workspace)
           runners.set(entry.key, service)
           runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
@@ -395,6 +408,7 @@ export function serve({
   const stopLoopWatch = timings.watchEventLoop()
   const app = createApp({
     workspaces,
+    host,
     notify,
     timings,
     interactions,
@@ -409,7 +423,14 @@ export function serve({
   const server = Bun.serve({
     hostname: host,
     port,
+    // Bun cuts a connection after 10 idle seconds by default, which kills the `amagi ask`
+    // long-poll, the SSE streams and a chat turn whose agent is thinking.
+    idleTimeout: 0,
     async fetch(req) {
+      // Static assets are refused too: the index page is what a rebinding page would read.
+      if (!hostAllowed(req.headers.get('host') ?? new URL(req.url).host, host)) {
+        return new Response('host not allowed', { status: 403 })
+      }
       if (staticDir !== undefined && !new URL(req.url).pathname.startsWith('/api')) {
         return staticAsset(staticDir, new URL(req.url).pathname)
       }

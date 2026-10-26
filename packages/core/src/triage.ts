@@ -63,13 +63,24 @@ export function parseTriageDecision(reply: string): TriageDecision | null {
   }
 }
 
-/** Maps a free-form operator answer onto an action; unknown answers fall back. */
+const NEGATION = String.raw`\b(?:no|not|never|avoid|without|cannot|can'?t|don'?t|doesn'?t|shouldn'?t|wouldn'?t|won'?t)\s+(?:\w+\s+)?`
+
+/**
+ * Maps a free-form operator answer onto the one action it names, inflections included
+ * ("implementation", "closing"). An action negated within the two words before it does not count;
+ * answers naming several actions or none fall back, and an answer never maps to ask.
+ */
 export function actionFromAnswer(answer: string, fallback: TriageActionType): TriageActionType {
-  const lower = answer.toLowerCase()
-  for (const action of TriageAction.options) {
-    if (lower.includes(action)) return action
-  }
-  return fallback
+  const text = answer.replace(/[\u2018\u2019]/g, "'")
+  const named = TriageAction.options.filter((action) => {
+    if (action === 'ask') return false
+    const word = `${action.replace(/e$/, '')}\\w*`
+    return (
+      new RegExp(`\\b${word}`, 'i').test(text) && !new RegExp(`${NEGATION}${word}`, 'i').test(text)
+    )
+  })
+  const [action] = named
+  return named.length === 1 && action !== undefined ? action : fallback
 }
 
 export type TriageDeps = {

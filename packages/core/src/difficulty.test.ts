@@ -60,6 +60,12 @@ describe('parseDifficulty', () => {
     expect(parseDifficulty('high', levels)).toBe('high')
     expect(parseDifficulty('  Medium  ', levels)).toBe('medium')
   })
+  test('resolves overlapping levels to the longest one named', () => {
+    const overlapping = ['complex', 'very complex', 'simple']
+    expect(parseDifficulty('Very Complex', overlapping)).toBe('very complex')
+    expect(parseDifficulty('this one is very complex.', overlapping)).toBe('very complex')
+    expect(parseDifficulty('complex', overlapping)).toBe('complex')
+  })
   test('returns null for an unrecognised reply', () => {
     expect(parseDifficulty('maybe', levels)).toBeNull()
     expect(parseDifficulty('', levels)).toBeNull()

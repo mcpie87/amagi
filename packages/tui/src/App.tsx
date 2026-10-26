@@ -14,8 +14,7 @@ import {
   tasksNeedingAttention,
   watcherRunsFor,
 } from '@amagi/core'
-import type { TrackerTask } from '@amagi/core/drivers/types'
-import type { RunnerStatus } from '@amagi/core/run-service'
+import type { ReadyTask, RunnerStatus } from '@amagi/core/run-service'
 import { Box, Text, useApp, useInput } from 'ink'
 import { useEffect, useMemo, useState } from 'react'
 import { OpenPrs } from './OpenPrs.tsx'
@@ -201,7 +200,7 @@ function OverviewScreen({
 }: {
   state: DashboardState
   runner: RunnerStatus | null
-  ready: TrackerTask[]
+  ready: ReadyTask[]
   onOpenPrs: () => void
   onSelectWatcher: (watcherId: string) => void
   onQueue: () => void
@@ -302,6 +301,12 @@ function OverviewScreen({
           ready.map((t) => (
             <Text key={t.id}>
               {t.id} {t.title}
+              {t.claimSkip !== undefined && (
+                <Text dimColor>
+                  {' · '}
+                  {t.claimSkip.state}: {t.claimSkip.reason}
+                </Text>
+              )}
             </Text>
           ))
         )}

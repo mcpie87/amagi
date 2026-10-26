@@ -1,11 +1,10 @@
 import type { PrInfo } from '@amagi/core'
-import type { TrackerTask } from '@amagi/core/drivers/types'
-import type { RunnerStatus } from '@amagi/core/run-service'
+import type { ReadyTask, RunnerStatus } from '@amagi/core/run-service'
 import { useEffect, useState } from 'react'
 
 export type OverviewData = {
   runner: RunnerStatus | null
-  ready: TrackerTask[]
+  ready: ReadyTask[]
   prs: PrInfo[]
 }
 
@@ -19,7 +18,7 @@ const POLL_MS = 4000
  */
 export function useOverview(baseUrl: string, repo: string): OverviewData {
   const [runner, setRunner] = useState<RunnerStatus | null>(null)
-  const [ready, setReady] = useState<TrackerTask[]>([])
+  const [ready, setReady] = useState<ReadyTask[]>([])
   const [prs, setPrs] = useState<PrInfo[]>([])
 
   useEffect(() => {
@@ -30,7 +29,7 @@ export function useOverview(baseUrl: string, repo: string): OverviewData {
           .then((res) => (res.ok ? (res.json() as Promise<RunnerStatus>) : null))
           .catch(() => null),
         fetch(`${baseUrl}/api/repos/${repo}/ready-queue`)
-          .then((res) => (res.ok ? (res.json() as Promise<TrackerTask[]>) : []))
+          .then((res) => (res.ok ? (res.json() as Promise<ReadyTask[]>) : []))
           .catch(() => []),
         fetch(`${baseUrl}/api/repos/${repo}/open-prs`)
           .then((res) =>

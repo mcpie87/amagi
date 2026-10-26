@@ -5,7 +5,7 @@ import { stateHome } from '../../paths.ts'
 import { prepareShim } from './shim.ts'
 
 const FORGE_CREDENTIAL =
-  /^(GH_TOKEN|GITHUB_TOKEN|GITLAB_(ACCESS_)?TOKEN|FORGEJO_TOKEN|GITEA_SERVER_(TOKEN|USER|PASSWORD|OTP)|TEA_TOKEN)$/
+  /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GITLAB_(ACCESS_)?TOKEN|FORGEJO_TOKEN|GITEA_SERVER_(TOKEN|USER|PASSWORD|OTP)|TEA_TOKEN)$/
 
 /** gh/glab/tea config dirs whose contents are forge credentials and must never reach an agent. */
 const FORGE_CONFIG_DIRS = ['gh', 'glab-cli', 'tea']

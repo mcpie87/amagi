@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentEvent } from '../../events.ts'
@@ -142,8 +150,14 @@ describe('CodexHarness argv', () => {
       'features.hooks=false',
       '-s',
       'workspace-write',
-      'do the thing',
+      '-',
     ])
+  })
+
+  test('a bin argv prefix comes before the harness arguments', () => {
+    const bin = ['bwrap', '--ro-bind', '/', '/', 'codex']
+    const argv = new CodexHarness({ bin }).argv(base, null)
+    expect(argv.slice(0, 6)).toEqual([...bin, 'exec'])
   })
 
   test('resume drops -C and -s, which codex exec resume does not accept', () => {
@@ -158,7 +172,7 @@ describe('CodexHarness argv', () => {
       'skills.include_instructions=false',
       '-c',
       'features.hooks=false',
-      'do the thing',
+      '-',
     ])
   })
 
@@ -212,9 +226,10 @@ describe('CodexHarness argv', () => {
     expect(argv).toContain('model_reasoning_effort=xhigh')
   })
 
-  test('extraArgs land before the trailing prompt', () => {
+  test('extraArgs land before the trailing stdin marker', () => {
     const argv = new CodexHarness().argv({ ...base, extraArgs: ['--add-dir', '/other'] }, null)
-    expect(argv.slice(-3)).toEqual(['--add-dir', '/other', 'do the thing'])
+    expect(argv.slice(-3)).toEqual(['--add-dir', '/other', '-'])
+    expect(argv).not.toContain(base.prompt)
   })
 
   test('skills are hidden unless extraArgs re-enables them with a later -c', () => {
@@ -229,6 +244,26 @@ describe('CodexHarness argv', () => {
 })
 
 describe('CodexHarness process', () => {
+  test('pipes a prompt larger than one argv element through stdin', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-stdin-'))
+    const bin = join(dir, 'codex')
+    const captured = join(dir, 'prompt')
+    const prompt = 'x'.repeat(140_000)
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ncat > '${captured}'\nprintf '%s\\n' '{"type":"turn.completed"}'\n`,
+    )
+    chmodSync(bin, 0o755)
+    try {
+      const harness = new CodexHarness({ bin, seat: `codex-stdin-test-${process.pid}` })
+      const outcome = await harness.start({ cwd: dir, prompt }).done
+      expect(outcome.ok).toBe(true)
+      expect(readFileSync(captured, 'utf8')).toBe(prompt)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a run that produces no json still resolves with the exit code', async () => {
     const harness = new CodexHarness({
       bin: 'false',

@@ -23,16 +23,22 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = savedXdg
   if (savedState === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = savedState
+  delete process.env.GH_ENTERPRISE_TOKEN
+  delete process.env.GITHUB_ENTERPRISE_TOKEN
   rmSync(home, { recursive: true, force: true })
 })
 
 test('removes forge credentials while retaining task-scoped values', () => {
   process.env.GH_TOKEN = 'secret'
+  process.env.GH_ENTERPRISE_TOKEN = 'secret'
+  process.env.GITHUB_ENTERPRISE_TOKEN = 'secret'
   const env = { ...harnessEnv(), AMAGI_TASK_TOKEN: 'task-token' } as Record<
     string,
     string | undefined
   >
   expect(env.GH_TOKEN).toBeUndefined()
+  expect(env.GH_ENTERPRISE_TOKEN).toBeUndefined()
+  expect(env.GITHUB_ENTERPRISE_TOKEN).toBeUndefined()
   expect(env.AMAGI_TASK_TOKEN).toBe('task-token')
 })
 

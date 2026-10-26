@@ -332,6 +332,9 @@ class FakePr implements PrDriver {
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     return ''
   }
+  async getPrChanges() {
+    return { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 }
+  }
 
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
@@ -673,6 +676,41 @@ describe('Runner.review', () => {
     expect(forge.calls).toHaveLength(0)
   })
 
+  test('parks without committing when the implementer writes invalid fix replies', async () => {
+    const forge = new FakePr()
+    const harness = new FakeHarness([
+      writesAFile,
+      {
+        effect: (_cwd, prompt) => {
+          const replyPath = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (replyPath === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(replyPath, 'not json')
+        },
+      },
+    ])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        harness: { implement: { kind: 'codex', permissions: 'workspace-write' } },
+        review: { enabled: true, harness: { kind: 'codex' }, maxRounds: 2 },
+      }),
+      forge,
+      exec,
+      undefined,
+      new ReviewHarness([JSON.stringify([finding])]),
+    ).runOnce()
+
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('review ended unresolved (rounds): F-1')
+    expect(stateReason(TASK.id)).toContain('implementer replies were invalid')
+    expect(types(TASK.id)).toContain('review.stopped')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(forge.calls).toHaveLength(0)
+  })
+
   test('invalid findings are re-asked once in the same session and reported as failed', async () => {
     registerTask()
     const reviewer = new ReviewHarness(['not json', '{"not":"an array"}'])
@@ -893,47 +931,46 @@ describe('Runner.runOnce', () => {
     expect(result?.state).toBe('pr_open')
     expect(types(TASK.id)).toContain('review.fixed')
     expect(reviewer.calls[1]?.opts.prompt).toContain('Implementer replies:')
-    expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-1.')
   })
 
   test('review fix replies go through a git-excluded worktree dir that never reaches the commit', async () => {
-    let worktree = ''
-    let replyPath = ''
-    const fixer = new FakeHarness([
-      writesAFile,
-      {
-        effect: (cwd, prompt) => {
-          worktree = cwd
-          replyPath =
-            prompt.match(/Write only a JSON array of FindingReply objects to ([^\s]+)/)?.[1] ?? ''
-          writeFileSync(
-            replyPath,
-            JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]),
-          )
-          writeFileSync(join(cwd, '.amagi-tmp', 'stray.txt'), 'left behind\n')
-        },
-        outcome: { summary: 'fixed' },
+    const fixes: { worktree: string; replyPath: string }[] = []
+    const fix: Turn = {
+      effect: (cwd, prompt) => {
+        const replyPath =
+          prompt.match(/Write only a JSON array of FindingReply objects to ([^\s]+)/)?.[1] ?? ''
+        fixes.push({ worktree: cwd, replyPath })
+        writeFileSync(
+          replyPath,
+          JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]),
+        )
+        writeFileSync(join(cwd, '.amagi-tmp', 'stray.txt'), 'left behind\n')
       },
-    ])
-    const result = await makeRunner(
-      new FakeTracker([TASK]),
-      fixer,
+      outcome: { summary: 'fixed' },
+    }
+    const runner = makeRunner(
+      new FakeTracker([TASK, { ...TASK, id: 'bd-second' }]),
+      new FakeHarness([writesAFile, fix, writesAFile, fix]),
       reviewConfig(),
       new FakePr(),
       exec,
       undefined,
-      new ReviewHarness([JSON.stringify([finding]), '[]']),
-    ).runOnce()
+      new ReviewHarness([JSON.stringify([finding]), '[]', JSON.stringify([finding]), '[]']),
+    )
+    expect((await runner.runOnce())?.state).toBe('pr_open')
+    expect((await runner.runOnce())?.state).toBe('pr_open')
 
-    expect(result?.state).toBe('pr_open')
-    expect(replyPath).toBe(join(worktree, '.amagi-tmp', basename(replyPath)))
-    expect(existsSync(join(worktree, '.amagi-tmp'))).toBe(false)
-    const committed = await execOk(exec, ['git', 'ls-tree', '-r', '--name-only', 'HEAD'], {
-      cwd: worktree,
-    })
-    expect(committed).toContain('hello.txt')
-    expect(committed).not.toContain('.amagi-tmp')
+    expect(fixes).toHaveLength(2)
+    for (const { worktree, replyPath } of fixes) {
+      expect(replyPath).toBe(join(worktree, '.amagi-tmp', basename(replyPath)))
+      expect(existsSync(join(worktree, '.amagi-tmp'))).toBe(false)
+      const committed = await execOk(exec, ['git', 'ls-tree', '-r', '--name-only', 'HEAD'], {
+        cwd: worktree,
+      })
+      expect(committed).toContain('hello.txt')
+      expect(committed).not.toContain('.amagi-tmp')
+    }
     const excludes = readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8').split('\n')
     expect(excludes.filter((line) => line === '/.amagi-tmp/')).toHaveLength(1)
   })
@@ -1018,7 +1055,7 @@ describe('Runner.runOnce', () => {
     expect(types(TASK.id)).toContain('review.skipped')
   })
 
-  test('records reviewer process failures and opens an unresolved PR without invalid state transitions', async () => {
+  test('records reviewer process failures and parks without invalid state transitions', async () => {
     const reviewer: Harness = {
       kind: 'codex',
       start: () => failedReviewProcess(),
@@ -1037,10 +1074,12 @@ describe('Runner.runOnce', () => {
       reviewer,
     ).runOnce()
 
-    expect(result?.state).toBe('pr_open')
+    expect(result?.state).toBe('needs_human')
     expect(types(TASK.id)).toContain('review.failed')
     expect(types(TASK.id)).toContain('review.stopped')
-    expect(forge.calls[0]?.labels).toContain('amagi/review-unresolved')
+    expect(stateReason(TASK.id)).toContain('review-failed-round-1')
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(forge.calls).toHaveLength(0)
   })
 
   test('catches and fixes a seeded boundary defect before opening a clean PR', async () => {
@@ -1159,7 +1198,6 @@ describe('Runner.runOnce', () => {
       unresolvedIds: [],
     })
     expect(forge.calls).toHaveLength(1)
-    expect(forge.calls[0]?.labels).not.toContain('amagi/review-unresolved')
     expect(forge.calls[0]?.body).toContain('Fixed: F-RANGE-1.')
   })
 
@@ -1189,7 +1227,43 @@ describe('Runner.runOnce', () => {
     ).toMatchObject({ reason: 'acceptable' })
   })
 
-  test('opens an unresolved PR after the round limit', async () => {
+  test('a clean last round with no room for the final pass still opens the PR', async () => {
+    const forge = new FakePr()
+    const fixer = new FakeHarness([
+      writesAFile,
+      {
+        effect: (_cwd, prompt) => {
+          const path = prompt.match(
+            /Write only a JSON array of FindingReply objects to ([^\s]+)/,
+          )?.[1]
+          if (path === undefined) throw new Error('review fix prompt omitted reply path')
+          writeFileSync(path, JSON.stringify([{ id: 'F-1', outcome: 'fixed', reason: 'Updated.' }]))
+        },
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const reviewer = new ReviewHarness([JSON.stringify([finding]), '[]'])
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      fixer,
+      reviewConfig({ finalPass: true, maxRounds: 2 }),
+      forge,
+      exec,
+      undefined,
+      reviewer,
+    ).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(reviewer.calls).toHaveLength(2)
+    expect(states(TASK.id)).not.toContain('needs_human')
+    expect(types(TASK.id)).toContain('commit.created')
+    expect(forge.calls).toHaveLength(1)
+    expect(
+      store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
+    ).toMatchObject({ reason: 'acceptable', unresolvedIds: [] })
+  })
+
+  test('parks without committing after the round limit', async () => {
     const forge = new FakePr()
     const result = await makeRunner(
       new FakeTracker([TASK]),
@@ -1201,13 +1275,16 @@ describe('Runner.runOnce', () => {
       new ReviewHarness([JSON.stringify([finding])]),
     ).runOnce()
 
-    expect(result?.state).toBe('pr_open')
-    expect(types(TASK.id)).toContain('review.stopped')
-    expect(forge.calls[0]?.labels).toContain('amagi/review-unresolved')
-    expect(forge.calls[0]?.body).toContain('Verdict: needs-human')
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toBe('review ended unresolved (rounds): F-1')
+    expect(
+      store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
+    ).toMatchObject({ reason: 'rounds', unresolvedIds: ['F-1'], findings: [finding] })
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(forge.calls).toHaveLength(0)
   })
 
-  test('opens an unresolved PR after the review token limit', async () => {
+  test('parks without committing after the review token limit', async () => {
     const forge = new FakePr()
     const result = await makeRunner(
       new FakeTracker([TASK]),
@@ -1219,13 +1296,14 @@ describe('Runner.runOnce', () => {
       new ReviewHarness([JSON.stringify([finding])]),
     ).runOnce()
 
-    expect(result?.state).toBe('pr_open')
+    expect(result?.state).toBe('needs_human')
     expect(
       store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
     ).toMatchObject({ reason: 'tokens' })
+    expect(forge.calls).toHaveLength(0)
   })
 
-  test('opens an unresolved PR when blocking findings make no progress', async () => {
+  test('parks without committing when blocking findings make no progress', async () => {
     const forge = new FakePr()
     const fixer = new FakeHarness([
       writesAFile,
@@ -1250,13 +1328,15 @@ describe('Runner.runOnce', () => {
       new ReviewHarness([JSON.stringify([finding]), JSON.stringify([finding])]),
     ).runOnce()
 
-    expect(result?.state).toBe('pr_open')
+    expect(result?.state).toBe('needs_human')
     expect(
       store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
     ).toMatchObject({ reason: 'no-progress', unresolvedIds: ['F-1'] })
+    expect(types(TASK.id)).not.toContain('commit.created')
+    expect(forge.calls).toHaveLength(0)
   })
 
-  test('opens an unresolved PR when review cost is exhausted', async () => {
+  test('parks without committing when review cost is exhausted', async () => {
     const forge = new FakePr()
     const result = await makeRunner(
       new FakeTracker([TASK]),
@@ -1268,10 +1348,11 @@ describe('Runner.runOnce', () => {
       new ReviewHarness([JSON.stringify([finding])]),
     ).runOnce()
 
-    expect(result?.state).toBe('pr_open')
+    expect(result?.state).toBe('needs_human')
     expect(
       store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
     ).toMatchObject({ reason: 'cost' })
+    expect(forge.calls).toHaveLength(0)
   })
 
   test('an empty queue is not an error', async () => {
@@ -2028,6 +2109,36 @@ describe('Runner.runOnce', () => {
     expect(harness.calls[1]?.prompt).toContain('checks failed')
   })
 
+  test('a one-line check-fix message does not replace the implement summary', async () => {
+    const harness = new FakeHarness([
+      {
+        effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'bad\n'),
+        outcome: {
+          summary: 'Readers were never greeted.\n\n### Conclusion\n\nAdds the greeting flag.',
+        },
+      },
+      {
+        effect: (cwd) => writeFileSync(join(cwd, 'flag'), 'good\n'),
+        outcome: { summary: 'fixed' },
+      },
+    ])
+    const pr = new FakePr()
+    await makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['grep -q good flag'] } }),
+      pr,
+    ).runOnce()
+
+    const body = await execOk(exec, ['git', 'log', '-1', '--format=%b'], {
+      cwd: store.task(TASK.id)?.worktree ?? '',
+    })
+    expect(body).toStartWith('Readers were never greeted.')
+    expect(body).not.toContain('fixed')
+    expect(pr.calls[0]?.body).toContain('Adds the greeting flag.')
+    expect(pr.calls[0]?.body).not.toContain('fixed')
+  })
+
   test('checks that never pass ask the operator and park when told to', async () => {
     const harness = new FakeHarness([writesAFile, {}, {}])
     const pending = makeRunner(
@@ -2041,6 +2152,26 @@ describe('Runner.runOnce', () => {
     expect(result?.state).toBe('needs_human')
     expect(store.task(TASK.id)?.state).toBe('needs_human')
     expect(types(TASK.id)).toContain('question.asked')
+  })
+
+  test('a hung check is killed after the timeout and fails like any other check', async () => {
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      // `; true` keeps sh alive as the parent, so sleep holds stdout as a grandchild.
+      config({
+        checks: { commands: ['sleep 30; true'], timeoutSec: 1 },
+        loop: { maxCheckRounds: 0 },
+      }),
+    ).runOnce()
+    await answerRecovery('park')
+
+    expect((await pending)?.state).toBe('needs_human')
+    const finished = store.events({ taskId: TASK.id }).find((e) => e.type === 'checks.finished')
+    expect(finished?.type === 'checks.finished' && finished.ok).toBe(false)
+    expect(finished?.type === 'checks.finished' && finished.results[0]?.output).toContain(
+      'timed out after 1000ms',
+    )
   })
 
   test('asks the operator and retries with another fix round when checks keep failing', async () => {
@@ -2086,6 +2217,79 @@ describe('Runner.runOnce', () => {
     const worktree = store.task(TASK.id)?.worktree
     expect(worktree).not.toBeNull()
     expect(existsSync(join(worktree as string, 'fresh.txt'))).toBe(true)
+    rmSync(remote, { recursive: true, force: true })
+  })
+
+  test('rebase recovery does not apply a stash from another worktree', async () => {
+    const remote = mkdtempSync(join(tmpdir(), 'amagi-run-remote-'))
+    await execOk(exec, ['git', 'clone', '-q', repo, remote], { cwd: repo })
+    await execOk(exec, ['git', 'config', 'user.name', 'Remote'], { cwd: remote })
+    await execOk(exec, ['git', 'config', 'user.email', 'remote@example.com'], { cwd: remote })
+    writeFileSync(join(remote, 'fresh.txt'), 'fresh\n')
+    await execOk(exec, ['git', 'add', '.'], { cwd: remote })
+    await execOk(exec, ['git', 'commit', '-q', '-m', 'add fresh.txt'], { cwd: remote })
+    await execOk(exec, ['git', 'remote', 'add', 'origin', remote], { cwd: repo })
+
+    const harness = new FakeHarness([writesAFile, {}, {}])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({ checks: { commands: ['test -f fresh.txt'] } }),
+    ).runOnce()
+    await waitFor(() => store.unansweredQuestions(TASK.id).length > 0)
+
+    const otherWorktree = join(wtRoot, 'other')
+    await execOk(exec, ['git', 'worktree', 'add', '--detach', otherWorktree, 'HEAD'], { cwd: repo })
+    writeFileSync(join(otherWorktree, 'other.txt'), 'other worktree\n')
+    await execOk(exec, ['git', 'stash', 'push', '-u', '-m', 'other worktree'], {
+      cwd: otherWorktree,
+    })
+
+    await answerRecovery('rebase')
+    const result = await pending
+    expect(result?.state).toBe('pr_open')
+    const taskWorktree = store.task(TASK.id)?.worktree
+    expect(taskWorktree).not.toBeNull()
+    expect(existsSync(join(taskWorktree as string, 'hello.txt'))).toBe(true)
+    expect(existsSync(join(taskWorktree as string, 'other.txt'))).toBe(false)
+    expect(
+      await execOk(
+        exec,
+        ['git', 'stash', 'show', '--include-untracked', '--name-only', 'stash@{0}'],
+        {
+          cwd: repo,
+        },
+      ),
+    ).toContain('other.txt')
+
+    rmSync(otherWorktree, { recursive: true, force: true })
+    rmSync(remote, { recursive: true, force: true })
+  })
+
+  test('rebase recovery reports a conflict while reapplying local changes', async () => {
+    const remote = mkdtempSync(join(tmpdir(), 'amagi-run-remote-'))
+    await execOk(exec, ['git', 'clone', '-q', repo, remote], { cwd: repo })
+    await execOk(exec, ['git', 'config', 'user.name', 'Remote'], { cwd: remote })
+    await execOk(exec, ['git', 'config', 'user.email', 'remote@example.com'], { cwd: remote })
+    writeFileSync(join(remote, 'README.md'), '# base edit\n')
+    await execOk(exec, ['git', 'add', '.'], { cwd: remote })
+    await execOk(exec, ['git', 'commit', '-q', '-m', 'edit README'], { cwd: remote })
+    await execOk(exec, ['git', 'remote', 'add', 'origin', remote], { cwd: repo })
+
+    const harness = new FakeHarness([writesAFile])
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      harness,
+      config({
+        checks: { commands: ['printf "# task edit\\n" > README.md; false'] },
+        loop: { maxCheckRounds: 1 },
+      }),
+    ).runOnce()
+    await answerRecovery('rebase')
+
+    const result = await pending
+    expect(result?.state).toBe('needs_human')
+    expect(stateReason(TASK.id)).toContain('local changes conflicted')
     rmSync(remote, { recursive: true, force: true })
   })
 
@@ -2487,6 +2691,40 @@ describe('Runner.runOnce', () => {
     expect(types(TASK.id)).toContain('question.parked')
   })
 
+  test('after a reset parks on the new question, not one the earlier attempt left', async () => {
+    store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+    store.append(TASK.id, {
+      type: 'question.asked',
+      questionId: 'q0',
+      question: 'stale?',
+      options: [],
+      gateRef: null,
+    })
+    store.append(TASK.id, { type: 'question.timedout', questionId: 'q0' })
+    store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'needs_human' })
+    store.append(TASK.id, { type: 'task.reset', reason: 'operator reset' })
+    const harness = new FakeHarness([
+      parksOnQuestion,
+      { effect: (cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi answer\n') },
+    ])
+    const pending = makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    await waitFor(() => store.events({ taskId: TASK.id }).some((e) => e.type === 'question.parked'))
+    const parked = store.events({ taskId: TASK.id }).find((e) => e.type === 'question.parked')
+    expect(parked?.type === 'question.parked' && parked.questionId).toBe('q1')
+    store.append(TASK.id, {
+      type: 'question.answered',
+      questionId: 'q1',
+      answer: 'npm',
+      via: 'web',
+    })
+    store.append(TASK.id, { type: 'task.state', from: 'awaiting_answer', to: 'implementing' })
+
+    const result = await pending
+    expect(result?.state).toBe('pr_open')
+    expect(harness.calls[1]?.prompt).toContain('which registry?')
+  })
+
   test('escalates to needs_human when the answer never lands', async () => {
     const harness = new FakeHarness([parksOnQuestion])
     const result = await makeRunner(
@@ -2535,6 +2773,20 @@ describe('Runner.runOnce', () => {
     expect(isKilled()).toBe(true)
     expect(types(TASK.id)).not.toContain('commit.created')
     expect(types(TASK.id)).not.toContain('pr.created')
+  })
+
+  test('a failing stream append kills the agent before the task is parked', async () => {
+    const { harness, isKilled } = hungHarness()
+    const append = store.append.bind(store)
+    store.append = (taskId, body) => {
+      if (body.type === 'agent.stream') throw new Error('database is locked')
+      return append(taskId, body)
+    }
+
+    await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(isKilled()).toBe(true)
+    expect(store.task(TASK.id)?.state).toBe('needs_human')
   })
 
   test('continue resumes a cancelled task in its recorded worktree', async () => {
@@ -2830,6 +3082,47 @@ describe('Runner.cancel', () => {
     // the recorded worktree survives the stop for the reclaim path
     expect(store.task(TASK.id)?.worktree).not.toBeNull()
     expect(store.task(TASK.id)?.branch).not.toBeNull()
+  })
+
+  test('cancel kills a running project check, releases the lease, and parks the task', async () => {
+    const tracker = new FakeTracker([TASK])
+    const released: string[] = []
+    tracker.release = async (id) => {
+      released.push(id)
+    }
+    const runner = makeRunner(
+      tracker,
+      new FakeHarness([writesAFile]),
+      config({ checks: { commands: ['sleep 30; true'] } }),
+    )
+    const pending = runner.runOnce()
+
+    await waitFor(() => store.task(TASK.id)?.state === 'checks')
+    runner.cancel()
+    const result = await pending
+
+    expect(result?.state).toBe('cancelled')
+    expect(released).toEqual([TASK.id])
+    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'checks.finished')).toBe(false)
+  })
+
+  test('a store-side stop kills a running project check and parks the task in cancelled', async () => {
+    const pending = makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({ checks: { commands: ['sleep 30; true'] } }),
+    ).runOnce()
+
+    await waitFor(() => store.task(TASK.id)?.state === 'checks')
+    store.append(TASK.id, {
+      type: 'task.state',
+      from: 'checks',
+      to: 'cancelled',
+      reason: 'operator interrupt',
+    })
+
+    expect((await pending)?.state).toBe('cancelled')
+    expect(store.events({ taskId: TASK.id }).some((e) => e.type === 'checks.finished')).toBe(false)
   })
 
   test('cancelling a parked question releases the lease and parks the task in cancelled', async () => {

@@ -1,3 +1,5 @@
+import { errMsg } from '@amagi/core'
+
 export type Poller = {
   stop(): void
   trigger(): void
@@ -22,6 +24,9 @@ export function startPoller(
     running = true
     try {
       await tick()
+    } catch (err) {
+      // Rethrown, it would end the poller and, unhandled, the whole process.
+      console.warn(`poller tick failed: ${errMsg(err)}`)
     } finally {
       running = false
     }
@@ -37,8 +42,10 @@ export function startPoller(
   return {
     trigger() {
       if (stopped) return
-      triggerRequested = true
-      if (running) return
+      if (running) {
+        triggerRequested = true
+        return
+      }
       if (timer !== null) clearTimeout(timer)
       timer = setTimeout(() => void run(), 0)
     },

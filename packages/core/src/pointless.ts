@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Config } from './config.ts'
@@ -10,11 +10,14 @@ import { harnessStartOpts, makeHarness } from './factory.ts'
 import { resolveTaskId } from './mentions.ts'
 import { cacheHome } from './paths.ts'
 import { type PrInfo, prepareConflictWorktree } from './pr-check.ts'
+import { withPrWriteLock } from './pr-write-lock.ts'
 import { pointlessPrompt, pointlessSystemPrompt } from './prompt.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun } from './watcher-agent.ts'
 
 export type FlagPointlessOptions = {
+  /** Registry key of the repo; keys the watch state. */
+  repo: string
   store: Store
   tracker: Tracker
   driver: PrDriver
@@ -106,13 +109,16 @@ export async function prDiffEmpty(cwd: string, number: number, driver: PrDriver)
 /** Last-evaluated head per amagi PR, so an unchanged PR is not re-commented every tick. */
 export type PointlessWatchState = Record<string, { headOid: string; flagged: boolean }>
 
-export function pointlessWatchPath(repoName: string): string {
-  return join(cacheHome(), 'amagi', 'pointless', `${repoName}.json`)
+/** Pointless watch state per registry repo key: repo names are not unique across the registry. */
+export function pointlessWatchPath(repo: string): string {
+  return join(cacheHome(), 'amagi', 'pointless', `${repo}.json`)
 }
 
-export function readPointlessWatch(path: string): PointlessWatchState {
+/** Reads `legacyPath` while `path` does not exist yet, like `readHandledMentions`. */
+export function readPointlessWatch(path: string, legacyPath?: string): PointlessWatchState {
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as PointlessWatchState
+    const from = legacyPath !== undefined && !existsSync(path) ? legacyPath : path
+    return JSON.parse(readFileSync(from, 'utf8')) as PointlessWatchState
   } catch {
     return {}
   }
@@ -176,6 +182,7 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
     const wt = await prepareConflictWorktree({
       repoRoot: opts.root,
       remote: opts.config.forge.remote,
+      forgeKind: opts.config.forge.kind,
       repoName: opts.repoName,
       worktreeRoot: opts.config.repo.worktreeRoot,
       baseBranch: opts.config.repo.baseBranch,
@@ -197,6 +204,7 @@ async function judgePointless(opts: JudgePointlessOptions): Promise<PointlessVer
         }),
         systemPrompt: pointlessSystemPrompt(),
         ...harnessStartOpts(opts.config.harness.implement),
+        env: { AMAGI_WORKTREE: wt.path, AMAGI_REPO_ROOT: opts.root },
       })
       opts.onLog?.('info', `worktree: ${wt.path}`)
       opts.onLog?.('info', 'agent: pointlessness judge')
@@ -249,8 +257,8 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
   const tasks = new Map(
     opts.store.tasks({ states: ['pr_open', 'pr_flagged'] }).map((t) => [t.prNumber, t]),
   )
-  const statePath = pointlessWatchPath(opts.repoName)
-  const state = readPointlessWatch(statePath)
+  const statePath = pointlessWatchPath(opts.repo)
+  const state = readPointlessWatch(statePath, pointlessWatchPath(opts.repoName))
   const nextState: PointlessWatchState = {}
   let flagged = 0
   let cleared = 0
@@ -290,19 +298,23 @@ export async function flagPointlessPrs(opts: FlagPointlessOptions): Promise<Flag
           await opts.driver.addLabel(opts.cwd, pr.number, NEEDS_CLOSING_LABEL)
           const verdict = contained
             ? (opts.contained?.get(pr.number) ?? null)
-            : await judgePointless({
-                store: opts.store,
-                root: opts.cwd,
-                repoName: opts.repoName,
-                pr,
-                task: await taskForVerdict(pr, opts.tracker, task?.id ?? null),
-                config: opts.config,
-                ...(opts.exec === undefined ? {} : { exec: opts.exec }),
-                ...(opts.makeHarnessFn === undefined ? {} : { makeHarnessFn: opts.makeHarnessFn }),
-                ...(opts.onLog === undefined
-                  ? {}
-                  : { onLog: (level, text) => opts.onLog?.(pr, level, text) }),
-              })
+            : await withPrWriteLock(opts.cwd, opts.config.forge.remote, pr.headRefName, async () =>
+                judgePointless({
+                  store: opts.store,
+                  root: opts.cwd,
+                  repoName: opts.repoName,
+                  pr,
+                  task: await taskForVerdict(pr, opts.tracker, task?.id ?? null),
+                  config: opts.config,
+                  ...(opts.exec === undefined ? {} : { exec: opts.exec }),
+                  ...(opts.makeHarnessFn === undefined
+                    ? {}
+                    : { makeHarnessFn: opts.makeHarnessFn }),
+                  ...(opts.onLog === undefined
+                    ? {}
+                    : { onLog: (level, text) => opts.onLog?.(pr, level, text) }),
+                }),
+              )
           const fallback = pointlessReason(pr, contained)
           const reasoning =
             verdict !== null && verdict.reasoning !== '' ? verdict.reasoning : fallback

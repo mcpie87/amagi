@@ -91,6 +91,7 @@ export const serveCommand = defineCommand({
           config: ws.config,
           repoRoot: ws.root,
           repoName: ws.name,
+          readiness: () => workspaces.readiness(ws.key),
           autoQueue:
             ws.config.loop.autoQueue &&
             (workspaces.list().find((entry) => entry.key === ws.key)?.workers ?? false),
@@ -138,7 +139,7 @@ export const serveCommand = defineCommand({
     }
     console.log(dim('ctrl-c to stop'))
     process.on('SIGINT', () => {
-      server.stop().finally(() => process.exit(0))
+      server.stop(true).finally(() => process.exit(0))
     })
   },
 })

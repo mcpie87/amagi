@@ -1,6 +1,6 @@
 import type { PrInfo } from '@amagi/core'
-import type { TrackerTask } from '@amagi/core/drivers/types'
 import { fmtTokens } from '@amagi/core/format'
+import type { ReadyTask } from '@amagi/core/run-service'
 import { activeTasks, type ProjectedTask, tasksNeedingAttention } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
@@ -52,7 +52,7 @@ function Metric({
   )
 }
 
-function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: () => void }) {
+function ReadyQueueDialog({ tasks, onClose }: { tasks: ReadyTask[]; onClose: () => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = dialogRef.current
@@ -106,6 +106,11 @@ function ReadyQueueDialog({ tasks, onClose }: { tasks: TrackerTask[]; onClose: (
                 {task.priority !== null && ` · P${task.priority}`}
                 {task.type !== null && ` · ${task.type}`}
               </span>
+              {task.claimSkip !== undefined && (
+                <span className="block truncate text-xs text-fg-muted">
+                  {task.claimSkip.state}: {task.claimSkip.reason}
+                </span>
+              )}
             </li>
           ))}
         </ul>
@@ -200,6 +205,84 @@ function MergeablePrsPanel() {
   )
 }
 
+type ResolveAllResult = { queued: number; skipped: number; failures: string[] }
+
+/**
+ * Queues every open PR of the repository on the PR conflict watcher, the same
+ * path the per-task Queue conflict resolution button takes.
+ */
+function ResolveAllConflictsButton({ repo }: { repo: string }) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<
+    { kind: 'ok'; body: ResolveAllResult } | { kind: 'error'; text: string } | null
+  >(null)
+
+  const queue = async () => {
+    if (
+      !window.confirm(
+        `Queue conflict resolution for every open PR in ${repo}? Each one gets the base branch merged in and pushed.`,
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/resolve-conflicts`, { method: 'POST' })
+      if (!res.ok) {
+        setResult({ kind: 'error', text: (await res.json())?.error ?? `HTTP ${res.status}` })
+      } else {
+        setResult({ kind: 'ok', body: (await res.json()) as ResolveAllResult })
+      }
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void queue()}
+        title="Queue conflict resolution for every run in this repository with an open PR"
+        className="rounded border border-red-edge bg-red-soft px-3 py-1.5 text-sm text-red-ink hover:bg-red-soft-hover disabled:opacity-50"
+      >
+        {busy ? 'Queuing…' : 'Resolve conflicts on all PRs'}
+      </button>
+      {result !== null && (
+        <div className="absolute right-0 z-10 mt-1 w-72 rounded border border-line bg-surface px-3 py-2 text-sm shadow">
+          {result.kind === 'error' ? (
+            <p className="text-red-ink">{result.text}</p>
+          ) : (
+            <>
+              <p className="text-emerald-ink">
+                {result.body.queued} queued, {result.body.skipped} skipped
+              </p>
+              {result.body.failures.length > 0 && (
+                <ul className="mt-1 list-disc pl-4 text-red-ink">
+                  {result.body.failures.map((failure) => (
+                    <li key={failure}>{failure}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => setResult(null)}
+            className="mt-1 text-xs text-fg-faint hover:underline"
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 type UsageRate = { seat: string; calls: number; tokens: number }
 
 function SeatUsagePanel() {
@@ -272,7 +355,7 @@ export function OverviewView() {
       ? queue
       : queue.filter((t) => t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
 
-  const workers = status === null ? '—' : `${status.busySeats}/${status.totalSeats}`
+  const workers = status === null ? '-' : `${status.busySeats}/${status.totalSeats}`
 
   return (
     <section>
@@ -289,6 +372,7 @@ export function OverviewView() {
             placeholder="Search runs…"
             className="w-52 rounded border border-line-strong bg-surface px-3 py-1.5 text-sm text-fg-strong placeholder:text-fg-faint focus:border-accent"
           />
+          {selected !== null && <ResolveAllConflictsButton key={selected} repo={selected} />}
         </div>
       </div>
 

@@ -181,6 +181,12 @@ describe('OpencodeHarness argv', () => {
     expect(argv).toEqual(['opencode', 'run', '--format', 'json', '--dir', '/wt'])
   })
 
+  test('a bin argv prefix comes before the harness arguments', () => {
+    const bin = ['bwrap', '--ro-bind', '/', '/', 'opencode']
+    const argv = new OpencodeHarness({ bin }).argv(base, null)
+    expect(argv.slice(0, 6)).toEqual([...bin, 'run'])
+  })
+
   test('resume continues the prior session by id', () => {
     const argv = new OpencodeHarness().argv(base, 'sess-42')
     expect(argv).toContain('--session')

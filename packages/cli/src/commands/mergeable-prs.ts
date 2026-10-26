@@ -17,6 +17,7 @@ export const mergeablePrsCommand = defineCommand({
       prs = await forge.listOpenPrs(root)
     } catch (err) {
       console.log(red(`failed to list PRs: ${errMsg(err)}`))
+      process.exitCode = 1
       return
     }
 

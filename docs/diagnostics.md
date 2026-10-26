@@ -70,7 +70,10 @@ an interaction is open belongs to it. That includes background polls that
 happen to fire in the window (visible in the request list). A request ends when
 its body is read (`json`/`text`/`arrayBuffer`/`blob`), or right after the
 headers if the caller does not read the body in the same turn, so streamed
-responses end at the headers. `EventSource` is not tracked.
+responses end at the headers. `EventSource` is not tracked. Polls run in the
+shared hub (a SharedWorker), outside the wrapped fetch: a refresh the page asks
+for (`refreshPoll`) is attributed from the request until the hub's answer for
+that url arrives; the hub's own timed polls are not.
 
 The settle state machine is `InteractionTracker`, written against injected
 clock, timer and paint hooks so `interactions.test.ts` drives it with a fake

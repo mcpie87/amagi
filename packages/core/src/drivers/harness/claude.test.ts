@@ -127,9 +127,16 @@ describe('ClaudeHarness argv', () => {
 
   test('always asks for the streaming json dialect', () => {
     const argv = new ClaudeHarness().argv(base, null)
-    expect(argv.slice(0, 4)).toEqual(['claude', '-p', 'do the thing'].concat(['--output-format']))
+    expect(argv.slice(0, 3)).toEqual(['claude', '-p', '--output-format'])
+    expect(argv).not.toContain(base.prompt)
     expect(argv).toContain('stream-json')
     expect(argv).toContain('--verbose')
+  })
+
+  test('a bin argv prefix comes before the harness arguments', () => {
+    const bin = ['bwrap', '--ro-bind', '/', '/', 'claude']
+    const argv = new ClaudeHarness({ bin }).argv(base, null)
+    expect(argv.slice(0, 6)).toEqual([...bin, '-p'])
   })
 
   test('defaults to an allowlist rather than skipping permissions', () => {
@@ -194,6 +201,26 @@ describe('ClaudeHarness argv', () => {
 })
 
 describe('ClaudeHarness process', () => {
+  test('pipes a prompt larger than one argv element through stdin', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'claude-stdin-'))
+    const bin = join(dir, 'claude')
+    const captured = join(dir, 'prompt')
+    const prompt = 'x'.repeat(140_000)
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ncat > '${captured}'\nprintf '%s\\n' '{"type":"result","subtype":"success","result":"ok"}'\n`,
+    )
+    chmodSync(bin, 0o755)
+    try {
+      const harness = new ClaudeHarness({ bin, seat: `claude-stdin-test-${process.pid}` })
+      const outcome = await harness.start({ cwd: dir, prompt }).done
+      expect(outcome.ok).toBe(true)
+      expect(readFileSync(captured, 'utf8')).toBe(prompt)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a run that produces no json still resolves with the exit code', async () => {
     const harness = new ClaudeHarness({ bin: 'false' })
     const proc = harness.start({ cwd: process.cwd(), prompt: 'x' })

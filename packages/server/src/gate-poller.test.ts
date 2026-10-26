@@ -142,6 +142,35 @@ test('a gate resolved after the question timed out still unblocks the parked run
   expect(store.unansweredQuestions()).toHaveLength(0)
 })
 
+test('a gate from before a reset does not unpark the new attempt', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  const tracker = new FakeTracker()
+  claim(store)
+  const ask = (questionId: string, gateRef: string) =>
+    store.append('bd-1', {
+      type: 'question.asked',
+      questionId,
+      question: 'which?',
+      options: [],
+      gateRef,
+    })
+  ask('q-old', 'gate-old')
+  // A reset in the same millisecond as the ask would count it as asked since.
+  store.db.query("update questions set asked_at = asked_at - 1000 where id = 'q-old'").run()
+  store.append('bd-1', { type: 'task.reset', reason: 'retry' })
+  implementing(store)
+  ask('q-new', 'gate-new')
+  store.append('bd-1', { type: 'task.state', from: 'implementing', to: 'awaiting_answer' })
+
+  pollers.push(startGatePoller({ store, tracker, intervalMs: 10 }))
+  tracker.setResolved('gate-old')
+  await Bun.sleep(40)
+
+  expect(store.question('q-old')?.answer).toBeNull()
+  expect(store.task('bd-1')?.state).toBe('awaiting_answer')
+  expect(store.unansweredQuestions().map((q) => q.id)).toEqual(['q-new'])
+})
+
 test('await unblocks within one poll interval after the gate resolves', async () => {
   const tracker = new FakeTracker()
   const ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
@@ -172,4 +201,32 @@ test('await unblocks within one poll interval after the gate resolves', async ()
   expect(body.question.answer).toBe('')
   expect(body.question.answeredVia).toBe('gate')
   ws.cleanup()
+})
+
+test('a web answer landing while the gate is polled is not overwritten', async () => {
+  const store = new Store(openDatabase(':memory:'))
+  claim(store)
+  implementing(store)
+  store.append('bd-1', {
+    type: 'question.asked',
+    questionId: 'q1',
+    question: 'which?',
+    options: [],
+    gateRef: 'gate-7',
+  })
+  const tracker = new FakeTracker()
+  tracker.gateResolved = async () => {
+    store.append('bd-1', {
+      type: 'question.answered',
+      questionId: 'q1',
+      answer: 'the second',
+      via: 'web',
+    })
+    return true
+  }
+
+  pollers.push(startGatePoller({ store, tracker, intervalMs: 10 }))
+  await Bun.sleep(40)
+
+  expect(store.question('q1')?.answer).toBe('the second')
 })

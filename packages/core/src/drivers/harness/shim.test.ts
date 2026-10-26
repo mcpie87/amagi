@@ -179,13 +179,13 @@ describe('git shim', () => {
         withWorktree({ AMAGI_WORKTREE: 'WT' }),
       ).exitCode,
     ).toBe(0)
-    expect(
-      shimGit(
-        wt,
-        ['-C', wt, 'commit', '--allow-empty', '-m', 'x'],
-        withWorktree({ AMAGI_WORKTREE: 'WT' }),
-      ).exitCode,
-    ).not.toBe(0)
+    const rejected = shimGit(
+      wt,
+      ['-C', wt, 'commit', '--allow-empty', '-m', 'x'],
+      withWorktree({ AMAGI_WORKTREE: 'WT' }),
+    )
+    expect(rejected.exitCode).not.toBe(0)
+    expect(rejected.stderr).toContain("git 'commit' is not allowed")
   })
 
   test('passes everything through when no protected root is set', () => {
@@ -205,6 +205,19 @@ describe('git shim', () => {
     expect(entry.argv).toEqual(['commit', '-m', 'say "hi"'])
     expect(entry.cwd).toBe(wt)
     expect(entry.at).toBeTruthy()
+  })
+
+  test('writes a rejected multi-line argv as one JSONL record', () => {
+    const run = join(home, 'run-multiline')
+    const message = 'subject\n\nbody\twith \\ "quotes"\r\n\x01\n'
+    shimGit(wt, ['commit', '-m', message], {
+      ...withWorktree({ AMAGI_WORKTREE: 'WT' }),
+      AMAGI_RUN_STATE: run,
+    })
+    const lines = readFileSync(join(run, 'rejected-git.jsonl'), 'utf8').trim().split('\n')
+    expect(lines).toHaveLength(1)
+    const entry = JSON.parse(lines[0] ?? '') as { argv: string[] }
+    expect(entry.argv).toEqual(['commit', '-m', message])
   })
 })
 
@@ -278,6 +291,8 @@ describe('git shim repository resolution', () => {
     for (const args of [
       ['remote'],
       ['remote', '-v'],
+      ['remote', '--verbose'],
+      ['remote', '-v', 'show', 'origin'],
       ['remote', 'get-url', 'origin'],
       ['branch', '--show-current'],
       ['branch', '--list', 'ma*'],
@@ -304,6 +319,11 @@ describe('git shim repository resolution', () => {
       ['tag', 'v1'],
       ['tag', '-a', 'v1', '-m', 'x'],
       ['remote', 'add', 'x', other],
+      ['remote', '-v', 'set-url', 'origin', other],
+      ['remote', '--verbose', 'remove', 'origin'],
+      ['remote', '-v', 'add', 'x', other],
+      ['remote', '-v', 'update'],
+      ['remote', '-v', 'prune', 'origin'],
       ['config', 'user.name', 'Evil'],
       ['config', '--unset', 'user.name'],
       ['stash', 'pop'],
@@ -461,9 +481,11 @@ describe('bd shim', () => {
       ['prime'],
       ['dep', 'tree', 'am-1'],
       ['close', '--help'],
+      ['--actor', 'x', 'show', 'am-1'],
     ]) {
       expect(run(args).stdout, `bd ${args.join(' ')} should pass`).toBe(`REAL: ${args.join(' ')}\n`)
     }
+    expect(run(['close', 'am-1', '--reason', '--help']).stdout).toBe('REAL: close --help\n')
     for (const args of [
       [],
       ['close', 'am-1'],
@@ -476,7 +498,16 @@ describe('bd shim', () => {
       ['comments', 'add', 'am-1', 'x'],
       ['dep', 'add', 'am-1', 'am-2'],
       ['orphans', '--fix'],
-      ['--actor', 'x', 'show', 'am-1'],
+      ['--actor', 'show', 'close', 'am-1'],
+      ['--actor', '--help', 'close', 'am-1'],
+      ['dep', '--db', 'tree', 'add', 'am-1', 'am-2'],
+      ['dep', '--type', 'tree', 'add', 'am-1', 'am-2'],
+      ['--reason', 'show', 'close', 'am-1'],
+      ['--title', 'show', 'update', 'am-1'],
+      ['--status', 'show', 'update', 'am-1'],
+      ['ready', '--claim'],
+      ['ready', '--json', '--claim=true'],
+      ['--claim', 'show', 'close', 'am-1'],
     ]) {
       const r = run(args)
       expect(r.exitCode, `bd ${args.join(' ')} should be rejected`).not.toBe(0)

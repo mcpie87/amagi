@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -67,6 +67,9 @@ class FakePr implements PrDriver {
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     throw new Error('unused')
   }
+  async getPrChanges() {
+    return { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 }
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     this.listCalls++
     return this.comments
@@ -117,8 +120,8 @@ beforeEach(() => {
   process.env.XDG_CACHE_HOME = cacheDir
 })
 
-afterEach(() => {
-  for (const w of watchers.splice(0)) w.stop()
+afterEach(async () => {
+  await Promise.all(watchers.splice(0).map((w) => w.stop()))
   delete process.env.XDG_CACHE_HOME
   rmSync(cacheDir, { recursive: true, force: true })
 })
@@ -336,8 +339,69 @@ test('records classification outcomes as mention.classified events when a store 
     type: 'mention.classified',
     prNumber: 7,
     mentionId: '1',
-    kind: 'ambiguous',
+    kinds: ['ambiguous'],
     reply: 'ambiguous',
   })
   store.close()
+})
+
+test('same-named repos keep separate handled mentions', async () => {
+  const driver = new FakePr()
+  driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
+  driver.prs = [prInfo()]
+  start(driver)
+  await waitFor(() => driver.posted.length === 1)
+
+  start(driver, noopExec, { repo: 'demo-2' })
+  await waitFor(() => driver.posted.length === 2)
+  await Bun.sleep(50)
+  expect(driver.posted).toHaveLength(2)
+})
+
+test('mentions handled under the repo name before the move to repo keys stay handled', async () => {
+  const dir = join(cacheDir, 'amagi', 'mentions')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'demo.json'), JSON.stringify(['1']))
+  const driver = new FakePr()
+  driver.comments = [
+    { id: '1', user: 'bob', body: '@chise-maru what is this?' },
+    { id: '2', user: 'bob', body: '@chise-maru and this?' },
+  ]
+  driver.prs = [prInfo()]
+  start(driver)
+
+  await waitFor(() => driver.posted.length === 1)
+  await Bun.sleep(50)
+  expect(driver.posted).toHaveLength(1)
+  expect(new Set(JSON.parse(readFileSync(join(dir, 'amagi.json'), 'utf8')))).toEqual(
+    new Set(['1', '2']),
+  )
+})
+
+test('a watcher restarted mid-response waits for the old scan instead of answering twice', async () => {
+  const driver = new FakePr()
+  driver.comments = [{ id: '1', user: 'bob', body: '@chise-maru what is this?' }]
+  driver.prs = [prInfo()]
+  let posting = false
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const post = driver.postComment.bind(driver)
+  driver.postComment = async (cwd, number, body) => {
+    posting = true
+    await gate
+    await post(cwd, number, body)
+  }
+
+  const first = start(driver)
+  await waitFor(() => posting)
+  first.stop()
+  start(driver)
+  await Bun.sleep(50)
+  release?.()
+
+  await waitFor(() => driver.posted.length === 1)
+  await Bun.sleep(50)
+  expect(driver.posted).toHaveLength(1)
 })

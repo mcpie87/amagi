@@ -214,6 +214,21 @@ describe('loadConfig', () => {
     expect(loadRepoConfig().config.harness.implement.bin).toBe('opencode-unconfined')
   })
 
+  test('accepts a harness bin given as an argv prefix, but not an empty one', () => {
+    writeRepo(
+      '[harness.implement]\nkind = "claude"\nbin = ["bwrap", "--ro-bind", "/", "/", "claude"]\n',
+    )
+    expect(loadRepoConfig().config.harness.implement.bin).toEqual([
+      'bwrap',
+      '--ro-bind',
+      '/',
+      '/',
+      'claude',
+    ])
+    writeRepo('[harness.implement]\nkind = "claude"\nbin = []\n')
+    expect(() => loadRepoConfig()).toThrow(/bin/)
+  })
+
   test('repo review harness settings override the fleet settings', () => {
     writeGlobal('[review.harness]\nkind = "codex"\nmodel = "global-review"\n')
     writeRepo('[review.harness]\nkind = "opencode"\nmodel = "repo-review"\n')

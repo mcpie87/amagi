@@ -1,7 +1,8 @@
+import type { Config } from '../config.ts'
 import type { MergeStatus } from '../events.ts'
-import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
+import { CommandError, exec as defaultExec, type Exec, execOk } from '../exec.ts'
 import { NotImplementedDriverError } from '../factory.ts'
-import { addPrLabels, type PrInfo, type PrMergeStatus, removePrLabel } from '../pr-check.ts'
+import { mergeTreeVerdict, type PrInfo, type PrMergeStatus } from '../pr-check.ts'
 import {
   forgeToken,
   forgeUrl,
@@ -21,6 +22,15 @@ export type PrState = 'open' | 'closed' | 'merged'
 
 /** A PR conversation comment, review summary, or inline review comment. */
 export type PrComment = { id: string; user: string; body: string }
+
+/** What a PR changes, read from the forge so no checkout is needed. */
+export type PrChanges = {
+  baseSha: string | null
+  headSha: string | null
+  /** The first page of changed paths only (about 100); `fileCount` is the full count. */
+  changedFiles: string[]
+  fileCount: number
+}
 
 /** Marks a PR as agent-generated, so humans can tell it from their own. */
 export const AMAGI_LABEL = 'amagi'
@@ -70,6 +80,8 @@ export type PrDriver = {
   getMergeStatus(cwd: string, number: number): Promise<MergeStatus>
   /** The PR's full diff text, for explain responses. */
   getPrDiff(cwd: string, number: number): Promise<string>
+  /** Base and head shas plus changed file paths, for routing a mention without a checkout. */
+  getPrChanges(cwd: string, number: number): Promise<PrChanges>
   /** Every conversation comment, review summary, and inline review comment on a PR. */
   listComments(cwd: string, number: number): Promise<PrComment[]>
   /** Post a comment on the PR conversation. */
@@ -96,11 +108,11 @@ const GH_FIELDS =
 async function pushTaskBranch(
   exec: Exec,
   opts: Pick<CreatePrOptions, 'cwd' | 'remote' | 'branch'>,
-  token: string | null,
+  kind: Config['forge']['kind'],
   openPrOn: (branch: string) => Promise<{ number: number; url: string } | null>,
 ): Promise<void> {
   const { cwd, remote, branch } = opts
-  const auth = await gitTokenConfig(exec, cwd, remote, token)
+  const auth = await gitTokenConfig(exec, cwd, remote, forgeToken(kind, cwd), kind)
   const ref = `refs/heads/${branch}`
   const heads = await execOk(exec, ['git', 'ls-remote', '--heads', remote, ref], {
     cwd,
@@ -133,9 +145,9 @@ async function deleteRemoteBranch(
   cwd: string,
   remote: string,
   branch: string,
-  token: string | null,
+  kind: Config['forge']['kind'],
 ): Promise<void> {
-  const auth = await gitTokenConfig(exec, cwd, remote, token)
+  const auth = await gitTokenConfig(exec, cwd, remote, forgeToken(kind, cwd), kind)
   await assertSafePushDestination(exec, cwd, remote, branch, auth)
   const r = await exec(['git', 'push', remote, '--delete', branch], {
     cwd,
@@ -169,19 +181,14 @@ function githubPr(exec: Exec, forgeRemote: string): PrDriver {
 
   return {
     async createPr({ cwd, branch, base, remote, title, body, labels }) {
-      await pushTaskBranch(
-        exec,
-        { cwd, remote, branch },
-        forgeToken('github', cwd),
-        async (head) => {
-          const out = await execOk(
-            exec,
-            ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
-            { cwd, env: ghEnv(cwd, forgeRemote) },
-          )
-          return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
-        },
-      )
+      await pushTaskBranch(exec, { cwd, remote, branch }, 'github', async (head) => {
+        const out = await execOk(
+          exec,
+          ['gh', 'pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url'],
+          { cwd, env: ghEnv(cwd, forgeRemote) },
+        )
+        return (JSON.parse(out) as Array<{ number: number; url: string }>)[0] ?? null
+      })
       for (const label of [...labels, ...OUTCOME_LABELS]) {
         // --force makes create idempotent; failure (e.g. no write perms) is best effort
         await exec(['gh', 'label', 'create', label, '--force'], {
@@ -271,6 +278,28 @@ function githubPr(exec: Exec, forgeRemote: string): PrDriver {
         env: ghEnv(cwd, forgeRemote),
       })
     },
+    async getPrChanges(cwd, number) {
+      const out = await execOk(
+        exec,
+        ['gh', 'pr', 'view', String(number), '--json', 'baseRefOid,headRefOid,files,changedFiles'],
+        { cwd, env: ghEnv(cwd, forgeRemote) },
+      )
+      const pr = JSON.parse(out) as {
+        baseRefOid?: string
+        headRefOid?: string
+        files?: Array<{ path?: string }>
+        changedFiles?: number
+      }
+      const changedFiles = (pr.files ?? []).flatMap((f) =>
+        typeof f.path === 'string' ? [f.path] : [],
+      )
+      return {
+        baseSha: pr.baseRefOid ?? null,
+        headSha: pr.headRefOid ?? null,
+        changedFiles,
+        fileCount: pr.changedFiles ?? changedFiles.length,
+      }
+    },
     async listComments(cwd, number) {
       const slug = await repoSlug(cwd)
       const comments: PrComment[] = []
@@ -311,19 +340,62 @@ function githubPr(exec: Exec, forgeRemote: string): PrDriver {
         env: ghEnv(cwd, forgeRemote),
       })
     },
+    // The REST issues endpoint creates a missing label on the fly. Not `gh pr edit`:
+    // with amagi's token it never attached a label.
     async addLabel(cwd, number, label) {
-      await addPrLabels(exec, cwd, forgeRemote, number, [label])
+      await execOk(
+        exec,
+        [
+          'gh',
+          'api',
+          '--method',
+          'POST',
+          `repos/{owner}/{repo}/issues/${number}/labels`,
+          '--input',
+          '-',
+        ],
+        { cwd, stdin: JSON.stringify({ labels: [label] }), env: ghEnv(cwd, forgeRemote) },
+      )
     },
     async removeLabel(cwd, number, label) {
-      await removePrLabel(exec, cwd, forgeRemote, number, label)
+      const cmd = [
+        'gh',
+        'api',
+        '--method',
+        'DELETE',
+        `repos/{owner}/{repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
+      ]
+      const r = await exec(cmd, { cwd, env: ghEnv(cwd, forgeRemote) })
+      // A label already gone from the PR is not an error.
+      if (r.exitCode !== 0 && !/HTTP 404/.test(r.stderr)) throw new CommandError(cmd, r)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('github', cwd))
+      await deleteRemoteBranch(exec, cwd, remote, branch, 'github')
     },
   }
 }
 
 type ForgejoRemote = { base: string; ownerRepo: string }
+
+/** A non-2xx Forgejo API answer; `status` lets a read tolerate a 404 and nothing else. */
+class ForgejoApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message)
+  }
+}
+
+const FORGEJO_PAGE = 50
+
+const items = (raw: unknown): Array<Record<string, unknown>> =>
+  Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : []
+
+const missingOk = (err: unknown): [] => {
+  if (err instanceof ForgejoApiError && err.status === 404) return []
+  throw err
+}
 
 /** Forgejo PR writes use tea, with API reads for PR state and metadata. */
 function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
@@ -364,8 +436,9 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
     if (!res.ok) {
-      throw new Error(
+      throw new ForgejoApiError(
         `forgejo api ${method} ${path}: ${res.status} ${(await res.text()).slice(0, 300)}`,
+        res.status,
       )
     }
     return res
@@ -380,6 +453,20 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
     const res = await request(cwd, method, path, body)
     if (res.status === 204) return {}
     return (await res.json()) as Record<string, unknown>
+  }
+
+  // Forgejo clamps limit to its MAX_RESPONSE_ITEMS, which may be below ours, so a short
+  // page is not the last: stop at X-Total-Count, or on an empty page without it.
+  async function pages(cwd: string, path: string): Promise<Array<Record<string, unknown>>> {
+    const all: Array<Record<string, unknown>> = []
+    const sep = path.includes('?') ? '&' : '?'
+    for (let page = 1; ; page++) {
+      const res = await request(cwd, 'GET', `${path}${sep}limit=${FORGEJO_PAGE}&page=${page}`)
+      const total = res.headers.get('x-total-count')
+      const batch = items(await res.json())
+      all.push(...batch)
+      if (batch.length === 0 || (total !== null && all.length >= Number(total))) return all
+    }
   }
 
   /** Forgejo endpoints like the `.diff` suffix return text, not JSON. */
@@ -400,47 +487,76 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
     return typeof sha === 'string' ? sha : null
   }
 
-  /** Maps Forgejo's bool mergeable + mergeable_state onto the shared shape. */
-  function mergeFields(item: Record<string, unknown>): PrMergeStatus {
-    const mergeable = item.mergeable
-    const state = typeof item.mergeable_state === 'string' ? item.mergeable_state : ''
-    if (mergeable === false || state === 'dirty') {
-      return { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+  /**
+   * Maps Forgejo's bool `mergeable` onto the shared shape. Forgejo also answers
+   * false while it is still checking, after a failed check and for every draft,
+   * so false counts as a conflict only on a non-draft PR whose head and base a
+   * local merge-tree finds conflicting; otherwise it is unknown.
+   */
+  async function mergeFields(cwd: string, item: Record<string, unknown>): Promise<PrMergeStatus> {
+    if (item.mergeable === true) return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+    const unknown = { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+    const head = headOid(item.head)
+    const base = headOid(item.base)
+    if (item.mergeable !== false || item.draft === true || head === null || base === null) {
+      return unknown
     }
-    if (mergeable !== true || state === '' || state === 'unknown') {
-      return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }
+    // A sha not fetched locally makes merge-tree fail: no verdict, not a conflict.
+    const verdict = await mergeTreeVerdict({ repoRoot: cwd, base, head, exec }).catch(() => null)
+    return verdict === 'conflict'
+      ? { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }
+      : unknown
+  }
+
+  /**
+   * Fetches the base branch of every PR mergeFields will run merge-tree on
+   * whose base commit is not local yet, so a base moved on the forge still
+   * gets a verdict. Best effort: a failed fetch leaves the PR unknown.
+   */
+  async function fetchBases(cwd: string, prs: Array<Record<string, unknown>>): Promise<void> {
+    const missing = new Set<string>()
+    for (const pr of prs) {
+      const sha = headOid(pr.base)
+      const ref = refName(pr.base)
+      if (pr.mergeable !== false || pr.draft === true || sha === null || ref === '') continue
+      const has = await exec(['git', 'cat-file', '-e', `${sha}^{commit}`], { cwd })
+      if (has.exitCode !== 0) missing.add(ref)
     }
-    return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+    if (missing.size === 0) return
+    const auth = await gitTokenConfig(exec, cwd, forgeRemote, forgeToken('forgejo', cwd), 'forgejo')
+    await exec(
+      ['git', 'fetch', '--no-tags', forgeRemote, ...[...missing].map((ref) => `refs/heads/${ref}`)],
+      { cwd, env: auth },
+    )
   }
 
   async function listOpenPrs(cwd: string): Promise<PrInfo[]> {
     const r = await forge(cwd)
-    const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/pulls?state=open`)
-    const items = Array.isArray(raw) ? raw : []
-    return (items as Array<Record<string, unknown>>).map((item) => ({
-      number: Number(item.number ?? 0),
-      title: typeof item.title === 'string' ? item.title : '',
-      body: typeof item.body === 'string' ? item.body : '',
-      url: typeof item.html_url === 'string' ? item.html_url : '',
-      headRefName: refName(item.head),
-      baseRefName: refName(item.base),
-      headRefOid: headOid(item.head),
-      ...mergeFields(item),
-      createdAt: typeof item.created_at === 'string' ? item.created_at : '',
-      updatedAt: typeof item.updated_at === 'string' ? item.updated_at : '',
-      labels: ((item.labels as Array<{ name?: string }> | undefined) ?? []).map(
-        (l) => l.name ?? '',
-      ),
-    }))
+    const raw = await pages(cwd, `repos/${r.ownerRepo}/pulls?state=open`)
+    await fetchBases(cwd, raw)
+    return Promise.all(
+      raw.map(async (item) => ({
+        number: Number(item.number ?? 0),
+        title: typeof item.title === 'string' ? item.title : '',
+        body: typeof item.body === 'string' ? item.body : '',
+        url: typeof item.html_url === 'string' ? item.html_url : '',
+        headRefName: refName(item.head),
+        baseRefName: refName(item.base),
+        headRefOid: headOid(item.head),
+        ...(await mergeFields(cwd, item)),
+        createdAt: typeof item.created_at === 'string' ? item.created_at : '',
+        updatedAt: typeof item.updated_at === 'string' ? item.updated_at : '',
+        labels: ((item.labels as Array<{ name?: string }> | undefined) ?? []).map(
+          (l) => l.name ?? '',
+        ),
+      })),
+    )
   }
 
   // The Forgejo issue-labels API keys on numeric label ids, so a name must be
   // resolved before a label can be added or removed.
   async function labelId(cwd: string, r: ForgejoRemote, name: string): Promise<number | null> {
-    const raw = await api(cwd, 'GET', `repos/${r.ownerRepo}/labels`).catch(() => null)
-    if (raw === null) return null
-    const items = Array.isArray(raw) ? raw : []
-    for (const item of items as Array<Record<string, unknown>>) {
+    for (const item of await pages(cwd, `repos/${r.ownerRepo}/labels`)) {
       if (item.name === name && typeof item.id === 'number') return item.id
     }
     return null
@@ -452,7 +568,7 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
       await pushTaskBranch(
         exec,
         { cwd, remote: remoteName, branch },
-        forgeToken('forgejo', cwd),
+        'forgejo',
         async (head) => (await listOpenPrs(cwd)).find((pr) => pr.headRefName === head) ?? null,
       )
       for (const label of [...labels, ...OUTCOME_LABELS]) {
@@ -500,34 +616,57 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
     listOpenPrs,
     async getMergeStatus(cwd, number) {
       const pr = await api(cwd, 'GET', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`)
-      if (pr.mergeable_state === 'has_conflicts') return 'conflicted'
-      if (pr.mergeable === true) return 'mergeable'
+      await fetchBases(cwd, [pr])
+      const { mergeable } = await mergeFields(cwd, pr)
+      if (mergeable === 'CONFLICTING') return 'conflicted'
+      if (mergeable === 'MERGEABLE') return 'mergeable'
       return 'unknown'
     },
     async getPrDiff(cwd, number) {
       const r = await forge(cwd)
       return rawApi(cwd, `repos/${r.ownerRepo}/pulls/${number}.diff`)
     },
+    async getPrChanges(cwd, number) {
+      const pr = `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`
+      const [item, res] = await Promise.all([
+        api(cwd, 'GET', pr),
+        request(cwd, 'GET', `${pr}/files?limit=100`),
+      ])
+      const changedFiles = items(await res.json()).flatMap((f) =>
+        typeof f.filename === 'string' ? [f.filename] : [],
+      )
+      const total = Number(res.headers.get('x-total-count'))
+      return {
+        baseSha: headOid(item.base),
+        headSha: headOid(item.head),
+        changedFiles,
+        fileCount: total > 0 ? total : changedFiles.length,
+      }
+    },
     async listComments(cwd, number) {
       const r = await forge(cwd)
+      const pr = `repos/${r.ownerRepo}/pulls/${number}`
+      // The issue and review-comment endpoints take no page parameters and return everything.
+      const conversation = items(
+        await api(cwd, 'GET', `repos/${r.ownerRepo}/issues/${number}/comments`).catch(missingOk),
+      )
+      const reviews = await pages(cwd, `${pr}/reviews`).catch(missingOk)
+      const inline: Array<Record<string, unknown>> = []
+      for (const review of reviews) {
+        if (typeof review.id !== 'number' || review.comments_count === 0) continue
+        inline.push(
+          ...items(await api(cwd, 'GET', `${pr}/reviews/${review.id}/comments`).catch(missingOk)),
+        )
+      }
       const out: PrComment[] = []
-      for (const path of [
-        `repos/${r.ownerRepo}/issues/${number}/comments`,
-        `repos/${r.ownerRepo}/pulls/${number}/reviews`,
-        `repos/${r.ownerRepo}/pulls/${number}/comments`,
-      ]) {
-        const raw = await api(cwd, 'GET', path).catch(() => null)
-        if (raw === null) continue
-        const items = Array.isArray(raw) ? raw : []
-        for (const item of items as Array<Record<string, unknown>>) {
-          const user = item.user as { login?: string } | null | undefined
-          if (typeof item.body !== 'string') continue
-          out.push({
-            id: String(item.id ?? ''),
-            user: user?.login ?? '',
-            body: item.body,
-          })
-        }
+      for (const item of [...conversation, ...reviews, ...inline]) {
+        const user = item.user as { login?: string } | null | undefined
+        if (typeof item.body !== 'string') continue
+        out.push({
+          id: String(item.id ?? ''),
+          user: user?.login ?? '',
+          body: item.body,
+        })
       }
       return out
     },
@@ -542,10 +681,10 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
         },
       )
     },
-    async closePr(cwd, number, _reason) {
-      await api(cwd, 'PATCH', `repos/${(await forge(cwd)).ownerRepo}/pulls/${number}`, {
-        state: 'closed',
-      })
+    async closePr(cwd, number, reason) {
+      const r = await forge(cwd)
+      await api(cwd, 'POST', `repos/${r.ownerRepo}/issues/${number}/comments`, { body: reason })
+      await api(cwd, 'PATCH', `repos/${r.ownerRepo}/pulls/${number}`, { state: 'closed' })
     },
     async addLabel(cwd, number, label) {
       const r = await forge(cwd)
@@ -565,7 +704,7 @@ function forgejoPr(exec: Exec, forgeRemote: string): PrDriver {
       await api(cwd, 'DELETE', `repos/${r.ownerRepo}/issues/${number}/labels/${id}`)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('forgejo', cwd))
+      await deleteRemoteBranch(exec, cwd, remote, branch, 'forgejo')
     },
   }
 }
@@ -663,7 +802,7 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
       await pushTaskBranch(
         exec,
         { cwd, remote, branch },
-        forgeToken('gitlab', cwd),
+        'gitlab',
         async (head) => (await openMrs(cwd, head))[0] ?? null,
       )
       // GitLab creates attached labels on first use; only the unattached outcome
@@ -732,6 +871,27 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
         env: glabEnv(cwd, forgeRemote),
       })
     },
+    async getPrChanges(cwd, number) {
+      const [item, diffs] = await Promise.all([
+        mr(cwd, number),
+        api(cwd, [`projects/:id/merge_requests/${number}/diffs?per_page=100`]),
+      ])
+      const refs =
+        typeof item.diff_refs === 'object' && item.diff_refs !== null
+          ? (item.diff_refs as Record<string, unknown>)
+          : {}
+      const changedFiles = (
+        Array.isArray(diffs) ? (diffs as Array<Record<string, unknown>>) : []
+      ).flatMap((d) => (typeof d.new_path === 'string' ? [d.new_path] : []))
+      // changes_count is a string, "1000+" once GitLab stops counting.
+      const total = Number.parseInt(text(item.changes_count), 10)
+      return {
+        baseSha: typeof refs.base_sha === 'string' ? refs.base_sha : null,
+        headSha: typeof refs.head_sha === 'string' ? refs.head_sha : null,
+        changedFiles,
+        fileCount: total > 0 ? total : changedFiles.length,
+      }
+    },
     async listComments(cwd, number) {
       // Notes cover conversation comments, review threads and inline diff comments.
       const notes = await pages(cwd, `projects/:id/merge_requests/${number}/notes`)
@@ -755,7 +915,7 @@ function gitlabPr(exec: Exec, forgeRemote: string): PrDriver {
       await update(cwd, number, `remove_labels=${label}`)
     },
     async deleteBranch(cwd, remote, branch) {
-      await deleteRemoteBranch(exec, cwd, remote, branch, forgeToken('gitlab', cwd))
+      await deleteRemoteBranch(exec, cwd, remote, branch, 'gitlab')
     },
   }
 }

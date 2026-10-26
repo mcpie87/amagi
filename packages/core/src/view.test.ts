@@ -72,6 +72,17 @@ const recorded: StoredEvent[] = [
 ]
 
 describe('dashboard state reducer', () => {
+  test('replays a single-kind mention.classified event as a one-element kinds list', () => {
+    const body = { type: 'mention.classified', reply: 'explain', prNumber: 7, mentionId: '1' }
+    const state = reduceBatch(initialDashboardState(), [
+      ev(1, null, 1, { ...body, kind: 'explain' }),
+      ev(2, null, 2, { ...body, kinds: ['explain', 'fix-pr'] }),
+    ])
+
+    expect(state.events[0]).toEqual(ev(1, null, 1, { ...body, kinds: ['explain'] }))
+    expect(state.events[1]).toMatchObject({ kinds: ['explain', 'fix-pr'] })
+  })
+
   test('folds review rounds, findings and stop reason into the shared task projection', () => {
     const finding = {
       id: 'finding-1',

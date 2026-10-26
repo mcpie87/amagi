@@ -5,6 +5,7 @@ import type { Config } from './config.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { assertSafePushDestination } from './drivers/push-safety.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
+import { configuredCheckCommands } from './mandatory-checks.ts'
 import type { PrInfo } from './pr-check.ts'
 import { withPrWriteLock } from './pr-write-lock.ts'
 import { applyRepoIdentity } from './worktree.ts'
@@ -24,7 +25,7 @@ export async function rebasePr(opts: {
     if (!pr.headRefOid) return 'unchanged'
     if (!opts.idle()) return 'busy'
     const { remote, kind } = config.forge
-    const auth = await gitTokenConfig(run, root, remote, forgeToken(kind, root))
+    const auth = await gitTokenConfig(run, root, remote, forgeToken(kind, root), kind)
     await execOk(
       run,
       [
@@ -62,14 +63,14 @@ export async function rebasePr(opts: {
       const diff = await run(['git', 'diff', '--quiet', baseOid, 'HEAD'], { cwd: path })
       if (diff.exitCode === 0) return 'unchanged'
       if (diff.exitCode !== 1) throw new Error('cannot inspect rebased PR diff')
-      const commands = [
-        config.repo.setupCmd,
-        config.checks.format,
-        config.checks.lint,
-        ...config.checks.commands,
-      ].filter((c): c is string => c !== null && c !== '')
-      for (const command of commands) {
-        await execOk(run, ['sh', '-c', command], { cwd: path })
+      if (config.repo.setupCmd !== null && config.repo.setupCmd !== '') {
+        await execOk(run, ['sh', '-c', config.repo.setupCmd], { cwd: path })
+      }
+      for (const command of configuredCheckCommands(config.checks)) {
+        await execOk(run, ['sh', '-c', command], {
+          cwd: path,
+          timeoutMs: config.checks.timeoutSec * 1000,
+        })
       }
       if ((await execOk(run, ['git', 'status', '--porcelain'], { cwd: path })).trim()) {
         throw new Error('rebase checks modified the worktree; refusing to push')
@@ -89,7 +90,12 @@ export async function rebasePr(opts: {
       )
       return 'rebased'
     } finally {
-      if (added) await execOk(run, ['git', 'worktree', 'remove', '--force', path], { cwd: root })
+      // A cleanup failure must not replace the original error or skip the rmSync.
+      if (added) {
+        await run(['git', 'worktree', 'remove', '--force', path], { cwd: root }).catch(
+          () => undefined,
+        )
+      }
       rmSync(parent, { recursive: true, force: true })
     }
   })

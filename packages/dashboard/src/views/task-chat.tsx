@@ -17,6 +17,7 @@ export function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const { state } = useDashboard()
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [sending, setSending] = useState(false)
   const task = state.tasks[taskId]
   const interactive =
     task !== undefined &&
@@ -35,18 +36,21 @@ export function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
   const send = async (event: FormEvent) => {
     event.preventDefault()
     const message = text.trim()
-    if (message === '' || responding || !interactive) return
+    if (message === '' || responding || sending || !interactive) return
     setError(null)
-    setText('')
+    setSending(true)
     try {
       const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message }),
       })
-      if (!res.ok) setError((await res.json())?.error ?? `HTTP ${res.status}`)
+      if (res.ok) setText('')
+      else setError((await res.json())?.error ?? `HTTP ${res.status}`)
     } catch {
       setError('could not reach the amagi server')
+    } finally {
+      setSending(false)
     }
   }
 
@@ -86,13 +90,13 @@ export function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
-            disabled={responding}
+            disabled={responding || sending}
             placeholder={responding ? 'worker is responding...' : 'ask the worker'}
             className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1 text-sm disabled:opacity-50"
           />
           <button
             type="submit"
-            disabled={responding || text.trim() === ''}
+            disabled={responding || sending || text.trim() === ''}
             className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
           >
             Send
@@ -105,6 +109,10 @@ export function ChatPanel({ repo, taskId }: { repo: string; taskId: string }) {
     </div>
   )
 }
+
+// A hex run needs a digit and a letter to count as a hash, so plain numbers and words like
+// "acceded" stay text.
+const COMMIT_HASH = '(?=[a-f]*[0-9])(?=[0-9]*[a-f])[a-f0-9]{7,40}'
 
 function ChatReply({
   text,
@@ -128,17 +136,17 @@ function ChatReply({
   }
 
   const taskIds = Object.keys(tasks).sort((a, b) => b.length - a.length)
-  const references = [...taskIds.map(escapeRegExp), '[a-f0-9]{7,40}'].join('|')
+  const references = [...taskIds.map(escapeRegExp), COMMIT_HASH].join('|')
   const linkedText = (value: string): ReactNode => {
     const pattern = new RegExp(`(?<![a-z0-9_.-])(${references})(?![a-z0-9_.-])`, 'gi')
     const parts = value.split(pattern)
     return parts.map((part, index) => {
-      const task = tasks[part]
+      const task = Object.hasOwn(tasks, part) ? tasks[part] : undefined
       if (task !== undefined) {
         // biome-ignore lint/suspicious/noArrayIndexKey: the same reference can repeat within one text.
         return <TaskReference key={`${part}-${index}`} task={task} />
       }
-      if (/^[a-f0-9]{7,40}$/i.test(part)) {
+      if (new RegExp(`^${COMMIT_HASH}$`, 'i').test(part)) {
         // biome-ignore lint/suspicious/noArrayIndexKey: the same reference can repeat within one text.
         return <CommitReference key={`${part}-${index}`} hash={part} repo={repo} />
       }

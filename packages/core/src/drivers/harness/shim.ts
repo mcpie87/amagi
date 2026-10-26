@@ -87,8 +87,14 @@ if [ -z "$REAL_GIT" ]; then
   exit 127
 fi
 
+# The trailing _ keeps trailing newlines from vanishing in awk's record split.
+# Backslashes are escaped first so later escapes are not doubled.
 json_escape() {
-  printf '%s' "$1" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g'
+  printf '%s_' "$1" | awk '
+    BEGIN { ORS = ""; for (i = 1; i < 32; i++) { ch[i] = sprintf("%c", i); rep[i] = sprintf("\\\\u%04x", i) } }
+    NR > 1 { print prev "\\\\n" }
+    { gsub(/\\\\/, "\\\\\\\\\\\\\\\\"); gsub(/"/, "\\\\\\""); for (i = 1; i < 32; i++) gsub(ch[i], rep[i]); prev = $0 }
+    END { print substr(prev, 1, length(prev) - 1) }'
 }
 
 shq() {
@@ -118,7 +124,7 @@ reject() {
       printf ']}\\n'
     } >>"$f"
   fi
-  echo "amagi: git '$1' is not allowed in the task worktree or main checkout (read-only git)" >&2
+  echo "amagi: git '$verb' is not allowed in the task worktree or main checkout (read-only git)" >&2
   exit 1
 }
 
@@ -231,7 +237,10 @@ read_only() {
       ;;
     remote)
       case "\${1:-}" in
-        ''|-v|--verbose|get-url|show) return 0 ;;
+        -v|--verbose) shift ;;
+      esac
+      case "\${1:-}" in
+        ''|get-url|show) return 0 ;;
       esac
       ;;
     config)
@@ -271,6 +280,7 @@ verb_is_read_only() {
 }
 
 out=$(resolve "$@")
+verb=$(printf '%s\\n' "$out" | sed -n '1p')
 common=$(printf '%s\\n' "$out" | sed -n '2p')
 skip=$(printf '%s\\n' "$out" | sed -n '3p')
 
@@ -342,8 +352,13 @@ exec "$REAL_AMAGI" "$@"
  * The bd shim: read verbs pass, every tracker write is rejected. The runner
  * owns the claim; an agent that closes or updates its own issue drops the
  * lease, and the runner then stops before committing, losing the work. The
- * first non-flag argument is the verb, so a global flag taking a value (e.g.
- * `--actor x show`) reads its value as the verb and fails closed. Same
+ * verb is the first argument that is neither a flag nor the value of one of
+ * bd's value-taking global flags, which bd accepts anywhere on the line: read
+ * as a verb, `bd --actor show close x` would pass as `show` and close. Any
+ * other flag before the verb (or before a `dep` subcommand) is rejected, since
+ * bd may take the next argument as its value (`bd --reason show close x`), and
+ * a help request runs only `bd <verb> --help`, since a flag value elsewhere on
+ * the line can swallow `--help`. `ready --claim` is a write. Same
  * defense-in-depth caveat as the other shims.
  */
 function bdShimScript(realBd: string, binDir: string): string {
@@ -369,15 +384,47 @@ fi
 
 verb=''
 sub=''
+value=0
+help=0
+claim=0
 for a in "$@"; do
+  if [ "$value" -eq 1 ]; then
+    value=0
+    continue
+  fi
   case "$a" in
-    -h|--help|--version) exec "$REAL_BD" "$@" ;;
-    -*) ;;
+    --actor|--database|--db|-C|--directory|--dolt-auto-commit|--mem-profile) value=1 ;;
+    -h|--help) help=1 ;;
+    --claim|--claim=*)
+      if [ -z "$verb" ]; then
+        verb="$a"
+        help=0
+        break
+      fi
+      claim=1
+      ;;
+    -V|--version) [ -n "$verb" ] || exec "$REAL_BD" --version ;;
+    --json|-q|--quiet|-v|--verbose|--no-color|--readonly|--sandbox|--global|--ignore-schema-skew|--cpu-profile|--*=*) ;;
+    -*)
+      if [ -z "$verb" ] || { [ "$verb" = dep ] && [ -z "$sub" ]; }; then
+        verb="$a"
+        help=0
+        break
+      fi
+      ;;
     *)
       if [ -z "$verb" ]; then verb="$a"; elif [ -z "$sub" ]; then sub="$a"; fi
       ;;
   esac
 done
+
+if [ "$help" -eq 1 ]; then
+  exec "$REAL_BD" \${verb:+"$verb"} --help
+fi
+
+if [ "$verb" = ready ] && [ "$claim" -eq 1 ]; then
+  verb='ready --claim'
+fi
 
 case "$verb" in
   show|list|ready|search|blocked|children|count|diff|history|lint|stale|status|statuses|types|graph|info|prime|memories|query|where|help|version)

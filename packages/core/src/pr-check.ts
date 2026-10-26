@@ -2,7 +2,8 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { lintCommitMessage } from './commit-lint.ts'
 import type { Config } from './config.ts'
-import { forgeToken, ghEnv, gitTokenConfig } from './drivers/forge-cred.ts'
+import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import type { PrDriver } from './drivers/pr.ts'
 import { assertSafePushDestination } from './drivers/push-safety.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
@@ -78,59 +79,12 @@ export async function resolvePrPriorities(
 
 export type SyncPrPriorityLabelOptions = {
   cwd: string
-  remote: string
   number: number
+  driver: Pick<PrDriver, 'addLabel' | 'removeLabel'>
   /** Labels already on the PR, from the list call. */
   labels: string[]
   /** Bead priority 0-4, or null to remove any P* label when the bead is gone or closed. */
   priority: number | null
-  exec?: Exec
-}
-
-/**
- * Adds labels to a PR through the REST issues endpoint, which creates missing
- * labels on the fly. Not `gh pr edit`: with amagi's token it never attached a
- * label, and its failures went unseen behind best-effort callers.
- */
-export async function addPrLabels(
-  run: Exec,
-  cwd: string,
-  remote: string,
-  number: number,
-  labels: readonly string[],
-): Promise<void> {
-  await execOk(
-    run,
-    [
-      'gh',
-      'api',
-      '--method',
-      'POST',
-      `repos/{owner}/{repo}/issues/${number}/labels`,
-      '--input',
-      '-',
-    ],
-    { cwd, stdin: JSON.stringify({ labels }), env: ghEnv(cwd, remote) },
-  )
-}
-
-/** Removes a label from a PR through the REST issues endpoint; a label already absent is not an error. */
-export async function removePrLabel(
-  run: Exec,
-  cwd: string,
-  remote: string,
-  number: number,
-  label: string,
-): Promise<void> {
-  const cmd = [
-    'gh',
-    'api',
-    '--method',
-    'DELETE',
-    `repos/{owner}/{repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
-  ]
-  const r = await run(cmd, { cwd, env: ghEnv(cwd, remote) })
-  if (r.exitCode !== 0 && !/HTTP 404/.test(r.stderr)) throw new CommandError(cmd, r)
 }
 
 /**
@@ -139,15 +93,14 @@ export async function removePrLabel(
  * can report it; each caller decides whether one PR's failure stops the rest.
  */
 export async function syncPrPriorityLabel(opts: SyncPrPriorityLabelOptions): Promise<void> {
-  const run = opts.exec ?? defaultExec
   const want = opts.priority === null ? null : `P${opts.priority}`
   for (const label of PRIORITY_LABELS) {
     if (label !== want && opts.labels.includes(label)) {
-      await removePrLabel(run, opts.cwd, opts.remote, opts.number, label)
+      await opts.driver.removeLabel(opts.cwd, opts.number, label)
     }
   }
   if (want !== null && !opts.labels.includes(want)) {
-    await addPrLabels(run, opts.cwd, opts.remote, opts.number, [want])
+    await opts.driver.addLabel(opts.cwd, opts.number, want)
   }
 }
 
@@ -180,33 +133,29 @@ export type StampedIteration = {
 }
 
 /**
- * Bumps a conflicting amagi PR's resolution counter: reads the current
- * amagi/iterations:N label (0 when absent), stamps amagi/iterations:N+1 on the
- * PR, and reports the new count so the caller can mirror it onto the linked
- * bead. Returns null for non-amagi PRs, which carry no iteration label.
+ * Sets a conflicting amagi PR's resolution counter: stamps
+ * amagi/iterations:<iteration> (default: the current count + 1) unless
+ * `pr.labels` has it, and removes every other amagi/iterations:* label there
+ * plus the previous count. Reports the count so the caller can mirror it onto the
+ * linked bead. Returns null for non-amagi PRs, which carry no iteration label.
  */
 export async function stampIterationLabel(opts: {
   cwd: string
-  remote: string
   pr: PrInfo
-  /** Explicit count when multiple dispatches share a stale PR snapshot. */
+  driver: Pick<PrDriver, 'addLabel' | 'removeLabel'>
   iteration?: number
-  exec?: Exec
 }): Promise<StampedIteration | null> {
-  const run = opts.exec ?? defaultExec
   const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
   if (taskId === null) return null
-  const current = iterationsFromLabels(opts.pr.labels)
-  const iteration = opts.iteration ?? current + 1
-  await addPrLabels(run, opts.cwd, opts.remote, opts.pr.number, [iterationLabel(iteration)])
-  // The snapshot's labels go stale across dispatches in one call, so the
-  // previous count is dropped even when the snapshot does not show it.
+  const iteration = opts.iteration ?? iterationsFromLabels(opts.pr.labels) + 1
+  const wanted = iterationLabel(iteration)
+  if (!opts.pr.labels.includes(wanted)) await opts.driver.addLabel(opts.cwd, opts.pr.number, wanted)
   const stale = new Set(opts.pr.labels.filter((l) => l.startsWith(ITERATION_LABEL_PREFIX)))
+  // Queued runs can share one PR listing, so the previous count may be on the
+  // PR without showing in the snapshot.
   if (iteration > 1) stale.add(iterationLabel(iteration - 1))
-  stale.delete(iterationLabel(iteration))
-  for (const label of stale) {
-    await removePrLabel(run, opts.cwd, opts.remote, opts.pr.number, label)
-  }
+  stale.delete(wanted)
+  for (const label of stale) await opts.driver.removeLabel(opts.cwd, opts.pr.number, label)
   return { taskId, iteration }
 }
 
@@ -239,6 +188,7 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
     opts.repoRoot,
     opts.remote,
     forgeToken(opts.forgeKind, opts.repoRoot),
+    opts.forgeKind,
   )
 
   const out = await execOk(run, ['git', 'ls-remote', opts.remote, remoteRef], {
@@ -285,6 +235,7 @@ export async function fetchPullHeads(opts: FetchPullHeadsOptions): Promise<Fetch
 export type PrepareConflictWorktreeOptions = {
   repoRoot: string
   remote: string
+  forgeKind: Config['forge']['kind']
   repoName: string
   worktreeRoot: string
   baseBranch: string
@@ -293,6 +244,7 @@ export type PrepareConflictWorktreeOptions = {
   persona?: string | null
   /** Linted message for a clean merge commit; absent keeps the legacy message. */
   mergeMessage?: string
+  deferCommit?: boolean
   exec?: Exec
 }
 
@@ -321,7 +273,8 @@ export async function prepareConflictWorktree(
     run,
     opts.repoRoot,
     opts.remote,
-    forgeToken('github', opts.repoRoot),
+    forgeToken(opts.forgeKind, opts.repoRoot),
+    opts.forgeKind,
   )
 
   await execOk(run, ['git', 'fetch', opts.remote, opts.baseBranch], {
@@ -333,8 +286,9 @@ export async function prepareConflictWorktree(
     env: tokenCfg,
   })
 
-  const branch = `amagi/pr-${opts.pr.number}-conflict`
-  const path = join(opts.worktreeRoot, `${opts.repoName}-pr-${opts.pr.number}`)
+  // Scoped by remote: each forge numbers its PRs independently.
+  const branch = `amagi/${opts.remote}-pr-${opts.pr.number}-conflict`
+  const path = join(opts.worktreeRoot, `${opts.repoName}-${opts.remote}-pr-${opts.pr.number}`)
 
   if (!existsSync(path)) {
     const exists = await branchExists(run, opts.repoRoot, branch)
@@ -368,7 +322,17 @@ export async function prepareConflictWorktree(
     const errors = lintCommitMessage(opts.mergeMessage)
     if (errors.length > 0) throw new Error(`malformed commit message: ${errors.join('; ')}`)
   }
-  const merge = await run(['git', 'merge', '-m', message, baseOid], { cwd: path })
+  const merge = await run(
+    [
+      'git',
+      'merge',
+      ...(opts.deferCommit ? ['--no-commit', '--no-ff'] : []),
+      '-m',
+      message,
+      baseOid,
+    ],
+    { cwd: path },
+  )
   return { path, branch, conflicted: merge.exitCode !== 0, baseOid }
 }
 
@@ -377,13 +341,20 @@ export type PushConflictFixOptions = {
   branch: string
   headRef: string
   remote: string
+  forgeKind: Config['forge']['kind']
   exec?: Exec
 }
 
 /** Pushes the resolved local branch back to the PR head ref, updating the PR. */
 export async function pushConflictFix(opts: PushConflictFixOptions): Promise<void> {
   const run = opts.exec ?? defaultExec
-  const tokenCfg = await gitTokenConfig(run, opts.cwd, opts.remote, forgeToken('github', opts.cwd))
+  const tokenCfg = await gitTokenConfig(
+    run,
+    opts.cwd,
+    opts.remote,
+    forgeToken(opts.forgeKind, opts.cwd),
+    opts.forgeKind,
+  )
   await assertSafePushDestination(run, opts.cwd, opts.remote, opts.headRef, tokenCfg)
   await execOk(run, ['git', 'push', opts.remote, `${opts.branch}:refs/heads/${opts.headRef}`], {
     cwd: opts.cwd,

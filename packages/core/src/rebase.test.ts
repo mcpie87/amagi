@@ -1,4 +1,6 @@
 import { expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { Config } from './config.ts'
 import type { Exec, ExecResult } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
@@ -35,7 +37,7 @@ function fixture(
   }
   const config = Config.parse({
     repo: { setupCmd: 'setup' },
-    checks: { format: 'format', lint: 'lint', commands: ['test'] },
+    checks: { format: 'format', lint: 'lint', test: 'unit', commands: ['test'] },
   })
   const run = (idle = () => true) =>
     rebasePr({ root: '/repo', pr, baseOid: 'base', config, exec, idle })
@@ -51,6 +53,7 @@ for (const kind of ['github', 'gitlab', 'forgejo'] as const) {
       'setup',
       'format',
       'lint',
+      'unit',
       'test',
     ])
     const push = f.calls.find((cmd) => cmd[1] === 'push')
@@ -137,4 +140,16 @@ test('a rejected lease surfaces the push failure and cleans up', async () => {
   )
   await expect(f.run()).rejects.toThrow('stale info')
   expect(f.calls.at(-1)?.slice(0, 4)).toEqual(['git', 'worktree', 'remove', '--force'])
+})
+
+test('a failed worktree removal keeps the original error and still drops the temp dir', async () => {
+  let worktree = ''
+  const f = fixture((cmd) => {
+    if (cmd[2] === 'add') worktree = cmd[4] ?? ''
+    if (cmd[1] === 'push') return { exitCode: 1, stderr: 'stale info' }
+    if (cmd[2] === 'remove') return { exitCode: 1, stderr: 'locked' }
+    return undefined
+  })
+  await expect(f.run()).rejects.toThrow('stale info')
+  expect(existsSync(dirname(worktree))).toBe(false)
 })

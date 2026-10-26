@@ -5,6 +5,14 @@ export const MERGE_STATUSES = ['mergeable', 'conflicted', 'unknown'] as const
 export const MergeStatus = z.enum(MERGE_STATUSES)
 export type MergeStatus = z.infer<typeof MergeStatus>
 
+/**
+ * Every mention kind, in the order the responder runs their handlers. The
+ * classifier vocabulary (MENTION_KINDS in prompt.ts) is built from this list.
+ */
+export const MENTION_KIND_NAMES = ['explain', 'fix-pr', 'add-a-task', 'flag', 'ambiguous'] as const
+export const MentionKind = z.enum(MENTION_KIND_NAMES)
+export type MentionKind = z.infer<typeof MentionKind>
+
 export const TASK_STATES = [
   'queued',
   'claimed',
@@ -98,7 +106,7 @@ const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   fixing: ['reviewing', 'checks', 'retrying'],
   retrying: ['implementing', 'reviewing', 'fixing'],
   committed: ['pr_open'],
-  pr_open: ['pr_flagged', 'pr_merge_conflict'],
+  pr_open: ['pr_flagged', 'pr_merge_conflict', 'pr_conflict_fixing'],
   // A flagged PR is parked for the operator, not terminal: the watcher owns
   // the label and clears it back to pr_open when the PR stops being pointless.
   pr_flagged: ['pr_open', 'pr_merge_conflict'],
@@ -472,8 +480,11 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('mention.classified'),
-    /** Which response path the classifier chose for the mention. */
-    kind: z.enum(['fix-pr', 'explain', 'add-a-task', 'flag', 'ambiguous']),
+    /**
+     * Every response path the classifier chose, in handler order. Events stored
+     * before multi-kind routing carry a single `kind`; view.ts folds it in.
+     */
+    kinds: z.array(MentionKind),
     /** The raw classifier reply; when the parse is wrong this is all that explains why. */
     reply: z.string(),
     /** The PR the mention was on. */

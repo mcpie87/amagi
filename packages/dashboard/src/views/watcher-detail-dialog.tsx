@@ -63,13 +63,17 @@ export function WatcherDetailDialog({
       alive = false
     }
   }, [runsUrl])
+  const currentUrl = useRef(runsUrl)
+  currentUrl.current = runsUrl
   const loadOlder = () => {
     if (runsUrl === null || page?.nextBeforeSeq == null) return
+    const requested = runsUrl
     setLoadingOlder(true)
     fetch(`${runsUrl}?beforeSeq=${page.nextBeforeSeq}`)
       .then((res) => (res.ok ? (res.json() as Promise<HistoryPage>) : null))
       .then((older) => {
-        if (older === null) return
+        // Another watcher opened while this page loaded: its history must not get these runs.
+        if (older === null || currentUrl.current !== requested) return
         setPage((current) =>
           current === null
             ? older

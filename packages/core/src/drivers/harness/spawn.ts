@@ -1,6 +1,7 @@
 import { AsyncQueue } from '../../async-queue.ts'
 import { errMsg } from '../../errors.ts'
 import type { AgentEvent } from '../../events.ts'
+import { readText } from '../../exec.ts'
 import { jsonLines } from '../../jsonl.ts'
 import { killTree } from '../../process.ts'
 import { acquireSeat, type SeatLease } from '../../seat-lock.ts'
@@ -215,24 +216,5 @@ function spawnUnlocked(
       return options.model ? options.model() : null
     },
     effort: options.effort ?? null,
-  }
-}
-
-async function readText(stream: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<string> {
-  const reader = stream.getReader()
-  const decoder = new TextDecoder()
-  let text = ''
-  const cancel = () => void reader.cancel()
-  signal.addEventListener('abort', cancel, { once: true })
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      text += decoder.decode(value, { stream: true })
-    }
-    return text + decoder.decode()
-  } finally {
-    signal.removeEventListener('abort', cancel)
-    reader.releaseLock()
   }
 }

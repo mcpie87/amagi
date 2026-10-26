@@ -2,8 +2,11 @@ import {
   CHECKPOINT_COMMIT_SUMMARY,
   type ChatService,
   canReset,
+  canTransition,
+  diffBase,
   errMsg,
   exec,
+  forgeToken,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
   HUMAN_ONLY_LABEL,
@@ -12,11 +15,14 @@ import {
   mergeBaseForChat,
   mergeLiveRuns,
   type Notifier,
+  PR_TASK_STATES,
+  PRIMARY_FORGE,
   type Question,
   type RunServiceApi,
   reconcilePr,
   removeWorktree,
   runApprovedGitRequest,
+  runMandatoryWorkerChecks,
   type Store,
   type StoredEvent,
   stageAndCommit,
@@ -26,6 +32,8 @@ import {
   type Workspaces,
 } from '@amagi/core'
 import { Hono } from 'hono'
+import { taskChatKey } from './chat-routes.ts'
+import { type ConflictQueueResult, taskBusy } from './pr-conflict-watcher.ts'
 import { capabilityError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   AgentLogQuery,
@@ -53,9 +61,10 @@ export type TaskRouteDeps = {
   workers: (() => WorkerActivity[]) | undefined
   liveRuns: (() => LiveRun[]) | undefined
   queueConflictResolution:
-    | ((repo: string, prNumber: number, prUrl: string | null) => boolean)
+    | ((repo: string, prNumber: number, prUrl: string | null) => ConflictQueueResult)
     | undefined
   chatFor: (ws: Workspace) => ChatService
+  liveTaskChats: Map<string, () => Promise<void>>
   authorized: (c: import('hono').Context, store: Store, id: string) => boolean
   openQuestionGate: (
     tracker: Tracker | undefined,
@@ -80,6 +89,7 @@ export function createTaskRoutes({
   liveRuns,
   queueConflictResolution,
   chatFor,
+  liveTaskChats,
   authorized,
   openQuestionGate,
   resolveQuestionGate,
@@ -87,6 +97,12 @@ export function createTaskRoutes({
 }: TaskRouteDeps) {
   /** Git requests being carried out, so a double click cannot push or comment twice. */
   const deciding = new Set<string>()
+
+  /** A chat agent works in the task worktree, so it must be gone before the worktree is. */
+  const stopTaskChats = async (ws: Workspace, id: string): Promise<void> => {
+    await chatFor(ws).stop(id)
+    await liveTaskChats.get(taskChatKey(ws, id))?.()
+  }
 
   return new Hono()
     .post('/api/repos/:repo/tasks/:id/stop', valid('param', RepoTaskIdParam), (c) => {
@@ -107,6 +123,11 @@ export function createTaskRoutes({
         to: 'cancelled',
         reason: 'operator interrupt',
       })
+      // A beads gate blocks its task, so an open one would keep the stopped
+      // task out of the ready queue for good.
+      for (const question of store.unansweredQuestions(id)) {
+        void resolveQuestionGate(ws.tracker, question.gateRef)
+      }
       void runnerFor(repo)?.stop(id)
       return c.json({ task: store.task(id) })
     })
@@ -128,9 +149,7 @@ export function createTaskRoutes({
       const ws = resolveWorkspace(workspaces, repo)
       const task = ws.store.task(id)
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
-      // The dashboard answers via the token-bound endpoint but has no other
-      // channel for the credential, so the task detail doubles as its source.
-      return c.json({ task, token: ws.store.token(id), questions: ws.store.openQuestions(id) })
+      return c.json({ task, questions: ws.store.openQuestions(id) })
     })
 
     .get(
@@ -140,8 +159,8 @@ export function createTaskRoutes({
       (c) => {
         const { repo, id } = c.req.valid('param')
         const ws = resolveWorkspace(workspaces, repo)
-        const { attempt, untilSeq, limit } = c.req.valid('query')
-        return c.json(ws.store.agentLog(id, attempt, untilSeq, limit))
+        const { attempt, untilSeq, sinceSeq, limit } = c.req.valid('query')
+        return c.json(ws.store.agentLog(id, attempt, untilSeq, limit, sinceSeq))
       },
     )
 
@@ -152,10 +171,19 @@ export function createTaskRoutes({
       if (!task) return c.json({ error: `unknown task ${id}` }, 404)
       // A completed or abandoned run cannot come back: the tracker issue is
       // closed and the runner will never claim it again. Everything else is
-      // restartable — the runner resumes the recorded worktree when present
+      // restartable: the runner resumes the recorded worktree when present
       // and starts from a fresh worktree otherwise.
       if (task.state === 'done' || task.state === 'abandoned') {
         return c.json({ error: `task ${id} is in terminal state ${task.state}` }, 409)
+      }
+      // A live run would keep working the worktree while auto-queue starts a second one on it.
+      const runner = runnerFor(repo)
+      if (runner !== undefined) {
+        try {
+          await runner.stop(id)
+        } catch (err) {
+          console.warn(`stop on reclaim ${id}: ${errMsg(err)}`)
+        }
       }
       // Best effort: the runner only re-claims issues the tracker sees as
       // ready, so a lapsed or still-live claim is released for it to pick up.
@@ -184,6 +212,7 @@ export function createTaskRoutes({
           console.warn(`stop on reset ${id}: ${errMsg(err)}`)
         }
       }
+      await stopTaskChats(ws, id)
       // Unlike close, the worktree removal is not best effort: a surviving
       // worktree or branch would be resumed by the next run, which is exactly
       // what the reset promises not to do.
@@ -210,6 +239,11 @@ export function createTaskRoutes({
         await ws.tracker.release(id)
       } catch (err) {
         console.warn(`release on reset ${id}: ${errMsg(err)}`)
+      }
+      // A beads gate blocks its task: one left open would keep the reset task
+      // out of the ready queue, so it could never be claimed again.
+      for (const question of ws.store.unansweredQuestions(id)) {
+        await resolveQuestionGate(ws.tracker, question.gateRef)
       }
       ws.store.append(id, { type: 'task.reset', reason: 'operator reset' })
       return c.json({ task: ws.store.task(id) })
@@ -269,7 +303,14 @@ export function createTaskRoutes({
       if (task.prNumber === null) {
         return c.json({ error: `task ${id} has no recorded pull request number` }, 409)
       }
-      if (queueConflictResolution?.(repo, task.prNumber, task.prUrl) !== true) {
+      const forge = ws.prForge?.(task.prUrl)
+      if (forge !== undefined && forge.key !== PRIMARY_FORGE) {
+        const { kind } = forge.config.forge
+        if (forgeToken(kind, ws.root) === null) {
+          return c.json({ error: `no ${kind} token configured for PR #${task.prNumber}` }, 409)
+        }
+      }
+      if (!queueConflictResolution?.(repo, task.prNumber, task.prUrl)) {
         return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
       }
       ws.store.append(task.id, {
@@ -279,6 +320,71 @@ export function createTaskRoutes({
         reason: `Conflict resolution queued for PR #${task.prNumber}`,
       })
       return c.json({ taskId: id, queued: true })
+    })
+
+    .post('/api/repos/:repo/resolve-conflicts', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      if (ws.prForge === null) {
+        return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      }
+      const prForge = ws.prForge
+      const openPrs = new Map<string, Promise<Set<number>>>()
+      let queued = 0
+      let skipped = 0
+      const failures: string[] = []
+      const snapshot = ws.store.tasks({ states: PR_TASK_STATES, limit: Number.MAX_SAFE_INTEGER })
+      for (const listed of snapshot) {
+        const prNumber = listed.prNumber
+        if (prNumber === null) {
+          skipped++
+          continue
+        }
+        const forge = prForge(listed.prUrl)
+        let open = openPrs.get(forge.key)
+        if (open === undefined) {
+          open = forge.driver
+            .listOpenPrs(ws.root)
+            .then((prs) => new Set(prs.map((pr) => pr.number)))
+          openPrs.set(forge.key, open)
+        }
+        let isOpen: boolean
+        try {
+          isOpen = (await open).has(prNumber)
+        } catch (error) {
+          failures.push(`${listed.id}: could not list open PRs: ${errMsg(error)}`)
+          continue
+        }
+        // Re-read after the forge round trip: the watcher may have moved the task meanwhile.
+        const task = ws.store.task(listed.id)
+        if (
+          !isOpen ||
+          task === null ||
+          task.prNumber !== prNumber ||
+          task.state === 'pr_conflict_fixing' ||
+          !canTransition(task.state, 'pr_conflict_fixing') ||
+          taskBusy(ws.store, ws.key, task.id)
+        ) {
+          skipped++
+          continue
+        }
+        const result = queueConflictResolution?.(repo, prNumber, task.prUrl)
+        if (!result) {
+          return c.json({ error: `PR conflict watcher is unavailable for ${repo}` }, 501)
+        }
+        if (result === 'pending') {
+          skipped++
+          continue
+        }
+        ws.store.append(task.id, {
+          type: 'task.state',
+          from: task.state,
+          to: 'pr_conflict_fixing',
+          reason: `Conflict resolution queued for PR #${prNumber}`,
+        })
+        queued++
+      }
+      return c.json({ queued, skipped, failures })
     })
 
     .post(
@@ -410,6 +516,7 @@ export function createTaskRoutes({
             console.warn(`stop on close ${id}: ${errMsg(err)}`)
           }
         }
+        await stopTaskChats(ws, id)
         const afterStop = ws.store.task(id)
         ws.store.append(id, {
           type: 'task.state',
@@ -546,6 +653,12 @@ export function createTaskRoutes({
         const ws = resolveWorkspace(workspaces, repo)
         const task = ws.store.task(id)
         if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+        if (!authorized(c, ws.store, id)) {
+          return c.json({ error: 'task token mismatch' }, 401)
+        }
+        if (!canTransition(task.state, 'awaiting_answer')) {
+          return c.json({ error: `task ${id} cannot take a question while ${task.state}` }, 409)
+        }
         const questionId = crypto.randomUUID()
         const gateRef = await openQuestionGate(ws.tracker, id, {
           id: questionId,
@@ -599,8 +712,8 @@ export function createTaskRoutes({
           unsub = ws.store.subscribe((event) => {
             if (event.taskId !== id) return
             const resolved =
-              event.type === 'question.timedout' ||
-              (event.type === 'question.answered' && event.questionId === questionId)
+              (event.type === 'question.timedout' || event.type === 'question.answered') &&
+              event.questionId === questionId
             if (!resolved) return
             cleanup()
             resolve(c.json({ question: ws.store.question(questionId) }))
@@ -697,6 +810,26 @@ export function createTaskRoutes({
         // The commit is synchronous, so it runs here and the sha returns in
         // the same response; a separate await endpoint would add a round trip.
         try {
+          const base = await diffBase(
+            exec,
+            task.worktree,
+            ws.config.forge.remote,
+            ws.config.repo.baseBranch,
+          )
+          const results = await runMandatoryWorkerChecks(
+            exec,
+            task.worktree,
+            ws.config.checks,
+            base,
+          )
+          const ok = results.every((result) => result.exitCode === 0)
+          ws.store.append(id, { type: 'checks.finished', ok, results })
+          if (!ok) {
+            return c.json(
+              { error: 'project checks failed; repair and retry the commit', results },
+              409,
+            )
+          }
           const staged = await stageAndCommit(
             exec,
             task,

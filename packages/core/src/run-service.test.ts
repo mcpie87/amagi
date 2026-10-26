@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,7 +23,7 @@ import type { AgentEvent } from './events.ts'
 import { exec, execOk } from './exec.ts'
 import type { PrInfo } from './pr-check.ts'
 import { RunService, type RunServiceOptions } from './run-service.ts'
-import type { RunOnceResult } from './runner.ts'
+import { Runner, type RunOnceResult } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 import { recordUsageHold, usageHoldKey } from './usage-hold.ts'
@@ -256,6 +256,9 @@ class FakePr implements PrDriver {
   async getPrDiff(_cwd: string, _number: number): Promise<string> {
     return ''
   }
+  async getPrChanges() {
+    return { baseSha: null, headSha: null, changedFiles: [], fileCount: 0 }
+  }
   async listComments(_cwd: string, _number: number): Promise<PrComment[]> {
     return []
   }
@@ -351,6 +354,61 @@ afterEach(() => {
 })
 
 describe('RunService', () => {
+  test('does not claim while repository readiness checks fail', async () => {
+    const tracker = new FakeTracker([TASK])
+    const service = makeService(tracker, new FakeHarness(), 1, config(), {
+      autoQueue: true,
+      autoQueueIdleMs: 60_000,
+      readiness: async () => [
+        { name: 'git root', ok: true },
+        { name: 'forge github token', ok: false, detail: 'no token' },
+      ],
+    })
+    const error = 'repository is not ready: forge github token (no token)'
+
+    expect(await service.start()).toEqual({ ok: false, status: 409, error })
+    expect(await service.start(TASK.id)).toEqual({ ok: false, status: 409, error })
+    expect(await tracker.ready()).toEqual([TASK])
+    expect(store.task(TASK.id)).toBeNull()
+    expect(service.claimSkip(TASK.id)).toEqual({ state: 'not-ready', reason: error })
+    service.dispose()
+  })
+
+  test('claims despite a failed advisory readiness check', async () => {
+    const harness = new FakeHarness((cwd) => writeFileSync(join(cwd, 'hello.txt'), 'hi\n'))
+    const service = makeService(new FakeTracker([TASK]), harness, 1, config(), {
+      readiness: async () => [
+        { name: 'harness opencode', ok: false, detail: 'not on PATH', advisory: true },
+      ],
+    })
+
+    expect(await service.start()).toEqual({ ok: true, taskId: TASK.id })
+    await waitFor(() => store.task(TASK.id)?.state === 'pr_open')
+  })
+
+  test('records why automatic dispatch skips a gated task until auto queue stops', async () => {
+    const hard = { ...TASK, difficulty: 'high' }
+    const service = makeService(
+      new FakeTracker([hard]),
+      new FakeHarness(),
+      1,
+      config({
+        worker: [{ id: 'worker-1', name: 'Worker 1', kind: 'claude', difficulties: ['low'] }],
+        difficulty: { enabled: true },
+      }),
+      { autoQueue: true, autoQueueIdleMs: 60_000 },
+    )
+
+    expect((await service.start()).ok).toBe(false)
+    expect(service.claimSkip(hard.id)).toEqual({
+      state: 'gated',
+      reason: 'Worker 1 does not take high difficulty tasks',
+    })
+    service.setAutoQueue(false)
+    expect(service.claimSkip(hard.id)).toBeNull()
+    service.dispose()
+  })
+
   test('does not claim a ready task while its harness and model are held', async () => {
     const tracker = new FakeTracker([TASK])
     let spawned = 0
@@ -374,6 +432,10 @@ describe('RunService', () => {
     const result = await service.start()
     expect(result).toMatchObject({ ok: false, status: 409 })
     expect(result.ok ? '' : result.error).toContain('claude+sonnet usage limit hold')
+    expect(service.claimSkip(TASK.id)).toEqual({
+      state: 'waiting',
+      reason: result.ok ? '' : result.error,
+    })
     expect(await tracker.ready()).toEqual([TASK])
     expect(spawned).toBe(0)
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -787,6 +849,18 @@ describe('RunService', () => {
     await waitFor(async () => (await service.status()).running.length === 0)
     expect(finished?.task.prUrl).toContain('https://example.com/pull/')
     expect(finished?.state).toBe('pr_open')
+  })
+
+  test('a run that rejects frees its seat instead of crashing the process', async () => {
+    const spy = spyOn(Runner.prototype, 'runClaimed').mockRejectedValue(new Error('lease lost'))
+    try {
+      const service = makeService(new FakeTracker([TASK]), new FakeHarness(() => {}))
+      expect(await service.start()).toEqual({ ok: true, taskId: TASK.id })
+      await waitFor(async () => (await service.status()).running.length === 0)
+      expect((await service.status()).busySeats).toBe(0)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test('start launches a specific ready task', async () => {

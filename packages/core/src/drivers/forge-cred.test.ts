@@ -215,6 +215,23 @@ describe('gitRewrite', () => {
     })
   })
 
+  test('sends ssh remotes to the forge URL, never to the ssh port', () => {
+    expect(gitRewrite('ssh://git@git.lan:2222/o/r.git', 'tok')).toEqual({
+      from: 'ssh://git@git.lan:2222/',
+      to: 'https://x-access-token:tok@git.lan/',
+    })
+    expect(
+      gitRewrite('ssh://git@git.lan:2222/o/r.git', 'tok', 'http://git.lan:3000/forge'),
+    ).toEqual({
+      from: 'ssh://git@git.lan:2222/',
+      to: 'http://x-access-token:tok@git.lan:3000/forge/',
+    })
+    expect(gitRewrite('git@git.lan:o/r.git', 'tok', 'https://git.lan:3000/forge')).toEqual({
+      from: 'git@git.lan:',
+      to: 'https://x-access-token:tok@git.lan:3000/forge/',
+    })
+  })
+
   test('rejects a remote with no host or path', () => {
     expect(gitRewrite('not a remote', 'tok')).toBeNull()
   })
@@ -240,16 +257,31 @@ describe('gitTokenConfig', () => {
     const { exec, calls } = fake((c) =>
       c.includes('get-url') ? ok('git@github.com:x/y.git') : undefined,
     )
-    expect(await gitTokenConfig(exec, '/repo', 'origin', null)).toEqual({})
+    expect(await gitTokenConfig(exec, '/repo', 'origin', null, 'github')).toEqual({})
     expect(calls).toHaveLength(0)
   })
 
   test('reads the remote and rewrites it once with a token', async () => {
     const { exec } = fake((c) => (c.includes('get-url') ? ok('git@github.com:x/y.git') : undefined))
-    expect(await gitTokenConfig(exec, '/repo', 'origin', 'tok')).toEqual({
+    expect(await gitTokenConfig(exec, '/repo', 'origin', 'tok', 'github')).toEqual({
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: 'url.https://x-access-token:tok@github.com/.insteadOf',
       GIT_CONFIG_VALUE_0: 'git@github.com:',
+    })
+  })
+
+  test('rewrites an ssh remote to the configured forge URL', async () => {
+    const repo = join(home, 'fj')
+    mkdirSync(repo)
+    Bun.spawnSync(['git', 'init', '-q'], { cwd: repo })
+    addForgeCredential('forgejo', 'bot', 'fj_tok', 'http://git.lan:3000')
+    const { exec } = fake((c) =>
+      c.includes('get-url') ? ok('ssh://git@git.lan:2222/o/r.git') : undefined,
+    )
+    expect(await gitTokenConfig(exec, repo, 'origin', 'fj_tok', 'forgejo')).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.http://x-access-token:fj_tok@git.lan:3000/.insteadOf',
+      GIT_CONFIG_VALUE_0: 'ssh://git@git.lan:2222/',
     })
   })
 })

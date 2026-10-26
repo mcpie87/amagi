@@ -116,6 +116,7 @@ export async function holdTaskForChat(deps: TaskChatDeps, taskId: string): Promi
       deps.repoRoot,
       config.forge.remote,
       forgeToken(config.forge.kind, deps.repoRoot),
+      config.forge.kind,
     )
     // Without a token the local base branch is used so git never prompts.
     const fetched = Object.keys(tokenCfg).length > 0
@@ -167,6 +168,7 @@ export async function mergeBaseForChat(
     cwd,
     config.forge.remote,
     forgeToken(config.forge.kind, deps.repoRoot),
+    config.forge.kind,
   )
   await execOk(exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
     cwd,
@@ -223,6 +225,7 @@ export async function runApprovedGitRequest(
       cwd,
       config.forge.remote,
       forgeToken(config.forge.kind, deps.repoRoot),
+      config.forge.kind,
     )
     await assertSafePushDestination(exec, cwd, config.forge.remote, task.branch, auth)
     await execOk(exec, ['git', 'push', config.forge.remote, task.branch], { cwd, env: auth })

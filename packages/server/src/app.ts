@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import {
   accessSync,
   constants as fsConstants,
@@ -30,6 +31,7 @@ import {
   type PrInfo,
   pidAlive,
   type Question,
+  type ReadyTask,
   type RegistryEntry,
   RequestTimings,
   type RunServiceApi,
@@ -37,7 +39,7 @@ import {
   type Store,
   setHarnessProcessCap,
   type Tracker,
-  Triage,
+  type TrackerTask,
   type WorkerActivity,
   type WorkerConfig,
   type Workspace,
@@ -49,10 +51,22 @@ import {
 import type { Harness } from '@amagi/core/drivers/types'
 import type { Context } from 'hono'
 import { Hono } from 'hono'
+import { getCookie, setCookie } from 'hono/cookie'
 import { routePath } from 'hono/route'
+import {
+  AGENT_ROUTE,
+  hostAllowed,
+  originMatchesHost,
+  SAFE_METHODS,
+  SESSION_COOKIE,
+  SESSION_HEADER,
+  sameSecret,
+} from './access.ts'
 import { createChatRoutes } from './chat-routes.ts'
+import { createConfigRoutes } from './config-routes.ts'
 import { createFleetRoutes } from './fleet-routes.ts'
 import { createIssueRoutes } from './issues-routes.ts'
+import type { ConflictQueueResult } from './pr-conflict-watcher.ts'
 import { RepoError, resolveWorkspace, valid } from './route-utils.ts'
 import {
   EventQuery,
@@ -85,13 +99,21 @@ export type ServerDeps = {
   /** Background worker activity (e.g. mention watchers), merged into repo runner status. */
   workers?: () => WorkerActivity[]
   /** Queues one PR on the existing conflict watcher. */
-  queueConflictResolution?: (repo: string, prNumber: number, prUrl: string | null) => boolean
+  queueConflictResolution?: (
+    repo: string,
+    prNumber: number,
+    prUrl: string | null,
+  ) => ConflictQueueResult
   /** Foreground CLI workers (`just run`) outside the server runner. */
   liveRuns?: () => LiveRun[]
   /** Overridable so tests stub the harness a workspace's chat uses. */
   chatHarnessFor?: (ws: Workspace) => Harness
   /** Shared with `serve` so its event-loop monitor lands in the same snapshot. */
   timings?: RequestTimings
+  /** The bind host; a Host header naming it is accepted besides loopback. */
+  host?: string
+  /** The operator secret; generated per server when unset. */
+  secret?: string
   /** Dashboard interaction timings; serve shares the diagnostics file with `timings`. */
   interactions?: InteractionTimings
 }
@@ -131,11 +153,20 @@ function validateGitIdentity(identity: GitIdentity | null): GitIdentity | null {
 }
 
 /**
- * The agent carries AMAGI_TASK_TOKEN in its environment; a question is bound
- * to the task that spawned it, so one agent cannot answer for another.
+ * The operator's secret, from the session header (CLI and TUI) or the dashboard
+ * cookie. A cookie is ambient, so it also needs a same-origin Origin: a page on
+ * another port of localhost carries it and must not pass.
  */
-const authorized = (c: Context, store: Store, id: string): boolean =>
-  c.req.header('X-Amagi-Token') === store.token(id)
+const operatorSession = (c: Context, secret: string): boolean => {
+  const header = c.req.header(SESSION_HEADER)
+  if (header !== undefined) return sameSecret(header, secret)
+  const cookie = getCookie(c, SESSION_COOKIE)
+  return (
+    cookie !== undefined &&
+    sameSecret(cookie, secret) &&
+    originMatchesHost(c.req.header('origin'), c.req.header('host') ?? new URL(c.req.url).host)
+  )
+}
 
 /**
  * Best effort: a notifier (e.g. a missing notify-send) must never break the
@@ -215,10 +246,16 @@ export function createApp({
   liveRuns,
   chatHarnessFor,
   timings = new RequestTimings(),
+  host,
+  secret = randomBytes(32).toString('hex'),
   interactions = new InteractionTimings(),
 }: ServerDeps) {
+  const authorized = (c: Context, store: Store, id: string): boolean =>
+    operatorSession(c, secret) || c.req.header('X-Amagi-Token') === store.token(id)
   // One ChatService per workspace, so the in-flight guard survives requests.
   const chats = new Map<string, ChatService>()
+  const seatQueueErrors = new Map<string, string>()
+  const liveTaskChats = new Map<string, () => Promise<void>>()
   const chatFor = (ws: Workspace): ChatService => {
     let chat = chats.get(ws.key)
     if (chat === undefined) {
@@ -244,7 +281,9 @@ export function createApp({
   const saveFleet = (fleet: WorkerConfig[]): void => {
     writeGlobalConfig({ worker: fleet })
     for (const { repo, service } of servedRunners()) {
-      resolveWorkspace(workspaces, repo).config.worker = fleet
+      const lookup = workspaces.lookup(repo)
+      if (lookup.status !== 'ready') continue
+      lookup.workspace.config.worker = fleet
       service.fleetChanged()
     }
   }
@@ -276,6 +315,13 @@ export function createApp({
     return { global, seats }
   }
   return new Hono()
+    .use('*', async (c, next) => {
+      // A DNS-rebinding page arrives under its own hostname; refuse it before anything runs.
+      if (!hostAllowed(c.req.header('host') ?? new URL(c.req.url).host, host)) {
+        return c.json({ error: 'host not allowed' }, 403)
+      }
+      await next()
+    })
     .use('/api/*', async (c, next) => {
       const start = performance.now()
       await next()
@@ -304,12 +350,27 @@ export function createApp({
       }
     })
 
+    .get('/api/session', (c) => {
+      setCookie(c, SESSION_COOKIE, secret, { httpOnly: true, sameSite: 'Strict', path: '/' })
+      return c.json({ secret })
+    })
+
+    .use('/api/*', async (c, next) => {
+      if (SAFE_METHODS.has(c.req.method) || operatorSession(c, secret)) return next()
+      // An agent's per-task token is checked by the handler itself, so it only gets through here.
+      if (AGENT_ROUTE.test(c.req.path) && c.req.header('X-Amagi-Token') !== undefined) {
+        return next()
+      }
+      return c.json({ error: 'operator session required' }, 401)
+    })
+
     .route('/', createIssueRoutes(workspaces))
 
     .route(
       '/',
       createChatRoutes({
         workspaces,
+        liveTaskChats,
         harnessFor: (ws, config) => chatHarnessFor?.(ws) ?? makeHarness(config),
       }),
     )
@@ -334,15 +395,9 @@ export function createApp({
       const since = Date.now() - windowMs
       const groups = new Map<string, { seat: string; calls: number; tokens: number }>()
       for (const entry of workspaces.list()) {
-        let ws: Workspace | null
-        // A repo with an invalid config (e.g. undeclared checks) must not fail the whole rate view.
-        try {
-          ws = workspaces.get(entry.key)
-        } catch {
-          continue
-        }
-        if (ws === null) continue
-        for (const event of ws.store.eventsSince(since)) {
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status !== 'ready') continue
+        for (const event of lookup.workspace.store.eventsSince(since)) {
           if (event.type !== 'agent.stream' || event.event.kind !== 'usage') continue
           const seat = event.event.seat ?? 'Unassigned / seat not recorded'
           const group = groups.get(seat) ?? { seat, calls: 0, tokens: 0 }
@@ -447,12 +502,13 @@ export function createApp({
           : { review: { harness: { kind: reviewer.kind, seat: reviewerSeat ?? null } } }),
       })
       for (const entry of workspaces.list()) {
-        let ws: Workspace | null
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status === 'missing') continue
+        let ws: Workspace
         let config: Config
-        // A repo with an invalid config (e.g. undeclared checks) must not fail a global save.
         try {
-          ws = workspaces.get(entry.key)
-          if (ws === null) continue
+          if (lookup.status === 'unavailable') throw lookup.error
+          ws = lookup.workspace
           config = loadConfig(ws.root).config
         } catch (err) {
           console.warn(`seat save: skipping ${entry.key}: ${errMsg(err)}`)
@@ -472,6 +528,8 @@ export function createApp({
       type Holder = {
         repo: string
         taskId?: string
+        /** The task's current attempt, which keys its agent log. */
+        attempt?: number
         title?: string
         watcher?: string
         status?: string
@@ -484,13 +542,9 @@ export function createApp({
         status: string
         since: number | null
       }
-      // A repo with an invalid config (e.g. undeclared checks) must not take down the whole view.
       const workspace = (key: string): Workspace | null => {
-        try {
-          return workspaces.get(key)
-        } catch {
-          return null
-        }
+        const lookup = workspaces.lookup(key)
+        return lookup.status === 'ready' ? lookup.workspace : null
       }
       const configured = new Set<string>()
       const global = loadGlobalConfig()
@@ -539,7 +593,17 @@ export function createApp({
             const workers = expandWorkers(ws.config.worker, ws.config.seats).filter(
               (worker) => worker.enabled,
             )
-            const ready = workers.length === 0 ? [] : await ws.tracker.ready()
+            let ready: TrackerTask[] = []
+            try {
+              if (workers.length > 0) ready = await ws.tracker.ready()
+              seatQueueErrors.delete(entry.key)
+            } catch (err) {
+              const detail = errMsg(err)
+              if (seatQueueErrors.get(entry.key) !== detail) {
+                seatQueueErrors.set(entry.key, detail)
+                console.warn(`seats: ${entry.key} ready queue unavailable: ${detail}`)
+              }
+            }
             return { repo: entry.key, ws, workers, ready }
           }),
         ),
@@ -565,6 +629,7 @@ export function createApp({
             setHolder(task?.seat, {
               repo,
               taskId,
+              attempt: projected?.attempt ?? 1,
               title: task?.title ?? projected?.title ?? taskId,
               status: taskStatus,
               since: task?.agentStartedAt ?? status.startedAt[taskId] ?? null,
@@ -598,6 +663,7 @@ export function createApp({
           setHolder(run.seat, {
             repo: run.repoKey,
             taskId: run.taskId,
+            attempt: projected?.attempt ?? 1,
             title: run.title,
             status: projected?.state ?? 'running',
             since: agentStartedAt ?? run.startedAt,
@@ -620,10 +686,12 @@ export function createApp({
             .events({ taskId: chat.taskId, limit: 100_000 })
             .filter((event) => event.type === 'agent.started' && event.role === 'chat')
             .at(-1)?.ts
+          const task = ws.store.task(chat.taskId)
           setHolder(chat.seat, {
             repo,
             taskId: chat.taskId,
-            title: ws.store.task(chat.taskId)?.title ?? chat.taskId,
+            attempt: task?.attempt ?? 1,
+            title: task?.title ?? chat.taskId,
             status: 'chat',
             since: startedAt ?? null,
           })
@@ -799,8 +867,13 @@ export function createApp({
     .get('/api/repos/:repo/ready-queue', valid('param', RepoParam), async (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
+      const service = runnerFor(repo)
       // The tracker orders the queue FCFS (bd ready --sort oldest).
-      return c.json(await ws.tracker.ready())
+      const ready: ReadyTask[] = (await ws.tracker.ready()).map((task) => {
+        const claimSkip = service?.claimSkip?.(task.id) ?? null
+        return claimSkip === null ? task : { ...task, claimSkip }
+      })
+      return c.json(ready)
     })
 
     .get('/api/repos/:repo/mergeable-prs', valid('param', RepoParam), async (c) => {
@@ -852,6 +925,7 @@ export function createApp({
         liveRuns,
         queueConflictResolution,
         chatFor,
+        liveTaskChats,
         authorized,
         openQuestionGate,
         resolveQuestionGate,
@@ -863,6 +937,7 @@ export function createApp({
       '/',
       createFleetRoutes({ workspaces, runnerFor, saveFleet, fleetView, validateGitIdentity }),
     )
+    .route('/', createConfigRoutes({ workspaces, runnerFor }))
 
     .get('/api/repos/:repo/events', valid('param', RepoParam), valid('query', EventQuery), (c) => {
       const { repo } = c.req.valid('param')
@@ -897,27 +972,6 @@ export function createApp({
         return c.json(ws.store.openQuestions(taskId))
       },
     )
-
-    .post('/api/repos/:repo/triage', valid('param', RepoParam), (c) => {
-      const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
-      const triage = new Triage({
-        store: ws.store,
-        tracker: ws.tracker,
-        harness: makeHarness(ws.config.harness.triage),
-        config: ws.config,
-        repoRoot: ws.root,
-        repoName: ws.name,
-        ...(ws.forge === null ? {} : { forge: ws.forge }),
-      })
-      // Triage may hand off to a long implementation run; the request returns
-      // immediately and every decision reports through the repo's event stream.
-      void triage.triageOnce().catch((err) => {
-        const message = err instanceof Error ? err.message : String(err)
-        ws.store.append(null, { type: 'error', message, fatal: false })
-      })
-      return c.json({ repo, started: true }, 202)
-    })
 
     .notFound((c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404))
 

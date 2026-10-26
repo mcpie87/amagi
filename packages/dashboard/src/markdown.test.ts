@@ -17,6 +17,15 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('javascript')
   })
 
+  test('drops schemes hidden behind character references', () => {
+    const html = renderMarkdown(
+      '[a](javascript&colon;alert(1)) [b](javascript&#58;alert(1)) [c](javascript&#x3A;alert(1)) [d](&#106;avascript:alert(1)) [e](java&#x09;script:alert(1))',
+    )
+    expect(html).not.toContain('href')
+    expect(isSafeUrl('docs/a&b.md')).toBe(true)
+    expect(isSafeUrl('https://example.com/?a=1&b=2')).toBe(true)
+  })
+
   test('drops autolinks with unsafe schemes', () => {
     const html = renderMarkdown('<javascript:alert(1)> and <data:text/html,hi>')
     expect(html).not.toContain('href="javascript')

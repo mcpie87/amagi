@@ -263,6 +263,21 @@ describe('formatPrBody', () => {
     expect(body).toContain('Run `hello`')
   })
 
+  test('leaves an agent Verification report out of the PR body', () => {
+    const body = formatPrBody(
+      {
+        ...TASK,
+        description:
+          'Write hello.txt\n\n### Conclusion\n\nChanged hello.txt only.\n\n### Verification\n\n- `just check` passed',
+      },
+      [],
+    )
+
+    expect(body).toContain('Changed `hello.txt` only.')
+    expect(body).not.toContain('Verification')
+    expect(body).not.toContain('just check')
+  })
+
   test('uses the run summary as the conclusion when the agent wrote none', () => {
     const body = formatPrBody(TASK, [], undefined, 'Wrote hello.txt and removed stale config')
 

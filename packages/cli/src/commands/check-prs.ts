@@ -74,11 +74,14 @@ async function resolveOne(
         console.log(
           red(`  iteration metadata failed: ${err instanceof Error ? err.message : String(err)}`),
         )
+        process.exitCode = 1
       }
     }
     console.log(result.ok ? green(`  ${result.message}`) : red(`  ${result.message}`))
+    if (!result.ok && !result.contained) process.exitCode = 1
   } catch (err) {
     console.log(red(`  ${err instanceof Error ? err.message : String(err)}`))
+    process.exitCode = 1
   }
 }
 
@@ -109,6 +112,7 @@ export const checkPrsCommand = defineCommand({
           `failed to list PRs: ${err instanceof Error ? err.message : String(err)} (is the forge CLI installed and authenticated?)`,
         ),
       )
+      process.exitCode = 1
       return
     }
     if (prs.length === 0) {
@@ -153,8 +157,8 @@ export const checkPrsCommand = defineCommand({
         try {
           await syncPrPriorityLabel({
             cwd: root,
-            remote: config.forge.remote,
             number: pr.number,
+            driver,
             labels: pr.labels,
             // A PR whose bead is gone or closed carries no priority label.
             priority: pri.linked ? pri.priority : null,

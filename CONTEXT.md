@@ -76,7 +76,7 @@ _Avoid_: attempt, pass
 A comment on a pull request naming the agent handle, written by anyone but the agent itself. The unit of work the mention watcher sweeps for.
 
 **Mention kind**:
-The single label a mention is routed to, drawn from a closed vocabulary that is the same list the classifier is shown and the same list the responder can act on. A mention the vocabulary cannot name is not routed at all, so the vocabulary is the limit of what a human can ask for on a pull request.
+One response path a mention is routed to, drawn from a closed vocabulary that is the same list the classifier is shown and the same list the responder can act on. A mention gets every kind that applies, each handled in vocabulary order; `flag` and `ambiguous` always stand alone. A mention the vocabulary cannot name is not routed at all, so the vocabulary is the limit of what a human can ask for on a pull request.
 _Avoid_: intent, category, mention type
 
 ### Project checks

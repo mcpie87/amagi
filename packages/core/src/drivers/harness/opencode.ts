@@ -32,7 +32,7 @@ type OpencodeMessage = {
  * out from the spawn so the recorded transcript can be replayed in tests.
  *
  * Unlike claude's `result` message or codex's `turn.completed`/`turn.failed`,
- * opencode's stream carries no message that marks the run as finished — the
+ * opencode's stream carries no message that marks the run as finished: the
  * process just exits. `finalize()` synthesizes the closing `result` event once
  * the harness sees the stream end, and is what `push()` would emit if opencode
  * had a terminal message of its own.
@@ -138,7 +138,7 @@ export class OpencodeTranslator {
 }
 
 export type OpencodeHarnessOptions = {
-  bin?: string | undefined
+  bin?: string | string[] | undefined
   seat?: string
 }
 
@@ -146,11 +146,11 @@ export class OpencodeHarness implements Harness {
   readonly kind = 'opencode'
   // The system prompt rides in the message, so the first one stays in the history.
   readonly replacesSystemPromptOnResume = false
-  private readonly bin: string
+  private readonly bin: string[]
   private readonly seat: string | undefined
 
   constructor(opts: OpencodeHarnessOptions = {}) {
-    this.bin = opts.bin ?? 'opencode'
+    this.bin = [opts.bin ?? 'opencode'].flat()
     this.seat = opts.seat
   }
 
@@ -159,7 +159,7 @@ export class OpencodeHarness implements Harness {
   }
 
   async listModels(): Promise<string[]> {
-    const cmd = [this.bin, 'models']
+    const cmd = [...this.bin, 'models']
     const result = await exec(cmd)
     if (result.exitCode !== 0) throw new CommandError(cmd, result)
     return parseModelLines(result.stdout)
@@ -175,7 +175,7 @@ export class OpencodeHarness implements Harness {
   }
 
   argv(opts: AgentStartOptions, sessionId: string | null): string[] {
-    const argv = [this.bin, 'run', '--format', 'json', '--dir', opts.cwd]
+    const argv = [...this.bin, 'run', '--format', 'json', '--dir', opts.cwd]
 
     if (sessionId !== null) argv.push('--session', sessionId)
     if (opts.model) argv.push('--model', opts.model)

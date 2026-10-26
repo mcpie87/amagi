@@ -1,6 +1,6 @@
 import hljs from 'highlight.js/lib/core'
 import { Marked, Renderer } from 'marked'
-import { useMemo, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import { languageLoaders } from './highlight-languages.ts'
 
 const escapeHtml = (s: string) =>
@@ -14,7 +14,10 @@ export const isSafeUrl = (url: string) => {
     .filter((c) => c.charCodeAt(0) > 0x20 && c.charCodeAt(0) !== 0x7f)
     .join('')
   const scheme = visible.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]
-  return !scheme || ALLOWED_SCHEMES.has(scheme.toLowerCase())
+  if (scheme) return ALLOWED_SCHEMES.has(scheme.toLowerCase())
+  // Browsers decode character references in href, so `javascript&colon;` is a scheme too:
+  // reject any reference before the path starts rather than decode every named entity.
+  return !/^[^/?#]*&/.test(visible)
 }
 
 const pendingLanguages = new Map<string, Promise<void>>()
@@ -84,6 +87,14 @@ const subscribeLanguages = (listener: () => void) => {
   return () => {
     languageListeners.delete(listener)
   }
+}
+
+/** Loads `name` on first use and re-renders the caller once its grammar is registered. */
+export function useLanguage(name: string | undefined): void {
+  useSyncExternalStore(subscribeLanguages, () => languageVersion)
+  useEffect(() => {
+    if (name !== undefined) void loadLanguage(name)
+  }, [name])
 }
 
 export function Markdown({ text }: { text: string }) {
