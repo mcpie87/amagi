@@ -26,6 +26,42 @@ test('includes expected paths in macOS deny rules even before they exist', () =>
   expect(sandboxExecProfile([path])).toContain(`(subpath ${JSON.stringify(path)})`)
 })
 
+test.skipIf(process.platform !== 'darwin')(
+  'denies macOS access to sensitive paths created after sandbox setup',
+  () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-macos-sandbox-'))
+    const secret = join(root, 'future-secret')
+    const visible = join(root, 'visible')
+    const env = { ...process.env, AMAGI_DB: secret }
+    const args = sandboxArgv(
+      [
+        process.execPath,
+        '-e',
+        `
+          const fs = require('node:fs');
+          try { fs.readFileSync(${JSON.stringify(secret)}); process.exit(1); }
+          catch (error) { if (!['EACCES', 'EPERM'].includes(error.code)) throw error; }
+          if (fs.readFileSync(${JSON.stringify(visible)}, 'utf8') !== 'ok') process.exit(2);
+          if (process.env.AMAGI_DB !== undefined) process.exit(3);
+        `,
+      ],
+      root,
+      root,
+      env,
+    )
+
+    try {
+      writeFileSync(secret, 'private')
+      writeFileSync(visible, 'ok')
+      const result = Bun.spawnSync(args, { env, stderr: 'pipe' })
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr.toString()).toBe('')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
 test('masks Amagi database and registry overrides and unsets them in the sandbox', () => {
   const root = mkdtempSync(join(tmpdir(), 'amagi-state-overrides-'))
   const database = join(root, 'custom.db')
