@@ -10,6 +10,7 @@ import {
   writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
+import { WorktreePool } from '@amagi/core/worktree-pool'
 import { Hono } from 'hono'
 import * as z from 'zod'
 import { resolveWorkspace, valid } from './route-utils.ts'
@@ -70,6 +71,23 @@ export function createConfigRoutes({ workspaces, runnerFor }: ConfigRouteDeps) {
             },
             409,
           )
+        }
+        if (
+          entries.some(
+            ([path, value]) =>
+              path === 'repo.worktreeRoot' && value !== ws.config.repo.worktreeRoot,
+          )
+        ) {
+          const pool = new WorktreePool({
+            repoRoot: ws.root,
+            worktreeRoot: ws.config.repo.worktreeRoot,
+            baseBranch: ws.config.repo.baseBranch,
+          })
+          if (pool.hasReservations())
+            return c.json(
+              { error: 'reset or resume reserved worktrees before changing the worktree root' },
+              409,
+            )
         }
         const persona = entries.find(([path]) => path === 'repo.persona')?.[1]
         if (typeof persona === 'string' && !gitPersonas().includes(persona)) {

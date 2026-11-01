@@ -155,7 +155,7 @@ export interface RunServiceApi {
   /** Why automatic dispatch left this ready task unclaimed; null when it has no reason on record. */
   claimSkip?(taskId: string): ClaimSkip | null
   /** Stops the automatic-dispatch loop, for server shutdown. */
-  dispose?(): void
+  dispose?(): void | Promise<void>
 }
 
 export type RunServiceOptions = {
@@ -225,10 +225,17 @@ export class RunService implements RunServiceApi {
   }
   private stopped = false
   private readonly seats: Map<string, string>
-  private readonly worktreePool: WorktreePool | undefined
+  private worktreePool: WorktreePool
+  private poolConfig: string
+  private readonly retiredPools: Promise<void>[] = []
 
   constructor(private readonly opts: RunServiceOptions) {
     this.seats = opts.seats ?? new Map()
+    this.poolConfig = JSON.stringify([
+      opts.config.repo.worktreeRoot,
+      opts.config.repo.baseBranch,
+      opts.config.forge.remote,
+    ])
     this.worktreePool = new WorktreePool({
       repoRoot: opts.repoRoot,
       worktreeRoot: opts.config.repo.worktreeRoot,
@@ -249,6 +256,23 @@ export class RunService implements RunServiceApi {
   }
 
   private refillWorktrees(): void {
+    if (this.stopped) return
+    const { repo, forge } = this.opts.config
+    const key = JSON.stringify([repo.worktreeRoot, repo.baseBranch, forge.remote])
+    if (key !== this.poolConfig) {
+      const retiring = this.worktreePool
+        .stop()
+        .catch((err: unknown) => console.warn(`worktree pool cleanup: ${String(err)}`))
+      this.retiredPools.push(retiring)
+      this.worktreePool = new WorktreePool({
+        repoRoot: this.opts.repoRoot,
+        worktreeRoot: repo.worktreeRoot,
+        baseBranch: repo.baseBranch,
+        remote: forge.remote,
+        exec: this.opts.exec,
+      })
+      this.poolConfig = key
+    }
     const available = new Set(
       expandWorkers(this.opts.config.worker, this.opts.config.seats)
         .filter((worker) => worker.enabled && worker.roles.includes('implement'))
@@ -293,13 +317,13 @@ export class RunService implements RunServiceApi {
   }
 
   /** Stops the auto-queue loop; the runner stays usable for manual launch/stop. */
-  dispose(): void {
+  dispose(): Promise<void> {
     this.stopped = true
-    this.worktreePool?.stop()
     if (this.autoQueueTimer !== null) {
       clearTimeout(this.autoQueueTimer)
       this.autoQueueTimer = null
     }
+    return Promise.all([...this.retiredPools, this.worktreePool.stop()]).then(() => undefined)
   }
 
   private scheduleAutoQueuePoll(ms: number): void {
@@ -586,6 +610,7 @@ export class RunService implements RunServiceApi {
     implement: Config['harness']['implement'],
   ): void {
     this.idleNotified = false
+    this.refillWorktrees()
     const { store, tracker, config, repoRoot, repoName, exec, forge } = this.opts
     const makeHarnessFn = this.opts.makeHarness ?? makeHarness
     const harness =

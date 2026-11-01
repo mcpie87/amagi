@@ -31,6 +31,8 @@ import {
   type Workspace,
   type Workspaces,
 } from '@amagi/core'
+import { acquireSeat } from '@amagi/core/seat-lock'
+import { WorktreePool } from '@amagi/core/worktree-pool'
 import { Hono } from 'hono'
 import { taskChatKey } from './chat-routes.ts'
 import { type ConflictQueueResult, taskBusy } from './pr-conflict-watcher.ts'
@@ -212,41 +214,61 @@ export function createTaskRoutes({
           console.warn(`stop on reset ${id}: ${errMsg(err)}`)
         }
       }
-      await stopTaskChats(ws, id)
-      // Unlike close, the worktree removal is not best effort: a surviving
-      // worktree or branch would be resumed by the next run, which is exactly
-      // what the reset promises not to do.
-      if (task.worktree !== null) {
-        try {
-          await removeWorktree(ws.store, id, {
-            repoRoot: ws.root,
-            path: task.worktree,
-            branch: task.branch ?? null,
-          })
-        } catch (err) {
-          return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
+      const worktreeLease = await acquireSeat(`amagi-worktree:${ws.root}:${id}`)
+      try {
+        const current = ws.store.task(id)
+        if (!current) return c.json({ error: `unknown task ${id}` }, 404)
+        if (!canReset(current.state, current.worktree !== null)) {
+          return c.json({ error: `task ${id} cannot be reset from state ${current.state}` }, 409)
         }
+        await stopTaskChats(ws, id)
+        // Unlike close, the worktree removal is not best effort: a surviving
+        // worktree or branch would be resumed by the next run, which is exactly
+        // what the reset promises not to do.
+        const pool = new WorktreePool({
+          repoRoot: ws.root,
+          worktreeRoot: ws.config.repo.worktreeRoot,
+          baseBranch: ws.config.repo.baseBranch,
+        })
+        const reserved = pool.reservation(id, current.title)
+        const resetWorktree =
+          current.worktree !== null ? { path: current.worktree, branch: current.branch } : reserved
+        if (resetWorktree !== null) {
+          try {
+            await removeWorktree(ws.store, id, {
+              repoRoot: ws.root,
+              path: resetWorktree.path,
+              branch: resetWorktree.branch,
+            })
+            if (reserved !== null && reserved.path === resetWorktree.path)
+              pool.recorded(reserved.branch)
+          } catch (err) {
+            return c.json({ error: `failed to remove worktree: ${errMsg(err)}` }, 500)
+          }
+        }
+        // The runner only claims ready issues, so a reset of a closed one would
+        // sit in claimed until the stall watcher parks it as closed remotely.
+        try {
+          const issue = await ws.tracker.get(id)
+          if (issue?.status === 'closed') await ws.tracker.setStatus(id, 'open')
+        } catch (err) {
+          return c.json({ error: `failed to reopen tracker issue: ${errMsg(err)}` }, 500)
+        }
+        try {
+          await ws.tracker.release(id)
+        } catch (err) {
+          console.warn(`release on reset ${id}: ${errMsg(err)}`)
+        }
+        // A beads gate blocks its task: one left open would keep the reset task
+        // out of the ready queue, so it could never be claimed again.
+        for (const question of ws.store.unansweredQuestions(id)) {
+          await resolveQuestionGate(ws.tracker, question.gateRef)
+        }
+        ws.store.append(id, { type: 'task.reset', reason: 'operator reset' })
+        return c.json({ task: ws.store.task(id) })
+      } finally {
+        worktreeLease.release()
       }
-      // The runner only claims ready issues, so a reset of a closed one would
-      // sit in claimed until the stall watcher parks it as closed remotely.
-      try {
-        const issue = await ws.tracker.get(id)
-        if (issue?.status === 'closed') await ws.tracker.setStatus(id, 'open')
-      } catch (err) {
-        return c.json({ error: `failed to reopen tracker issue: ${errMsg(err)}` }, 500)
-      }
-      try {
-        await ws.tracker.release(id)
-      } catch (err) {
-        console.warn(`release on reset ${id}: ${errMsg(err)}`)
-      }
-      // A beads gate blocks its task: one left open would keep the reset task
-      // out of the ready queue, so it could never be claimed again.
-      for (const question of ws.store.unansweredQuestions(id)) {
-        await resolveQuestionGate(ws.tracker, question.gateRef)
-      }
-      ws.store.append(id, { type: 'task.reset', reason: 'operator reset' })
-      return c.json({ task: ws.store.task(id) })
     })
 
     .post('/api/repos/:repo/tasks/:id/retry', valid('param', RepoTaskIdParam), async (c) => {

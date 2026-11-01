@@ -343,12 +343,16 @@ export function serve({
   const runners = new Map<string, RunServiceApi>()
   const runnerAutoQueue = new Map<string, boolean>()
   const runnerErrors = new Map<string, string>()
+  const retiredRunners = new Set<Promise<void>>()
   const syncRunners = () => {
     const entries = workspaces.list()
     const keys = new Set(entries.map((entry) => entry.key))
     for (const [key, service] of runners) {
       if (keys.has(key)) continue
-      service.dispose?.()
+      const cleanup = Promise.resolve(service.dispose?.())
+        .catch((err: unknown) => console.warn(`runner cleanup: ${String(err)}`))
+        .finally(() => retiredRunners.delete(cleanup))
+      retiredRunners.add(cleanup)
       runners.delete(key)
       runnerAutoQueue.delete(key)
       runnerErrors.delete(key)
@@ -451,14 +455,24 @@ export function serve({
       repoPollers.stop()
       stopLoopWatch()
       if (runnerSupervisor !== null) clearInterval(runnerSupervisor)
-      for (const service of runners.values()) service.dispose?.()
+      const cleanup = [
+        ...retiredRunners,
+        ...[...runners.values()].map((service) => service.dispose?.()),
+      ]
       runners.clear()
-      if (runnerFactory === undefined) runner?.dispose?.()
-      // In-flight requests still record their timing until the server stops.
-      return server.stop(closeActiveConnections).finally(() => {
-        timings.close()
-        interactions.close()
-      })
+      if (runnerFactory === undefined) cleanup.push(runner?.dispose?.())
+      return Promise.allSettled(cleanup)
+        .then((results) => {
+          for (const result of results) {
+            if (result.status === 'rejected')
+              console.warn(`runner cleanup: ${String(result.reason)}`)
+          }
+          return server.stop(closeActiveConnections)
+        })
+        .finally(() => {
+          timings.close()
+          interactions.close()
+        })
     },
   }
 }

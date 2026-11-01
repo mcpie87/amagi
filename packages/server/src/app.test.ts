@@ -48,6 +48,8 @@ import {
   writeGlobalConfig,
 } from '@amagi/core'
 import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { execOk, exec as runCommand } from '@amagi/core/exec'
+import { WorktreePool } from '@amagi/core/worktree-pool'
 import { hc } from 'hono/client'
 import { type AppType, createApp, type ServerDeps } from './app.ts'
 import { type TestWorkspaces, testWorkspaces } from './test-util.ts'
@@ -1373,6 +1375,51 @@ describe('POST /api/repos/:repo/tasks/:id/reset', () => {
       ).toBe(true)
     },
   )
+
+  test('reset removes an unrecorded pooled reservation after setup fails', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (!workspace) throw new Error('missing workspace')
+    workspace.config.repo.worktreeRoot = join(workspace.root, 'trees')
+    await execOk(runCommand, ['git', 'init', '-q', '-b', 'main'], { cwd: workspace.root })
+    await execOk(runCommand, ['git', 'config', 'user.name', 'Test'], { cwd: workspace.root })
+    await execOk(runCommand, ['git', 'config', 'user.email', 'test@example.com'], {
+      cwd: workspace.root,
+    })
+    await execOk(runCommand, ['git', 'add', '.amagi'], { cwd: workspace.root })
+    await execOk(runCommand, ['git', 'commit', '-qm', 'initial'], { cwd: workspace.root })
+    const pool = new WorktreePool({
+      repoRoot: workspace.root,
+      worktreeRoot: workspace.config.repo.worktreeRoot,
+      baseBranch: 'main',
+    })
+    await pool.refill(1, 'true')
+    await expect(
+      pool.take(
+        'bd-1',
+        'work on bd-1',
+        'main',
+        'false',
+        () => {},
+        () => {},
+      ),
+    ).rejects.toThrow()
+    const reserved = pool.reservation('bd-1', 'work on bd-1')
+    expect(reserved).not.toBeNull()
+    claim('bd-1')
+    store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'needs_human' })
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/reset', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(pool.reservation('bd-1', 'work on bd-1')).toBeNull()
+    expect(
+      (
+        await runCommand(['git', 'branch', '--list', reserved?.branch ?? 'missing'], {
+          cwd: workspace.root,
+        })
+      ).stdout,
+    ).toBe('')
+    expect(await Bun.file(join(reserved?.path ?? '', '.git')).exists()).toBe(false)
+    await pool.stop()
+  })
 
   test('resolves the gate of a question left unanswered so the task is ready again', async () => {
     parked('bd-1', 'needs_human')

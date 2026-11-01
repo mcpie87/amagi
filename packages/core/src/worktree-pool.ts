@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { branchExists, branchName, type SetupReport, type WorktreeSpec } from './worktree.ts'
 
@@ -26,6 +26,8 @@ export class WorktreePool {
   private target = 0
   private setupCmd = ''
   private stopped = false
+  private readonly abort = new AbortController()
+  private stopping: Promise<void> | null = null
 
   constructor(private readonly opts: Options) {
     this.run = opts.exec ?? defaultExec
@@ -39,7 +41,7 @@ export class WorktreePool {
     if (this.filling !== null) return this.filling
     this.filling = this.fill()
       .catch((err: unknown) => {
-        console.warn(`worktree pool: ${String(err)}`)
+        if (!this.stopped) console.warn(`worktree pool: ${String(err)}`)
       })
       .finally(() => {
         this.filling = null
@@ -47,11 +49,42 @@ export class WorktreePool {
     return this.filling
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopping !== null) return this.stopping
     this.stopped = true
     this.target = 0
-    void this.filling?.then(() => this.removeReady())
-    if (this.filling === null) void this.removeReady()
+    this.abort.abort()
+    this.stopping = (async () => {
+      await this.filling
+      await this.removeReady()
+    })()
+    return this.stopping
+  }
+
+  hasReservations(): boolean {
+    try {
+      return readdirSync(this.root).some((name) => name.endsWith('.json'))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw err
+    }
+  }
+
+  reservation(taskId: string, title: string): WorktreeSpec | null {
+    const branch = branchName(taskId, title)
+    try {
+      const saved = JSON.parse(readFileSync(this.marker(branch), 'utf8')) as Reservation
+      if (saved.branch === branch && dirname(saved.path) === this.root) {
+        return { path: saved.path, branch }
+      }
+    } catch {
+      // A missing or malformed marker cannot identify a worktree safely.
+    }
+    return null
+  }
+
+  private marker(branch: string): string {
+    return join(this.root, `${digest(branch)}.json`)
   }
 
   private async removeReady(): Promise<void> {
@@ -67,7 +100,7 @@ export class WorktreePool {
 
   private async setup(path: string, command: string): Promise<SetupReport> {
     const started = Date.now()
-    const result = await this.run(['sh', '-c', command], { cwd: path })
+    const result = await this.run(['sh', '-c', command], { cwd: path, signal: this.abort.signal })
     const report = {
       command,
       exitCode: result.exitCode,
@@ -129,7 +162,7 @@ export class WorktreePool {
     onFinished: (report: SetupReport) => void,
   ): Promise<WorktreeSpec | null> {
     const branch = branchName(taskId, title)
-    const marker = join(this.root, `${digest(branch)}.json`)
+    const marker = this.marker(branch)
     let reservation: Reservation | undefined
     let recovered = false
     try {
@@ -199,6 +232,6 @@ export class WorktreePool {
   }
 
   recorded(branch: string): void {
-    rmSync(join(this.root, `${digest(branch)}.json`), { force: true })
+    rmSync(this.marker(branch), { force: true })
   }
 }

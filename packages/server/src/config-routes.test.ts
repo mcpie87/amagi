@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -110,6 +111,18 @@ test('refuses worktree-bound keys while a task runs, but not the rest', async ()
   expect((await patch({ 'forge.agentHandle': 'helper' }, ['bd-1'])).status).toBe(200)
   expect((await patch({ 'repo.baseBranch': 'develop' })).status).toBe(200)
   expect(workspace().config.repo.baseBranch).toBe('develop')
+})
+
+test('keeps the old root available while a reservation is unresolved', async () => {
+  const ws = workspace()
+  ws.config.repo.worktreeRoot = join(ws.root, 'trees')
+  const repoKey = createHash('sha256').update(ws.root).digest('hex').slice(0, 16)
+  const poolRoot = join(ws.config.repo.worktreeRoot, '.amagi-pool', repoKey)
+  mkdirSync(poolRoot, { recursive: true })
+  writeFileSync(join(poolRoot, 'reservation.json'), '{}')
+  expect((await patch({ 'repo.worktreeRoot': join(ws.root, 'new-trees') })).status).toBe(409)
+  rmSync(join(poolRoot, 'reservation.json'))
+  expect((await patch({ 'repo.worktreeRoot': join(ws.root, 'new-trees') })).status).toBe(200)
 })
 
 test('a persona must name an existing persona file', async () => {

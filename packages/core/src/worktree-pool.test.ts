@@ -39,14 +39,22 @@ describe('WorktreePool', () => {
     reports.length = 0
     started.length = 0
   })
-  afterEach(() => {
-    pool.stop()
+  afterEach(async () => {
+    await pool.stop()
     rmSync(repo, { recursive: true, force: true })
     rmSync(root, { recursive: true, force: true })
   })
   async function prepare() {
     await pool.refill(1, 'echo setup >> setup.log')
   }
+  test('shutdown interrupts setup and waits for the detached worktree to be removed', async () => {
+    const filling = pool.refill(1, 'sleep 30')
+    await Bun.sleep(100)
+    await pool.stop()
+    await filling
+    const listing = await execOk(exec, ['git', 'worktree', 'list', '--porcelain'], { cwd: repo })
+    expect(listing).not.toContain('.amagi-pool')
+  })
   test('hands off setup and reports it, preserving existing branches', async () => {
     await prepare()
     await execOk(exec, ['git', 'branch', 'amagi/task-1-test'], { cwd: repo })
@@ -72,7 +80,7 @@ describe('WorktreePool', () => {
     const claimed = await take()
     if (!claimed) throw new Error('expected worktree')
     writeFileSync(join(claimed.path, 'progress.txt'), 'keep me')
-    pool.stop()
+    await pool.stop()
     pool = new WorktreePool({ repoRoot: repo, worktreeRoot: root, baseBranch: 'main' })
     const recovered = await take()
     expect(recovered).toEqual(claimed)

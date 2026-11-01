@@ -62,6 +62,7 @@ import {
   usageLimitExpiry,
 } from './retry.ts'
 import { reviewPrompt } from './review-pack.ts'
+import { acquireSeat, SeatAcquireAbortedError } from './seat-lock.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
 import {
   acquireUsageProbe,
@@ -1048,83 +1049,105 @@ export class Runner {
       prior.costSeen,
     )
 
-    // A reclaimed task already has its worktree and branch recorded in the
-    // store; reuse them instead of creating a fresh worktree.
-    const recorded = store.task(task.id)
-    const recordedWorktree =
-      recorded !== null && recorded.worktree !== null && recorded.branch !== null
-        ? { path: recorded.worktree, branch: recorded.branch }
-        : null
-    // Reuse only what still exists on disk: a reboot that cleared the worktree
-    // root must fall back to a fresh worktree, not run the agent in a dir that
-    // is gone.
-    const resume = recordedWorktree !== null && existsSync(recordedWorktree.path)
-
     let worktree: WorktreeSpec
-    let pooled = false
-    if (recordedWorktree !== null && resume) {
-      worktree = recordedWorktree
-    } else {
-      // With a token present, base the worktree on a fresh origin fetch over
-      // https; without one, fall back to the local base branch so git never
-      // prompts during an unattended run.
-      const tokenCfg = await gitTokenConfig(
-        this.exec,
-        this.deps.repoRoot,
-        config.forge.remote,
-        forgeToken(config.forge.kind, this.deps.repoRoot),
-        config.forge.kind,
-      )
-      if (Object.keys(tokenCfg).length > 0) {
-        await execOk(this.exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
-          cwd: this.deps.repoRoot,
-          env: tokenCfg,
-        })
-      }
-      const base =
-        Object.keys(tokenCfg).length > 0
-          ? `${config.forge.remote}/${config.repo.baseBranch}`
-          : config.repo.baseBranch
-      const existingPath = join(
-        config.repo.worktreeRoot,
-        worktreeDirName(this.deps.repoName, task.id, task.title),
-      )
-      const prepared =
-        recordedWorktree !== null || existsSync(existingPath)
-          ? null
-          : await this.deps.worktreePool?.take(
-              task.id,
-              task.title,
-              base,
-              config.repo.setupCmd,
-              (command) => store.append(task.id, { type: 'setup.started', command }),
-              (report) => store.append(task.id, { type: 'setup.finished', ...report }),
-            )
-      pooled = prepared != null
-      worktree =
-        prepared ??
-        (await createWorktree({
-          repoRoot: this.deps.repoRoot,
-          repoName: this.deps.repoName,
-          taskId: task.id,
-          title: task.title,
-          baseBranch: base,
-          worktreeRoot: config.repo.worktreeRoot,
-          setupCmd: config.repo.setupCmd,
-          persona: config.repo.persona,
-          exec: this.exec,
-          onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
-          onSetupFinished: (report) => store.append(task.id, { type: 'setup.finished', ...report }),
-        }))
-    }
-    await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)
-    store.append(task.id, {
-      type: 'worktree.created',
-      path: worktree.path,
-      branch: worktree.branch,
+    let resume: boolean
+    const worktreeLease = await acquireSeat(`amagi-worktree:${this.deps.repoRoot}:${task.id}`, {
+      signal: this.checksAbort.signal,
+    }).catch((err: unknown) => {
+      if (err instanceof SeatAcquireAbortedError) throw new RunCancelledError(task.id)
+      throw err
     })
-    if (pooled) this.deps.worktreePool?.recorded(worktree.branch)
-    this.transition(task.id, 'worktree_ready')
+    try {
+      if (this.claimSeq !== null && store.claimReplaced(task.id, this.claimSeq)) {
+        throw new LeaseLostError(task.id)
+      }
+      // A reclaimed task already has its worktree and branch recorded in the
+      // store; reuse them instead of creating a fresh worktree.
+      const recorded = store.task(task.id)
+      const recordedWorktree =
+        recorded !== null && recorded.worktree !== null && recorded.branch !== null
+          ? { path: recorded.worktree, branch: recorded.branch }
+          : null
+      // Reuse only what still exists on disk: a reboot that cleared the worktree
+      // root must fall back to a fresh worktree, not run the agent in a dir that
+      // is gone.
+      resume = recordedWorktree !== null && existsSync(recordedWorktree.path)
+
+      let pooled = false
+      if (recordedWorktree !== null && resume) {
+        worktree = recordedWorktree
+        const reservation = this.deps.worktreePool?.reservation(task.id, task.title)
+        if (
+          reservation?.path === recordedWorktree.path &&
+          reservation.branch === recordedWorktree.branch
+        ) {
+          this.deps.worktreePool?.recorded(recordedWorktree.branch)
+        }
+      } else {
+        // With a token present, base the worktree on a fresh origin fetch over
+        // https; without one, fall back to the local base branch so git never
+        // prompts during an unattended run.
+        const tokenCfg = await gitTokenConfig(
+          this.exec,
+          this.deps.repoRoot,
+          config.forge.remote,
+          forgeToken(config.forge.kind, this.deps.repoRoot),
+          config.forge.kind,
+        )
+        if (Object.keys(tokenCfg).length > 0) {
+          await execOk(this.exec, ['git', 'fetch', config.forge.remote, config.repo.baseBranch], {
+            cwd: this.deps.repoRoot,
+            env: tokenCfg,
+          })
+        }
+        const base =
+          Object.keys(tokenCfg).length > 0
+            ? `${config.forge.remote}/${config.repo.baseBranch}`
+            : config.repo.baseBranch
+        const existingPath = join(
+          config.repo.worktreeRoot,
+          worktreeDirName(this.deps.repoName, task.id, task.title),
+        )
+        const prepared =
+          recordedWorktree !== null || existsSync(existingPath)
+            ? null
+            : await this.deps.worktreePool?.take(
+                task.id,
+                task.title,
+                base,
+                config.repo.setupCmd,
+                (command) => store.append(task.id, { type: 'setup.started', command }),
+                (report) => store.append(task.id, { type: 'setup.finished', ...report }),
+              )
+        pooled = prepared != null
+        worktree =
+          prepared ??
+          (await createWorktree({
+            repoRoot: this.deps.repoRoot,
+            repoName: this.deps.repoName,
+            taskId: task.id,
+            title: task.title,
+            baseBranch: base,
+            worktreeRoot: config.repo.worktreeRoot,
+            setupCmd: config.repo.setupCmd,
+            persona: config.repo.persona,
+            exec: this.exec,
+            onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
+            onSetupFinished: (report) =>
+              store.append(task.id, { type: 'setup.finished', ...report }),
+          }))
+      }
+      await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)
+      store.append(task.id, {
+        type: 'worktree.created',
+        path: worktree.path,
+        branch: worktree.branch,
+      })
+      if (pooled) this.deps.worktreePool?.recorded(worktree.branch)
+      this.transition(task.id, 'worktree_ready')
+    } finally {
+      worktreeLease.release()
+    }
     this.throwIfCancelled(task.id)
 
     if (!resume) await this.preflight(task.id, worktree.path)

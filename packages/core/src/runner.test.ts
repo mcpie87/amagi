@@ -24,6 +24,7 @@ import { type Exec, exec, execOk } from './exec.ts'
 import { runStateDir } from './paths.ts'
 import type { PrInfo } from './pr-check.ts'
 import { Runner } from './runner.ts'
+import { acquireSeat } from './seat-lock.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 import { readUsageHold, usageHoldKey } from './usage-hold.ts'
@@ -1354,6 +1355,31 @@ describe('Runner.runOnce', () => {
       store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
     ).toMatchObject({ reason: 'cost' })
     expect(forge.calls).toHaveLength(0)
+  })
+
+  test('waits for the previous worktree handoff and stops while waiting', async () => {
+    const pool = new WorktreePool({ repoRoot: repo, worktreeRoot: wtRoot, baseBranch: 'main' })
+    const lease = await acquireSeat(`amagi-worktree:${repo}:${TASK.id}`)
+    const runner = new Runner({
+      store,
+      tracker: new FakeTracker([TASK]),
+      harness: new FakeHarness([writesAFile]),
+      config: config(),
+      repoRoot: repo,
+      repoName: 'demo',
+      forge: new FakePr(),
+      worktreePool: pool,
+    })
+    try {
+      const run = runner.runOnce()
+      await Bun.sleep(100)
+      expect(store.task(TASK.id)?.worktree).toBeNull()
+      runner.cancel()
+      expect((await run)?.state).toBe('cancelled')
+    } finally {
+      lease.release()
+      await pool.stop()
+    }
   })
 
   test('uses a prepared worktree and records setup for the task', async () => {

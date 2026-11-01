@@ -829,6 +829,29 @@ describe('RunService', () => {
     await second.stop(TASK2.id)
   })
 
+  test('uses the new worktree root after a live config change', async () => {
+    const cfg = config({ repo: { baseBranch: 'main', worktreeRoot: wtRoot, setupCmd: 'true' } })
+    const service = makeService(new FakeTracker([TASK]), new FakeHarness(), 1, cfg)
+    const newRoot = join(wtRoot, 'new-root')
+    cfg.repo.worktreeRoot = newRoot
+    service.fleetChanged()
+    try {
+      await waitFor(async () =>
+        (await execOk(exec, ['git', 'worktree', 'list', '--porcelain'], { cwd: repo })).includes(
+          newRoot,
+        ),
+      )
+      expect((await service.start()).ok).toBe(true)
+      await waitFor(
+        () => store.task(TASK.id)?.worktree !== null && store.task(TASK.id)?.worktree !== undefined,
+      )
+      expect(store.task(TASK.id)?.worktree).toStartWith(newRoot)
+      await waitFor(() => store.task(TASK.id)?.state === 'no_pr')
+    } finally {
+      await service.dispose()
+    }
+  })
+
   test('start launches the next ready task and it completes', async () => {
     let finished: NonNullable<RunOnceResult> | undefined
     const service = makeService(
