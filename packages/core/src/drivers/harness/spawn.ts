@@ -4,6 +4,7 @@ import type { AgentEvent } from '../../events.ts'
 import { readText } from '../../exec.ts'
 import { jsonLines } from '../../jsonl.ts'
 import { killTree } from '../../process.ts'
+import { findRegistryEntryByPath, repoKey } from '../../registry.ts'
 import { acquireSeat, type SeatLease } from '../../seat-lock.ts'
 import { recordWatcherSeat, removeWatcherSeat } from '../../watcher-seats.ts'
 import type { AgentOutcome, AgentProcess, AgentStartOptions, AgentUsage } from '../types.ts'
@@ -171,6 +172,10 @@ function spawnUnlocked(
 ): AgentProcess {
   const env = { ...harnessEnv(), ...opts.env, ...options.env }
   stripHarnessCredentials(env)
+  if (env.AMAGI_REPO_ROOT !== undefined) {
+    env.AMAGI_REPO_KEY =
+      findRegistryEntryByPath(env.AMAGI_REPO_ROOT)?.key ?? repoKey(env.AMAGI_REPO_ROOT)
+  }
   const proc = Bun.spawn(sandboxArgv(argv), {
     cwd: opts.cwd,
     env,
