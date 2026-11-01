@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, isAbsolute, join } from 'node:path'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import { configHome, hostStateHome, stateHome } from '../../paths.ts'
 import { stripHarnessCredentials } from './env.ts'
 
@@ -76,6 +76,60 @@ function configuredHelperPaths(cwd?: string, env: NodeJS.ProcessEnv = process.en
   return paths
 }
 
+function helperWords(command: string): string[] {
+  const words: string[] = []
+  const pattern = /(?:"((?:\\.|[^"\\])*)"|'([^']*)'|([^\s]+))/g
+  for (const match of command.matchAll(pattern)) {
+    words.push((match[1] ?? match[2] ?? match[3] ?? '').replace(/\\(.)/g, '$1'))
+  }
+  return words
+}
+
+function configuredCredentialStorePaths(
+  cwd?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string[] {
+  const git = Bun.which('git')
+  if (git === null || !existsSync(git)) return []
+  let config: ReturnType<typeof Bun.spawnSync>
+  try {
+    config = Bun.spawnSync([git, 'config', '--null', '--get-regexp', '^credential\\..*helper$'], {
+      ...(cwd === undefined ? {} : { cwd }),
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+  } catch {
+    return []
+  }
+  if (config.exitCode !== 0) return []
+
+  const paths: string[] = []
+  for (const item of (config.stdout?.toString() ?? '').split('\0')) {
+    const newline = item.indexOf('\n')
+    if (newline < 0) continue
+    let command = item.slice(newline + 1).trim()
+    if (command.startsWith('!')) command = command.slice(1).trimStart()
+    const words = helperWords(command)
+    if (basename(words[0] ?? '') !== 'store' && basename(words[0] ?? '') !== 'git-credential-store')
+      continue
+    for (let i = 1; i < words.length; i++) {
+      const word = words[i]
+      const path = word?.startsWith('--file=')
+        ? word.slice('--file='.length)
+        : word === '--file'
+          ? words[++i]
+          : undefined
+      if (path === undefined || path === '') continue
+      const expanded =
+        path === '~' ? home : path.startsWith('~/') ? join(home, path.slice(2)) : path
+      paths.push(isAbsolute(expanded) ? expanded : resolve(cwd ?? process.cwd(), expanded))
+    }
+  }
+  return paths
+}
+
 /** Prevent the harness from reading the operator's state or forge credentials. */
 export function sandboxArgv(
   argv: string[],
@@ -93,6 +147,8 @@ export function sandboxArgv(
   )
   const hidden = [
     ...helpers,
+    ...configuredCredentialStorePaths(cwd, process.env, home),
+    ...configuredCredentialStorePaths(cwd, env, home),
     ...[stateHome(), hostStateHome()].map((state) => join(state, 'amagi')),
     join(home, '.ssh'),
     join(home, '.git-credentials'),
