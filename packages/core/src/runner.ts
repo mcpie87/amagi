@@ -71,7 +71,13 @@ import {
   usageHoldKey,
 } from './usage-hold.ts'
 import { parseVerdict, type Verdict, withVerdictLine } from './verdict.ts'
-import { applyRepoIdentity, createWorktree, type WorktreeSpec } from './worktree.ts'
+import {
+  applyRepoIdentity,
+  createWorktree,
+  type WorktreeSpec,
+  worktreeDirName,
+} from './worktree.ts'
+import type { WorktreePool } from './worktree-pool.ts'
 
 export type RunnerDeps = {
   store: Store
@@ -99,6 +105,7 @@ export type RunnerDeps = {
   workerName?: string | undefined
   /** Fleet worker `runOnce` claims for, so its difficulty levels gate the claim. */
   worker?: ClaimWorker | undefined
+  worktreePool?: WorktreePool | undefined
 }
 
 export type RunOnceResult = {
@@ -1054,6 +1061,7 @@ export class Runner {
     const resume = recordedWorktree !== null && existsSync(recordedWorktree.path)
 
     let worktree: WorktreeSpec
+    let pooled = false
     if (recordedWorktree !== null && resume) {
       worktree = recordedWorktree
     } else {
@@ -1077,19 +1085,37 @@ export class Runner {
         Object.keys(tokenCfg).length > 0
           ? `${config.forge.remote}/${config.repo.baseBranch}`
           : config.repo.baseBranch
-      worktree = await createWorktree({
-        repoRoot: this.deps.repoRoot,
-        repoName: this.deps.repoName,
-        taskId: task.id,
-        title: task.title,
-        baseBranch: base,
-        worktreeRoot: config.repo.worktreeRoot,
-        setupCmd: config.repo.setupCmd,
-        persona: config.repo.persona,
-        exec: this.exec,
-        onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
-        onSetupFinished: (report) => store.append(task.id, { type: 'setup.finished', ...report }),
-      })
+      const existingPath = join(
+        config.repo.worktreeRoot,
+        worktreeDirName(this.deps.repoName, task.id, task.title),
+      )
+      const prepared =
+        recordedWorktree !== null || existsSync(existingPath)
+          ? null
+          : await this.deps.worktreePool?.take(
+              task.id,
+              task.title,
+              base,
+              config.repo.setupCmd,
+              (command) => store.append(task.id, { type: 'setup.started', command }),
+              (report) => store.append(task.id, { type: 'setup.finished', ...report }),
+            )
+      pooled = prepared != null
+      worktree =
+        prepared ??
+        (await createWorktree({
+          repoRoot: this.deps.repoRoot,
+          repoName: this.deps.repoName,
+          taskId: task.id,
+          title: task.title,
+          baseBranch: base,
+          worktreeRoot: config.repo.worktreeRoot,
+          setupCmd: config.repo.setupCmd,
+          persona: config.repo.persona,
+          exec: this.exec,
+          onSetupStarted: (command) => store.append(task.id, { type: 'setup.started', command }),
+          onSetupFinished: (report) => store.append(task.id, { type: 'setup.finished', ...report }),
+        }))
     }
     await applyRepoIdentity(this.exec, worktree.path, this.deps.repoRoot, config.repo.persona)
     store.append(task.id, {
@@ -1097,6 +1123,7 @@ export class Runner {
       path: worktree.path,
       branch: worktree.branch,
     })
+    if (pooled) this.deps.worktreePool?.recorded(worktree.branch)
     this.transition(task.id, 'worktree_ready')
     this.throwIfCancelled(task.id)
 

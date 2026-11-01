@@ -27,6 +27,7 @@ import { Runner } from './runner.ts'
 import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 import { readUsageHold, usageHoldKey } from './usage-hold.ts'
+import { WorktreePool } from './worktree-pool.ts'
 
 const TASK: TrackerTask = {
   id: 'bd-a1b2',
@@ -1353,6 +1354,39 @@ describe('Runner.runOnce', () => {
       store.events({ taskId: TASK.id }).find((event) => event.type === 'review.stopped'),
     ).toMatchObject({ reason: 'cost' })
     expect(forge.calls).toHaveLength(0)
+  })
+
+  test('uses a prepared worktree and records setup for the task', async () => {
+    const command = 'echo prepared > prepared.txt'
+    const pool = new WorktreePool({
+      repoRoot: repo,
+      worktreeRoot: wtRoot,
+      baseBranch: 'main',
+    })
+    await pool.refill(1, command)
+    try {
+      const runner = new Runner({
+        store,
+        tracker: new FakeTracker([TASK]),
+        harness: new FakeHarness([writesAFile]),
+        config: config({ repo: { baseBranch: 'main', worktreeRoot: wtRoot, setupCmd: command } }),
+        repoRoot: repo,
+        repoName: 'demo',
+        forge: new FakePr(),
+        worktreePool: pool,
+      })
+      const result = await runner.runOnce()
+      expect(result?.state).toBe('pr_open')
+      expect(store.task(TASK.id)?.worktree).toContain('.amagi-pool')
+      expect(
+        store.events({ taskId: TASK.id }).filter((event) => event.type === 'setup.started'),
+      ).toHaveLength(1)
+      expect(
+        store.events({ taskId: TASK.id }).filter((event) => event.type === 'setup.finished'),
+      ).toMatchObject([{ command, exitCode: 0 }])
+    } finally {
+      pool.stop()
+    }
   })
 
   test('an empty queue is not an error', async () => {

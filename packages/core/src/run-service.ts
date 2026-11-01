@@ -16,6 +16,7 @@ import { processTreeStats } from './process.ts'
 import { Runner, type RunOnceResult } from './runner.ts'
 import type { Store } from './store/store.ts'
 import { readUsageHold, usageHoldKey } from './usage-hold.ts'
+import { WorktreePool } from './worktree-pool.ts'
 
 /** Summed over the agent's whole process tree (see process.ts). */
 export type RunnerResource = {
@@ -224,9 +225,18 @@ export class RunService implements RunServiceApi {
   }
   private stopped = false
   private readonly seats: Map<string, string>
+  private readonly worktreePool: WorktreePool | undefined
 
   constructor(private readonly opts: RunServiceOptions) {
     this.seats = opts.seats ?? new Map()
+    this.worktreePool = new WorktreePool({
+      repoRoot: opts.repoRoot,
+      worktreeRoot: opts.config.repo.worktreeRoot,
+      baseBranch: opts.config.repo.baseBranch,
+      remote: opts.config.forge.remote,
+      exec: opts.exec,
+    })
+    this.refillWorktrees()
     this.autoQueue = opts.autoQueue ?? opts.config.loop.autoQueue
     this.autoQueueIdleMs = opts.autoQueueIdleMs ?? opts.config.loop.autoQueueIdleSec * 1000
     this.autoQueueActiveMs = opts.autoQueueActiveMs ?? 5_000
@@ -234,7 +244,18 @@ export class RunService implements RunServiceApi {
   }
 
   fleetChanged(): void {
+    this.refillWorktrees()
     if (this.autoQueue) this.scheduleAutoQueuePoll(0)
+  }
+
+  private refillWorktrees(): void {
+    const available = new Set(
+      expandWorkers(this.opts.config.worker, this.opts.config.seats)
+        .filter((worker) => worker.enabled && worker.roles.includes('implement'))
+        .map((worker) => this.workerSeat(worker))
+        .filter((seat) => !this.seats.has(seat)),
+    )
+    void this.worktreePool?.refill(available.size, this.opts.config.repo.setupCmd)
   }
 
   /**
@@ -274,6 +295,7 @@ export class RunService implements RunServiceApi {
   /** Stops the auto-queue loop; the runner stays usable for manual launch/stop. */
   dispose(): void {
     this.stopped = true
+    this.worktreePool?.stop()
     if (this.autoQueueTimer !== null) {
       clearTimeout(this.autoQueueTimer)
       this.autoQueueTimer = null
@@ -589,10 +611,12 @@ export class RunService implements RunServiceApi {
       exec,
       forge,
       workerName: worker.name,
+      worktreePool: this.worktreePool,
     })
     const seat = this.workerSeat(worker)
     const holder = `${repoName}/${task.id}`
     this.seats.set(seat, holder)
+    this.refillWorktrees()
     const done = runner
       .runClaimed(task)
       .then(async (result) => {
@@ -611,6 +635,7 @@ export class RunService implements RunServiceApi {
       .finally(() => {
         this.runs.delete(task.id)
         if (this.seats.get(seat) === holder) this.seats.delete(seat)
+        this.refillWorktrees()
       })
     this.runs.set(task.id, { runner, startedAt: Date.now(), done, workerId: worker.id, seat })
   }
