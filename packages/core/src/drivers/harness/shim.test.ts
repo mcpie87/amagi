@@ -104,7 +104,7 @@ beforeEach(() => {
 
 describe('git shim', () => {
   test('is generated into the state home shim dir', () => {
-    expect(shim).toBe(join(home, 'amagi', 'shim', 'bin'))
+    expect(shim).toBe(join(home, 'amagi-agent', 'shim', 'bin'))
     expect(existsSync(join(shim, 'git'))).toBe(true)
     expect(existsSync(join(shim, 'amagi'))).toBe(true)
   })

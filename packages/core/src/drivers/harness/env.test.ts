@@ -44,8 +44,8 @@ test('removes forge credentials while retaining task-scoped values', () => {
 
 test('points gh and tea at empty Amagi-owned dirs so agents fail closed', () => {
   const env = harnessEnv()
-  expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi', 'forge', 'agents', 'gh'))
-  expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi', 'forge', 'agents', 'xdg'))
+  expect(env.GH_CONFIG_DIR).toContain(join(home, 'amagi-agent', 'env', 'gh'))
+  expect(env.XDG_CONFIG_HOME).toContain(join(home, 'amagi-agent', 'env', 'xdg'))
   expect(env.XDG_CONFIG_HOME).not.toBe(home)
 })
 

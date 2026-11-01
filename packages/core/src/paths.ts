@@ -68,7 +68,7 @@ export function registryPath(): string {
  * task events.
  */
 export function runStateDir(taskId: string): string {
-  return join(stateHome(), 'amagi', 'runs', taskId)
+  return join(stateHome(), 'amagi-agent', 'runs', taskId)
 }
 
 /** The git shim's rejected-call log for one task's run, drained by the runner. */

@@ -7,12 +7,17 @@ import { prepareShim } from './shim.ts'
 const FORGE_CREDENTIAL =
   /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GITLAB_(ACCESS_)?TOKEN|FORGEJO_TOKEN|GITEA_SERVER_(TOKEN|USER|PASSWORD|OTP)|TEA_TOKEN)$/
 
+export function stripHarnessCredentials(env: Record<string, string>): void {
+  for (const key of Object.keys(env)) if (FORGE_CREDENTIAL.test(key)) delete env[key]
+  delete env.SSH_AUTH_SOCK
+}
+
 /** gh/glab/tea config dirs whose contents are forge credentials and must never reach an agent. */
 const FORGE_CONFIG_DIRS = ['gh', 'glab-cli', 'tea']
 
 /** Amagi-owned XDG_CONFIG_HOME for harness agents: the operator's config minus forge login dirs. */
 function agentXdgHome(): string {
-  return join(stateHome(), 'amagi', 'forge', 'agents', 'xdg')
+  return join(stateHome(), 'amagi-agent', 'env', 'xdg')
 }
 
 /**
@@ -53,14 +58,15 @@ export function harnessEnv(): Record<string, string> {
     Object.entries(process.env).filter(([name]) => !FORGE_CREDENTIAL.test(name)),
   ) as Record<string, string>
 
-  const ghDir = join(stateHome(), 'amagi', 'forge', 'agents', 'gh')
+  const ghDir = join(stateHome(), 'amagi-agent', 'env', 'gh')
   mkdirSync(ghDir, { recursive: true })
   env.GH_CONFIG_DIR = ghDir
-  const glabDir = join(stateHome(), 'amagi', 'forge', 'agents', 'glab')
+  const glabDir = join(stateHome(), 'amagi-agent', 'env', 'glab')
   mkdirSync(glabDir, { recursive: true })
   env.GLAB_CONFIG_DIR = glabDir
   env.XDG_CONFIG_HOME = prepareAgentXdg()
   const shim = prepareShim()
   env.PATH = env.PATH ? `${shim}:${env.PATH}` : shim
+  stripHarnessCredentials(env)
   return env
 }

@@ -15,7 +15,7 @@ Orchestrates AI coding agents over an issue tracker. Amagi claims ready issues, 
 
 ## Install
 
-Requires [bun](https://bun.sh). Other tools (`git`, `beads`, `claude`, `gh`/`tea`) are resolved at runtime, only as needed by the trackers and harnesses you configure.
+Requires [bun](https://bun.sh). Agent runs require `bwrap` on Linux or `sandbox-exec` on macOS. Other tools (`git`, `beads`, `claude`, `gh`/`tea`) are resolved at runtime, only as needed by the trackers and harnesses you configure.
 
 ```bash
 bun install
@@ -25,7 +25,8 @@ just check   # lint + typecheck + tests
 For development, run `bun serve`. It starts the API with source watching and
 the dashboard Vite server with hot module replacement. Open the dashboard at
 the URL Vite prints (normally `http://localhost:5173`); `/api` requests proxy
-to the API at `http://127.0.0.1:7777`.
+to the API at `http://127.0.0.1:7777`. Open the single-use login link printed by
+`amagi serve` to authenticate the dashboard.
 
 ### Dashboard
 

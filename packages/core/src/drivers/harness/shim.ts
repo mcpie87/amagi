@@ -11,7 +11,7 @@ import { stateHome } from '../../paths.ts'
  * absolute path or rewrites its own PATH reaches the real binary untouched.
  */
 export function shimDir(): string {
-  return join(stateHome(), 'amagi', 'shim', 'bin')
+  return join(stateHome(), 'amagi-agent', 'shim', 'bin')
 }
 
 /**

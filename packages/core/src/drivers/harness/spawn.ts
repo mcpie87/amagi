@@ -7,7 +7,8 @@ import { killTree } from '../../process.ts'
 import { acquireSeat, type SeatLease } from '../../seat-lock.ts'
 import { recordWatcherSeat, removeWatcherSeat } from '../../watcher-seats.ts'
 import type { AgentOutcome, AgentProcess, AgentStartOptions, AgentUsage } from '../types.ts'
-import { harnessEnv } from './env.ts'
+import { harnessEnv, stripHarnessCredentials } from './env.ts'
+import { sandboxArgv } from './sandbox.ts'
 
 const PROCESS_CAP_SEAT = 'amagi:harness-processes'
 let processCap: number | null = null
@@ -168,9 +169,11 @@ function spawnUnlocked(
   translator: Translator,
   options: SpawnAgentOptions,
 ): AgentProcess {
-  const proc = Bun.spawn(argv, {
+  const env = { ...harnessEnv(), ...opts.env, ...options.env }
+  stripHarnessCredentials(env)
+  const proc = Bun.spawn(sandboxArgv(argv), {
     cwd: opts.cwd,
-    env: { ...harnessEnv(), ...opts.env, ...options.env },
+    env,
     stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
     stdout: 'pipe',
     stderr: 'pipe',
