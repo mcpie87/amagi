@@ -4,10 +4,14 @@ import { apiBase } from '../api.ts'
 const POLL_MS = 3000
 
 /** Polls a diagnostics snapshot; null until the first answer, 'error' when it failed. */
-export function usePolled<T>(paused: boolean, path: string): T | null | 'error' {
+export function usePolled<T>(
+  paused: boolean,
+  path: string,
+  loadWhilePaused = false,
+): T | null | 'error' {
   const [snapshot, setSnapshot] = useState<T | null | 'error'>(null)
   useEffect(() => {
-    if (paused) return
+    if (paused && !loadWhilePaused) return
     let active = true
     const refresh = () => {
       fetch(`${apiBase}${path}`)
@@ -20,12 +24,12 @@ export function usePolled<T>(paused: boolean, path: string): T | null | 'error' 
         })
     }
     refresh()
-    const timer = setInterval(refresh, POLL_MS)
+    const timer = paused ? null : setInterval(refresh, POLL_MS)
     return () => {
       active = false
-      clearInterval(timer)
+      if (timer !== null) clearInterval(timer)
     }
-  }, [paused, path])
+  }, [paused, path, loadWhilePaused])
   return snapshot
 }
 

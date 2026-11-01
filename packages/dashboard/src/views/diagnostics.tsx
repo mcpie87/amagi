@@ -116,8 +116,12 @@ function filterQuery(filters: Filters): string {
   return params.toString()
 }
 
-const useTimings = (paused: boolean, query: string) =>
-  usePolled<TimingSnapshot>(paused, `/api/diagnostics/requests${query === '' ? '' : `?${query}`}`)
+const useTimings = (paused: boolean, query: string, loadWhilePaused = false) =>
+  usePolled<TimingSnapshot>(
+    paused,
+    `/api/diagnostics/requests${query === '' ? '' : `?${query}`}`,
+    loadWhilePaused,
+  )
 
 function SampleTable({
   title,
@@ -302,7 +306,7 @@ function RouteDetailDialog({
   const params = new URLSearchParams(query)
   params.set('method', selected.method)
   params.set('route', selected.route)
-  const snapshot = useTimings(paused, params.toString())
+  const snapshot = useTimings(paused, params.toString(), true)
   const timing = snapshot === null || snapshot === 'error' ? undefined : snapshot.routes[0]
   const [sourceSort, setSourceSort] = useState<SortState | null>(null)
   const callers =
