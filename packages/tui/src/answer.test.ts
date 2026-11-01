@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fetchOperatorSecret, submitAnswer } from './answer.ts'
 
 const originalFetch = globalThis.fetch
@@ -8,19 +11,24 @@ afterEach(() => {
 })
 
 describe('fetchOperatorSecret', () => {
-  test('returns the secret from the session endpoint', async () => {
-    globalThis.fetch = (async (url: string) => {
-      expect(url).toBe('http://amagi.test/api/session')
-      return new Response(JSON.stringify({ secret: 'secret' }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    expect(await fetchOperatorSecret('http://amagi.test')).toBe('secret')
-  })
-
-  test('returns null when the session endpoint fails', async () => {
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ error: 'nope' }), { status: 500 })) as unknown as typeof fetch
-    expect(await fetchOperatorSecret('http://amagi.test')).toBeNull()
+  test('reads the local state only for the matching loopback server', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-session-test-'))
+    const previous = process.env.AMAGI_DEV_HOME
+    process.env.AMAGI_DEV_HOME = dir
+    try {
+      mkdirSync(join(dir, 'state', 'amagi'), { recursive: true })
+      writeFileSync(
+        join(dir, 'state', 'amagi', 'operator-session.json'),
+        JSON.stringify({ secret: 'secret', port: 7777 }),
+      )
+      expect(await fetchOperatorSecret('http://localhost:7777')).toBe('secret')
+      expect(await fetchOperatorSecret('http://localhost:7778')).toBeNull()
+      expect(await fetchOperatorSecret('http://evil.test:7777')).toBeNull()
+    } finally {
+      if (previous === undefined) delete process.env.AMAGI_DEV_HOME
+      else process.env.AMAGI_DEV_HOME = previous
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

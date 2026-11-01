@@ -12,7 +12,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import { refreshSession } from './api.ts'
 import {
   followRepo,
   pollOk,
@@ -255,7 +254,6 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
     }
     const unfollow = followRepo(repo, {
       status: (status) => {
-        if (status === 'connected') void refreshSession()
         setConnection(status)
       },
       events: (data) => {

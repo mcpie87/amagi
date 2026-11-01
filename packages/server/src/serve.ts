@@ -18,6 +18,8 @@ import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
 
 export type ServeOptions = {
   workspaces: Workspaces
+  secret?: string
+  loginToken?: string
   host: string
   port: number
   notify?: Notifier[] | undefined
@@ -319,6 +321,8 @@ export function portInUse(host: string, port: number): boolean {
 
 export function serve({
   workspaces,
+  secret,
+  loginToken,
   host,
   port,
   notify,
@@ -408,6 +412,8 @@ export function serve({
   const stopLoopWatch = timings.watchEventLoop()
   const app = createApp({
     workspaces,
+    ...(secret === undefined ? {} : { secret }),
+    ...(loginToken === undefined ? {} : { loginToken }),
     host,
     notify,
     timings,

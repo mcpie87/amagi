@@ -4335,14 +4335,33 @@ describe('operator access', () => {
     expect((await stop(app, { 'X-Amagi-Secret': 'wrong' })).status).toBe(401)
   })
 
-  test('the session endpoint hands out the secret and sets it as a strict cookie', async () => {
-    const app = createApp({ workspaces: ws.workspaces, secret: OPERATOR_SECRET })
-    const res = await app.request('/api/session')
-    expect(((await res.json()) as { secret: string }).secret).toBe(OPERATOR_SECRET)
+  test('login is single-use, expires, and never exposes the secret', async () => {
+    const app = createApp({
+      workspaces: ws.workspaces,
+      secret: OPERATOR_SECRET,
+      loginToken: 'login',
+    })
+    expect((await app.request('/api/session')).status).toBe(404)
+    expect((await app.request('/api/auth-status')).status).toBe(200)
+    expect(await (await app.request('/api/auth-status')).json()).toEqual({ authenticated: false })
+    expect((await app.request('/api/login?token=wrong')).status).toBe(401)
+    const res = await app.request('/api/login?token=login')
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toBe('/')
     const cookie = res.headers.get('set-cookie') ?? ''
     expect(cookie).toContain(`amagi_session=${OPERATOR_SECRET}`)
     expect(cookie).toContain('HttpOnly')
     expect(cookie).toContain('SameSite=Strict')
+    expect(await (await app.request('/api/auth-status', { headers: { cookie } })).json()).toEqual({
+      authenticated: true,
+    })
+    expect((await app.request('/api/login?token=login')).status).toBe(401)
+    const expired = createApp({
+      workspaces: ws.workspaces,
+      loginToken: 'login',
+      loginExpiresAt: Date.now() - 1,
+    })
+    expect((await expired.request('/api/login?token=login')).status).toBe(401)
   })
 
   test('the ask route refuses a mutating call with neither token nor secret', async () => {

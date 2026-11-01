@@ -114,6 +114,8 @@ export type ServerDeps = {
   host?: string
   /** The operator secret; generated per server when unset. */
   secret?: string
+  loginToken?: string
+  loginExpiresAt?: number
   /** Dashboard interaction timings; serve shares the diagnostics file with `timings`. */
   interactions?: InteractionTimings
 }
@@ -248,6 +250,8 @@ export function createApp({
   timings = new RequestTimings(),
   host,
   secret = randomBytes(32).toString('hex'),
+  loginToken,
+  loginExpiresAt = Date.now() + 10 * 60_000,
   interactions = new InteractionTimings(),
 }: ServerDeps) {
   const authorized = (c: Context, store: Store, id: string): boolean =>
@@ -325,7 +329,7 @@ export function createApp({
     .use('/api/*', async (c, next) => {
       const start = performance.now()
       await next()
-      if (c.req.path.startsWith('/api/diagnostics/')) return
+      if (c.req.path.startsWith('/api/diagnostics/') || c.req.path === '/api/login') return
       const ms = performance.now() - start
       const route = routePath(c, -1)
       const referer = c.req.header('referer') ?? null
@@ -350,9 +354,27 @@ export function createApp({
       }
     })
 
-    .get('/api/session', (c) => {
+    .get('/api/login', (c) => {
+      const token = c.req.query('token')
+      c.header('Cache-Control', 'no-store')
+      c.header('Referrer-Policy', 'no-referrer')
+      if (
+        loginToken === undefined ||
+        token === undefined ||
+        Date.now() >= loginExpiresAt ||
+        !sameSecret(token, loginToken)
+      ) {
+        return c.text('Login link invalid or expired. Restart amagi serve for a new link.', 401)
+      }
+      loginToken = undefined
       setCookie(c, SESSION_COOKIE, secret, { httpOnly: true, sameSite: 'Strict', path: '/' })
-      return c.json({ secret })
+      return c.redirect('/')
+    })
+
+    .get('/api/auth-status', (c) => {
+      const cookie = getCookie(c, SESSION_COOKIE)
+      c.header('Cache-Control', 'no-store')
+      return c.json({ authenticated: cookie !== undefined && sameSecret(cookie, secret) })
     })
 
     .use('/api/*', async (c, next) => {

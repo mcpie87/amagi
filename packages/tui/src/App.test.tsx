@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ReadyTask, StoredEvent } from '@amagi/core'
 import { render } from 'ink-testing-library'
 import { createElement } from 'react'
@@ -256,11 +259,16 @@ describe('App', () => {
   })
 
   test('answering an option posts it with the operator secret', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'amagi-tui-session-'))
+    const previous = process.env.AMAGI_DEV_HOME
+    process.env.AMAGI_DEV_HOME = dir
+    mkdirSync(join(dir, 'state', 'amagi'), { recursive: true })
+    writeFileSync(
+      join(dir, 'state', 'amagi', 'operator-session.json'),
+      JSON.stringify({ secret: 'secret', port: 7777 }),
+    )
     const posted: { url: string; body: unknown }[] = []
     globalThis.fetch = streamMock(EVENTS, (href, init) => {
-      if (href.endsWith('/api/session')) {
-        return new Response(JSON.stringify({ secret: 'secret' }), { status: 200 })
-      }
       if (href.includes('/answer')) {
         posted.push({ url: href, body: JSON.parse(init?.body as string) })
         return new Response(JSON.stringify({}), { status: 200 })
@@ -268,7 +276,7 @@ describe('App', () => {
       throw new Error(`unexpected fetch ${href}`)
     })
 
-    const instance = render(createElement(App, { baseUrl: 'http://amagi.test', repo: 'repo1' }))
+    const instance = render(createElement(App, { baseUrl: 'http://localhost:7777', repo: 'repo1' }))
     try {
       await waitFor(() => (instance.lastFrame() ?? '').includes('amagi overview'))
       instance.stdin.write('\t')
@@ -279,17 +287,19 @@ describe('App', () => {
       instance.stdin.write('1')
       await waitFor(() => posted.length > 0)
       expect(posted[0]?.url).toBe(
-        'http://amagi.test/api/repos/repo1/tasks/am-1/questions/q-1/answer',
+        'http://localhost:7777/api/repos/repo1/tasks/am-1/questions/q-1/answer',
       )
       expect(posted[0]?.body).toEqual({ answer: 'npm', via: 'cli' })
     } finally {
       instance.unmount()
+      if (previous === undefined) delete process.env.AMAGI_DEV_HOME
+      else process.env.AMAGI_DEV_HOME = previous
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
   test('an answer that cannot reach the server shows the error and keeps the TUI up', async () => {
     globalThis.fetch = streamMock(EVENTS, (href) => {
-      if (href.endsWith('/api/session')) throw new TypeError('Unable to connect')
       throw new Error(`unexpected fetch ${href}`)
     })
 
@@ -302,7 +312,9 @@ describe('App', () => {
       await waitFor(() => (instance.lastFrame() ?? '').includes('Which registry?'))
 
       instance.stdin.write('1')
-      await waitFor(() => (instance.lastFrame() ?? '').includes('Unable to connect'))
+      await waitFor(() =>
+        (instance.lastFrame() ?? '').includes('could not fetch the operator secret'),
+      )
       expect(instance.lastFrame()).toContain('Which registry?')
     } finally {
       instance.unmount()

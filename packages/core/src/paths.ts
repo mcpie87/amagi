@@ -50,6 +50,8 @@ export function dbPathForRepo(key: string): string {
   return join(stateHome(), 'amagi', 'repos', `${key}.db`)
 }
 
+export const operatorSessionPath = (): string => join(stateHome(), 'amagi', 'operator-session.json')
+
 /** API request and dashboard interaction timings shown on the Diagnostics page; one file for the whole server. */
 export const requestTimingsPath = (): string => join(stateHome(), 'amagi', 'request-timings.db')
 

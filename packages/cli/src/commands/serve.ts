@@ -1,4 +1,6 @@
-import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
   addRegistryEntry,
   loadGlobalConfig,
@@ -6,6 +8,7 @@ import {
   makeHarness,
   makeNotifiers,
   migrateFleet,
+  operatorSessionPath,
   RunService,
   repoRoot,
   requestTimingsPath,
@@ -69,7 +72,11 @@ export const serveCommand = defineCommand({
     await buildDashboard(dashboardDir)
     const workspaces = new Workspaces()
     const seats = new Map<string, string>()
+    const secret = randomBytes(32).toString('hex')
+    const loginToken = randomBytes(32).toString('hex')
     const server = serve({
+      secret,
+      loginToken,
       workspaces,
       host: config.server.host,
       port: config.server.port,
@@ -133,7 +140,19 @@ export const serveCommand = defineCommand({
         })
       },
     })
+    const statePath = operatorSessionPath()
+    mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
+    writeFileSync(
+      statePath,
+      JSON.stringify({ secret, port: server.port, host: config.server.host }),
+      { mode: 0o600 },
+    )
+    chmodSync(statePath, 0o600)
     console.log(`${bold('amagi')} dashboard + api: ${server.url}`)
+    console.log(
+      `${bold('amagi')} login (single use, expires in 10 minutes): ${server.url}api/login?token=${loginToken}`,
+    )
+    console.log(dim(`  dev dashboard: http://localhost:5173/api/login?token=${loginToken}`))
     for (const entry of workspaces.list()) {
       console.log(dim(`  repo ${entry.key}: ${entry.path}`))
     }

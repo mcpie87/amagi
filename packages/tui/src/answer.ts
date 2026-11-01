@@ -1,13 +1,26 @@
-import { errorOf } from '@amagi/core'
+import { errorOf, operatorSessionPath } from '@amagi/core'
 
 export type AnswerOutcome = { kind: 'ok' } | { kind: 'error'; message: string }
 
-/** The operator secret gates mutating routes; the session endpoint hands it to local clients. */
 export async function fetchOperatorSecret(baseUrl: string): Promise<string | null> {
-  const res = await fetch(`${baseUrl}/api/session`)
-  if (!res.ok) return null
-  const body = (await res.json()) as { secret?: string }
-  return body.secret ?? null
+  try {
+    const url = new URL(baseUrl)
+    if (url.protocol !== 'http:') return null
+    const state = JSON.parse(await Bun.file(operatorSessionPath()).text()) as {
+      secret?: unknown
+      port?: unknown
+      host?: unknown
+    }
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    const configured = typeof state.host === 'string' && url.hostname === state.host
+    return (local || configured) &&
+      typeof state.secret === 'string' &&
+      Number(url.port || 80) === state.port
+      ? state.secret
+      : null
+  } catch {
+    return null
+  }
 }
 
 export async function submitAnswer(

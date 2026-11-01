@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { serve } from '../../server/src/serve.ts'
 import { type TestWorkspaces, testWorkspaces } from '../../server/src/test-util.ts'
 import { answerQuestion } from './answer.ts'
@@ -7,6 +10,8 @@ let ws: TestWorkspaces
 let store: import('@amagi/core').Store
 let server: ReturnType<typeof serve>
 let baseUrl: string
+let stateDir: string
+const oldDevHome = process.env.AMAGI_DEV_HOME
 
 beforeEach(() => {
   ws = testWorkspaces(['repo1'])
@@ -21,13 +26,23 @@ beforeEach(() => {
     options: ['npm', 'bun'],
     gateRef: null,
   })
-  server = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0 })
+  stateDir = mkdtempSync(join(tmpdir(), 'amagi-cli-session-'))
+  process.env.AMAGI_DEV_HOME = stateDir
+  server = serve({ workspaces: ws.workspaces, host: '127.0.0.1', port: 0, secret: 'secret' })
+  mkdirSync(join(stateDir, 'state', 'amagi'), { recursive: true })
+  writeFileSync(
+    join(stateDir, 'state', 'amagi', 'operator-session.json'),
+    JSON.stringify({ secret: 'secret', port: server.port }),
+  )
   baseUrl = `http://127.0.0.1:${server.port}`
 })
 
 afterEach(async () => {
   await server.stop(true)
   ws.cleanup()
+  if (oldDevHome === undefined) delete process.env.AMAGI_DEV_HOME
+  else process.env.AMAGI_DEV_HOME = oldDevHome
+  rmSync(stateDir, { recursive: true, force: true })
 })
 
 test('answers a waiting question through the server', async () => {
