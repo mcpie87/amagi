@@ -67,3 +67,78 @@ test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
     }
   },
 )
+
+test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
+  'masks a configured custom credential helper, including direct and explicit Git calls',
+  () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-git-helper-'))
+    const oldGlobal = process.env.GIT_CONFIG_GLOBAL
+    const helper = join(root, 'helper')
+    const config = join(root, 'gitconfig')
+    writeFileSync(helper, '#!/bin/sh\nprintf "username=test\\npassword=synthetic-secret\\n"\n', {
+      mode: 0o700,
+    })
+    writeFileSync(config, `[credential]\n  helper = ${helper}\n`)
+    process.env.GIT_CONFIG_GLOBAL = config
+    try {
+      const input = 'protocol=https\nhost=example.test\n\n'
+      const before = Bun.spawnSync(['git', 'credential', 'fill'], {
+        stdin: new TextEncoder().encode(input),
+        env: process.env,
+      })
+      expect({
+        status: before.exitCode,
+        out: before.stdout.toString(),
+        err: before.stderr.toString(),
+      }).toMatchObject({ status: 0, out: expect.stringContaining('synthetic-secret') })
+      const command = `
+        const input = new TextEncoder().encode(${JSON.stringify(input)});
+        for (const args of [
+          ['git', 'credential', 'fill'],
+          ['git', '-c', 'credential.helper=', '-c', ${JSON.stringify(`credential.helper=${helper}`)}, 'credential', 'fill'],
+          [${JSON.stringify(helper)}, 'get'],
+        ]) {
+          try {
+            const result = Bun.spawnSync(args, { stdin: input, stderr: 'pipe' });
+            if (result.stdout.toString().includes('synthetic-secret')) process.exit(1);
+            if (result.exitCode === 0) process.exit(2);
+          } catch (error) {
+            if (error.code !== 'EACCES') throw error;
+          }
+        }
+        const git = Bun.spawnSync(['git', '--version']);
+        if (git.exitCode !== 0) process.exit(3);
+      `
+      const result = Bun.spawnSync(sandboxArgv([process.execPath, '-e', command], root, root), {
+        stderr: 'pipe',
+        env: process.env,
+      })
+      expect(result.stderr.toString()).toBe('')
+      expect(result.exitCode).toBe(0)
+    } finally {
+      if (oldGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = oldGlobal
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test.skipIf(process.platform !== 'linux')(
+  'inspects the harness environment override for helpers',
+  () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-helper-env-'))
+    try {
+      const helper = join(root, 'helper')
+      const config = join(root, 'gitconfig')
+      writeFileSync(helper, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+      writeFileSync(config, `[credential]\n  helper = ${helper}\n`)
+      const args = sandboxArgv([process.execPath, '--version'], root, root, {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: config,
+      })
+      expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${helper}`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)

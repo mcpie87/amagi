@@ -176,7 +176,7 @@ function spawnUnlocked(
     env.AMAGI_REPO_KEY =
       findRegistryEntryByPath(env.AMAGI_REPO_ROOT)?.key ?? repoKey(env.AMAGI_REPO_ROOT)
   }
-  const proc = Bun.spawn(sandboxArgv(argv), {
+  const proc = Bun.spawn(sandboxArgv(argv, undefined, opts.cwd, env), {
     cwd: opts.cwd,
     env,
     stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
