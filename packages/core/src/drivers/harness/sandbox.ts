@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import { configHome, hostStateHome, stateHome } from '../../paths.ts'
+import { configHome, expandTilde, hostStateHome, stateHome } from '../../paths.ts'
 import { stripHarnessCredentials } from './env.ts'
 
 export function projectCommandEnv(inheritedEnv: NodeJS.ProcessEnv = process.env) {
@@ -577,7 +577,7 @@ function globalGitConfigPaths(cwd: string | undefined, env: NodeJS.ProcessEnv): 
 
 function sensitiveEnvironmentNames(env: NodeJS.ProcessEnv): string[] {
   return Object.keys(env).filter((name) =>
-    /^(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|SECURITY_TOKEN|PROFILE|WEB_IDENTITY_TOKEN_FILE|SHARED_CREDENTIALS_FILE|CONFIG_FILE|CONTAINER_CREDENTIALS_.*)|GOOGLE_APPLICATION_CREDENTIALS|CLOUDSDK_(?:CONFIG|AUTH_CREDENTIAL_FILE_OVERRIDE)|AZURE_(?:CONFIG_DIR|CLIENT_SECRET|CLIENT_CERTIFICATE_PATH|ACCESS_TOKEN|IDENTITY_TOKEN)|DOCKER_CONFIG|KUBECONFIG|GIT_ASKPASS|GIT_SSH(?:_COMMAND)?|SSH_ASKPASS|GIT_CONFIG_.*)$/.test(
+    /^(?:AMAGI_(?:DB|REGISTRY)|AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|SECURITY_TOKEN|PROFILE|WEB_IDENTITY_TOKEN_FILE|SHARED_CREDENTIALS_FILE|CONFIG_FILE|CONTAINER_CREDENTIALS_.*)|GOOGLE_APPLICATION_CREDENTIALS|CLOUDSDK_(?:CONFIG|AUTH_CREDENTIAL_FILE_OVERRIDE)|AZURE_(?:CONFIG_DIR|CLIENT_SECRET|CLIENT_CERTIFICATE_PATH|ACCESS_TOKEN|IDENTITY_TOKEN)|DOCKER_CONFIG|KUBECONFIG|GIT_ASKPASS|GIT_SSH(?:_COMMAND)?|SSH_ASKPASS|GIT_CONFIG_.*)$/.test(
       name,
     ),
   )
@@ -671,6 +671,12 @@ export function sandboxArgv(
     ...credentialEnvs.flatMap((entry) =>
       configuredCredentialCachePaths(cwd, entry, entry.HOME ?? effectiveHome),
     ),
+    ...credentialEnvs.flatMap((entry) =>
+      ['AMAGI_DB', 'AMAGI_REGISTRY'].flatMap((name) => {
+        const path = entry[name]
+        return path ? [resolve(expandTilde(path))] : []
+      }),
+    ),
     ...credentialEnvs.flatMap((entry) => defaultCredentialCachePaths(entry, cacheHomes)),
     ...globalGitConfigPaths(cwd, withoutGitConfigOverrides(process.env)),
     ...globalGitConfigPaths(cwd, defaultGitEnv),
@@ -679,6 +685,18 @@ export function sandboxArgv(
     ...systemGitConfigPaths(cwd, defaultGitEnv),
     ...systemGitConfigPaths(cwd, env),
     ...[stateHome(), hostStateHome()].map((state) => join(state, 'amagi')),
+    ...credentialEnvs.flatMap((entry) => {
+      const entryHome = entry.HOME ?? effectiveHome
+      const xdgState =
+        entry.XDG_STATE_HOME && isAbsolute(entry.XDG_STATE_HOME)
+          ? entry.XDG_STATE_HOME
+          : join(entryHome, '.local', 'state')
+      const devState =
+        entry.AMAGI_DEV_HOME && isAbsolute(entry.AMAGI_DEV_HOME)
+          ? [join(entry.AMAGI_DEV_HOME, 'state', 'amagi')]
+          : []
+      return [join(xdgState, 'amagi'), ...devState]
+    }),
     ...homes.flatMap((path) => [
       join(path, '.ssh'),
       join(path, '.git-credentials'),
@@ -689,24 +707,35 @@ export function sandboxArgv(
       join(path, 'Library', 'Keychains'),
       join(path, '.gnupg'),
     ]),
-    ...['SSH_AUTH_SOCK', 'GH_CONFIG_DIR', 'GLAB_CONFIG_DIR']
-      .map((name) => env[name])
-      .filter((path): path is string => path !== undefined && isAbsolute(path)),
+    ...credentialEnvs.flatMap((entry) =>
+      ['SSH_AUTH_SOCK', 'GH_CONFIG_DIR', 'GLAB_CONFIG_DIR']
+        .map((name) => entry[name])
+        .filter((path): path is string => path !== undefined && isAbsolute(path)),
+    ),
     ...['XDG_RUNTIME_DIR', 'GNUPGHOME']
       .map((name) => env[name])
       .filter((path): path is string => path !== undefined && isAbsolute(path)),
     ...[...homes.map((path) => join(path, '.config')), configHome()].flatMap((base) =>
       ['gh', 'glab-cli', 'tea'].map((name) => join(base, name)),
     ),
+    ...(process.platform === 'linux' && typeof process.getuid === 'function'
+      ? [join('/run/user', String(process.getuid()))]
+      : []),
   ]
-  const paths = [...new Set(hidden.filter(existsSync).flatMap((p) => [p, realpathSync(p)]))]
+  const paths = [
+    ...new Set(
+      hidden.flatMap((path) => (existsSync(path) ? [path, realpathSync(path)] : [resolve(path)])),
+    ),
+  ]
   if (process.platform === 'linux') {
     const root = options.workspaceOnly
       ? ['--ro-bind', '/', '/', ...(existsSync('/tmp') ? ['--bind', '/tmp', '/tmp'] : [])]
       : ['--bind', '/', '/']
-    const mounts = paths.flatMap((path) =>
-      statSync(path).isDirectory() ? ['--tmpfs', path] : ['--ro-bind', '/dev/null', path],
-    )
+    const mounts = paths
+      .filter(existsSync)
+      .flatMap((path) =>
+        statSync(path).isDirectory() ? ['--tmpfs', path] : ['--ro-bind', '/dev/null', path],
+      )
     const workspace = options.workspaceOnly ? ['--bind', cwd as string, cwd as string] : []
     const unset = sensitiveEnvironmentNames(env).flatMap((name) => ['--unsetenv', name])
     return [

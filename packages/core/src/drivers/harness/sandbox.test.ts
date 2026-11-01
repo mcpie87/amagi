@@ -1,5 +1,13 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sandboxArgv, sandboxExecProfile } from './sandbox.ts'
@@ -10,6 +18,87 @@ test('builds one macOS deny rule per secret path and blocks Keychain lookup', ()
   expect(profile).toContain('(deny file-read* file-write* (subpath "/home/test/.aws"))')
   expect(profile).toContain('(deny file-read* file-write* (subpath "/home/test/.netrc"))')
   expect(profile).not.toContain('(subpath "/home/test/.aws") (subpath')
+})
+
+test('includes expected paths in macOS deny rules even before they exist', () => {
+  const path = join(tmpdir(), 'amagi-future-secret')
+  expect(existsSync(path)).toBe(false)
+  expect(sandboxExecProfile([path])).toContain(`(subpath ${JSON.stringify(path)})`)
+})
+
+test('masks Amagi database and registry overrides and unsets them in the sandbox', () => {
+  const root = mkdtempSync(join(tmpdir(), 'amagi-state-overrides-'))
+  const database = join(root, 'custom.db')
+  const registry = join(root, 'custom-registry.json')
+  writeFileSync(database, 'private database')
+  writeFileSync(registry, 'private registry')
+  try {
+    const env = { ...process.env, AMAGI_DB: database, AMAGI_REGISTRY: registry }
+    const args = sandboxArgv([process.execPath, '--version'], root, root, env)
+    const joined = args.join('\0')
+    expect(joined).toContain(database)
+    expect(joined).toContain(registry)
+    if (process.platform === 'linux') {
+      expect(joined).toContain('--unsetenv\0AMAGI_DB')
+      expect(joined).toContain('--unsetenv\0AMAGI_REGISTRY')
+    } else if (process.platform === 'darwin') {
+      expect(joined).toContain('-u\0AMAGI_DB')
+      expect(joined).toContain('-u\0AMAGI_REGISTRY')
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('masks Amagi state paths selected by the child environment', () => {
+  const root = mkdtempSync(join(tmpdir(), 'amagi-state-homes-'))
+  const xdgState = join(root, 'xdg-state')
+  const devState = join(root, 'dev-home', 'state')
+  mkdirSync(join(xdgState, 'amagi'), { recursive: true })
+  mkdirSync(join(devState, 'amagi'), { recursive: true })
+  try {
+    const env = {
+      ...process.env,
+      HOME: root,
+      XDG_STATE_HOME: xdgState,
+      AMAGI_DEV_HOME: join(root, 'dev-home'),
+    }
+    const args = sandboxArgv([process.execPath, '--version'], root, root, env)
+    const joined = args.join('\0')
+    expect(joined).toContain(join(xdgState, 'amagi'))
+    expect(joined).toContain(join(devState, 'amagi'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(process.platform !== 'linux' || !existsSync(`/run/user/${process.getuid?.()}`))(
+  'masks the conventional user runtime directory without XDG_RUNTIME_DIR',
+  () => {
+    const runtime = `/run/user/${process.getuid?.()}`
+    const env = { ...process.env }
+    delete env.XDG_RUNTIME_DIR
+    const args = sandboxArgv([process.execPath, '--version'], undefined, process.cwd(), env)
+    expect(args.join('\0')).toContain(`--tmpfs\0${runtime}`)
+  },
+)
+
+test('masks the host SSH agent path even when the child environment removed it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'amagi-ssh-agent-path-'))
+  const socket = join(root, 'agent.sock')
+  writeFileSync(socket, 'socket stand-in')
+  const previous = process.env.SSH_AUTH_SOCK
+  process.env.SSH_AUTH_SOCK = socket
+  const env = { ...process.env }
+  delete env.SSH_AUTH_SOCK
+  try {
+    const args = sandboxArgv([process.execPath, '--version'], root, root, env)
+    expect(args.join('\0')).toContain(socket)
+  } finally {
+    if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+    else process.env.SSH_AUTH_SOCK = previous
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
