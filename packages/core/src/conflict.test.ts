@@ -14,6 +14,8 @@ import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 
 type Call = readonly string[]
+const shellCommand = (cmd: Call): string | undefined =>
+  cmd.at(-3) === 'sh' && cmd.at(-2) === '-c' ? cmd.at(-1) : undefined
 
 function fake(routes: (cmd: Call) => ExecResult | undefined): {
   exec: Exec
@@ -225,7 +227,7 @@ describe('resolveConflict', () => {
     const { exec, calls } = fake((c) => {
       if (c.includes('rev-parse')) return fail('')
       if (c.includes('merge')) return ok('Already up to date')
-      if (c[0] === 'sh' && c[2] === 'lint-code' && checks++ === 0) return fail('lint failed')
+      if (shellCommand(c) === 'lint-code' && checks++ === 0) return fail('lint failed')
       return undefined
     })
     const result = await resolveConflict({
@@ -242,7 +244,7 @@ describe('resolveConflict', () => {
     })
     expect(result.ok).toBe(true)
     expect(launches).toBe(1)
-    const commands = calls.filter((c) => c[0] === 'sh').map((c) => c[2])
+    const commands = calls.map(shellCommand).filter((c) => c !== undefined)
     expect(commands).toEqual(['format-code', 'lint-code', 'format-code', 'lint-code', 'test-code'])
     expect(calls.some((c) => c[1] === 'push')).toBe(true)
   })
@@ -517,7 +519,7 @@ describe('resolveConflict', () => {
       store.append('am-1', { type: 'task.state', from: null, to })
     }
     const { exec, calls } = fake((command) => {
-      if (command[0] === 'sh') return fail('check failed')
+      if (shellCommand(command) !== undefined) return fail('check failed')
       return conflicted(command)
     })
     let launches = 0

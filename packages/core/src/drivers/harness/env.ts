@@ -10,6 +10,8 @@ const FORGE_CREDENTIAL =
 export function stripHarnessCredentials(env: Record<string, string>): void {
   for (const key of Object.keys(env)) if (FORGE_CREDENTIAL.test(key)) delete env[key]
   delete env.SSH_AUTH_SOCK
+  delete env.DBUS_SESSION_BUS_ADDRESS
+  delete env.GPG_AGENT_INFO
 }
 
 /** gh/glab/tea config dirs whose contents are forge credentials and must never reach an agent. */

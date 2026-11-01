@@ -7,6 +7,7 @@ import { stageAndCommit } from './commit.ts'
 import { activeReviewerConfig, type Config, reviewerHarnessConfig } from './config.ts'
 import { type ClaimWorker, claimEligible } from './difficulty.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { sandboxProjectCommand } from './drivers/harness/sandbox.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
 import { PROPOSED_LABEL } from './drivers/tracker/beads.ts'
 import type { AgentProcess, Harness, Tracker, TrackerTask } from './drivers/types.ts'
@@ -2230,8 +2231,10 @@ export class Runner {
       if (this.deps.store.task(taskId)?.state === 'cancelled') this.checksAbort.abort()
     }, 500)
     try {
-      return await this.exec(['sh', '-c', command], {
+      const isolated = sandboxProjectCommand(command, cwd)
+      return await this.exec(isolated.command, {
         cwd,
+        env: isolated.env,
         timeoutMs: this.deps.config.checks.timeoutSec * 1000,
         signal: this.checksAbort.signal,
       })

@@ -113,16 +113,19 @@ function fakeHarness(summary = 'ambiguous'): Harness {
 }
 
 let cacheDir: string
+let oldCacheDir: string | undefined
 const watchers: ReturnType<typeof startMentionWatcher>[] = []
 
 beforeEach(() => {
   cacheDir = mkdtempSync(join(tmpdir(), 'amagi-mention-watch-'))
+  oldCacheDir = process.env.XDG_CACHE_HOME
   process.env.XDG_CACHE_HOME = cacheDir
 })
 
 afterEach(async () => {
   await Promise.all(watchers.splice(0).map((w) => w.stop()))
-  delete process.env.XDG_CACHE_HOME
+  if (oldCacheDir === undefined) delete process.env.XDG_CACHE_HOME
+  else process.env.XDG_CACHE_HOME = oldCacheDir
   rmSync(cacheDir, { recursive: true, force: true })
 })
 

@@ -1,5 +1,6 @@
 import { changedCheckTooling } from './check-tooling.ts'
 import type { Config } from './config.ts'
+import { sandboxProjectCommand } from './drivers/harness/sandbox.ts'
 import { errMsg } from './errors.ts'
 import type { CheckResult } from './events.ts'
 import type { Exec } from './exec.ts'
@@ -32,8 +33,10 @@ export async function runMandatoryWorkerChecks(
   }
   const results: CheckResult[] = []
   for (const command of configuredCheckCommands(checks)) {
-    const result = await exec(['sh', '-c', command], {
+    const isolated = sandboxProjectCommand(command, cwd)
+    const result = await exec(isolated.command, {
       cwd,
+      env: isolated.env,
       timeoutMs: checks.timeoutSec * 1000,
     })
     results.push({

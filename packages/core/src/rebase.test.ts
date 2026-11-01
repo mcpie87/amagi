@@ -7,6 +7,9 @@ import type { PrInfo } from './pr-check.ts'
 import { withPrWriteLock } from './pr-write-lock.ts'
 import { rebasePr } from './rebase.ts'
 
+const shellCommand = (cmd: readonly string[]): string | undefined =>
+  cmd.at(-3) === 'sh' && cmd.at(-2) === '-c' ? cmd.at(-1) : undefined
+
 const pr: PrInfo = {
   number: 7,
   title: 'Task',
@@ -49,7 +52,7 @@ for (const kind of ['github', 'gitlab', 'forgejo'] as const) {
     const f = fixture()
     f.config.forge.kind = kind
     expect(await f.run()).toBe('rebased')
-    expect(f.calls.filter((cmd) => cmd[0] === 'sh').map((cmd) => cmd[2])).toEqual([
+    expect(f.calls.map(shellCommand).filter((command) => command !== undefined)).toEqual([
       'setup',
       'format',
       'lint',
@@ -84,7 +87,7 @@ test('conflicts, failed checks and dirty check output never push and clean up', 
     (cmd: readonly string[]) =>
       cmd[1] === 'rebase' && cmd[2] !== '--abort' ? { exitCode: 1, stderr: 'conflict' } : undefined,
     (cmd: readonly string[]) =>
-      cmd[0] === 'sh' && cmd[2] === 'test' ? { exitCode: 1, stderr: 'test failed' } : undefined,
+      shellCommand(cmd) === 'test' ? { exitCode: 1, stderr: 'test failed' } : undefined,
     (cmd: readonly string[]) => (cmd[1] === 'status' ? { stdout: ' M file.ts' } : undefined),
   ]) {
     const f = fixture(over)
@@ -97,7 +100,7 @@ test('conflicts, failed checks and dirty check output never push and clean up', 
 test('a worker starting during checks prevents the push', async () => {
   let idle = true
   const f = fixture((cmd) => {
-    if (cmd[0] === 'sh') idle = false
+    if (shellCommand(cmd) !== undefined) idle = false
     return undefined
   })
   expect(await f.run(() => idle)).toBe('busy')

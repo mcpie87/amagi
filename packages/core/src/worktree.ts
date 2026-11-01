@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { sandboxProjectCommand } from './drivers/harness/sandbox.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { configHome, expandTilde, stateHome } from './paths.ts'
 import { findRegistryEntryByPath } from './registry.ts'
@@ -180,10 +181,11 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
     if (opts.setupCmd) {
-      const cmd = ['sh', '-c', opts.setupCmd]
+      const isolated = sandboxProjectCommand(opts.setupCmd, path)
+      const cmd = isolated.command
       opts.onSetupStarted?.(opts.setupCmd)
       const started = Date.now()
-      const result = await run(cmd, { cwd: path })
+      const result = await run(cmd, { cwd: path, env: isolated.env })
       opts.onSetupFinished?.({
         command: opts.setupCmd,
         exitCode: result.exitCode,

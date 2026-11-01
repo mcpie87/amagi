@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Config } from './config.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
+import { sandboxProjectCommand } from './drivers/harness/sandbox.ts'
 import { assertSafePushDestination } from './drivers/push-safety.ts'
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { configuredCheckCommands } from './mandatory-checks.ts'
@@ -64,11 +65,14 @@ export async function rebasePr(opts: {
       if (diff.exitCode === 0) return 'unchanged'
       if (diff.exitCode !== 1) throw new Error('cannot inspect rebased PR diff')
       if (config.repo.setupCmd !== null && config.repo.setupCmd !== '') {
-        await execOk(run, ['sh', '-c', config.repo.setupCmd], { cwd: path })
+        const isolated = sandboxProjectCommand(config.repo.setupCmd, path)
+        await execOk(run, isolated.command, { cwd: path, env: isolated.env })
       }
       for (const command of configuredCheckCommands(config.checks)) {
-        await execOk(run, ['sh', '-c', command], {
+        const isolated = sandboxProjectCommand(command, path)
+        await execOk(run, isolated.command, {
           cwd: path,
+          env: isolated.env,
           timeoutMs: config.checks.timeoutSec * 1000,
         })
       }

@@ -38,6 +38,8 @@ import { openDatabase } from './store/db.ts'
 import { Store } from './store/store.ts'
 
 type Call = readonly string[]
+const shellCommand = (cmd: Call): string | undefined =>
+  cmd.at(-3) === 'sh' && cmd.at(-2) === '-c' ? cmd.at(-1) : undefined
 
 function fake(routes: (cmd: Call) => ExecResult | undefined): {
   exec: Exec
@@ -507,7 +509,7 @@ describe('respondToMention', () => {
 
   test('a fix-pr mention with failing mandatory checks parks the task without committing or pushing', async () => {
     const { exec, calls } = fake((command) => {
-      if (command[0] === 'sh' && command[2] === 'just check') return fail('typecheck failed')
+      if (shellCommand(command) === 'just check') return fail('typecheck failed')
       if (command[1] === 'status') return { exitCode: 0, stdout: ' M src/fix.ts\n', stderr: '' }
       return command.includes('rev-parse') ? fail('') : undefined
     })

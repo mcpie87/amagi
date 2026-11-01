@@ -5,6 +5,41 @@ import { join } from 'node:path'
 import { sandboxArgv } from './sandbox.ts'
 
 test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
+  'limits project checks to a writable worktree and temporary files',
+  () => {
+    const root = mkdtempSync(join(process.cwd(), '.amagi-check-sandbox-'))
+    const worktree = join(root, 'worktree')
+    const outside = join(root, 'outside')
+    mkdirSync(worktree)
+    writeFileSync(outside, 'unchanged')
+    const sandbox = sandboxArgv(
+      [
+        process.execPath,
+        '-e',
+        `
+        const fs = require('node:fs');
+        try { fs.writeFileSync(${JSON.stringify(outside)}, 'changed'); process.exit(1); }
+        catch (error) { if (!['EROFS', 'EACCES'].includes(error.code)) throw error; }
+        fs.writeFileSync(${JSON.stringify(join(worktree, 'result'))}, 'ok');
+      `,
+      ],
+      root,
+      worktree,
+      {},
+      { workspaceOnly: true },
+    )
+    try {
+      const result = Bun.spawnSync(sandbox, { stderr: 'pipe' })
+      expect(result.exitCode).toBe(0)
+      expect(readFileSync(outside, 'utf8')).toBe('unchanged')
+      expect(readFileSync(join(worktree, 'result'), 'utf8')).toBe('ok')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
   'hides state and exposes only the shim, agent config and current run',
   () => {
     const root = mkdtempSync(join(tmpdir(), 'amagi-isolation-test-'))

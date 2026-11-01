@@ -764,8 +764,8 @@ describe('Runner.runOnce', () => {
       config({ checks: { format: 'just fmt', lint: 'just lint' } }),
       undefined,
       async (cmd, opts) => {
-        if (cmd[0] === 'sh' && cmd[1] === '-c') {
-          const command = cmd[2] ?? ''
+        if (cmd.at(-3) === 'sh' && cmd.at(-2) === '-c') {
+          const command = cmd.at(-1) ?? ''
           commands.push(command)
           return command === 'just fmt'
             ? { exitCode: 0, stdout: '', stderr: '' }
@@ -2413,7 +2413,7 @@ describe('Runner.runOnce', () => {
       }),
       undefined,
       async (cmd, opts) => {
-        if (baseLint && cmd[0] === 'sh' && cmd[2] === 'grep -q good flag') {
+        if (baseLint && cmd.at(-3) === 'sh' && cmd.at(-1) === 'grep -q good flag') {
           baseLint = false
           return { exitCode: 0, stdout: '', stderr: '' }
         }
