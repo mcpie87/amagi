@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { harnessEnv } from './env.ts'
+import { harnessEnv, stripHarnessCredentials } from './env.ts'
 import { shimDir } from './shim.ts'
 
 const savedToken = process.env.GH_TOKEN
@@ -40,6 +40,16 @@ test('removes forge credentials while retaining task-scoped values', () => {
   expect(env.GH_ENTERPRISE_TOKEN).toBeUndefined()
   expect(env.GITHUB_ENTERPRISE_TOKEN).toBeUndefined()
   expect(env.AMAGI_TASK_TOKEN).toBe('task-token')
+})
+
+test('removes credentials added by a harness environment override', () => {
+  const env: Record<string, string> = {
+    GH_TOKEN: 'secret',
+    SSH_AUTH_SOCK: '/tmp/agent.sock',
+    AMAGI_TASK_TOKEN: 'task-token',
+  }
+  stripHarnessCredentials(env)
+  expect(env).toEqual({ AMAGI_TASK_TOKEN: 'task-token' })
 })
 
 test('points gh and tea at empty Amagi-owned dirs so agents fail closed', () => {
