@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   addRegistryEntry,
+  killDescendantsSync,
   loadGlobalConfig,
   loadRegistry,
   makeHarness,
@@ -152,13 +153,22 @@ export const serveCommand = defineCommand({
     console.log(
       `${bold('amagi')} login (single use, expires in 10 minutes): ${server.url}api/login?token=${loginToken}`,
     )
-    console.log(dim(`  dev dashboard: http://localhost:5173/api/login?token=${loginToken}`))
+    const devDashboardUrl = process.env.AMAGI_DEV_DASHBOARD_URL
+    if (devDashboardUrl !== undefined) {
+      console.log(dim(`  dev dashboard: ${devDashboardUrl}api/login?token=${loginToken}`))
+    }
     for (const entry of workspaces.list()) {
       console.log(dim(`  repo ${entry.key}: ${entry.path}`))
     }
     console.log(dim('ctrl-c to stop'))
-    process.on('SIGINT', () => {
-      server.stop(true).finally(() => process.exit(0))
-    })
+    let stopping = false
+    const stop = () => {
+      if (stopping) return
+      stopping = true
+      killDescendantsSync(process.pid)
+      void server.stop(true).finally(() => process.exit(0))
+    }
+    process.on('SIGINT', stop)
+    process.on('SIGTERM', stop)
   },
 })
