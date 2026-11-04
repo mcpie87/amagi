@@ -56,3 +56,10 @@ export function resolveWorkspace(workspaces: Workspaces, repo: string): Workspac
   if (lookup.status === 'missing') throw new RepoError(404, `unknown repository ${repo}`)
   return lookup.workspace
 }
+
+/** Resolves configuration without opening a tracker, database, or runner. */
+export function resolveSetup(workspaces: Workspaces, repo: string) {
+  const setup = workspaces.setup(repo)
+  if (setup === null) throw new RepoError(404, `unknown repository ${repo}`)
+  return setup
+}

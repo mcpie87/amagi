@@ -3,10 +3,15 @@ import type { AgentEvent, AgentRole } from './events.ts'
 export type AgentLogLine = {
   id: number
   ts: number
-  role: AgentRole
-  kind: AgentEvent['kind']
+  role: AgentRole | 'checks'
+  kind: AgentEvent['kind'] | 'check'
   text: string
 }
+
+/** A stored event that renders as rows of a task's log. */
+export type AgentLogSource =
+  | { type: 'agent.stream'; role: AgentRole; ts: number; event: AgentEvent }
+  | { type: 'checks.output'; ts: number; text: string }
 
 const CAPACITY = 4000
 
@@ -32,7 +37,7 @@ export class AgentLogBuffer {
     return this.items[(this.start + index) % CAPACITY]
   }
 
-  push(role: AgentRole, ts: number, kind: AgentEvent['kind'], text: string): void {
+  push(role: AgentLogLine['role'], ts: number, kind: AgentLogLine['kind'], text: string): void {
     const writeIndex = (this.start + this.count) % CAPACITY
     this.items[writeIndex] = { id: this.nextId++, ts, role, kind, text }
     if (this.count < CAPACITY) {
@@ -110,6 +115,22 @@ export function linesForAgentEvent(event: AgentEvent): string[] {
   }
 }
 
+function linesForSource(source: AgentLogSource): Omit<AgentLogLine, 'id'>[] {
+  if (source.type === 'checks.output')
+    return splitLines(source.text).map((text) => ({
+      role: 'checks',
+      ts: source.ts,
+      kind: 'check',
+      text,
+    }))
+  return linesForAgentEvent(source.event).map((text) => ({
+    role: source.role,
+    ts: source.ts,
+    kind: source.event.kind,
+    text,
+  }))
+}
+
 export type Scheduler = (flush: () => void) => void
 
 const rafScheduler: Scheduler = (flush) => {
@@ -151,15 +172,16 @@ export class AgentLogStore {
     this.scheduleFlush()
   }
 
+  appendCheckOutput(taskId: string, ts: number, text: string): void {
+    const buffer = this.get(taskId)
+    for (const line of splitLines(text)) buffer.push('checks', ts, 'check', line)
+    this.dirty.add(taskId)
+    this.scheduleFlush()
+  }
+
   /** Lines from before the live stream began, placed ahead of whatever it already appended. */
-  backfill(
-    taskId: string,
-    events: readonly { role: AgentRole; ts: number; event: AgentEvent }[],
-  ): void {
-    const lines = events.flatMap(({ role, ts, event }) =>
-      linesForAgentEvent(event).map((text) => ({ role, ts, kind: event.kind, text })),
-    )
-    this.get(taskId).prepend(lines)
+  backfill(taskId: string, sources: readonly AgentLogSource[]): void {
+    this.get(taskId).prepend(sources.flatMap(linesForSource))
     this.dirty.add(taskId)
     this.scheduleFlush()
   }

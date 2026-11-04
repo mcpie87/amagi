@@ -1,8 +1,10 @@
 import {
-  Config,
+  configSettingOrigins,
   EDITABLE_SETTINGS,
+  errMsg,
   gitPersonas,
   loadConfig,
+  loadGlobalConfig,
   type RunServiceApi,
   settingPatch,
   settingValue,
@@ -13,10 +15,11 @@ import {
 import { WorktreePool } from '@amagi/core/worktree-pool'
 import { Hono } from 'hono'
 import * as z from 'zod'
-import { resolveWorkspace, valid } from './route-utils.ts'
+import { resolveSetup, valid } from './route-utils.ts'
 import { RepoParam } from './schemas.ts'
 
 /** Path to value; null resets the key to its default. */
+const ConfigParam = z.object({ repo: RepoParam.shape.repo.optional() })
 const ConfigBody = z.object({ values: z.record(z.string(), z.unknown()) })
 
 export type ConfigRouteDeps = {
@@ -33,38 +36,47 @@ export function createConfigRoutes({ workspaces, runnerFor }: ConfigRouteDeps) {
   const running = async (repo: string): Promise<boolean> =>
     ((await runnerFor(repo)?.status())?.running.length ?? 0) > 0
 
-  const view = async (repo: string) => {
-    const ws = resolveWorkspace(workspaces, repo)
+  const setup = (repo?: string) =>
+    repo === undefined ? { root: null, config: loadGlobalConfig() } : resolveSetup(workspaces, repo)
+  const view = async (repo?: string) => {
+    const ws = setup(repo)
     return {
       values: Object.fromEntries(
         EDITABLE_SETTINGS.map(({ path }) => [path, settingValue(ws.config, path) ?? null]),
       ),
+      origins: configSettingOrigins(
+        ws.root,
+        EDITABLE_SETTINGS.map(({ path }) => path),
+      ),
       server: ws.config.server,
       personas: gitPersonas(),
-      running: await running(repo),
+      running: repo === undefined ? false : await running(repo),
     }
   }
 
-  return new Hono()
-    .get('/api/repos/:repo/config', valid('param', RepoParam), async (c) =>
-      c.json(await view(c.req.valid('param').repo)),
-    )
+  const app = new Hono()
+  for (const path of ['/api/config', '/api/repos/:repo/config']) {
+    app
+      .get(path, valid('param', ConfigParam), async (c) =>
+        c.json(await view(c.req.valid('param').repo)),
+      )
 
-    .patch(
-      '/api/repos/:repo/config',
-      valid('param', RepoParam),
-      valid('json', ConfigBody),
-      async (c) => {
+      .patch(path, valid('param', ConfigParam), valid('json', ConfigBody), async (c) => {
         const { repo } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
+        const ws = setup(repo)
         const entries = Object.entries(c.req.valid('json').values)
         const settings = entries.map(([path]) => EDITABLE_SETTINGS.find((s) => s.path === path))
-        const unknown = entries.filter((_, i) => settings[i] === undefined).map(([path]) => path)
+        const unknown = entries
+          .filter(
+            (_, i) =>
+              settings[i] === undefined || (repo === undefined && settings[i]?.layer !== 'global'),
+          )
+          .map(([path]) => path)
         if (unknown.length > 0) {
           return c.json({ error: `not editable here: ${unknown.join(', ')}` }, 400)
         }
         const blocked = settings.filter((s) => s !== undefined && 'idleOnly' in s)
-        if (blocked.length > 0 && (await running(repo))) {
+        if (blocked.length > 0 && repo !== undefined && (await running(repo))) {
           return c.json(
             {
               error: `stop the running tasks first: changing ${blocked.map((s) => s?.path).join(', ')} would strand their worktrees`,
@@ -73,6 +85,7 @@ export function createConfigRoutes({ workspaces, runnerFor }: ConfigRouteDeps) {
           )
         }
         if (
+          ws.root !== null &&
           entries.some(
             ([path, value]) =>
               path === 'repo.worktreeRoot' && value !== ws.config.repo.worktreeRoot,
@@ -94,37 +107,45 @@ export function createConfigRoutes({ workspaces, runnerFor }: ConfigRouteDeps) {
           return c.json({ error: `no git persona named ${persona}` }, 400)
         }
 
-        const candidate = structuredClone(ws.config) as Record<string, unknown>
-        for (const [path, value] of entries) {
+        const repoPatch: Record<string, unknown> = {}
+        const globalPatch: Record<string, unknown> = {}
+        entries.forEach(([path, value], i) => {
+          let node = settings[i]?.layer === 'global' ? globalPatch : repoPatch
           const keys = path.split('.')
           const last = keys.pop() as string
-          let node = candidate
-          for (const key of keys) node = node[key] as Record<string, unknown>
-          if (value === null) delete node[last]
-          else node[last] = value
+          for (const key of keys) {
+            node[key] ??= {}
+            node = node[key] as Record<string, unknown>
+          }
+          node[last] = value
+        })
+        try {
+          if (ws.root !== null)
+            loadConfig(ws.root, { allowIncompleteChecks: true, repoPatch, globalPatch })
+          else loadGlobalConfig(globalPatch)
+        } catch (error) {
+          return c.json({ error: errMsg(error) }, 400)
         }
-        const parsed = Config.safeParse(candidate)
-        if (!parsed.success) return c.json({ error: z.prettifyError(parsed.error) }, 400)
 
         entries.forEach(([path, value], i) => {
           const patch = settingPatch(path, value)
           if (settings[i]?.layer === 'global') writeGlobalConfig(patch)
-          else writeConfig(ws.root, patch)
+          else if (ws.root !== null) writeConfig(ws.root, patch)
         })
-        // Sections are refreshed in place: pollers and runners hold this config object.
-        const fresh = loadConfig(ws.root).config as unknown as Record<
-          string,
-          Record<string, unknown>
-        >
-        const live = ws.config as unknown as Record<string, Record<string, unknown>>
-        for (const section of new Set(entries.map(([path]) => path.split('.')[0] as string))) {
-          const target = live[section]
-          const source = fresh[section]
-          if (target === undefined || source === undefined) continue
-          for (const key of Object.keys(target)) if (!(key in source)) delete target[key]
-          Object.assign(target, source)
-        }
+        const globalSections = new Set(
+          entries
+            .filter((_, i) => settings[i]?.layer === 'global')
+            .map(([path]) => path.split('.')[0] as string),
+        )
+        const repoSections = new Set(
+          entries
+            .filter((_, i) => settings[i]?.layer === 'repo')
+            .map(([path]) => path.split('.')[0] as string),
+        )
+        workspaces.refreshConfig(globalSections)
+        if (repo !== undefined) workspaces.refreshConfig(repoSections, repo)
         return c.json(await view(repo))
-      },
-    )
+      })
+  }
+  return app
 }

@@ -1,6 +1,7 @@
 import type { Config } from './config.ts'
 import { ClaudeHarness } from './drivers/harness/claude.ts'
 import { CodexHarness } from './drivers/harness/codex.ts'
+import { OmpHarness } from './drivers/harness/omp.ts'
 import { OpencodeHarness } from './drivers/harness/opencode.ts'
 import { BeadsTracker } from './drivers/tracker/beads.ts'
 import { ForgejoTracker, GithubTracker } from './drivers/tracker/forge.ts'
@@ -35,6 +36,11 @@ export function makeHarness(config: Config['harness']['implement']): Harness {
       })
     case 'opencode':
       return new OpencodeHarness({
+        bin: config.bin,
+        ...(config.seat === undefined ? {} : { seat: config.seat }),
+      })
+    case 'omp':
+      return new OmpHarness({
         bin: config.bin,
         ...(config.seat === undefined ? {} : { seat: config.seat }),
       })

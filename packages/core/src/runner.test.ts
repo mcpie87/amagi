@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { AsyncQueue } from './async-queue.ts'
 import { Config } from './config.ts'
+import { ForgeApiError } from './drivers/forge-api.ts'
 import type { CreatePrOptions, PrComment, PrDriver, PrState, PullRequest } from './drivers/pr.ts'
 import type {
   AgentOutcome,
@@ -107,6 +108,9 @@ class FakeHarness implements Harness {
   readonly calls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
   /** Viability-check runs are recorded here, separate from implementation calls. */
   readonly verifyCalls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+  /** Asks for a missing commit message, answered by `commitMessageTurn` without using `turns`. */
+  readonly commitMessageCalls: { resumeFrom: string | null; prompt: string; cwd: string }[] = []
+  commitMessageTurn: Turn = {}
   private readonly verifyResponse: Turn
   replacesSystemPromptOnResume = false
   kills = 0
@@ -146,9 +150,14 @@ class FakeHarness implements Harness {
 
   private run(resumeFrom: string | null, opts: AgentStartOptions): AgentProcess {
     const verify = opts.systemPrompt?.includes('viability checker') === true
-    const calls = verify ? this.verifyCalls : this.calls
+    const commitMessage = opts.prompt.includes('has no `### Commit message` section')
+    const calls = verify ? this.verifyCalls : commitMessage ? this.commitMessageCalls : this.calls
     calls.push({ resumeFrom, prompt: opts.prompt, cwd: opts.cwd })
-    const turn = verify ? this.verifyResponse : (this.turns.shift() ?? {})
+    const turn = verify
+      ? this.verifyResponse
+      : commitMessage
+        ? this.commitMessageTurn
+        : (this.turns.shift() ?? {})
     turn.effect?.(opts.cwd, opts.prompt)
 
     const queue = new AsyncQueue<AgentEvent>()
@@ -343,6 +352,14 @@ class FakePr implements PrDriver {
   }
 
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async getPrBody(): Promise<string> {
+    return ''
+  }
+  async updatePr(
+    _cwd: string,
+    _number: number,
+    _update: { title: string; body: string },
+  ): Promise<void> {}
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
@@ -358,7 +375,7 @@ let previousStateHome: string | undefined
 const config = ({ checks, ...rest }: Record<string, unknown> = {}) =>
   Config.parse({
     repo: { baseBranch: 'main', worktreeRoot: wtRoot },
-    // No formatter/lint tooling in the fake worktrees, so the mandatory gate is off.
+    // Fake worktrees explicitly opt out of project commands unless a test supplies them.
     checks: { commands: [], format: null, lint: null, ...(checks as Record<string, unknown>) },
     ...rest,
   })
@@ -788,6 +805,91 @@ describe('Runner.runOnce', () => {
       { command: 'just lint', exitCode: 1, output: 'error: Recipe `lint` not found.' },
     ])
   })
+
+  test('records check output as it streams, headed by the command', async () => {
+    let headerBeforeExit = false
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile]),
+      config({ checks: { commands: ['make ci'] } }),
+      undefined,
+      async (cmd, opts) => {
+        if (cmd.at(-3) === 'sh' && cmd.at(-2) === '-c') {
+          headerBeforeExit = store
+            .events({ taskId: TASK.id })
+            .some((event) => event.type === 'checks.output' && event.text === '$ make ci\n')
+          opts?.onOutput?.('collected 3 items\n')
+          opts?.onOutput?.('3 errors')
+          return { exitCode: 1, stdout: 'collected 3 items\n3 errors', stderr: '' }
+        }
+        return exec(cmd, opts)
+      },
+    ).runOnce()
+
+    expect(headerBeforeExit).toBe(true)
+    const output = store
+      .events({ taskId: TASK.id })
+      .flatMap((event) => (event.type === 'checks.output' ? [event.text] : []))
+    expect(output.join('')).toBe('$ make ci\ncollected 3 items\n3 errors')
+  })
+
+  test('runs every user-defined command in order before and after implementation', async () => {
+    const commands: { command: string; implemented: boolean }[] = []
+    let implemented = false
+    const result = await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([
+        {
+          ...writesAFile,
+          effect: (cwd, prompt) => {
+            implemented = true
+            writesAFile.effect?.(cwd, prompt)
+          },
+        },
+      ]),
+      config({ checks: { commands: ['make verify', 'python smoke.py'] } }),
+      undefined,
+      async (cmd, opts) => {
+        if (cmd.at(-3) === 'sh' && cmd.at(-2) === '-c') {
+          commands.push({ command: cmd.at(-1) ?? '', implemented })
+          return { exitCode: 0, stdout: '', stderr: '' }
+        }
+        return exec(cmd, opts)
+      },
+    ).runOnce()
+    expect(result?.state).toBe('pr_open')
+    expect(commands).toEqual([
+      { command: 'make verify', implemented: false },
+      { command: 'python smoke.py', implemented: false },
+      { command: 'make verify', implemented: true },
+      { command: 'python smoke.py', implemented: true },
+    ])
+  })
+
+  test.each([
+    { before: ['make baseline'], expected: ['make baseline', 'make verify'] },
+    { before: [], expected: ['make verify'] },
+  ])(
+    'runs before checks $before ahead of agent work, after checks once it is done',
+    async ({ before, expected }) => {
+      const commands: string[] = []
+      const result = await makeRunner(
+        new FakeTracker([TASK]),
+        new FakeHarness([writesAFile]),
+        config({ checks: { before, commands: ['make verify'] } }),
+        undefined,
+        async (cmd, opts) => {
+          if (cmd.at(-3) === 'sh' && cmd.at(-2) === '-c') {
+            commands.push(cmd.at(-1) ?? '')
+            return { exitCode: 0, stdout: '', stderr: '' }
+          }
+          return exec(cmd, opts)
+        },
+      ).runOnce()
+      expect(result?.state).toBe('pr_open')
+      expect(commands).toEqual([...expected])
+    },
+  )
 
   test('does not start the agent when base lint already fails', async () => {
     const harness = new FakeHarness([writesAFile])
@@ -1441,11 +1543,49 @@ describe('Runner.runOnce', () => {
       'task.state',
       'checks.finished',
       'review.skipped',
+      // writesAFile ends without a commit message, so the agent is asked for one.
+      'task.state',
+      'agent.exited',
+      'task.state',
       'commit.created',
       'task.state',
       'pr.created',
       'task.state',
     ])
+  })
+
+  test('a final message without a commit message is asked for one, which the commit uses', async () => {
+    const harness = new FakeHarness([writesAFile])
+    harness.commitMessageTurn = {
+      outcome: {
+        summary:
+          'Dodaje plik powitalny.\n\n### Conclusion\n\n- `hello.txt`: nowy plik\n\n### Commit message\n\n```text\n[WEWAI-1] Plik powitalny\n\n- hello.txt wita czytelnika\n```',
+      },
+    }
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.commitMessageCalls).toHaveLength(1)
+    expect(harness.commitMessageCalls[0]?.resumeFrom).toBe('sess-1')
+    const wt = store.task(TASK.id)?.worktree ?? ''
+    const log = await execOk(exec, ['git', 'log', '-1', '--format=%B'], { cwd: wt })
+    expect(log).toStartWith('[WEWAI-1] Plik powitalny\n\n- hello.txt wita czytelnika\n')
+  })
+
+  test('a final message that carries a commit message is not asked again', async () => {
+    const harness = new FakeHarness([
+      {
+        ...writesAFile,
+        outcome: {
+          summary:
+            'Adds hello.txt.\n\n### Commit message\n\n```text\n[bd-a1b2] Greeting\n\nAdds hello.txt.\n```',
+        },
+      },
+    ])
+    const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+    expect(result?.state).toBe('pr_open')
+    expect(harness.commitMessageCalls).toHaveLength(0)
   })
 
   test('the agent.started event carries the harness-reported model and effort', async () => {
@@ -1685,6 +1825,104 @@ describe('Runner.runOnce', () => {
     expect(pr.calls[0]?.body).toContain('Run `hello`')
   })
 
+  test('records a demo after commit, uploads it into the PR body and discards worktree leftovers', async () => {
+    class UploadingPr extends FakePr {
+      readonly uploads: string[] = []
+      async uploadFile(_cwd: string, path: string): Promise<string> {
+        this.uploads.push(basename(path))
+        return `https://gitlab.example.com/uploads/${basename(path)}`
+      }
+    }
+    const pr = new UploadingPr()
+    const harness = new FakeHarness([
+      writesAFile,
+      {
+        effect: (cwd, prompt) => {
+          const outputDir = prompt.match(/^Output directory: (.+)$/m)?.[1] ?? ''
+          writeFileSync(join(outputDir, '01-hello.webm'), 'video')
+          writeFileSync(join(outputDir, 'notes.txt'), 'not a video')
+          writeFileSync(join(cwd, 'demo.spec.ts'), 'scratch')
+        },
+      },
+    ])
+    await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
+
+    expect(harness.calls[1]?.prompt).toContain(join(runStateDir(TASK.id), 'demo'))
+    expect(pr.uploads).toEqual(['01-hello.webm'])
+    expect(pr.calls[0]?.body).toContain(
+      '![01-hello.webm](https://gitlab.example.com/uploads/01-hello.webm)',
+    )
+    expect(existsSync(join(harness.calls[1]?.cwd ?? '', 'demo.spec.ts'))).toBe(false)
+    expect(states(TASK.id)).toContain('pr_open')
+  })
+
+  test('a demo without a video still opens the PR', async () => {
+    class UploadingPr extends FakePr {
+      async uploadFile(): Promise<string> {
+        return 'https://gitlab.example.com/uploads/unused.webm'
+      }
+    }
+    const pr = new UploadingPr()
+    await makeRunner(
+      new FakeTracker([TASK]),
+      new FakeHarness([writesAFile, { outcome: { summary: 'the dev server would not start' } }]),
+      config(),
+      pr,
+    ).runOnce()
+
+    expect(pr.calls[0]?.body).not.toContain('### 🎬 Demo')
+    expect(states(TASK.id)).toContain('pr_open')
+    expect(
+      store
+        .events({ taskId: TASK.id, limit: 999 })
+        .some(
+          (e) =>
+            e.type === 'error' && e.message.includes('no video recorded: the dev server would not'),
+        ),
+    ).toBe(true)
+  })
+
+  test('recordDemoNow puts the videos into an open PR description, before the conclusion', async () => {
+    class UploadingPr extends FakePr {
+      readonly uploads: string[] = []
+      readonly updates: { title: string; body: string }[] = []
+      async uploadFile(_cwd: string, path: string): Promise<string> {
+        this.uploads.push(basename(path))
+        return `https://gitlab.example.com/uploads/${basename(path)}`
+      }
+      override async getPrBody(): Promise<string> {
+        return '## ✨ Write hello\n\n### 📝 Summary\n\nWrite hello.txt\n\n### 🧠 Conclusion\n\nDone.'
+      }
+      override async updatePr(
+        _cwd: string,
+        _number: number,
+        update: { title: string; body: string },
+      ) {
+        this.updates.push(update)
+      }
+    }
+    const pr = new UploadingPr()
+    const tracker = new FakeTracker([TASK])
+    tracker.freshTask = TASK
+    await makeRunner(tracker, new FakeHarness([writesAFile]), config(), pr).runOnce()
+
+    const harness = new FakeHarness([
+      {
+        effect: (_cwd, prompt) => {
+          const outputDir = prompt.match(/^Output directory: (.+)$/m)?.[1] ?? ''
+          writeFileSync(join(outputDir, '01-hello.webm'), 'video')
+        },
+      },
+    ])
+    await makeRunner(tracker, harness, config(), pr).recordDemoNow(TASK.id)
+
+    expect(pr.uploads).toEqual(['01-hello.webm'])
+    const body = pr.updates[0]?.body ?? ''
+    expect(body).toContain('![01-hello.webm](https://gitlab.example.com/uploads/01-hello.webm)')
+    expect(body.indexOf('### 🎬 Demo')).toBeLessThan(body.indexOf('### 🧠 Conclusion'))
+    expect(body).toContain('Done.')
+  })
+
   test('renders the agent-authored conclusion after the changed-files list', async () => {
     const tracker = new FakeTracker([TASK])
     tracker.freshTask = {
@@ -1756,9 +1994,9 @@ describe('Runner.runOnce', () => {
 
   test('a failed pull request escalates but keeps the commit', async () => {
     const pr = new FakePr()
-    pr.failWith = new Error('gh not authenticated')
+    pr.failWith = new ForgeApiError('github api POST pulls: 401 bad credentials', 401)
     const diagnosis =
-      'The branch is committed locally, but gh has no active login. Run gh auth login, then open the pull request from this branch.'
+      'The branch is committed locally, but the forge rejected the token. Fix the token, then open the pull request from this branch.'
     const harness = new FakeHarness([writesAFile, { outcome: { summary: diagnosis } }])
     const result = await makeRunner(new FakeTracker([TASK]), harness, config(), pr).runOnce()
 
@@ -1769,11 +2007,11 @@ describe('Runner.runOnce', () => {
     expect(pr.calls).toHaveLength(2)
     expect(harness.calls).toHaveLength(2)
     expect(harness.calls[1]?.resumeFrom).toBe('sess-1')
-    expect(harness.calls[1]?.prompt).toContain('gh not authenticated')
+    expect(harness.calls[1]?.prompt).toContain('401 bad credentials')
     expect(harness.calls[1]?.prompt).toContain('Resolve the problem if you can')
     const errors = store.events({ taskId: TASK.id }).filter((e) => e.type === 'error')
     expect(
-      errors.some((e) => e.type === 'error' && e.message.includes('gh not authenticated')),
+      errors.some((e) => e.type === 'error' && e.message.includes('(forge needs a token: set it')),
     ).toBe(true)
   })
 
@@ -2000,6 +2238,90 @@ describe('Runner.runOnce', () => {
     expect(existsSync(join(wtRoot, 'demo-bd-a1b2-add-a-greeting-file'))).toBe(false)
   })
 
+  test.each(['passed', 'interrupted'])(
+    'a reclaimed task whose checks %s skips implementation',
+    async (checks) => {
+      const wtPath = join(wtRoot, 'resume-worktree')
+      const branch = 'amagi/bd-a1b2-add-a-greeting-file'
+      await execOk(exec, ['git', 'worktree', 'add', '-b', branch, wtPath, 'main'], { cwd: repo })
+      writeFileSync(join(wtPath, 'hello.txt'), 'hi\n')
+
+      store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+      store.append(TASK.id, { type: 'worktree.created', path: wtPath, branch })
+      store.append(TASK.id, { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+      store.append(TASK.id, { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+      const agent = { harness: 'fake', model: null, effort: null, cwd: wtPath, resumed: false }
+      store.append(TASK.id, { type: 'agent.started', role: 'implement', ...agent })
+      store.append(TASK.id, {
+        type: 'agent.stream',
+        role: 'implement',
+        event: { kind: 'result', ok: true, summary: 'Added hello.txt.' },
+      })
+      store.append(TASK.id, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 0,
+        sessionId: 's1',
+      })
+      store.append(TASK.id, { type: 'task.state', from: 'implementing', to: 'checks' })
+      if (checks === 'passed') {
+        store.append(TASK.id, { type: 'checks.finished', ok: true, results: [] })
+        store.append(TASK.id, { type: 'task.state', from: 'checks', to: 'needs_human' })
+      }
+      store.append(TASK.id, { type: 'task.reclaimed' })
+
+      const harness = new FakeHarness([])
+      const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+      expect(result?.state).toBe('pr_open')
+      expect(harness.calls).toHaveLength(0)
+      const log = await execOk(exec, ['git', 'log', '-1', '--format=%B'], { cwd: wtPath })
+      expect(log).toContain('Added hello.txt.')
+    },
+  )
+
+  test.each(['failed checks', 'unfinished agent', 'failed agent'])(
+    'a reclaimed task with %s does not reuse an older completed implementation',
+    async (interruption) => {
+      const wtPath = join(wtRoot, 'resume-worktree')
+      const branch = 'amagi/bd-a1b2-add-a-greeting-file'
+      await execOk(exec, ['git', 'worktree', 'add', '-b', branch, wtPath, 'main'], { cwd: repo })
+      writeFileSync(join(wtPath, 'hello.txt'), 'before\n')
+
+      store.append(TASK.id, { type: 'task.claimed', title: TASK.title, tracker: 'fake' })
+      store.append(TASK.id, { type: 'worktree.created', path: wtPath, branch })
+      const agent = { harness: 'fake', model: null, effort: null, cwd: wtPath, resumed: false }
+      store.append(TASK.id, { type: 'agent.started', role: 'implement', ...agent })
+      store.append(TASK.id, {
+        type: 'agent.exited',
+        role: 'implement',
+        exitCode: 0,
+        sessionId: 's1',
+      })
+      store.append(TASK.id, { type: 'checks.finished', ok: true, results: [] })
+      if (interruption === 'failed checks') {
+        store.append(TASK.id, { type: 'checks.finished', ok: false, results: [] })
+      } else {
+        store.append(TASK.id, { type: 'agent.started', role: 'implement', ...agent })
+        if (interruption === 'failed agent') {
+          store.append(TASK.id, {
+            type: 'agent.exited',
+            role: 'implement',
+            exitCode: 1,
+            sessionId: 's2',
+          })
+        }
+      }
+      store.append(TASK.id, { type: 'task.reclaimed' })
+
+      const harness = new FakeHarness([writesAFile])
+      const result = await makeRunner(new FakeTracker([TASK]), harness).runOnce()
+
+      expect(result?.state).toBe('pr_open')
+      expect(readFileSync(join(wtPath, 'hello.txt'), 'utf8')).toBe('hi\n')
+    },
+  )
+
   test('a reclaimed lease stops the run without parking the task in needs_human', async () => {
     // An external reclaim has no local task.reclaimed event, so the runner
     // must queue the task after it stops, without escalating to needs_human.
@@ -2160,7 +2482,9 @@ describe('Runner.runOnce', () => {
     const result = await makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['grep -q good flag'] } }),
+      config({
+        checks: { commands: ['(test ! -e hello.txt && test ! -e flag) || grep -q good flag'] },
+      }),
     ).runOnce()
 
     expect(result?.state).toBe('pr_open')
@@ -2186,7 +2510,9 @@ describe('Runner.runOnce', () => {
     await makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['grep -q good flag'] } }),
+      config({
+        checks: { commands: ['(test ! -e hello.txt && test ! -e flag) || grep -q good flag'] },
+      }),
       pr,
     ).runOnce()
 
@@ -2204,7 +2530,7 @@ describe('Runner.runOnce', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['false'] }, loop: { maxCheckRounds: 1 } }),
+      config({ checks: { commands: ['test ! -e hello.txt'] }, loop: { maxCheckRounds: 1 } }),
     ).runOnce()
     await answerRecovery('park')
 
@@ -2220,7 +2546,7 @@ describe('Runner.runOnce', () => {
       new FakeHarness([writesAFile]),
       // `; true` keeps sh alive as the parent, so sleep holds stdout as a grandchild.
       config({
-        checks: { commands: ['sleep 30; true'], timeoutSec: 1 },
+        checks: { commands: ['if test -e hello.txt; then sleep 30; true; fi'], timeoutSec: 1 },
         loop: { maxCheckRounds: 0 },
       }),
     ).runOnce()
@@ -2243,7 +2569,10 @@ describe('Runner.runOnce', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['grep -q good flag'] }, loop: { maxCheckRounds: 1 } }),
+      config({
+        checks: { commands: ['(test ! -e hello.txt && test ! -e flag) || grep -q good flag'] },
+        loop: { maxCheckRounds: 1 },
+      }),
     ).runOnce()
     await answerRecovery('retry')
 
@@ -2268,7 +2597,7 @@ describe('Runner.runOnce', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['test -f fresh.txt'] } }),
+      config({ checks: { commands: ['test ! -e hello.txt || test -f fresh.txt'] } }),
     ).runOnce()
     await answerRecovery('rebase')
 
@@ -2294,7 +2623,7 @@ describe('Runner.runOnce', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['test -f fresh.txt'] } }),
+      config({ checks: { commands: ['test ! -e hello.txt || test -f fresh.txt'] } }),
     ).runOnce()
     await waitFor(() => store.unansweredQuestions(TASK.id).length > 0)
 
@@ -2341,7 +2670,9 @@ describe('Runner.runOnce', () => {
       new FakeTracker([TASK]),
       harness,
       config({
-        checks: { commands: ['printf "# task edit\\n" > README.md; false'] },
+        checks: {
+          commands: ['if test -e hello.txt; then printf "# task edit\\n" > README.md; false; fi'],
+        },
         loop: { maxCheckRounds: 1 },
       }),
     ).runOnce()
@@ -2358,7 +2689,7 @@ describe('Runner.runOnce', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       harness,
-      config({ checks: { commands: ['false'] }, loop: { maxCheckRounds: 1 } }),
+      config({ checks: { commands: ['test ! -e hello.txt'] }, loop: { maxCheckRounds: 1 } }),
     ).runOnce()
     await answerRecovery('rebase')
 
@@ -2372,7 +2703,7 @@ describe('Runner.runOnce', () => {
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile, {}, {}]),
       config({
-        checks: { commands: ['false'] },
+        checks: { commands: ['test ! -e hello.txt'] },
         loop: { maxCheckRounds: 1, questionParkTimeoutSec: 1 },
       }),
     ).runOnce()
@@ -2385,7 +2716,10 @@ describe('Runner.runOnce', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile, {}, {}]),
-      config({ checks: { commands: ['false', 'true'] }, loop: { maxCheckRounds: 0 } }),
+      config({
+        checks: { commands: ['test ! -e hello.txt', 'true'] },
+        loop: { maxCheckRounds: 0 },
+      }),
     ).runOnce()
     await answerRecovery('park')
     await pending
@@ -3153,7 +3487,7 @@ describe('Runner.cancel', () => {
     const runner = makeRunner(
       tracker,
       new FakeHarness([writesAFile]),
-      config({ checks: { commands: ['sleep 30; true'] } }),
+      config({ checks: { commands: ['if test -e hello.txt; then sleep 30; true; fi'] } }),
     )
     const pending = runner.runOnce()
 
@@ -3170,7 +3504,7 @@ describe('Runner.cancel', () => {
     const pending = makeRunner(
       new FakeTracker([TASK]),
       new FakeHarness([writesAFile]),
-      config({ checks: { commands: ['sleep 30; true'] } }),
+      config({ checks: { commands: ['if test -e hello.txt; then sleep 30; true; fi'] } }),
     ).runOnce()
 
     await waitFor(() => store.task(TASK.id)?.state === 'checks')

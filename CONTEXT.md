@@ -4,6 +4,28 @@ An orchestrator that turns tracker issues into pull requests: it leases a task, 
 
 ## Language
 
+### Work
+
+**Task**:
+A unit of work amagi can lease, seen whole: its issue together with everything amagi has done to it, from runs and review rounds to its pull request. The one object the operator steers, across every repository.
+_Avoid_: job, ticket, bead
+
+**Issue**:
+The tracker-side record of a task: title, description, priority, dependencies and tracker status. Owned by the tracker; amagi reads and edits it but never treats it as the whole task.
+_Avoid_: task (when only the tracker record is meant)
+
+**Stage**:
+Where a task sits on its path from backlog to merged pull request, derived from its tracker status and run state together. The single grouping the operator sees tasks in.
+_Avoid_: column, status, state
+
+**Epic**:
+An issue that groups tasks and is never leased itself, so it is not a task. It is finished once every child is closed, and its progress is the share of children closed.
+_Avoid_: parent task, milestone, project
+
+**Proposal**:
+A follow-up an agent filed as out of scope for its own task, held out of the ready queue until a human accepts or dismisses it. A human decision, so it waits in the inbox, not among tasks.
+_Avoid_: suggestion, follow-up issue
+
 ### Actors
 
 **Execution profile**:
@@ -81,4 +103,16 @@ _Avoid_: intent, category, mention type
 
 ### Project checks
 
-Every repository declares non-empty `checks.format`, `checks.lint`, and `checks.test` commands in its own `.amagi/config.toml`. A global `[checks]` table is rejected. The runner executes the repo commands in that order before any additional `checks.commands`; a failure enters the normal check recovery path.
+**Project check**:
+A repository-specific command chosen by the operator to prepare or verify agent changes. Project checks form ordered lists whose contents belong to the repository; Amagi does not prescribe format, lint, or test categories.
+
+**Before check**:
+A project check run on the untouched worktree before agent work. A failure means the baseline or the tooling is broken, so the task parks instead of reaching an agent. Defaults to the after checks when not declared.
+
+**After check**:
+A project check run after agent work and each fix. A failure starts a fix round; passing gates the commit.
+_Avoid_: mandatory formatter, mandatory lint, mandatory test
+
+**Services**:
+The containers a worktree's setup and project checks depend on (database, queue), started by amagi per worktree from a repository-declared command and reachable only from that worktree's private network. They live until the worktree is removed.
+_Avoid_: infra, stack

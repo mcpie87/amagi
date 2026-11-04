@@ -9,6 +9,7 @@ import {
   holdTaskForChat,
   listModelsCached,
   makeHarness,
+  readCachedModels,
   resolveHarnessKind,
   runStateDir,
   taskChatSystemPrompt,
@@ -18,13 +19,19 @@ import {
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { resolveWorkspace, valid } from './route-utils.ts'
-import { ChatConversationBody, ChatPageBody, RepoChatIdParam, RepoParam } from './schemas.ts'
+import {
+  ChatConversationBody,
+  ChatPageBody,
+  RepoChatIdParam,
+  RepoHarnessParam,
+  RepoParam,
+} from './schemas.ts'
 
 const SYSTEM_PROMPT =
   'You are a helpful assistant chatting about the selected repository. You may inspect its files, but do not modify files or run commands that change repository state. Answer directly and use Markdown when it helps.'
 
 type ChatHarnessConfig = Parameters<typeof makeHarness>[0]
-const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
+const HARNESS_KINDS = ['claude', 'codex', 'opencode', 'omp'] as const
 
 export type ChatRouteDeps = {
   workspaces: Workspaces
@@ -45,8 +52,7 @@ function chatTitle(message: string): string {
   return title.length > 48 ? `${title.slice(0, 48)}…` : title || 'New chat'
 }
 
-async function chatModels(config: ChatHarnessConfig, harness: Harness): Promise<string[]> {
-  const listed = await listModelsCached(config.kind, () => harness.listModels())
+function chatModels(config: ChatHarnessConfig, listed: string[]): string[] {
   return [
     ...new Set([...listed, config.model].filter((model): model is string => model !== undefined)),
   ]
@@ -66,7 +72,7 @@ export function createChatRoutes({ workspaces, harnessFor, liveTaskChats }: Chat
   const busy = new Set<string>()
 
   return new Hono()
-    .get('/api/repos/:repo/chat/options', valid('param', RepoParam), async (c) => {
+    .get('/api/repos/:repo/chat/options', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
       const ws = resolveWorkspace(workspaces, repo)
       const configs = HARNESS_KINDS.map((kind) => resolveHarnessKind(ws.config, kind))
@@ -75,11 +81,8 @@ export function createChatRoutes({ workspaces, harnessFor, liveTaskChats }: Chat
         ...(config.model === undefined ? {} : { model: config.model }),
         ...(config.effort === undefined ? {} : { effort: config.effort }),
       }))
-      const modelEntries = await Promise.all(
-        configs.map(async (config) => {
-          const harness = harnessFor?.(ws, config) ?? makeHarness(config)
-          return [config.kind, await chatModels(config, harness)] as const
-        }),
+      const modelEntries = configs.map(
+        (config) => [config.kind, chatModels(config, readCachedModels(config.kind))] as const,
       )
       const effortEntries = configs.map((config) => [config.kind, chatEfforts(config)] as const)
       const defaultConfig = ws.config.harness.implement
@@ -93,6 +96,15 @@ export function createChatRoutes({ workspaces, harnessFor, liveTaskChats }: Chat
           ...(defaultConfig.effort === undefined ? {} : { effort: defaultConfig.effort }),
         },
       })
+    })
+    .get('/api/repos/:repo/chat/models/:kind', valid('param', RepoHarnessParam), async (c) => {
+      const { repo, kind } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const config = resolveHarnessKind(ws.config, kind)
+      const listed = await listModelsCached(kind, () =>
+        (harnessFor?.(ws, config) ?? makeHarness(config)).listModels(),
+      )
+      return c.json({ models: chatModels(config, listed) })
     })
     .get('/api/repos/:repo/chat/:id', valid('param', RepoChatIdParam), (c) => {
       const { repo, id } = c.req.valid('param')
@@ -175,7 +187,10 @@ export function createChatRoutes({ workspaces, harnessFor, liveTaskChats }: Chat
           if (taskKey !== null) busy.delete(taskKey)
         }
         try {
-          const models = await chatModels(harnessConfig, harness)
+          const models = chatModels(
+            harnessConfig,
+            await listModelsCached(harnessConfig.kind, () => harness.listModels()),
+          )
           if (body.model !== undefined && customModel !== true && !models.includes(body.model)) {
             release()
             return c.json({ error: `model is not available for ${body.harness}` }, 400)

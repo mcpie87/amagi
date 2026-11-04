@@ -256,3 +256,29 @@ test('reports an unavailable runner once per distinct reason, not on every retry
     ['repo1', 'forge unreachable'],
   ])
 })
+
+test('startup releases tasks a previous server left mid-run so auto-queue resumes them', async () => {
+  ws = testWorkspaces(['repo1'])
+  ws.workspaces.updateParticipation('repo1', { workers: true, watchers: false })
+  const workspace = ws.workspaces.get('repo1')
+  if (workspace === null) throw new Error('test workspace missing')
+  const released: string[] = []
+  workspace.tracker.release = async (id) => {
+    released.push(id)
+  }
+  const store = ws.store('repo1')
+  store.append('bd-1', { type: 'task.claimed', title: 'orphaned run', tracker: 'beads' })
+  store.append('bd-1', { type: 'task.state', from: 'claimed', to: 'worktree_ready' })
+  store.append('bd-1', { type: 'task.state', from: 'worktree_ready', to: 'implementing' })
+
+  server = serve({
+    workspaces: ws.workspaces,
+    host: '127.0.0.1',
+    port: 0,
+    runnerFactory: () => ({ setAutoQueue: () => {} }) as unknown as RunServiceApi,
+  })
+  await Bun.sleep(20)
+
+  expect(released).toEqual(['bd-1'])
+  expect(store.task('bd-1')?.state).not.toBe('implementing')
+})

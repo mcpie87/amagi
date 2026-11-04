@@ -6,9 +6,14 @@ import type { CheckResult } from './events.ts'
 import type { Exec } from './exec.ts'
 
 export function configuredCheckCommands(checks: Config['checks']): string[] {
-  return [...new Set([checks.format, checks.lint, checks.test, ...checks.commands])].filter(
+  const legacy = [checks.format, checks.lint, checks.test].filter(
     (command): command is string => command !== null && command !== '',
   )
+  return legacy.length === 0 ? [...checks.commands] : [...new Set([...legacy, ...checks.commands])]
+}
+
+export function beforeCheckCommands(checks: Config['checks']): string[] {
+  return checks.before === null ? configuredCheckCommands(checks) : [...checks.before]
 }
 
 export async function runMandatoryWorkerChecks(
@@ -33,7 +38,7 @@ export async function runMandatoryWorkerChecks(
   }
   const results: CheckResult[] = []
   for (const command of configuredCheckCommands(checks)) {
-    const isolated = sandboxProjectCommand(command, cwd)
+    const isolated = await sandboxProjectCommand(command, cwd)
     const result = await exec(isolated.command, {
       cwd,
       env: isolated.env,
@@ -42,7 +47,7 @@ export async function runMandatoryWorkerChecks(
     results.push({
       command,
       exitCode: result.exitCode,
-      output: `${result.stdout}${result.stderr}`.slice(-8000),
+      output: `${isolated.servicesLog}${result.stdout}${result.stderr}`.slice(-8000),
     })
     if (result.exitCode !== 0) break
   }

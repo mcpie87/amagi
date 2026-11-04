@@ -1,7 +1,16 @@
-import { existsSync, realpathSync, statSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import { configHome, expandTilde, hostStateHome, stateHome } from '../../paths.ts'
+import { cacheHome, configHome, expandTilde, hostStateHome, stateHome } from '../../paths.ts'
+import { type ServiceForward, startServices } from '../../services.ts'
 import { stripHarnessCredentials } from './env.ts'
 
 export function projectCommandEnv(inheritedEnv: NodeJS.ProcessEnv = process.env) {
@@ -17,17 +26,34 @@ export function projectCommandEnv(inheritedEnv: NodeJS.ProcessEnv = process.env)
   return env
 }
 
-export function sandboxProjectCommand(
+/**
+ * Setup or check command for a worktree, sandboxed in a private network on
+ * Linux. Starts the repository's services first and forwards their ports in;
+ * `servicesLog` is what that start printed, for the command's output.
+ */
+export async function sandboxProjectCommand(
   command: string,
   cwd: string,
   inheritedEnv: NodeJS.ProcessEnv = process.env,
 ) {
+  const services = await startServices(cwd)
   const env = projectCommandEnv(inheritedEnv)
+  // uvx needs a writable tool dir; the default one under the read-only data
+  // dir holds executables the host runs, so it must not become writable.
+  env.UV_TOOL_DIR ??= join(
+    env.XDG_CACHE_HOME && isAbsolute(env.XDG_CACHE_HOME)
+      ? env.XDG_CACHE_HOME
+      : join(env.HOME ?? homedir(), '.cache'),
+    'uv',
+    'check-tools',
+  )
   return {
     command: sandboxArgv(['sh', '-c', command], undefined, cwd, env, {
       workspaceOnly: true,
+      ...(process.platform === 'linux' ? { network: services.forwards } : {}),
     }),
     env,
+    servicesLog: services.log,
   }
 }
 
@@ -610,13 +636,83 @@ function environmentCredentialPaths(
   })
 }
 
+/**
+ * Empty read-only file bound over hidden files on Linux. Lives under the
+ * state dir, which is itself hidden, so the agent cannot rewrite it.
+ */
+export function emptyMaskPath(): string {
+  return join(stateHome(), 'amagi', 'sandbox-empty')
+}
+
+/** Address inside a private network that pasta answers DNS on, relaying to the host resolver. */
+const SANDBOX_DNS = '169.254.1.1'
+
+/**
+ * resolv.conf for a private network: the host's search and options lines,
+ * with the nameserver swapped for the pasta relay, since a loopback resolver
+ * such as systemd-resolved is unreachable from another network namespace.
+ */
+function sandboxResolvConf(): string | null {
+  if (!existsSync('/etc/resolv.conf')) return null
+  const kept = readFileSync('/etc/resolv.conf', 'utf8')
+    .split('\n')
+    .filter((line) => /^(search|domain|options)\s/.test(line))
+  const content = [`nameserver ${SANDBOX_DNS}`, ...kept, ''].join('\n')
+  const path = join(stateHome(), 'amagi', 'sandbox-resolv.conf')
+  if (!existsSync(path) || readFileSync(path, 'utf8') !== content) {
+    mkdirSync(dirname(path), { recursive: true })
+    const staged = `${path}.${process.pid}`
+    writeFileSync(staged, content, { mode: 0o444 })
+    renameSync(staged, path)
+  }
+  return path
+}
+
+/**
+ * Runs a bwrap argv that waits on fd 4 after reporting its pid on fd 3, attaches
+ * pasta to its network namespace, then releases it. pasta gives the sandbox
+ * outbound access and forwards each `port:hostPort` from its loopback to the
+ * host's; every other host loopback port stays unreachable. Explicit `none`
+ * specs matter: pasta's default `auto` mirrors every host listener inside.
+ */
+const NETNS_LAUNCHER = `set -eu
+if ! command -v pasta >/dev/null 2>&1; then
+  echo 'amagi: pasta (from passt) is not on PATH; setup and checks need it for their private network' >&2
+  exit 127
+fi
+forwards=$1
+shift
+dir=$(mktemp -d)
+sandbox=
+child=
+# Exiting closes the block fifo and EOF releases the sandbox, network or not.
+# Kill its pid namespace init directly: killing the outer bwrap leaves it running.
+trap 'if [ -n "$child" ]; then kill -KILL "$child" 2>/dev/null || true; fi; if [ -n "$sandbox" ]; then kill "$sandbox" 2>/dev/null || true; fi; rm -rf "$dir"' EXIT
+mkfifo "$dir/info" "$dir/block"
+"$@" 3>"$dir/info" 4<"$dir/block" &
+sandbox=$!
+exec 5<"$dir/info" 6>"$dir/block"
+child=$(sed -n 's/.*"child-pid": *\\([0-9]*\\).*/\\1/p' <&5 | head -n1)
+set --
+for forward in $forwards; do set -- "$@" -T "$forward"; done
+if [ $# -eq 0 ]; then set -- -T none; fi
+pasta --config-net --quiet --no-map-gw -t none -u none -U none --dns-forward ${SANDBOX_DNS} "$@" "$child"
+printf x >&6
+exec 5<&- 6>&-
+status=0
+wait "$sandbox" || status=$?
+sandbox=
+child=
+exit "$status"
+`
+
 /** Prevent the harness from reading the operator's state or forge credentials. */
 export function sandboxArgv(
   argv: string[],
   home = homedir(),
   cwd?: string,
   env: NodeJS.ProcessEnv = process.env,
-  options: { workspaceOnly?: boolean } = {},
+  options: { workspaceOnly?: boolean; network?: readonly ServiceForward[] } = {},
 ): string[] {
   if (options.workspaceOnly && cwd === undefined)
     throw new Error('workspace sandbox requires a working directory')
@@ -731,14 +827,52 @@ export function sandboxArgv(
     const root = options.workspaceOnly
       ? ['--ro-bind', '/', '/', ...(existsSync('/tmp') ? ['--bind', '/tmp', '/tmp'] : [])]
       : ['--bind', '/', '/']
+    const mask = emptyMaskPath()
+    if (!existsSync(mask)) {
+      mkdirSync(dirname(mask), { recursive: true })
+      writeFileSync(mask, '', { mode: 0o444 })
+    }
+    // Not /dev/null: bwrap binds are nodev, so a masked file would fail with
+    // EACCES and libgit2 (nix flakes) refuses to open a repo over an
+    // unreadable ~/.gitconfig.
     const mounts = paths
       .filter(existsSync)
       .flatMap((path) =>
-        statSync(path).isDirectory() ? ['--tmpfs', path] : ['--ro-bind', '/dev/null', path],
+        statSync(path).isDirectory() ? ['--tmpfs', path] : ['--ro-bind', mask, path],
       )
-    const workspace = options.workspaceOnly ? ['--bind', cwd as string, cwd as string] : []
+    const cache =
+      env.XDG_CACHE_HOME && isAbsolute(env.XDG_CACHE_HOME)
+        ? env.XDG_CACHE_HOME
+        : join(effectiveHome, '.cache')
+    // nix and package managers fail on a read-only cache; amagi's own cache
+    // holds the other tasks' worktrees, so it stays hidden.
+    const workspace = options.workspaceOnly
+      ? [
+          ...(existsSync(cache) ? ['--bind', cache, cache] : []),
+          ...[join(cacheHome(), 'amagi'), join(cache, 'amagi')].flatMap((path) =>
+            existsSync(path) ? ['--tmpfs', path] : [],
+          ),
+          '--bind',
+          cwd as string,
+          cwd as string,
+        ]
+      : []
     const unset = sensitiveEnvironmentNames(env).flatMap((name) => ['--unsetenv', name])
-    return [
+    const resolv = options.network === undefined ? null : sandboxResolvConf()
+    const network =
+      options.network === undefined
+        ? []
+        : [
+            '--unshare-net',
+            '--die-with-parent',
+            '--info-fd',
+            '3',
+            '--block-fd',
+            '4',
+            // bwrap cannot mount over a symlink, and /etc/resolv.conf usually is one.
+            ...(resolv === null ? [] : ['--ro-bind', resolv, realpathSync('/etc/resolv.conf')]),
+          ]
+    const bwrap = [
       'bwrap',
       ...root,
       '--dev-bind',
@@ -746,6 +880,7 @@ export function sandboxArgv(
       '/dev',
       '--unshare-pid',
       '--unshare-user',
+      ...network,
       '--proc',
       '/proc',
       ...workspace,
@@ -754,6 +889,9 @@ export function sandboxArgv(
       '--',
       ...argv,
     ]
+    if (options.network === undefined) return bwrap
+    const forwards = options.network.map(({ port, hostPort }) => `${port}:${hostPort}`).join(' ')
+    return ['sh', '-c', NETNS_LAUNCHER, 'amagi-netns', forwards, ...bwrap]
   }
   if (process.platform === 'darwin') {
     const unset = sensitiveEnvironmentNames(env).flatMap((name) => ['-u', name])

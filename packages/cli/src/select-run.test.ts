@@ -37,9 +37,9 @@ const scripted = (selects: (string | null)[], inputs: (string | null)[] = []): P
 }
 
 describe('harnessChoices', () => {
-  test('offers the three known harness kinds', () => {
+  test('offers all known harness kinds', () => {
     const labels = harnessChoices(config()).map((o) => o.label)
-    expect(labels).toEqual(['claude', 'codex', 'opencode'])
+    expect(labels).toEqual(['claude', 'codex', 'opencode', 'omp'])
   })
 
   test('fallback kind matching the implement harness keeps its bin', () => {
@@ -63,13 +63,13 @@ describe('harnessChoices', () => {
       started(3, 'opencode', 'local/x'),
     ])
     const labels = harnessChoices(config(), counts).map((o) => o.label)
-    expect(labels).toEqual(['claude', 'opencode', 'codex'])
+    expect(labels).toEqual(['claude', 'opencode', 'codex', 'omp'])
   })
 
   test('sorts the fallback kinds by usage, ties keep insertion order', () => {
     const counts = usageCounts([started(1, 'codex'), started(2, 'codex'), started(3, 'claude')])
     const labels = harnessChoices(config(), counts).map((o) => o.label)
-    expect(labels).toEqual(['codex', 'claude', 'opencode'])
+    expect(labels).toEqual(['codex', 'claude', 'opencode', 'omp'])
   })
 })
 

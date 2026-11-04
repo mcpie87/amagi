@@ -353,6 +353,10 @@ class FakeMergePrDriver implements PrDriver {
     return []
   }
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async getPrBody(): Promise<string> {
+    return ''
+  }
+  async updatePr(): Promise<void> {}
   async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {}
   async addLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
   async removeLabel(_cwd: string, _number: number, _label: string): Promise<void> {}
@@ -866,7 +870,12 @@ class FakeIssueTracker extends BeadsTracker {
 }
 
 function issueApp(tracker: Tracker) {
-  ws = testWorkspaces(['repo1'], { trackerFor: () => tracker })
+  ws = testWorkspaces(['repo1'], {
+    trackerFor: (config) => {
+      config.difficulty.enabled = false
+      return tracker
+    },
+  })
   store = ws.store('repo1')
   return operatorApp({ workspaces: ws.workspaces })
 }
@@ -1679,6 +1688,32 @@ describe('POST /api/repos/:repo/tasks/:id/retry', () => {
   })
 })
 
+describe('POST /api/repos/:repo/tasks/:id/redo-pr', () => {
+  beforeEach(() => {
+    ws = testWorkspaces(['repo1'], { forgeFor: () => new FakeMergePrDriver() })
+    store = ws.store('repo1')
+    app = operatorApp({ workspaces: ws.workspaces })
+  })
+
+  test('409s when the task has no open pull request', async () => {
+    claim('bd-1')
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/redo-pr', { method: 'POST' })
+    expect(res.status).toBe(409)
+  })
+
+  test('409s on an open pull request whose worktree is gone', async () => {
+    claim('bd-1')
+    store.append('bd-1', { type: 'worktree.created', path: '/nonexistent/wt', branch: 'amagi/x' })
+    store.append('bd-1', { type: 'pr.created', url: 'https://example.com/pull/7', number: 7 })
+    for (const to of ['worktree_ready', 'checks', 'committed', 'pr_open'] as const) {
+      store.append('bd-1', { type: 'task.state', from: null, to })
+    }
+    const res = await app.request('/api/repos/repo1/tasks/bd-1/redo-pr', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toContain('no worktree')
+  })
+})
+
 describe('POST /api/repos/:repo/tasks/:id/recheck', () => {
   let tracker: FakeGateTracker
   let forge: FakeMergePrDriver
@@ -2073,6 +2108,10 @@ describe('POST /api/repos/:repo/tasks/:id/close', () => {
       return []
     }
     async postComment(): Promise<void> {}
+    async getPrBody(): Promise<string> {
+      return ''
+    }
+    async updatePr(): Promise<void> {}
     async closePr(_cwd: string, number: number, reason: string): Promise<void> {
       if (this.closeError !== null) throw this.closeError
       this.closed.push({ number, reason })
@@ -2619,20 +2658,25 @@ describe('repository check settings', () => {
     if (workspace === null) throw new Error('repo1 missing')
     writeConfig(workspace.root, { checks: { commands: ['extra-check'] } })
     expect(await (await app.request('/api/repos/repo1/checks')).json()).toEqual({
-      format: 'true',
-      lint: 'true',
-      test: 'true',
-      commands: ['extra-check'],
+      before: ['true', 'extra-check'],
+      commands: ['true', 'extra-check'],
+      configured: true,
       timeoutSec: 1800,
     })
     const checks = { format: 'just fmt', lint: 'just lint', test: 'bun test' }
     const response = await patchChecks({ ...checks, format: ' just fmt ' })
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual(checks)
+    expect(await response.json()).toEqual({
+      before: ['just fmt', 'just lint', 'bun test', 'extra-check'],
+      commands: ['just fmt', 'just lint', 'bun test', 'extra-check'],
+      timeoutSec: 1800,
+      configured: true,
+    })
     expect(workspace.config.checks).toMatchObject(checks)
     expect(loadConfig(workspace.root).config.checks).toEqual({
       ...checks,
       commands: ['extra-check'],
+      before: null,
       timeoutSec: 1800,
     })
     expect(ws.workspaces.get('repo2')?.config.checks.format).toBe('true')
@@ -2643,19 +2687,92 @@ describe('repository check settings', () => {
     if (entry === undefined) throw new Error('repo1 missing')
     writeFileSync(join(entry.path, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "custom"\n')
     ws.workspaces.close()
-    expect(() => ws.workspaces.get('repo1')).toThrow('must declare non-empty')
+    expect(() => ws.workspaces.get('repo1')).toThrow('must declare commands')
     const response = await app.request('/api/repos/repo1/checks')
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
-      format: null,
-      lint: null,
-      test: null,
+      configured: false,
+      before: [],
       commands: [],
       timeoutSec: 1800,
     })
-    expect((await patchChecks({ format: 'true', lint: 'true', test: 'true' })).status).toBe(200)
+    expect((await patchChecks({ commands: [] })).status).toBe(200)
     expect(loadConfig(entry.path).config.repo.baseBranch).toBe('custom')
     expect(ws.workspaces.get('repo1')).not.toBeNull()
+  })
+
+  test('saving a command list migrates legacy categories and preserves timeout', async () => {
+    const workspace = ws.workspaces.get('repo1')
+    if (workspace === null) throw new Error('repo1 missing')
+    expect(
+      (
+        await patchChecks({
+          commands: ['make verify', 'python smoke.py', 'make verify'],
+          timeoutSec: 45,
+        })
+      ).status,
+    ).toBe(200)
+    expect(workspace.config.checks).toEqual({
+      commands: ['make verify', 'python smoke.py', 'make verify'],
+      before: null,
+      timeoutSec: 45,
+      format: null,
+      lint: null,
+      test: null,
+    })
+    expect(loadConfig(workspace.root).config.checks).toEqual(workspace.config.checks)
+    const file = readFileSync(join(workspace.root, '.amagi', 'config.toml'), 'utf8')
+    expect(file).not.toContain('format =')
+    expect(file).not.toContain('lint =')
+    expect(file).not.toContain('test =')
+    const response = await patchChecks({ commands: [] })
+    expect(await response.json()).toEqual({
+      before: [],
+      commands: [],
+      timeoutSec: 45,
+      configured: true,
+    })
+    expect(loadConfig(workspace.root).config.checks.commands).toEqual([])
+    const split = await patchChecks({ before: ['make baseline'], commands: ['make verify'] })
+    expect(await split.json()).toEqual({
+      before: ['make baseline'],
+      commands: ['make verify'],
+      timeoutSec: 45,
+      configured: true,
+    })
+    expect(loadConfig(workspace.root).config.checks.before).toEqual(['make baseline'])
+    await patchChecks({ before: [], commands: ['make verify'] })
+    expect(loadConfig(workspace.root).config.checks.before).toEqual([])
+    for (const body of [
+      { commands: [''] },
+      { commands: [], before: [' '] },
+      { commands: [' '] },
+      { commands: null },
+      { commands: [], timeoutSec: 0 },
+    ])
+      expect((await patchChecks(body)).status).toBe(400)
+  })
+
+  test('activation checks readiness before persisting participation', async () => {
+    ws.workspaces.updateParticipation('repo1', { workers: false, watchers: false })
+    ws.workspaces.diagnose = async () => [{ name: 'config', ok: false, detail: 'Choose checks' }]
+    const activate = () =>
+      app.request('/api/repos/repo1/participation', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workers: true, watchers: true }),
+      })
+    expect((await activate()).status).toBe(409)
+    expect(ws.workspaces.list().find((entry) => entry.key === 'repo1')).toMatchObject({
+      workers: false,
+      watchers: false,
+    })
+    ws.workspaces.diagnose = async () => [{ name: 'config', ok: true }]
+    expect((await activate()).status).toBe(200)
+    expect(ws.workspaces.list().find((entry) => entry.key === 'repo1')).toMatchObject({
+      workers: true,
+      watchers: true,
+    })
   })
 
   test('rejects missing, blank, null and unknown commands without changing config', async () => {
@@ -3228,6 +3345,38 @@ describe('fleet endpoints', () => {
     rmSync(home, { recursive: true, force: true })
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME
     else process.env.XDG_CONFIG_HOME = savedXdg
+  })
+
+  test('repository workers use profiles and stay isolated when profiles change', async () => {
+    const profile = { profile_name: 'Careful', harness: 'codex', model: 'first', effort: 'high' }
+    expect((await send('PUT', '/api/profiles', { profiles: [profile] })).status).toBe(200)
+    const worker = {
+      id: 'local',
+      name: 'Local',
+      kind: 'claude',
+      profile: 'Careful',
+      seat: 'shared',
+      enabled: true,
+    }
+    expect((await send('PUT', '/api/repos/repo1/workers', { workers: [worker] })).status).toBe(200)
+    expect(ws.workspaces.get('repo1')?.config.worker[0]).toMatchObject({
+      kind: 'codex',
+      model: 'first',
+      seat: 'shared',
+    })
+    expect(ws.workspaces.get('repo2')?.config.worker).toEqual([])
+    expect(
+      (await send('PUT', '/api/profiles', { profiles: [{ ...profile, model: 'second' }] })).status,
+    ).toBe(200)
+    expect(ws.workspaces.get('repo1')?.config.worker[0]?.model).toBe('second')
+    expect((await send('PUT', '/api/profiles', { profiles: [] })).status).toBe(400)
+    expect(
+      (
+        await send('PUT', '/api/repos/repo1/workers', {
+          workers: [{ ...worker, profile: 'missing' }],
+        })
+      ).status,
+    ).toBe(400)
   })
 
   test('a created worker persists globally, reaches the runner, and starts disabled', async () => {
@@ -4141,7 +4290,15 @@ describe('POST /api/repos (onboarding)', () => {
       body: JSON.stringify({ path: process.cwd() }),
     })
     expect(res.status).toBe(201)
-    const body = (await res.json()) as { key: string; name: string; ready: unknown[] }
+    const body = (await res.json()) as {
+      key: string
+      name: string
+      ready: unknown[]
+      workers: boolean
+      watchers: boolean
+    }
+    expect(body.workers).toBe(false)
+    expect(body.watchers).toBe(false)
     expect(body.key).toBeTruthy()
     expect(Array.isArray(body.ready)).toBe(true)
     expect(ws.workspaces.list().some((e) => e.key === body.key)).toBe(true)
@@ -4225,6 +4382,7 @@ describe('POST /api/repos/:repo/tasks/:id/git-requests', () => {
       lint: 'false',
       test: 'true',
       commands: [],
+      before: null,
       timeoutSec: 1800,
     }
     writeFileSync(join(wt, 'hello.txt'), 'hi\n')

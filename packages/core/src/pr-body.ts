@@ -49,7 +49,7 @@ export async function changesSinceBase(
 /** Headings an agent appends to the task description to document the PR. */
 const SECTION_HEADING = /^###\s+(How to use|Conclusion)\s*$/gm
 
-/** Drops the runner's Pre-flight steps and any agent Verification report. */
+/** Drops the runner's Pre-flight steps, any agent Verification report and the commit message. */
 function stripInternalSections(text: string): string {
   const headings = [...text.matchAll(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/gm)].map((m) => ({
     index: m.index ?? 0,
@@ -61,7 +61,8 @@ function stripInternalSections(text: string): string {
 
   for (const [i, heading] of headings.entries()) {
     if (heading.index < cursor) continue
-    if (!/^(?:Pre-flight(?:\s+\([^\r\n]*\))?|Verification)$/i.test(heading.title)) continue
+    if (!/^(?:Pre-flight(?:\s+\([^\r\n]*\))?|Verification|Commit message)$/i.test(heading.title))
+      continue
     result += text.slice(cursor, heading.index)
     const next = headings.slice(i + 1).find((candidate) => candidate.level <= heading.level)
     cursor = next?.index ?? text.length
@@ -228,6 +229,30 @@ function createdAgo(createdAt: number | null | undefined): string | null {
   return `created \`${iso.slice(0, 19).replace('T', ' ')} UTC\``
 }
 
+/** The `### 🎬 Demo` block; GitLab renders a linked .webm/.mp4 as an inline player. */
+export function demoSection(demo: readonly { name: string; url: string }[]): string {
+  const lines = ['### 🎬 Demo']
+  for (const clip of demo) lines.push('', `**${clip.name}**`, '', `![${clip.name}](${clip.url})`)
+  return lines.join('\n')
+}
+
+/**
+ * Puts the demo block into an existing PR description: replaces an earlier
+ * one, else goes before the first section formatPrBody places after it.
+ */
+export function withDemoSection(
+  body: string,
+  demo: readonly { name: string; url: string }[],
+): string {
+  const section = demoSection(demo)
+  const existing = /\n### 🎬 Demo\n[\s\S]*?(?=\n### |\n\n---\n\n<sub>|$)/
+  if (existing.test(body)) return body.replace(existing, `\n${section}`)
+  const anchor = /\n(?=### (?:🛠️ What changed|🧠 Conclusion|🔎 Review)\n|\n---\n\n<sub>)/
+  const at = body.search(anchor)
+  if (at !== -1) return `${body.slice(0, at)}\n${section}\n${body.slice(at)}`
+  return `${body}\n\n${section}`
+}
+
 export function formatPrBody(
   task: TrackerTask,
   changes: readonly PrChange[],
@@ -235,6 +260,8 @@ export function formatPrBody(
   /** The implementing run's final summary, used as the conclusion when the agent wrote none. */
   fallbackSummary?: string | null,
   review?: PrReviewSummary,
+  /** Uploaded demo videos, embedded under their own heading. */
+  demo: readonly { name: string; url: string }[] = [],
 ): string {
   const created = createdAgo(task.createdAt)
   const lines = [
@@ -247,6 +274,7 @@ export function formatPrBody(
   const body = summary !== '' ? summary : stripInternalSections(fallbackSummary ?? '').trim()
   lines.push('', '### 📝 Summary', '', renderDescriptionMarkdown(normalizeWorktreeLinks(body)))
   if (howToUse !== null) lines.push('', '### 🚀 How to use', '', howToUse)
+  if (demo.length > 0) lines.push('', demoSection(demo))
   if (changes.length > 0) {
     lines.push('', '### 🛠️ What changed', '')
     for (const change of changes) {

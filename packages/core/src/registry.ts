@@ -165,13 +165,16 @@ export function addRegistryEntry(
 ): RegistryEntry {
   const root = gitRoot(path)
   if (root === null) throw new Error(`not a git repository: ${path}`)
-  const entries = loadRegistry(registry).filter((e) => resolve(e.path) !== root)
+  const existing = loadRegistry(registry)
+  const registered = existing.find((e) => resolve(e.path) === root)
+  if (registered !== undefined) return registered
+  const entries = existing
   const entry: RegistryEntry = {
     key: uniqueKey(key ?? repoKey(root), entries),
     name: basename(root),
     path: root,
-    workers: true,
-    watchers: true,
+    workers: false,
+    watchers: false,
     gitIdentity: null,
   }
   saveRegistry([...entries, entry], registry)

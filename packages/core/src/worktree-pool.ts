@@ -216,13 +216,13 @@ export class WorktreePool {
       if (needsSetup) {
         onStarted(setupCmd)
         const started = Date.now()
-        const isolated = sandboxProjectCommand(setupCmd, entry.path)
+        const isolated = await sandboxProjectCommand(setupCmd, entry.path)
         const result = await this.run(isolated.command, { cwd: entry.path, env: isolated.env })
         onFinished({
           command: setupCmd,
           exitCode: result.exitCode,
           durationMs: Date.now() - started,
-          output: `${result.stdout}${result.stderr}`.slice(-4000),
+          output: `${isolated.servicesLog}${result.stdout}${result.stderr}`.slice(-4000),
         })
         if (result.exitCode !== 0) throw new CommandError(isolated.command, result)
       } else {

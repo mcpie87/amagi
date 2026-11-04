@@ -141,4 +141,8 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    name: '013_task_demo',
+    sql: 'alter table tasks add column demo text;',
+  },
 ]

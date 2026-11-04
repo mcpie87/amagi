@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { sandboxArgv, sandboxExecProfile } from './sandbox.ts'
+import { emptyMaskPath, sandboxArgv, sandboxExecProfile, sandboxProjectCommand } from './sandbox.ts'
 
 test('builds one macOS deny rule per secret path and blocks Keychain lookup', () => {
   const profile = sandboxExecProfile(['/home/test/.aws', '/home/test/.netrc'])
@@ -172,6 +172,142 @@ test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
   },
 )
 
+test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
+  'never runs a project command whose network pasta failed to attach',
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-check-no-network-'))
+    const bin = join(root, 'bin')
+    const worktree = join(root, 'worktree')
+    mkdirSync(bin)
+    mkdirSync(worktree)
+    writeFileSync(join(bin, 'pasta'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    try {
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` }
+      const result = Bun.spawnSync(
+        sandboxArgv(
+          ['sh', '-c', `sleep 0.3; touch ${join(worktree, 'ran')}`],
+          root,
+          worktree,
+          env,
+          {
+            workspaceOnly: true,
+            network: [],
+          },
+        ),
+        { env, stderr: 'pipe' },
+      )
+      await Bun.sleep(600)
+      expect(result.exitCode).not.toBe(0)
+      expect(existsSync(join(worktree, 'ran'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test.skipIf(
+  process.platform !== 'linux' || Bun.which('bwrap') === null || Bun.which('pasta') === null,
+)('gives project checks a private network that reaches only forwarded ports', async () => {
+  const listen = (reply: string) =>
+    Bun.listen({
+      hostname: '127.0.0.1',
+      port: 0,
+      socket: {
+        open: (socket) => {
+          socket.end(reply)
+        },
+        data() {},
+      },
+    })
+  const service = listen('service')
+  const host = listen('host')
+  const root = mkdtempSync(join(process.cwd(), '.amagi-check-network-'))
+  try {
+    const probe = `
+      const net = require('node:net');
+      const probe = (port) => new Promise((done) => {
+        const socket = net.connect(port, '127.0.0.1');
+        socket.on('data', (data) => done(data.toString()));
+        socket.on('error', () => done('refused'));
+      });
+      (async () => console.log(JSON.stringify([await probe(5432), await probe(${host.port})])))();
+    `
+    const proc = Bun.spawn(
+      sandboxArgv([process.execPath, '-e', probe], root, root, process.env, {
+        workspaceOnly: true,
+        network: [{ port: 5432, hostPort: service.port }],
+      }),
+      { stdout: 'pipe', stderr: 'pipe' },
+    )
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    expect(stderr).toBe('')
+    expect(exitCode).toBe(0)
+    expect(JSON.parse(stdout)).toEqual(['service', 'refused'])
+  } finally {
+    service.stop(true)
+    host.stop(true)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
+  'gives project checks a writable cache and readable empty masked files',
+  () => {
+    const root = mkdtempSync(join(tmpdir(), 'amagi-check-cache-'))
+    const home = join(root, 'home')
+    const cache = join(root, 'cache')
+    const worktree = join(cache, 'amagi', 'worktrees', 'task')
+    const other = join(cache, 'amagi', 'worktrees', 'other')
+    mkdirSync(home)
+    mkdirSync(worktree, { recursive: true })
+    mkdirSync(other)
+    writeFileSync(join(home, '.gitconfig'), '[user]\n  name = host\n')
+    const sandbox = sandboxArgv(
+      [
+        process.execPath,
+        '-e',
+        `
+        const fs = require('node:fs');
+        if (fs.readFileSync(${JSON.stringify(join(home, '.gitconfig'))}, 'utf8') !== '') process.exit(1);
+        if (fs.existsSync(${JSON.stringify(other)})) process.exit(2);
+        fs.mkdirSync(${JSON.stringify(join(cache, 'nix'))});
+      `,
+      ],
+      home,
+      worktree,
+      { HOME: home, XDG_CACHE_HOME: cache },
+      { workspaceOnly: true },
+    )
+    try {
+      const result = Bun.spawnSync(sandbox, { stderr: 'pipe' })
+      expect(result.stderr.toString()).toBe('')
+      expect(result.exitCode).toBe(0)
+      expect(existsSync(join(cache, 'nix'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test('points uv tools of project commands into the writable cache', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'amagi-check-uv-'))
+  try {
+    expect((await sandboxProjectCommand('true', root, { HOME: root })).env.UV_TOOL_DIR).toBe(
+      join(root, '.cache', 'uv', 'check-tools'),
+    )
+    expect(
+      (await sandboxProjectCommand('true', root, { HOME: root, UV_TOOL_DIR: '/opt/tools' })).env
+        .UV_TOOL_DIR,
+    ).toBe('/opt/tools')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('rejects credential values in repository Git config and included files', () => {
   const root = mkdtempSync(join(tmpdir(), 'amagi-local-git-credentials-'))
   const repo = join(root, 'repo')
@@ -277,7 +413,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_NOSYSTEM: '1',
       })
       for (const path of [cookieFile, sslKey, sslCert, sslCertTarget])
-        expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${path}`)
+        expect(args.join('\0')).toContain(`--ro-bind\0${emptyMaskPath()}\0${path}`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -547,7 +683,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_SSH: '/private/ssh-wrapper',
         GIT_SSH_COMMAND: 'ssh -i /private/key',
       })
-      expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${helper}`)
+      expect(args.join('\0')).toContain(`--ro-bind\0${emptyMaskPath()}\0${helper}`)
       expect(args.join('\0')).toContain('--unsetenv\0GIT_CONFIG_GLOBAL')
       expect(args.join('\0')).toContain('--unsetenv\0GIT_SSH')
       expect(args.join('\0')).toContain('--unsetenv\0GIT_SSH_COMMAND')
@@ -573,7 +709,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_GLOBAL: config,
         PATH: bin,
       })
-      expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${helper}`)
+      expect(args.join('\0')).toContain(`--ro-bind\0${emptyMaskPath()}\0${helper}`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -596,7 +732,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_GLOBAL: config,
         PATH: bin,
       })
-      expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${helper}`)
+      expect(args.join('\0')).toContain(`--ro-bind\0${emptyMaskPath()}\0${helper}`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -626,7 +762,7 @@ test.skipIf(process.platform !== 'linux')(
           GIT_CONFIG_GLOBAL: config,
           PATH: bin,
         })
-        expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${helper}`)
+        expect(args.join('\0')).toContain(`--ro-bind\0${emptyMaskPath()}\0${helper}`)
       }
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -723,14 +859,14 @@ test.skipIf(process.platform !== 'linux')(
         GOOGLE_APPLICATION_CREDENTIALS: google,
       })
       const joined = args.join('\0')
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${join(aws, 'credentials')}`)
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${join(aws, 'config')}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${join(aws, 'credentials')}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${join(aws, 'config')}`)
       expect(joined).toContain(`--tmpfs\0${docker}`)
       expect(joined).toContain(`--tmpfs\0${gcloud}`)
       expect(joined).toContain(`--tmpfs\0${azure}`)
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${kube1}`)
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${kube2}`)
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${google}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${kube1}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${kube2}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${google}`)
       for (const name of [
         'AWS_SHARED_CREDENTIALS_FILE',
         'AWS_CONFIG_FILE',
@@ -825,7 +961,7 @@ test.skipIf(process.platform !== 'linux' || Bun.which('bwrap') === null)(
         ['GIT_CONFIG_GLOBAL', globalConfig],
         ['GIT_CONFIG_SYSTEM', systemConfig],
       ]) {
-        expect(joined).toContain(`--ro-bind\0/dev/null\0${path}`)
+        expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${path}`)
         expect(joined).toContain(`--unsetenv\0${name}`)
       }
       const result = Bun.spawnSync(args, { stderr: 'pipe', env })
@@ -863,8 +999,8 @@ test.skipIf(process.platform !== 'linux')(
       })
       const joined = args.join('\0')
       for (const path of [defaultConfig, hostGitConfig])
-        expect(joined).toContain(`--ro-bind\0/dev/null\0${path}`)
-      expect(joined).not.toContain(`--ro-bind\0/dev/null\0${join(agentGitDir, 'config')}`)
+        expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${path}`)
+      expect(joined).not.toContain(`--ro-bind\0${emptyMaskPath()}\0${join(agentGitDir, 'config')}`)
     } finally {
       if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME
       else process.env.XDG_CONFIG_HOME = previousXdg
@@ -897,8 +1033,8 @@ test.skipIf(process.platform !== 'linux')(
       for (const env of [explicitEnv, defaultEnv]) {
         const args = sandboxArgv([process.execPath, '--version'], childHome, childHome, env)
         const joined = args.join('\0')
-        expect(joined).toContain(`--ro-bind\0/dev/null\0${included}`)
-        expect(joined).toContain(`--ro-bind\0/dev/null\0${includedTarget}`)
+        expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${included}`)
+        expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${includedTarget}`)
         expect(joined).not.toContain('hidden-value')
       }
     } finally {
@@ -929,7 +1065,7 @@ test.skipIf(process.platform !== 'linux')(
       })
       const joined = args.join('\0')
       for (const path of [overrideGlobal, overrideInclude, defaultGlobal, defaultInclude])
-        expect(joined).toContain(`--ro-bind\0/dev/null\0${path}`)
+        expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${path}`)
       expect(joined).not.toContain('hidden-value')
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -951,7 +1087,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_SYSTEM: config,
       })
       const joined = args.join('\0')
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${target}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${target}`)
       expect(joined).not.toContain('inline-secret')
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -972,7 +1108,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_SYSTEM: systemConfig,
       })
       const joined = args.join('\0')
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${systemConfig}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${systemConfig}`)
       expect(joined).toContain('--unsetenv\0GIT_CONFIG_NOSYSTEM')
       expect(joined).toContain('--unsetenv\0GIT_CONFIG_SYSTEM')
       expect(joined).not.toContain('inline-secret')
@@ -998,8 +1134,8 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_SYSTEM: systemConfig,
       })
       const joined = args.join('\0')
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${included}`)
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${includedTarget}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${included}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${includedTarget}`)
       expect(joined).not.toContain('hidden-value')
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -1030,8 +1166,8 @@ test.skipIf(process.platform !== 'linux')(
         XDG_CONFIG_HOME: xdg,
       })
       const joined = args.join('\0')
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${homeStore}`)
-      expect(joined).toContain(`--ro-bind\0/dev/null\0${xdgStore}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${homeStore}`)
+      expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${xdgStore}`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -1061,8 +1197,8 @@ test.skipIf(process.platform !== 'linux')('masks credential stores wrapped by en
       GIT_CONFIG_GLOBAL: config,
     })
     const joined = args.join('\0')
-    expect(joined).toContain(`--ro-bind\0/dev/null\0${envStore}`)
-    expect(joined).toContain(`--ro-bind\0/dev/null\0${gitStore}`)
+    expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${envStore}`)
+    expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${gitStore}`)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -1133,7 +1269,7 @@ test.skipIf(process.platform !== 'linux')(
       })
       const joined = args.join('\0')
       for (const path of [directSocket, wrappedSocket])
-        expect(joined).toContain(`--ro-bind\0/dev/null\0${path}`)
+        expect(joined).toContain(`--ro-bind\0${emptyMaskPath()}\0${path}`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -1171,7 +1307,7 @@ test.skipIf(process.platform !== 'linux')(
         ...process.env,
         GIT_CONFIG_GLOBAL: config,
       })
-      expect(args.join('\0')).not.toContain(`--tmpfs\0${tmpdir()}`)
+      expect(args.join('\0')).not.toContain(`--tmpfs\0${tmpdir()}\0`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -1268,7 +1404,7 @@ test.skipIf(process.platform !== 'linux')(
         GIT_CONFIG_GLOBAL: config,
         PATH: bin,
       })
-      expect(args.join('\0')).toContain(`--ro-bind\0/dev/null\0${helper}`)
+      expect(args.join('\0')).toContain(`--ro-bind\0${emptyMaskPath()}\0${helper}`)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

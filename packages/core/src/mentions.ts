@@ -32,6 +32,7 @@ import {
   respondToMentionSystemPrompt,
 } from './prompt.ts'
 import { parseQuickTaskDecision, quickTaskCandidates, resolveQuickTask } from './quick-task.ts'
+import { stopServices } from './services.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun, type WatcherAgentSession } from './watcher-agent.ts'
 import { taskIdFromBranch } from './worktree.ts'
@@ -421,6 +422,10 @@ async function respondToFix(opts: RespondToMentionOptions, run: Exec, p: Progres
     )
   } finally {
     rmSync(outPath, { force: true })
+    // The PR worktree outlives this run, so its services must not.
+    await stopServices(opts.root, wt.path, run).catch((err) =>
+      console.warn(`services stop failed for ${wt.path}: ${errMsg(err)}`),
+    )
   }
 }
 

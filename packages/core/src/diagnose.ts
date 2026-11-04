@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import {
   type Config,
@@ -7,7 +8,8 @@ import {
   reviewerWorkerConfig,
   watcherHarnessConfig,
 } from './config.ts'
-import { forgeHostname, forgeToken, gitRemoteUrls, remoteHostname } from './drivers/forge-cred.ts'
+import { forgeJson, resolveForge } from './drivers/forge-api.ts'
+import { forgeHostname, gitRemoteUrls, remoteHostname } from './drivers/forge-cred.ts'
 import { makePrDriver } from './drivers/pr.ts'
 import { errMsg } from './errors.ts'
 import { configuredCheckCommands } from './mandatory-checks.ts'
@@ -17,14 +19,10 @@ import { isRepoRoot, type RegistryEntry } from './registry.ts'
 /** `advisory` marks a check whose failure is shown but does not stop the repo claiming tasks. */
 export type Diagnostic = { name: string; ok: boolean; detail?: string; advisory?: true }
 
-const TRACKER_BIN: Record<string, string> = { beads: 'bd', github: 'gh', forgejo: 'tea' }
-const FORGE_BIN: Record<string, string> = { github: 'gh', gitlab: 'glab', forgejo: 'tea' }
-/** Env var a forge token comes from, per kind, so the diagnostic names the fix. */
-const FORGE_TOKEN_VAR: Record<string, string> = {
-  github: 'GH_TOKEN or GITHUB_TOKEN',
-  gitlab: 'GITLAB_TOKEN',
-  forgejo: 'FORGEJO_TOKEN',
-}
+/** How long a successful forge probe answers without another request. */
+const PROBE_TTL_MS = 5 * 60_000
+/** When each forge API root and token pair last answered the probe. */
+const probedAt = new Map<string, number>()
 
 function binaryExists(bin: string): boolean {
   const r = Bun.spawnSync(['which', bin], { stdout: 'pipe', stderr: 'pipe' })
@@ -49,6 +47,33 @@ function forgeRemoteCheck(root: string, kind: Config['forge']['kind'], remote: s
     }
   }
   return { name, ok: true, detail: `${remote} (${url})` }
+}
+
+/**
+ * Authenticated `GET user` against the forge the repo resolves to, so a token
+ * passes only when the forge accepts it. A missing token or remote fails with
+ * the resolver's error. Successes are cached per API root and token, since
+ * /api/repos re-runs the diagnosis on every request; failures are not, so a
+ * fixed token shows up at the next check.
+ */
+async function forgeAuthCheck(
+  name: string,
+  kind: Config['forge']['kind'],
+  root: string,
+  remote: string,
+): Promise<Diagnostic> {
+  try {
+    const forge = await resolveForge(kind, root, remote)
+    const key = `${forge.apiRoot}\n${createHash('sha256').update(forge.token).digest('hex')}`
+    const last = probedAt.get(key)
+    if (last === undefined || Date.now() - last >= PROBE_TTL_MS) {
+      await forgeJson(forge, 'GET', 'user')
+      probedAt.set(key, Date.now())
+    }
+    return { name, ok: true, detail: forge.base }
+  } catch (err) {
+    return { name, ok: false, detail: errMsg(err) }
+  }
 }
 
 /**
@@ -108,65 +133,64 @@ function harnessChecks(config: Config): Diagnostic[] {
 
 /**
  * Static readiness checks for a registered repo: git root resolves, config
- * parses, tracker and forge drivers are implemented and their CLIs are on
- * PATH, every harness binary resolves, and the worktree root can be created. Everything here runs without
- * constructing the workspace, so onboarding never needs a server restart.
+ * parses, the beads CLI is on PATH or the forge accepts its token, the forge
+ * driver is implemented, every harness binary resolves, the Linux sandbox
+ * tools are on PATH, and the worktree root can be created. Everything here
+ * runs without constructing the workspace, so onboarding never needs a server
+ * restart.
  */
-export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
+export async function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
   const checks: Diagnostic[] = []
 
   if (!isRepoRoot(entry.path)) {
-    return Promise.resolve([
+    return [
       { name: 'git root', ok: false, detail: `${entry.path} is not inside a git working tree` },
-    ])
+    ]
   }
   checks.push({ name: 'git root', ok: true })
 
   let config: Awaited<ReturnType<typeof loadConfig>>['config']
   try {
-    const loaded = loadConfig(entry.path)
+    const loaded = loadConfig(entry.path, { allowIncompleteChecks: true })
     config = loaded.config
-    checks.push({ name: 'config', ok: true, detail: loaded.sources.join(', ') || 'defaults' })
+    try {
+      loadConfig(entry.path)
+      checks.push({ name: 'config', ok: true, detail: loaded.sources.join(', ') || 'defaults' })
+    } catch (err) {
+      checks.push({ name: 'config', ok: false, detail: errMsg(err) })
+    }
   } catch (err) {
-    return Promise.resolve([...checks, { name: 'config', ok: false, detail: errMsg(err) }])
+    return [...checks, { name: 'config', ok: false, detail: errMsg(err) }]
   }
 
-  const trackerBin = TRACKER_BIN[config.tracker.kind]
-  if (trackerBin === undefined) {
+  if (config.tracker.kind === 'beads') {
+    const found = binaryExists('bd')
     checks.push({
-      name: `tracker ${config.tracker.kind}`,
-      ok: false,
-      detail: 'driver not implemented',
+      name: 'tracker beads',
+      ok: found,
+      ...(found ? {} : { detail: 'bd not on PATH' }),
     })
   } else {
-    checks.push({
-      name: `tracker ${config.tracker.kind}`,
-      ok: binaryExists(trackerBin),
-      ...(binaryExists(trackerBin) ? {} : { detail: `${trackerBin} not on PATH` }),
-    })
+    checks.push(
+      await forgeAuthCheck(
+        `tracker ${config.tracker.kind}`,
+        config.tracker.kind,
+        entry.path,
+        config.forge.remote,
+      ),
+    )
   }
 
   try {
     makePrDriver(config.forge.kind, config.forge.remote)
-    const forgeBin = FORGE_BIN[config.forge.kind]
-    checks.push({
-      name: `forge ${config.forge.kind}`,
-      ok: forgeBin !== undefined && binaryExists(forgeBin),
-      ...(forgeBin === undefined
-        ? { detail: 'driver not implemented' }
-        : binaryExists(forgeBin)
-          ? {}
-          : { detail: `${forgeBin} not on PATH` }),
-    })
-    checks.push({
-      name: `forge ${config.forge.kind} token`,
-      ok: forgeToken(config.forge.kind, entry.path) !== null,
-      ...(forgeToken(config.forge.kind, entry.path) === null
-        ? {
-            detail: `no dashboard forge token for this repository and ${FORGE_TOKEN_VAR[config.forge.kind] ?? 'no token env var'} not set`,
-          }
-        : {}),
-    })
+    checks.push(
+      await forgeAuthCheck(
+        `forge ${config.forge.kind} token`,
+        config.forge.kind,
+        entry.path,
+        config.forge.remote,
+      ),
+    )
     checks.push(forgeRemoteCheck(entry.path, config.forge.kind, config.forge.remote))
   } catch (err) {
     checks.push({
@@ -177,6 +201,21 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
   }
 
   checks.push(...harnessChecks(config))
+
+  if (process.platform === 'linux') {
+    const missing = ['bwrap', 'pasta'].filter(
+      (bin) => Bun.which(bin, { PATH: process.env.PATH ?? '' }) === null,
+    )
+    checks.push({
+      name: 'sandbox',
+      ok: missing.length === 0,
+      ...(missing.length === 0
+        ? {}
+        : {
+            detail: `${missing.join(', ')} not on the server's PATH; agents need bwrap, setup and checks need pasta (from passt)`,
+          }),
+    })
+  }
 
   const worktreeRoot = expandTilde(config.repo.worktreeRoot)
   try {
@@ -192,9 +231,12 @@ export function diagnoseRepo(entry: RegistryEntry): Promise<Diagnostic[]> {
 
   checks.push({
     name: 'checks',
-    ok: true,
-    detail: `${configuredCheckCommands(config.checks).length} step(s)`,
+    ok: checks.find((check) => check.name === 'config')?.ok === true,
+    detail:
+      configuredCheckCommands(config.checks).length === 0
+        ? 'No project checks configured'
+        : `${configuredCheckCommands(config.checks).length} step(s)`,
   })
 
-  return Promise.resolve(checks)
+  return checks
 }

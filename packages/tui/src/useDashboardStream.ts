@@ -24,6 +24,9 @@ export function useDashboardStream(baseUrl: string, repo: string, taskId?: strin
         if (!mounted.current) return
         if (event.type === 'agent.stream' && event.taskId !== null) {
           agentLogStore.append(`${repo}/${event.taskId}`, event.role, event.ts, event.event)
+        } else if (event.type === 'checks.output') {
+          if (event.taskId !== null)
+            agentLogStore.appendCheckOutput(`${repo}/${event.taskId}`, event.ts, event.text)
         } else {
           dispatch(event)
         }

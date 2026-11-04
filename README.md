@@ -9,13 +9,13 @@ Orchestrates AI coding agents over an issue tracker. Amagi claims ready issues, 
 ## How it works
 
 - **Tracker** (`beads`, `github`, `forgejo`): issues come from an issue tracker. Amagi claims the next ready task and keeps the lease alive for the whole run.
-- **Harness** (`claude`): the agent that implements and reviews. Runs in a dedicated worktree, so a repo stays clean while work is in flight.
+- **Harness** (`claude`, `codex`, `opencode`, `omp`): the agent that implements and reviews. Runs in a dedicated worktree, so a repo stays clean while work is in flight.
 - **Loop**: implement -> project checks -> commit -> pull request, with fix-up rounds when checks fail.
 - **Server**: an HTTP + SSE event feed (`amagi serve`) so tools and humans can watch and steer runs, backed by a dashboard.
 
 ## Install
 
-Requires [bun](https://bun.sh). Agent runs require `bwrap` on Linux or `sandbox-exec` on macOS. Other tools (`git`, `beads`, `claude`, `gh`/`tea`) are resolved at runtime, only as needed by the trackers and harnesses you configure.
+Requires [bun](https://bun.sh). Agent runs require `bwrap` on Linux or `sandbox-exec` on macOS; on Linux, project setup and checks also need `pasta` (from passt) for their private network. Other tools (`git`, `beads`, `claude`, `gh`/`tea`) are resolved at runtime, only as needed by the trackers and harnesses you configure.
 
 ```bash
 bun install
@@ -31,6 +31,8 @@ to the API at `http://127.0.0.1:7777`. Open the single-use login link printed by
 ### Dashboard
 
 The dashboard is the shared control room for the connected server. A persistent sidebar navigates between the pages; the header shows the live connection status (streaming, reconnecting, or connecting), the runner status indicator (how many capacity slots are busy), and a **Search** command palette (`Ctrl/Cmd+K`) that jumps to any page or task. On narrow screens the sidebar collapses behind a menu button, and the page content is inert while it is open. The repo selector and the button to register another repository live at the bottom of the sidebar. Six pages, plus a per-task detail:
+
+The **Chat** page's harness and model controls open with curated, configured and cached choices immediately, without waiting for harness CLIs. Only the selected harness's model catalog refreshes in the background; cached choices and custom model IDs remain usable while it loads. The model picker includes fuzzy search, so typing part of a model name filters the available models.
 
 - **Overview** opens with metric cards (active runs, workers busy, needs attention, open questions), a Workers panel (runner capacity, per-slot resource usage RSS/CPU/process count, running background workers like `respond-to-mentions` and `check-prs`), a Needs attention group for tasks stuck in attention states (each with its reason and close actions), and the live run list with a search box and a **Run next** button. An **Auto queue** toggle turns automatic dispatch on or off (when on, free slots are filled as tasks become claimable).
 - **Tasks** browses the tracker's issues in board or list view (the choice is remembered), with a search box, a status filter, and create/edit modals. Clicking an issue opens its detail: description, acceptance criteria, and tracker fields, with an edit button.
@@ -90,6 +92,8 @@ server's repo-scoped routes by that key.
 
 The runner needs write access to create git worktrees next to the repo (`repo.worktreeRoot`, `~/.cache/amagi/worktrees` by default). Forge access is token-only: add the bot's token once under Settings, Repositories, Forge tokens, or export it into the Amagi process environment (`GH_TOKEN`/`GITHUB_TOKEN` for `github`, `GITLAB_TOKEN` for `gitlab`, `FORGEJO_TOKEN` for `forgejo`). Dashboard tokens are shared by every repository: a repo uses the token it picked under Forge for pull requests, else the only token for its forge, else the env var, so rotating a token reaches every repo using it. Dashboard tokens live in `$XDG_STATE_HOME/amagi/forge/tokens.json` (mode 0600), never in the repo config. Amagi uses the token for `gh`, `glab`, `tea` and the unattended `git push`/`fetch` with no `gh auth login`, `glab auth login` or `tea login` step. Harness agents never inherit forge credentials: token env vars are stripped and their `gh`/`glab`/`tea` are pointed at empty Amagi-owned config dirs, so an agent that reaches for the forge fails closed instead of using the operator's stored login.
 
+For a GitLab [fine-grained personal access token](https://docs.gitlab.com/auth/tokens/fine_grained_access_tokens/), also grant **Work Item: Write** (`write_work_item`) at the project boundary. Amagi uses this permission to upload demo videos through GitLab's [`POST /projects/:id/uploads`](https://docs.gitlab.com/api/project_markdown_uploads/) Markdown uploads API and link them in the merge request description. Without it, demo videos cannot be attached.
+
 ## The task state machine
 
 Every task moves through a fixed set of states (`packages/core/src/events.ts`), recorded as `task.state` events in the store. Any state can fall to a terminal state (an unrecoverable error), so only forward progress is listed below:
@@ -126,7 +130,7 @@ ready task or the next ready one (`POST /api/repos/:repo/runs`, with an optional
 the owned agent process is killed, the tracker lease is released, and the task
 is parked in the terminal `cancelled` state with its worktree untouched, so the
 existing Reclaim action (or a fresh launch) resumes it where it left off. The
-server dispatches through the enabled workers in the global `worker` fleet,
+server dispatches through the enabled workers configured for the repository,
 manually or, while the global `loop.autoQueue` is on, automatically whenever an
 enabled worker has a free seat. Workers sharing a seat serialize their runs, and
 the fleet's seats are shared by every registered repository, so loading more
@@ -195,6 +199,14 @@ resumes where the dead one left off. Only in-progress states are watched;
 `pr_open` is excluded, since there the PR is out for human review and no
 worker runs the task.
 
+Server shutdown (`SIGINT` or `SIGTERM`, including development watch reloads)
+terminates child processes synchronously, so an agent cannot outlive its runner
+and keep a seat occupied. At startup, interrupted tasks are released back to the
+queue with their recorded worktree preserved. If implementation completed before
+checks were interrupted, recovery reruns checks without launching implementation
+again. Failed checks or a newer unfinished agent run require implementation work
+instead; a preserved worktree alone is not proof that implementation finished.
+
 A per-repo **PR conflict watcher** (`loop.prCheckIntervalSec`, default 5
 minutes) is the same idea as the mention watcher but for the `check-prs` flow:
 each interval it lists open PRs, and any that conflict with `repo.baseBranch`
@@ -221,8 +233,9 @@ turn it off.
 
 Amagi is configured per-repo (`.amagi/config.toml`) and globally (`~/.config/amagi/config.toml`, or `$XDG_CONFIG_HOME/amagi/config.toml`); later sources win and are merged key by key (arrays are replaced wholesale, never concatenated). Run `amagi config` to print the fully resolved configuration and which files it came from, or `amagi config --json` for machine-readable output.
 
-The worker fleet is machine-wide, so define `[[worker]]` entries in the global
-config. Define named credential seats independently with `[[seats]]`; each seat
+Define reusable profiles and named credential seats in the global config. Define
+workers for each repository in its `.amagi/config.toml` or in repository settings.
+Each seat
 has one slot by default. Set a worker's `seat` to a named seat and `count` to
 create replicas of the same profile. Replicas use separate slots when available
 and share slots, serializing, when replicas or workers outnumber the capacity:
@@ -240,9 +253,20 @@ count = 2
 name = "codex_alt"
 count = 1
 
+[[profiles]]
+profile_name = "Careful"
+harness = "codex"
+model = "example-model"
+effort = "high"
+```
+
+In the repository config:
+
+```toml
 [[worker]]
 id = "worker-a"
 name = "Worker A"
+profile = "Careful"
 kind = "codex"
 seat = "codex_main"
 count = 2
@@ -263,7 +287,9 @@ slot take turns. Chat replies ignore seats.
 
 Separately, `harness.maxProcesses` caps how many agent processes run at once
 across every amagi on the host, chats included; a launch past the cap waits for
-one to exit.
+one to exit. Seat and process-slot waits have no default timeout: capacity
+contention does not park a task in `needs_human`, and stopping a queued launch
+still cancels it.
 
 Watcher settings use `[watchers.<kind>]` tables. Set defaults globally and
 override them in a repo's `.amagi/config.toml` when needed. The `mention`,
@@ -280,7 +306,7 @@ below gives the schema and defaults.
 | `worker[]` | array | `[]` | Global-only fleet, configured with `[[worker]]`; at most 16 expanded workers. Worker IDs are unique and limited to lowercase letters, digits, and hyphens. |
 | `worker[].id` | string | required | Stable worker identity, unique across the fleet. |
 | `worker[].name` | string | required | Display name. |
-| `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` | required | Harness used by this worker. |
+| `worker[].kind` | `"claude"` \| `"codex"` \| `"opencode"` \| `"omp"` | required | Harness used by this worker. |
 | `worker[].model` | string | *(harness default)* | Model passed to the harness. |
 | `worker[].effort` | string | *(harness default)* | Reasoning effort passed to the harness. |
 | `worker[].seat` | string | `worker[].kind` | Named credential seat used by the worker; replicas and workers share its configured slots. |
@@ -311,12 +337,12 @@ below gives the schema and defaults.
 | `forge.kind` | `"github"` \| `"gitlab"` \| `"forgejo"` | `"github"` | Where pull requests are opened; exactly one per repo, also pickable in the dashboard's repository settings. `github` uses `gh`; `gitlab` uses `glab` (merge requests, `glab api` for state, notes and labels); `forgejo` uses `tea` to create pull requests and post comments, with API reads for PR state and metadata. All are token-only and never require an interactive login. |
 | `forge.remote` | string | `"origin"` | Git remote pushed before opening the PR. |
 | `forge.agentHandle` | string | `"chise-maru"` | Forge handle (without the `@`) the agent is pinged under on PRs; `respond-to-mentions` responds to mentions of it. |
-| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Fallback harness configuration for runs not routed through a worker. |
+| `harness.implement.kind` | `"claude"` \| `"codex"` \| `"opencode"` \| `"omp"` | `"claude"` | Fallback harness configuration for runs not routed through a worker. |
 | `harness.implement.model` | string | *(harness default)* | Model name passed through to the harness, e.g. `"claude-opus-5"`. |
 | `harness.implement.effort` | string | *(harness default)* | Reasoning effort passed through (e.g. `low`/`medium`/`high`/`xhigh` for claude). |
 | `harness.implement.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Least blast radius that still lets an unattended agent work. `bypass` disables the harness's own permission system entirely — a worktree is isolation, not a sandbox. |
 | `harness.implement.extraArgs` | string[] | `[]` | Extra argv appended to the harness invocation. |
-| `harness.triage.kind` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | Harness that decides what to do with unclaimed tasks the runner skips. It reads task context and reports a structured decision; it never touches the repository. |
+| `harness.triage.kind` | `"claude"` \| `"codex"` \| `"opencode"` \| `"omp"` | `"claude"` | Harness that decides what to do with unclaimed tasks the runner skips. It reads task context and reports a structured decision; it never touches the repository. |
 | `harness.triage.model` | string | *(harness default)* | Same shape as `harness.implement.model`. |
 | `harness.triage.effort` | string | *(harness default)* | Same shape as `harness.implement.effort`. |
 | `harness.triage.permissions` | `"workspace-write"` \| `"bypass"` | `"workspace-write"` | Same shape as `harness.implement.permissions`. |
@@ -336,14 +362,15 @@ below gives the schema and defaults.
 | `loop.contextWarnTokens` | integer >= 0 | `160000` | Input context (input + cached tokens) at which a run is flagged: the runner appends a `context.warn` event once the run's peak context reaches it. Kept under `loop.contextMaxTokens`. |
 | `loop.contextMaxTokens` | integer >= 0 | `200000` | Input context at which a run is stopped: crossing it kills the current agent process and restarts it with a fresh session in the same worktree instead of letting the harness degrade. |
 | `loop.contextMaxRestarts` | integer >= 0 | `1` | How many fresh-context restarts a task gets after a run trips `loop.contextMaxTokens`, before escalating to `needs_human`. Each restart reuses the worktree and claim and hands the new session a synthesized handoff of what was done. `0` keeps the hard-kill behavior. |
-| `loop.contextOverrides.<harness>.warnTokens` | integer >= 0 | *(falls back to `loop.contextWarnTokens`)* | Per-harness soft limit, keyed by harness kind (`claude`/`codex`/`opencode`), for harnesses whose context window differs. |
+| `loop.contextOverrides.<harness>.warnTokens` | integer >= 0 | *(falls back to `loop.contextWarnTokens`)* | Per-harness soft limit, keyed by harness kind (`claude`/`codex`/`opencode`/`omp`), for harnesses whose context window differs. |
 | `loop.contextOverrides.<harness>.maxTokens` | integer >= 0 | *(falls back to `loop.contextMaxTokens`)* | Per-harness hard limit, keyed by harness kind, for harnesses whose context window differs. |
 | `loop.autoQueue` | boolean | `false` | Automatic dispatch: while on, the runner polls for the next ready task and launches it whenever a slot is free. Toggleable from the dashboard Workers section; off means dispatch is manual (Run next). |
 | `loop.autoQueueIdleSec` | integer >= 1 | `60` | How long the auto-queue waits between polls when nothing is claimable, so an empty queue does not hammer the tracker. |
-| `checks.format` | string | required per repo | Formatter command run first against the worktree. |
-| `checks.lint` | string | required per repo | Lint command run after formatting. |
-| `checks.test` | string | required per repo | Test command run after lint. |
-| `checks.commands` | string[] | `[]` | Additional shell commands run after format, lint, and test; the first non-zero exit stops the run and triggers a fix round. |
+| `checks.commands` | string[] | must be declared per repo | After checks: ordered shell commands run after agent work and each fix. A failure triggers a fix round; passing gates the commit. Set `[]` to explicitly choose no checks. |
+| `checks.before` | string[] | *(same as `checks.commands`)* | Before checks: ordered shell commands run on the untouched worktree before agent work. A failure parks the task. Set `[]` to skip them. |
+| `services.start` | string \| null | `null` | Shell command that starts the containers setup and checks need (database, queue). Runs on the host from the repository checkout before each setup and check command, so it must be idempotent (`compose up -d --wait`). Linux only. |
+| `services.stop` | string \| null | `null` | Shell command that removes them again (`compose down -v`), run when the worktree is removed. Required with `services.start`. |
+| `services.ports` | integer[] | `[]` | Ports setup and checks reach on `127.0.0.1`. Each is forwarded to the host port in `AMAGI_PORT_<port>`, where `services.start` must publish it. |
 | `checks.timeoutSec` | integer 1-86400 | `1800` | How long one check command may run before its process tree is killed and the check fails; covers task checks and the conflict, mention, rebase and commit checks. |
 | `notify.idle` | boolean | `true` | Send one notification when automatic dispatch drains the queue and no run is active. |
 | `notify.desktop` | boolean | `true` | Send desktop notifications via `notify-send` (best effort; a missing binary is silently ignored). |
@@ -353,12 +380,22 @@ below gives the schema and defaults.
 | `server.port` | integer | `7777` | Port for `amagi serve`. |
 
 Declare `[checks]` in each repository's `.amagi/config.toml`. A global
-`[checks]` table is rejected.
+`[checks]` table is rejected. No formatter, linter, test runner, or task-runner
+recipe is assumed. Legacy `format`, `lint`, and `test` keys remain readable;
+saving checks in the dashboard migrates them and any extra commands into one
+ordered list, retaining their existing execution order.
+
+In the dashboard, choose **Add repository**, enter an existing server checkout,
+and follow Connection, Tracker, Checks, then Activation. Setup remains editable
+before checks are configured. Readiness errors link to the relevant settings;
+project commands themselves run in task worktrees. Repository settings share a
+single selection; Global, Credentials, Workers, and Profiles apply across repos.
 
 The server's registered-repository list is stored in
 `$XDG_STATE_HOME/amagi/registry.json` (or `~/.local/state/amagi/registry.json`).
-Each entry has `workers` and `watchers` participation flags, both defaulting to
-`true`. `workers` controls whether that repository's tasks can be dispatched by
+Each new entry starts with `workers` and `watchers` paused until explicitly
+activated. Existing entries retain their participation flags; legacy entries
+without flags still default to `true`. `workers` controls whether that repository's tasks can be dispatched by
 the automatic queue; `watchers` controls whether its background pollers and
 watchers run. Change these flags in the dashboard's repository controls.
 
@@ -387,11 +424,29 @@ kind = "github"
 remote = "origin"
 
 [checks]
-format = "just fmt"
-lint = "just lint"
-test = "just test"
 commands = ["just check"]
 ```
+
+### Services
+
+On Linux, setup and checks run in their own network namespace: they have
+outbound internet access, but no host loopback port is reachable from inside,
+so parallel tasks cannot share or collide on a database. Agents stay on the
+host network. A repository that needs containers declares how to start them;
+`start` and `stop` see `COMPOSE_PROJECT_NAME` (one per worktree) and
+`AMAGI_PORT_<port>` (a free host port per entry of `ports`), which works with
+both `docker compose` and `podman-compose`:
+
+```toml
+[services]
+start = "DB_PORT=127.0.0.1:$AMAGI_PORT_5432 docker compose -p $COMPOSE_PROJECT_NAME -f compose.test.yml up -d --wait db"
+stop = "docker compose -p $COMPOSE_PROJECT_NAME -f compose.test.yml down -v"
+ports = [5432]
+```
+
+with `compose.test.yml` publishing `"${DB_PORT:-5432}:5432"`. Checks then
+connect to `127.0.0.1:5432` as they would locally. The services live from the
+worktree's first setup or check until the worktree is removed.
 
 ### Other environment variables
 
@@ -422,7 +477,7 @@ permissions = "bypass"
 
 ### Harness and model selection
 
-`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness kind (`claude`, `codex`, or `opencode`), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
+`amagi run` can pick the harness, model and reasoning effort at dispatch time, either from flags or an interactive picker. When neither `--harness`, `--model` nor `--effort` is given and stdin is a terminal, amagi prompts for a harness kind (`claude`, `codex`, `opencode`, or `omp`), then a model, then an effort. Model and effort options for claude and codex are curated in `packages/core/src/models.json`, loaded once at startup, so a new model ships as a data change rather than a CLI scrape. `opencode` keeps listing its own models, cached under `$XDG_CACHE_HOME/amagi/models/` for 24h. `omp` lists models from its own model catalog. Non-interactive runs (no terminal) fall back to `harness.implement` with any `--model`/`--effort` override.
 
 ```bash
 amagi run                      # interactive picker

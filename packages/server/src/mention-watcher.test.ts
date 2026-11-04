@@ -81,6 +81,10 @@ class FakePr implements PrDriver {
     }
     this.posted.push(body)
   }
+  async getPrBody(): Promise<string> {
+    return ''
+  }
+  async updatePr(): Promise<void> {}
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
@@ -203,16 +207,20 @@ test('scans every open PR each tick and responds to each unhandled mention exact
 
 test('publishes the active scan state while a watcher run is still waiting on the forge', async () => {
   const driver = new FakePr()
-  let release: ((prs: PrInfo[]) => void) | undefined
-  driver.listOpenPrs = () => new Promise((resolve) => (release = resolve))
+  const pending = Promise.withResolvers<PrInfo[]>()
+  let started = false
+  driver.listOpenPrs = () => {
+    started = true
+    return pending.promise
+  }
   const w = start(driver)
 
-  await waitFor(() => release !== undefined)
+  await waitFor(() => started)
   expect(w.activity().status).toBe('active')
   expect(w.activity().detail).toBe('scanning open PRs')
 
-  release?.([prInfo()])
-  await waitFor(() => driver.listCalls === 1)
+  pending.resolve([prInfo()])
+  await waitFor(() => driver.listCalls >= 1)
 })
 
 test('a new mention is noticed even when the PR updatedAt does not change', async () => {

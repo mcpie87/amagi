@@ -711,11 +711,21 @@ describe('BeadsTracker', () => {
   })
 
   test('get surfaces notes and comments and asks for them', async () => {
-    const { exec, calls } = fake((c) => (c.includes('show') ? ok(SHOW_WITH_DEPS_JSON) : undefined))
+    const { exec, calls } = fake((c) =>
+      c.includes('show')
+        ? ok(
+            SHOW_WITH_DEPS_JSON.replace(
+              '"id": "tst-1",',
+              '"id": "tst-1",\n    "external_ref": "WEWAI-6039",',
+            ),
+          )
+        : undefined,
+    )
     const task = await new BeadsTracker({ cwd: '/repo', exec }).get('tst-1')
 
     expect(task?.notes).toBe('root cause already found here')
     expect(task?.comments).toEqual(['try the fix'])
+    expect(task?.externalRef).toBe('WEWAI-6039')
     const show = calls.find((c) => c.includes('show'))
     expect(show).toContain('--include-comments')
   })

@@ -1,6 +1,8 @@
 import {
   addForgeCredential,
+  beforeCheckCommands,
   Config,
+  configuredCheckCommands,
   errMsg,
   ForgeKind,
   forgeTokenStates,
@@ -23,10 +25,9 @@ import {
   writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
-import { BeadsTracker } from '@amagi/core/drivers/tracker/beads'
 import { Hono } from 'hono'
 import * as z from 'zod'
-import { resolveWorkspace, valid } from './route-utils.ts'
+import { resolveSetup, resolveWorkspace, valid } from './route-utils.ts'
 import {
   ChecksBody,
   ForgeCredentialCreateBody,
@@ -72,24 +73,55 @@ export function createFleetRoutes({
       const { repo } = c.req.valid('param')
       const entry = workspaces.list().find((candidate) => candidate.key === repo)
       if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
-      return c.json(readRepoChecks(entry.path))
+      const checks = readRepoChecks(entry.path)
+      let configured = true
+      try {
+        loadConfig(entry.path)
+      } catch {
+        configured = false
+      }
+      return c.json({
+        before: beforeCheckCommands(checks),
+        commands: configuredCheckCommands(checks),
+        timeoutSec: checks.timeoutSec,
+        configured,
+      })
     })
     .patch('/api/repos/:repo/checks', valid('param', RepoParam), valid('json', ChecksBody), (c) => {
       const { repo } = c.req.valid('param')
       const checks = c.req.valid('json')
-      if (!workspaces.updateChecks(repo, checks)) {
+      const patch =
+        'commands' in checks
+          ? {
+              commands: checks.commands,
+              ...(checks.before === undefined ? {} : { before: checks.before }),
+              ...(checks.timeoutSec === undefined ? {} : { timeoutSec: checks.timeoutSec }),
+              format: null,
+              lint: null,
+              test: null,
+            }
+          : checks
+      if (!workspaces.updateChecks(repo, patch)) {
         return c.json({ error: `unknown repository ${repo}` }, 404)
       }
-      return c.json(checks)
+      const entry = workspaces.list().find((candidate) => candidate.key === repo)
+      if (entry === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
+      const saved = readRepoChecks(entry.path)
+      return c.json({
+        before: beforeCheckCommands(saved),
+        commands: configuredCheckCommands(saved),
+        timeoutSec: saved.timeoutSec,
+        configured: true,
+      })
     })
     .get('/api/repos/:repo/settings', valid('param', RepoParam), (c) => {
       const { repo } = c.req.valid('param')
-      const ws = resolveWorkspace(workspaces, repo)
+      const ws = resolveSetup(workspaces, repo)
       return c.json({
         autoQueue: ws.config.loop.autoQueue,
         autoRebase: ws.config.loop.autoRebase,
         epicCloseEnabled: ws.config.watchers.epicClose.enabled,
-        epicCloseAvailable: ws.tracker instanceof BeadsTracker,
+        epicCloseAvailable: ws.config.tracker.kind === 'beads',
         ntfyTopic: ws.config.notify.ntfyTopic,
         ntfyServer: ws.config.notify.ntfyServer,
         desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
@@ -110,7 +142,7 @@ export function createFleetRoutes({
       valid('json', SettingsBody),
       (c) => {
         const { repo } = c.req.valid('param')
-        const ws = resolveWorkspace(workspaces, repo)
+        const ws = resolveSetup(workspaces, repo)
         const {
           autoQueue,
           autoRebase,
@@ -204,7 +236,7 @@ export function createFleetRoutes({
           forgeRemote !== undefined ||
           forgeCredentials !== undefined
         ) {
-          const { kind, remote } = loadConfig(ws.root).config.forge
+          const { kind, remote } = loadConfig(ws.root, { allowIncompleteChecks: true }).config.forge
           ws.config.forge.kind = kind
           ws.config.forge.remote = remote
         }
@@ -221,7 +253,7 @@ export function createFleetRoutes({
           autoQueue: ws.config.loop.autoQueue,
           autoRebase: ws.config.loop.autoRebase,
           epicCloseEnabled: ws.config.watchers.epicClose.enabled,
-          epicCloseAvailable: ws.tracker instanceof BeadsTracker,
+          epicCloseAvailable: ws.config.tracker.kind === 'beads',
           ntfyTopic: ws.config.notify.ntfyTopic,
           ntfyServer: ws.config.notify.ntfyServer,
           desktopFailureAlerts: ws.config.notify.desktopFailureAlerts,
@@ -292,9 +324,24 @@ export function createFleetRoutes({
       '/api/repos/:repo/participation',
       valid('param', RepoParam),
       valid('json', ParticipationBody),
-      (c) => {
+      async (c) => {
         const { repo } = c.req.valid('param')
         const body = c.req.valid('json')
+        const existing = workspaces.list().find((e) => e.key === repo)
+        if (existing === undefined) return c.json({ error: `unknown repository ${repo}` }, 404)
+        if (
+          (body.workers === true && !existing.workers) ||
+          (body.watchers === true && !existing.watchers)
+        ) {
+          const blockers = (await workspaces.diagnose(existing)).filter(
+            (check) => !check.ok && !check.advisory,
+          )
+          if (blockers.length > 0)
+            return c.json(
+              { error: 'Resolve readiness problems before activating this repository', blockers },
+              409,
+            )
+        }
         const participation = {
           ...(body.workers === undefined ? {} : { workers: body.workers }),
           ...(body.watchers === undefined ? {} : { watchers: body.watchers }),
@@ -336,6 +383,64 @@ export function createFleetRoutes({
           return c.json({ error: `unknown repository ${repo}` }, 404)
         }
         return c.json({ gitIdentity })
+      },
+    )
+
+    .get('/api/repos/:repo/workers', valid('param', RepoParam), async (c) => {
+      const { repo } = c.req.valid('param')
+      const ws = resolveSetup(workspaces, repo)
+      const live = (await runnerFor(repo)?.status())?.fleet ?? []
+      return c.json({
+        workers: ws.config.worker.map((worker) => ({
+          ...worker,
+          taskId:
+            live.find(
+              (entry) =>
+                (entry.id === worker.id || entry.id.startsWith(`${worker.id}-`)) &&
+                entry.taskId !== null,
+            )?.taskId ?? null,
+        })),
+        difficultyLevels: ws.config.difficulty.levels,
+        profiles: loadGlobalConfig().profiles,
+      })
+    })
+    .put(
+      '/api/repos/:repo/workers',
+      valid('param', RepoParam),
+      valid('json', z.object({ workers: Config.shape.worker })),
+      async (c) => {
+        const { repo } = c.req.valid('param')
+        const ws = resolveSetup(workspaces, repo)
+        const { workers } = c.req.valid('json')
+        const profiles = loadGlobalConfig().profiles
+        for (const worker of workers) {
+          if (
+            worker.profile !== undefined &&
+            !profiles.some((profile) => profile.profile_name === worker.profile)
+          ) {
+            return c.json({ error: `unknown worker profile "${worker.profile}"` }, 400)
+          }
+        }
+        const live = (await runnerFor(repo)?.status())?.fleet ?? []
+        for (const worker of ws.config.worker) {
+          if (
+            !workers.some((entry) => entry.id === worker.id) &&
+            live.some(
+              (entry) =>
+                (entry.id === worker.id || entry.id.startsWith(`${worker.id}-`)) &&
+                entry.taskId !== null,
+            )
+          ) {
+            return c.json(
+              { error: `worker ${worker.id} is running; stop that run before deleting the worker` },
+              409,
+            )
+          }
+        }
+        writeConfig(ws.root, { worker: workers })
+        ws.config.worker = loadConfig(ws.root, { allowIncompleteChecks: true }).config.worker
+        runnerFor(repo)?.fleetChanged()
+        return c.json({ workers: ws.config.worker })
       },
     )
 

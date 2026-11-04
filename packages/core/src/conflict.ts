@@ -25,6 +25,7 @@ import {
 } from './pr-check.ts'
 import { withPrWriteLock } from './pr-write-lock.ts'
 import { commitMessage, resolveConflictPrompt, resolveConflictSystemPrompt } from './prompt.ts'
+import { stopServices } from './services.ts'
 import type { Store } from './store/store.ts'
 import { recordWatcherAgentRun } from './watcher-agent.ts'
 
@@ -196,6 +197,7 @@ async function resolveConflictLocked(opts: ResolveConflictOptions): Promise<Reso
   let iteration = 0
   let startIteration = 0
   let verdict: PointlessVerdict | undefined
+  let worktree: string | null = null
 
   try {
     const taskId = taskIdFromAmagiBranch(opts.pr.headRefName)
@@ -226,6 +228,7 @@ async function resolveConflictLocked(opts: ResolveConflictOptions): Promise<Reso
       deferCommit: true,
       exec: run,
     })
+    worktree = wt.path
     log('info', `worktree: ${wt.path}`)
     iteration = iterationsFromLabels(opts.pr.labels)
     startIteration = iteration
@@ -432,6 +435,12 @@ async function resolveConflictLocked(opts: ResolveConflictOptions): Promise<Reso
       } catch (err) {
         log('warn', `iteration bump failed: ${errMsg(err)}`)
       }
+    }
+    // The PR worktree outlives this run, so its services must not.
+    if (worktree !== null) {
+      await stopServices(opts.repoRoot, worktree, run).catch((err) =>
+        log('warn', `services stop failed: ${errMsg(err)}`),
+      )
     }
   }
 }

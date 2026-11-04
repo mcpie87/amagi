@@ -135,7 +135,7 @@ export class Workspaces {
   }
 
   /** Persists checks without requiring a valid workspace, and updates any live workspace. */
-  updateChecks(key: string, checks: Pick<Config['checks'], 'format' | 'lint' | 'test'>): boolean {
+  updateChecks(key: string, checks: Partial<Config['checks']>): boolean {
     const entry = this.list().find((candidate) => candidate.key === key)
     if (entry === undefined) return false
     writeConfig(entry.path, { checks })
@@ -143,6 +143,35 @@ export class Workspaces {
     const cached = this.cache.get(key)
     if (cached !== undefined) Object.assign(cached.config.checks, checks)
     return true
+  }
+
+  /** Configuration editors must work before a runnable workspace can be built. */
+  setup(key: string): { root: string; config: Config } | null {
+    const cached = this.cache.get(key)
+    if (cached !== undefined) return cached
+    const entry = this.list().find((candidate) => candidate.key === key)
+    return entry === undefined
+      ? null
+      : {
+          root: entry.path,
+          config: loadConfig(entry.path, { allowIncompleteChecks: true }).config,
+        }
+  }
+
+  refreshConfig(sections: ReadonlySet<string>, key?: string): void {
+    if (sections.size === 0) return
+    for (const [repo, workspace] of this.cache) {
+      if (key !== undefined && repo !== key) continue
+      const fresh = loadConfig(workspace.root, { allowIncompleteChecks: true }).config
+      for (const section of sections) {
+        const name = section as keyof Config
+        const target = workspace.config[name] as Record<string, unknown>
+        const source = fresh[name] as Record<string, unknown>
+        for (const key of Object.keys(target)) if (!(key in source)) delete target[key]
+        Object.assign(target, source)
+      }
+    }
+    this.readinessCache.clear()
   }
 
   /** Registers a repo and returns its entry. Throws when path is not a repo. */
@@ -220,10 +249,16 @@ function liveForge(config: Config): PrDriver {
     getPrChanges: (cwd, number) => current().getPrChanges(cwd, number),
     listComments: (cwd, number) => current().listComments(cwd, number),
     postComment: (cwd, number, body) => current().postComment(cwd, number, body),
+    getPrBody: (cwd, number) => current().getPrBody(cwd, number),
+    updatePr: (cwd, number, update) => current().updatePr(cwd, number, update),
     closePr: (cwd, number, reason) => current().closePr(cwd, number, reason),
     addLabel: (cwd, number, label) => current().addLabel(cwd, number, label),
     removeLabel: (cwd, number, label) => current().removeLabel(cwd, number, label),
     deleteBranch: (cwd, remote, branch) => current().deleteBranch(cwd, remote, branch),
+    get uploadFile() {
+      const driver = current()
+      return driver.uploadFile?.bind(driver)
+    },
   }
 }
 

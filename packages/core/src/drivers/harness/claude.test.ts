@@ -266,6 +266,93 @@ describe('ClaudeHarness process', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test.each(['seat', 'process cap'] as const)(
+    'a launch queued on its %s for over five minutes still starts when capacity frees',
+    async (resource) => {
+      const dir = mkdtempSync(join(tmpdir(), 'amagi-long-wait-'))
+      const bin = join(dir, 'claude')
+      writeFileSync(
+        bin,
+        `#!/bin/sh\nprintf '%s\\n' '{"type":"result","subtype":"success","result":"completed after waiting"}'\n`,
+      )
+      chmodSync(bin, 0o755)
+      const script = `
+        import { setSystemTime } from 'bun:test';
+        import { acquireSeat } from ${JSON.stringify(new URL('../../seat-lock.ts', import.meta.url).pathname)};
+        import { ClaudeHarness } from ${JSON.stringify(new URL('./claude.ts', import.meta.url).pathname)};
+        import { setHarnessProcessCap } from ${JSON.stringify(new URL('./spawn.ts', import.meta.url).pathname)};
+        process.env.AMAGI_SEAT_LOCK_DIR = ${JSON.stringify(join(dir, 'seats'))};
+        const resource = ${JSON.stringify(resource)};
+        const held = await acquireSeat(resource === 'seat' ? 'queued-seat' : 'amagi:harness-processes');
+        if (resource === 'process cap') setHarnessProcessCap(1);
+        const harness = new ClaudeHarness({ bin: ${JSON.stringify(bin)}, seat: 'queued-seat' });
+        const proc = harness.start({
+          cwd: ${JSON.stringify(dir)}, prompt: 'queued work',
+          ...(resource === 'process cap' ? { seat: null } : {}),
+        });
+        try {
+          const event = (await proc.events()[Symbol.asyncIterator]().next()).value;
+          if (event?.kind !== 'status') throw new Error('launch did not queue');
+          setSystemTime(Date.now() + 6 * 60 * 1000);
+          held.release();
+          console.log(JSON.stringify(await proc.done));
+        } finally {
+          held.release();
+        }
+      `
+      try {
+        const child = Bun.spawn([process.execPath, '-e', script], {
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ])
+        expect(exitCode, stderr).toBe(0)
+        expect(JSON.parse(stdout)).toMatchObject({
+          ok: true,
+          exitCode: 0,
+          summary: 'completed after waiting',
+        })
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.each(['deadline', 'interrupt'] as const)(
+    'a queued launch still honors an explicit %s',
+    async (stop) => {
+      const seat = `test-${randomUUID()}`
+      const held = await acquireSeat(seat)
+      const harness = new ClaudeHarness({ bin: '/bin/false', seat })
+      const proc = harness.start({
+        cwd: tmpdir(),
+        prompt: 'queued work',
+        ...(stop === 'deadline' ? { seatMaxWaitMs: 50 } : {}),
+      })
+      try {
+        const events = proc.events()[Symbol.asyncIterator]()
+        expect((await events.next()).value).toMatchObject({ kind: 'status' })
+        if (stop === 'interrupt') await proc.kill()
+        const outcome = await proc.done
+        expect(proc.pid).toBe(0)
+        expect(outcome.ok).toBe(false)
+        if (stop === 'deadline') {
+          expect(outcome.stderr).toBe(`timed out waiting 50ms for seat ${seat}`)
+        } else {
+          expect(outcome.exitCode).toBe(130)
+        }
+      } finally {
+        await proc.kill()
+        await proc.done
+        held.release()
+      }
+    },
+  )
   test('a null seat skips the seat lock but still waits on the process cap', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'amagi-cap-spawn-'))
     const bin = join(dir, 'claude')

@@ -46,6 +46,7 @@ import {
   type Workspaces,
   watcherHarnessConfig,
   workerSeat,
+  writeConfig,
   writeGlobalConfig,
 } from '@amagi/core'
 import type { Harness } from '@amagi/core/drivers/types'
@@ -287,7 +288,9 @@ export function createApp({
     for (const { repo, service } of servedRunners()) {
       const lookup = workspaces.lookup(repo)
       if (lookup.status !== 'ready') continue
-      lookup.workspace.config.worker = fleet
+      lookup.workspace.config.worker = loadConfig(lookup.workspace.root, {
+        allowIncompleteChecks: true,
+      }).config.worker
       service.fleetChanged()
     }
   }
@@ -304,6 +307,13 @@ export function createApp({
     const seats = new Map(global.seats.map(({ name, count }) => [name, count]))
     for (const worker of global.worker) {
       if (worker.seat !== undefined && !seats.has(worker.seat)) seats.set(worker.seat, 1)
+    }
+    for (const entry of workspaces.list()) {
+      const lookup = workspaces.lookup(entry.key)
+      if (lookup.status !== 'ready') continue
+      for (const worker of lookup.workspace.config.worker) {
+        if (worker.seat !== undefined && !seats.has(worker.seat)) seats.set(worker.seat, 1)
+      }
     }
     for (const watcher of [global.watchers.mention, global.watchers.prConflict]) {
       if (watcher.seat !== undefined && !seats.has(watcher.seat)) seats.set(watcher.seat, 1)
@@ -441,7 +451,23 @@ export function createApp({
 
     .put('/api/profiles', valid('json', ProfilesUpdateBody), (c) => {
       const { profiles } = c.req.valid('json')
+      for (const entry of workspaces.list()) {
+        try {
+          loadConfig(entry.path, { allowIncompleteChecks: true, globalPatch: { profiles } })
+        } catch (err) {
+          return c.json({ error: `${entry.key}: ${errMsg(err)}` }, 400)
+        }
+      }
       writeGlobalConfig({ profiles })
+      for (const entry of workspaces.list()) {
+        const lookup = workspaces.lookup(entry.key)
+        if (lookup.status !== 'ready') continue
+        lookup.workspace.config.profiles = profiles
+        lookup.workspace.config.worker = loadConfig(entry.path, {
+          allowIncompleteChecks: true,
+        }).config.worker
+        runnerFor(entry.key)?.fleetChanged()
+      }
       return c.json({ profiles })
     })
 
@@ -536,8 +562,18 @@ export function createApp({
           console.warn(`seat save: skipping ${entry.key}: ${errMsg(err)}`)
           continue
         }
+        const repoWorkers = config.worker.map((entry) => {
+          const seat = rewrite(entry.seat)
+          if (seat === entry.seat) return entry
+          const rest = { ...entry }
+          delete rest.seat
+          return seat === undefined ? rest : { ...rest, seat }
+        })
+        if (JSON.stringify(repoWorkers) !== JSON.stringify(config.worker)) {
+          writeConfig(ws.root, { worker: repoWorkers })
+        }
         ws.config.seats = config.seats
-        ws.config.worker = config.worker
+        ws.config.worker = repoWorkers
         ws.config.watchers = config.watchers
         ws.config.harness = config.harness
         ws.config.review = config.review
@@ -947,6 +983,7 @@ export function createApp({
         liveRuns,
         queueConflictResolution,
         chatFor,
+        harnessFor: (ws) => chatHarnessFor?.(ws) ?? makeHarness(ws.config.harness.implement),
         liveTaskChats,
         authorized,
         openQuestionGate,

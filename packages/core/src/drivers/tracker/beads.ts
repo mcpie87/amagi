@@ -1,3 +1,4 @@
+import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '../../beads-labels.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from '../../exec.ts'
 import type {
   CreateTrackerTask,
@@ -10,6 +11,8 @@ import type {
   UpdateTrackerTask,
 } from '../types.ts'
 
+export { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from '../../beads-labels.ts'
+
 type BdIssue = {
   id: string
   title: string
@@ -18,6 +21,7 @@ type BdIssue = {
   status?: string
   priority?: number
   issue_type?: string
+  external_ref?: string
   assignee?: string
   labels?: string[]
   parent?: string
@@ -85,11 +89,6 @@ const LEASE_TTL_MS = 5 * 60_000
  */
 const NOT_WORK_TYPES = ['epic', 'milestone', 'gate'] as const
 
-/** Opt out marker for work that is the operator's to do, not an agent's. */
-export const HUMAN_ONLY_LABEL = 'human'
-/** Keeps proposed work out of the worker queue until a human accepts it. */
-export const PROPOSED_LABEL = 'proposed'
-
 const STATUS_MAP: Record<string, TrackerStatus> = {
   open: 'open',
   in_progress: 'in_progress',
@@ -109,6 +108,7 @@ function toTask(issue: BdIssue): TrackerTask {
     priority: issue.priority ?? null,
     type: issue.issue_type ?? null,
     url: null,
+    ...(issue.external_ref ? { externalRef: issue.external_ref } : {}),
     ...(typeof difficulty === 'string' && difficulty !== '' ? { difficulty } : {}),
     ...(created !== null && !Number.isNaN(created) ? { createdAt: created } : {}),
   }
@@ -116,6 +116,7 @@ function toTask(issue: BdIssue): TrackerTask {
   if (notes) task.notes = notes
   const comments = (issue.comments ?? []).map((c) => c.text).filter((c) => c.trim() !== '')
   if (comments.length > 0) task.comments = comments
+  if (issue.labels !== undefined && issue.labels.length > 0) task.labels = issue.labels
   return task
 }
 

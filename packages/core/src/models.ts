@@ -6,8 +6,7 @@ import { cacheHome } from './paths.ts'
 /**
  * Curated model and effort options per harness kind, owned by amagi rather
  * than scraped from each CLI's own listing. A new model ships by editing
- * models.json, not by parsing `claude model list` or `~/.codex/config.toml`.
- * Only claude and codex are curated; opencode keeps listing its own models.
+ * models.json for curated harnesses; opencode and omp list from their own CLIs.
  */
 type HarnessModelTable = Partial<Record<string, readonly string[]>> & {
   claude: readonly string[]
@@ -99,6 +98,23 @@ const TTL_MS = 24 * 60 * 60 * 1000
 
 type CacheEntry = { cachedAt: number; models: string[] }
 
+const modelsCacheDir = () => join(cacheHome(), 'amagi', 'models')
+
+function readModelsCache(kind: string, cacheDir: string): CacheEntry | null {
+  const file = join(cacheDir, `${kind}.json`)
+  if (!existsSync(file)) return null
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as CacheEntry
+  } catch {
+    return null
+  }
+}
+
+/** Picker snapshot: curated or cached models, even stale, without launching a harness. */
+export function readCachedModels(kind: string, cacheDir = modelsCacheDir()): string[] {
+  return [...(HARDCODED_MODELS[kind] ?? readModelsCache(kind, cacheDir)?.models ?? [])]
+}
+
 /**
  * Returns curated models for claude/codex. Other harnesses use a per-kind
  * disk cache so the picker stays fast and works offline: a fresh cache wins,
@@ -108,20 +124,12 @@ type CacheEntry = { cachedAt: number; models: string[] }
 export async function listModelsCached(
   kind: string,
   list: () => Promise<string[]>,
-  cacheDir = join(cacheHome(), 'amagi', 'models'),
+  cacheDir = modelsCacheDir(),
 ): Promise<string[]> {
   const curated = HARDCODED_MODELS[kind]
   if (curated !== undefined) return [...curated]
   const file = join(cacheDir, `${kind}.json`)
-  const read = (): CacheEntry | null => {
-    if (!existsSync(file)) return null
-    try {
-      return JSON.parse(readFileSync(file, 'utf8')) as CacheEntry
-    } catch {
-      return null
-    }
-  }
-  const cached = read()
+  const cached = readModelsCache(kind, cacheDir)
   if (cached !== null && Date.now() - cached.cachedAt < TTL_MS) return cached.models
 
   try {

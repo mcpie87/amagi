@@ -1,3 +1,7 @@
+---
+status: partially superseded by ADR-0006
+---
+
 # Project checks have no defaults, and an undeclared repository is never claimed
 
 Each repository declares its format, lint and test commands in its own `.amagi/config.toml`, each as a non-empty shell command. A key that is absent or empty blocks claiming in that repository and sends a notification. Amagi ships no defaults, does not detect a task runner, and does not accept checks from the global config.

@@ -93,7 +93,7 @@ describe('loadConfig', () => {
 
   test('works with no files at all', () => {
     rawWriteRepo('')
-    expect(() => loadConfig(repo)).toThrow(/must declare non-empty format, lint, test/)
+    expect(() => loadConfig(repo)).toThrow(/must declare commands/)
     writeRepo('[checks]\nformat = "bun run format"\nlint = "bun run lint"\ntest = "bun test"\n')
     const { config, sources } = loadRepoConfig()
     expect(sources).toHaveLength(1)
@@ -136,6 +136,18 @@ describe('loadConfig', () => {
     expect(config.loop.doomDiffWindowSec).toBe(1800)
     expect(config.loop.maxRunMinutes).toBe(0)
     expect(config.loop.maxCostUsd).toBe(0)
+  })
+
+  test('accepts user commands or an explicit empty list, but never assumes checks', () => {
+    rawWriteRepo('[checks]\ncommands = ["make verify", "python smoke.py"]\n')
+    expect(loadConfig(repo).config.checks.commands).toEqual(['make verify', 'python smoke.py'])
+    rawWriteRepo('[checks]\ncommands = []\n')
+    expect(loadConfig(repo).config.checks.commands).toEqual([])
+    rawWriteRepo('[checks]\ntimeoutSec = 30\n')
+    expect(() => loadConfig(repo)).toThrow('must declare commands')
+    expect(loadConfig(repo, { allowIncompleteChecks: true }).config.checks.timeoutSec).toBe(30)
+    rawWriteRepo('[checks]\ncommands = [" "]\n')
+    expect(() => loadConfig(repo)).toThrow('invalid amagi config')
   })
 
   test('global checks are rejected even when the repo declares its own', () => {
@@ -207,6 +219,11 @@ describe('loadConfig', () => {
     expect(loadRepoConfig().config.forge.agentHandle).toBe('chise-maru')
     writeRepo('[forge]\nagentHandle = "chise"\n')
     expect(loadRepoConfig().config.forge.agentHandle).toBe('chise')
+  })
+
+  test('accepts omp as a harness kind', () => {
+    writeRepo('[harness.implement]\nkind = "omp"\n')
+    expect(loadRepoConfig().config.harness.implement.kind).toBe('omp')
   })
 
   test('accepts a per-harness binary override', () => {
@@ -430,7 +447,7 @@ describe('writeConfig', () => {
   test('creates the repo config file when absent', () => {
     writeConfig(repo, { loop: { autoQueue: true } })
     expect(readFileSync(join(repo, '.amagi', 'config.toml'), 'utf8')).toContain('autoQueue = true')
-    expect(() => loadConfig(repo)).toThrow(/must declare non-empty format, lint, test/)
+    expect(() => loadConfig(repo)).toThrow(/must declare commands/)
   })
 })
 
@@ -462,6 +479,36 @@ describe('execution profiles', () => {
 })
 
 describe('worker fleet', () => {
+  test('repository workers resolve their profiles and override the global fleet', () => {
+    writeGlobalConfig({
+      profiles: [{ profile_name: 'Careful', harness: 'codex', model: 'model-a', effort: 'high' }],
+      worker: [{ id: 'global', name: 'Global', kind: 'claude' }],
+    })
+    writeRepo(
+      '[[worker]]\nid = "local"\nname = "Local"\nprofile = "Careful"\nkind = "claude"\nseat = "shared"\n',
+    )
+    expect(loadConfig(repo).config.worker).toEqual([
+      expect.objectContaining({
+        id: 'local',
+        kind: 'codex',
+        model: 'model-a',
+        effort: 'high',
+        seat: 'shared',
+      }),
+    ])
+    writeGlobalConfig({
+      profiles: [{ profile_name: 'Careful', harness: 'claude', model: 'model-b', effort: 'low' }],
+    })
+    expect(loadConfig(repo).config.worker[0]).toMatchObject({
+      kind: 'claude',
+      model: 'model-b',
+      effort: 'low',
+      seat: 'shared',
+    })
+    writeGlobalConfig({ profiles: [] })
+    expect(() => loadConfig(repo)).toThrow('unknown worker profile')
+  })
+
   test('defaults a worker profile to one instance and one seat', () => {
     const config = Config.parse({
       worker: [{ id: 'claude', name: 'Claude', kind: 'claude', enabled: true }],
@@ -610,9 +657,9 @@ describe('worker fleet', () => {
     expect(() => loadGlobalConfig()).toThrow(/worker ids must be unique/)
   })
 
-  test('rejects [[worker]] in a repo config, naming the global path', () => {
+  test('accepts workers in a repo config', () => {
     writeRepo('[[worker]]\nid = "w-1"\nname = "x"\nkind = "claude"\n')
-    expect(() => loadRepoConfig()).toThrow(join(home, 'amagi', 'config.toml'))
+    expect(loadRepoConfig().config.worker[0]?.id).toBe('w-1')
   })
 
   test('newWorkerId avoids taken ids', () => {

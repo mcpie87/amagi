@@ -1,4 +1,12 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import * as z from 'zod'
@@ -6,6 +14,7 @@ import { changedCheckTooling } from './check-tooling.ts'
 import { stageAndCommit } from './commit.ts'
 import { activeReviewerConfig, type Config, reviewerHarnessConfig } from './config.ts'
 import { type ClaimWorker, claimEligible } from './difficulty.ts'
+import { isForgeAuthError } from './drivers/forge-api.ts'
 import { forgeToken, gitTokenConfig } from './drivers/forge-cred.ts'
 import { sandboxProjectCommand } from './drivers/harness/sandbox.ts'
 import { amagiLabels, type CreatePrOptions, makePrDriver, type PrDriver } from './drivers/pr.ts'
@@ -29,7 +38,7 @@ import {
 import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { harnessStartOpts, makeHarness } from './factory.ts'
 import { headReflog, headReflogEntriesSince } from './git-bypass.ts'
-import { configuredCheckCommands } from './mandatory-checks.ts'
+import { beforeCheckCommands, configuredCheckCommands } from './mandatory-checks.ts'
 import { rejectedGitLogPath, runStateDir } from './paths.ts'
 import {
   changesSinceBase,
@@ -37,18 +46,26 @@ import {
   formatPrBody,
   type PrBodyMeta,
   withAgentSections,
+  withDemoSection,
 } from './pr-body.ts'
+import { withPrWriteLock } from './pr-write-lock.ts'
 import {
+  agentCommitMessage,
   answerPrompt,
   commitSummary,
+  demoPrompt,
+  demoSystemPrompt,
   fixChecksPrompt,
   implementAfterVerifyPrompt,
   implementPrompt,
   implementSystemPrompt,
+  type PromptContext,
   prFailurePrompt,
   prFailureSystemPrompt,
   prTitle,
   reclaimPrompt,
+  rewriteFinalMessagePrompt,
+  ticketRef,
   verifyViabilityPrompt,
   verifyViabilitySystemPrompt,
   WHOLE_TASK_FINAL_MESSAGE,
@@ -64,6 +81,7 @@ import {
 } from './retry.ts'
 import { reviewPrompt } from './review-pack.ts'
 import { acquireSeat, SeatAcquireAbortedError } from './seat-lock.ts'
+import { startServices } from './services.ts'
 import type { ProjectedTask, Store } from './store/store.ts'
 import {
   acquireUsageProbe,
@@ -152,6 +170,9 @@ const SCRATCH_DIR = '.amagi-tmp'
 
 /** How often the parked runner re-checks the store for an answer. */
 const PARK_POLL_MS = 100
+
+/** Batching window for a running check's output into checks.output events. */
+const CHECK_OUTPUT_FLUSH_MS = 1000
 
 /**
  * Worker heartbeat cadence into the store, well under the default 1h stall
@@ -1194,85 +1215,19 @@ export class Runner {
 
     this.throwIfCancelled(task.id)
     this.throwIfBudgetExhausted(task.id, budget)
-    this.transition(task.id, 'implementing')
-    // A fresh run first verifies the task is still viable against the current
-    // repository, so a task already satisfied on the base branch is stopped
-    // before the implement agent writes anything or a no-op PR is opened. A
-    // resumed run skips the check: its worktree already holds in-progress work.
-    // Implement resumes the check's session so its exploration is not redone,
-    // but only on a harness that swaps the system prompt on resume: elsewhere
-    // the resumed session stays a read-only checker and never implements.
-    let verifySession: string | null = null
-    if (!resume) {
-      const verified = await this.verifyViability(task, cwd, branch, budget)
-      if (verified === null) return
-      if (this.deps.harness.replacesSystemPromptOnResume === true) {
-        verifySession = verified.sessionId
-      }
-    }
-    const first = await this.runAgentWithRetry(
-      task.id,
-      verifySession,
-      {
-        cwd,
-        prompt: resume
-          ? reclaimPrompt(promptCtx)
-          : verifySession !== null
-            ? implementAfterVerifyPrompt(promptCtx)
-            : implementPrompt(promptCtx),
-        systemPrompt: implementSystemPrompt(promptCtx),
-        ...harnessStartOpts(config.harness.implement),
-      },
-      'implement',
-      lease,
-      budget,
-    )
-    if (first.stopped) return
-    let current: AgentRun = {
-      sessionId: first.sessionId,
-      summary: first.summary,
-      model: first.model,
-      effort: first.effort,
-    }
-
-    if (lease.isLost) throw new LeaseLostError(task.id)
-
-    const parked = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
-    if (parked === null) return
-    current = mergeAgentRuns(current, parked)
-
-    if (current.summary !== null && parseViabilityDecision(current.summary) !== null) {
-      const status = await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })
-      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
-      const commits = await execOk(this.exec, ['git', 'rev-list', '--count', `${base}..HEAD`], {
-        cwd,
-      })
-      if (status.trim() === '' && Number(commits.trim()) === 0) {
-        const retry = await this.runAgentWithRetry(
-          task.id,
-          null,
-          {
-            cwd,
-            prompt: implementPrompt(promptCtx),
-            systemPrompt: implementSystemPrompt(promptCtx),
-            ...harnessStartOpts(config.harness.implement),
-          },
-          'implement retry',
-          lease,
-          budget,
-        )
-        if (retry.stopped) return
-        current = {
-          sessionId: retry.sessionId,
-          summary: retry.summary,
-          model: retry.model,
-          effort: retry.effort,
-        }
-        if (lease.isLost) throw new LeaseLostError(task.id)
-        const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
-        if (resumed === null) return
-        current = mergeAgentRuns(current, resumed)
-      }
+    const recoveredRun = resume ? this.recoverableImplementRun(task.id) : null
+    let current: AgentRun
+    if (recoveredRun !== null) {
+      current = recoveredRun
+      this.transition(
+        task.id,
+        'checks',
+        'resumed completed implementation; checking preserved work',
+      )
+    } else {
+      const implemented = await this.implement(task, cwd, branch, promptCtx, lease, budget, resume)
+      if (implemented === null) return
+      current = implemented
     }
 
     const checked = await this.runCheckRounds(task, cwd, current, lease, budget)
@@ -1291,8 +1246,40 @@ export class Runner {
       })
     }
 
+    // Without the agent's own message the commit falls back to the raw final
+    // reply, so a run that skipped it is asked once more before committing.
+    const dirty = (await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })).trim()
+    if (
+      agentCommitMessage(current.summary) === null &&
+      dirty !== '' &&
+      current.sessionId !== null
+    ) {
+      this.transition(task.id, 'implementing', 'final message has no commit message')
+      const rewritten = await this.runAgentWithRetry(
+        task.id,
+        current.sessionId,
+        {
+          cwd,
+          prompt: rewriteFinalMessagePrompt(
+            promptCtx,
+            'Your final message has no `### Commit message` section.',
+          ),
+          ...harnessStartOpts(config.harness.implement),
+        },
+        'commit message',
+        lease,
+        budget,
+      )
+      if (rewritten.stopped) return
+      if (agentCommitMessage(rewritten.summary) !== null) {
+        current = { ...current, sessionId: rewritten.sessionId, summary: rewritten.summary }
+      }
+      this.transition(task.id, 'checks', 'final message rewritten')
+    }
+
     const committed = await this.commit(task, cwd, config.repo.baseBranch, {
       summary: commitSummary(current.summary),
+      authored: agentCommitMessage(current.summary),
       model: current.model,
       effort: current.effort,
     })
@@ -1349,6 +1336,152 @@ export class Runner {
       reviewSummary,
     )
     this.throwIfCancelled(task.id)
+  }
+
+  /**
+   * Runs verify and the implement agent, including the empty-diff retry.
+   * Returns null when the run must end.
+   */
+  private async implement(
+    task: TrackerTask,
+    cwd: string,
+    branch: string,
+    promptCtx: PromptContext,
+    lease: Lease,
+    budget: TaskBudget,
+    resume: boolean,
+  ): Promise<AgentRun | null> {
+    const { config } = this.deps
+    this.transition(task.id, 'implementing')
+    // A fresh run first verifies the task is still viable against the current
+    // repository, so a task already satisfied on the base branch is stopped
+    // before the implement agent writes anything or a no-op PR is opened. A
+    // resumed run skips the check: its worktree already holds in-progress work.
+    // Implement resumes the check's session so its exploration is not redone,
+    // but only on a harness that swaps the system prompt on resume: elsewhere
+    // the resumed session stays a read-only checker and never implements.
+    let verifySession: string | null = null
+    if (!resume) {
+      const verified = await this.verifyViability(task, cwd, branch, budget)
+      if (verified === null) return null
+      if (this.deps.harness.replacesSystemPromptOnResume === true) {
+        verifySession = verified.sessionId
+      }
+    }
+    const first = await this.runAgentWithRetry(
+      task.id,
+      verifySession,
+      {
+        cwd,
+        prompt: resume
+          ? reclaimPrompt(promptCtx)
+          : verifySession !== null
+            ? implementAfterVerifyPrompt(promptCtx)
+            : implementPrompt(promptCtx),
+        systemPrompt: implementSystemPrompt(promptCtx),
+        ...harnessStartOpts(config.harness.implement),
+      },
+      'implement',
+      lease,
+      budget,
+    )
+    if (first.stopped) return null
+    let current: AgentRun = {
+      sessionId: first.sessionId,
+      summary: first.summary,
+      model: first.model,
+      effort: first.effort,
+    }
+
+    if (lease.isLost) throw new LeaseLostError(task.id)
+
+    const parked = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
+    if (parked === null) return null
+    current = mergeAgentRuns(current, parked)
+
+    if (current.summary !== null && parseViabilityDecision(current.summary) !== null) {
+      const status = await execOk(this.exec, ['git', 'status', '--porcelain'], { cwd })
+      const base = await diffBase(this.exec, cwd, config.forge.remote, config.repo.baseBranch)
+      const commits = await execOk(this.exec, ['git', 'rev-list', '--count', `${base}..HEAD`], {
+        cwd,
+      })
+      if (status.trim() === '' && Number(commits.trim()) === 0) {
+        const retry = await this.runAgentWithRetry(
+          task.id,
+          null,
+          {
+            cwd,
+            prompt: implementPrompt(promptCtx),
+            systemPrompt: implementSystemPrompt(promptCtx),
+            ...harnessStartOpts(config.harness.implement),
+          },
+          'implement retry',
+          lease,
+          budget,
+        )
+        if (retry.stopped) return null
+        current = {
+          sessionId: retry.sessionId,
+          summary: retry.summary,
+          model: retry.model,
+          effort: retry.effort,
+        }
+        if (lease.isLost) throw new LeaseLostError(task.id)
+        const resumed = await this.parkAndResume(task.id, current.sessionId, cwd, lease, budget)
+        if (resumed === null) return null
+        current = mergeAgentRuns(current, resumed)
+      }
+    }
+    return current
+  }
+
+  /**
+   * Reuse completed implementation when checks were interrupted or passed.
+   * Failed checks, a newer implement run, or a reset invalidate that work.
+   */
+  private recoverableImplementRun(taskId: string): AgentRun | null {
+    let run = null as AgentRun | null
+    let exitedSuccessfully = false
+    let readyForChecks = false
+    for (const event of this.deps.store.events({ taskId, limit: 1_000_000 })) {
+      if (
+        event.type === 'task.reset' ||
+        (event.type === 'agent.started' && event.role === 'verify')
+      ) {
+        run = null
+        exitedSuccessfully = false
+        readyForChecks = false
+      } else if (event.type === 'agent.started' && event.role === 'implement') {
+        run = {
+          sessionId: run?.sessionId ?? null,
+          summary: run?.summary ?? null,
+          model: event.model,
+          effort: event.effort,
+        }
+        exitedSuccessfully = false
+        readyForChecks = false
+      } else if (event.type === 'agent.exited' && event.role === 'implement' && run !== null) {
+        if (event.sessionId !== null) run.sessionId = event.sessionId
+        exitedSuccessfully = event.exitCode === 0
+      } else if (
+        event.type === 'agent.stream' &&
+        event.role === 'implement' &&
+        event.event.kind === 'result' &&
+        event.event.summary?.trim() &&
+        run !== null
+      ) {
+        run.summary = event.event.summary
+      } else if (
+        event.type === 'task.state' &&
+        event.to === 'checks' &&
+        (event.from === 'implementing' || event.from === 'fixing')
+      ) {
+        readyForChecks = exitedSuccessfully && run !== null
+      } else if (event.type === 'checks.finished') {
+        readyForChecks = event.ok && run !== null
+      }
+    }
+    return readyForChecks ? run : null
   }
 
   /**
@@ -1554,6 +1687,9 @@ export class Runner {
         }
       }
     }
+    // Without an upload API the videos would only stay on disk, so the run is not spent on them.
+    const demo =
+      forge.uploadFile === undefined ? [] : await this.recordDemo(current, cwd, budget, forge)
     const opts: CreatePrOptions = {
       cwd,
       branch,
@@ -1579,6 +1715,7 @@ export class Runner {
               proposalCreationSupported: reviewSummary.proposalCreationSupported,
               history: reviewSummary.history,
             },
+        demo,
       ),
       labels: amagiLabels(current.type),
     }
@@ -1589,7 +1726,7 @@ export class Runner {
       await this.updateProposalPrLinks(task.id, reviewSummary, pr.url)
     } catch (err) {
       const message = errMsg(err)
-      const hint = /auth|login|token|not logged/i.test(message)
+      const hint = isForgeAuthError(err)
         ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
         : ''
       store.append(task.id, {
@@ -1625,7 +1762,7 @@ export class Runner {
       } catch (retryErr) {
         this.throwIfCancelled(task.id)
         const retryMessage = errMsg(retryErr)
-        const retryHint = /auth|login|token|not logged/i.test(retryMessage)
+        const retryHint = isForgeAuthError(retryErr)
           ? ` (forge needs a token: set it in the repository settings, or GH_TOKEN, GITLAB_TOKEN or FORGEJO_TOKEN in the amagi process environment)`
           : ''
         store.append(task.id, {
@@ -1636,6 +1773,114 @@ export class Runner {
         this.transition(task.id, 'needs_human', reason ?? `${retryMessage}${retryHint}`)
       }
     }
+  }
+
+  /**
+   * An agent records the task's acceptance as videos and they are uploaded for
+   * the PR body. Advisory: every failure is logged and only drops clips, it
+   * never holds the PR back. Whatever the agent leaves in the worktree is
+   * discarded, so a later fix commit cannot pick it up.
+   */
+  private async recordDemo(
+    task: TrackerTask,
+    cwd: string,
+    budget: TaskBudget,
+    forge: PrDriver,
+  ): Promise<{ name: string; url: string }[]> {
+    const { store, config } = this.deps
+    const outputDir = join(runStateDir(task.id), 'demo')
+    rmSync(outputDir, { recursive: true, force: true })
+    mkdirSync(outputDir, { recursive: true })
+    const fail = (message: string): [] => {
+      store.append(task.id, { type: 'error', message: `demo: ${message}`, fatal: false })
+      return []
+    }
+    let summary: string | null = null
+    try {
+      const services = await startServices(cwd, this.exec)
+        .then((started) => started.forwards)
+        .catch(() => [])
+      const run = await this.runAgent(
+        task.id,
+        null,
+        {
+          cwd,
+          prompt: demoPrompt({
+            task,
+            outputDir,
+            services,
+          }),
+          systemPrompt: demoSystemPrompt(),
+          ...harnessStartOpts(config.harness.implement),
+        },
+        'demo',
+        budget,
+      )
+      summary = run.summary?.trim() || null
+    } catch (err) {
+      this.throwIfCancelled(task.id)
+      return fail(errMsg(err))
+    } finally {
+      // The commit left the worktree clean, so anything here is the demo agent's.
+      await this.exec(['git', 'checkout', '--', '.'], { cwd }).catch(() => undefined)
+      await this.exec(['git', 'clean', '-fd'], { cwd }).catch(() => undefined)
+    }
+    this.throwIfCancelled(task.id)
+    const files = readdirSync(outputDir)
+      .filter((name) => /\.(webm|mp4)$/i.test(name))
+      .sort()
+    if (files.length === 0) return fail(`no video recorded${summary ? `: ${summary}` : ''}`)
+    const clips: { name: string; url: string | null }[] = []
+    for (const name of files) {
+      let url: string | null = null
+      if (forge.uploadFile !== undefined) {
+        try {
+          url = await forge.uploadFile(cwd, join(outputDir, name))
+        } catch (err) {
+          fail(`uploading ${name}: ${errMsg(err)}`)
+        }
+      }
+      clips.push({ name, url })
+    }
+    store.append(task.id, { type: 'demo.recorded', clips })
+    if (forge.uploadFile === undefined) {
+      fail(`${config.forge.kind} has no upload API; the videos stay in ${outputDir}`)
+    }
+    return clips.flatMap(({ name, url }) => (url === null ? [] : [{ name, url }]))
+  }
+
+  /**
+   * Records a demo for a task outside a run, from the dashboard. The worktree
+   * must be clean: recordDemo discards whatever the demo agent leaves behind,
+   * which must not take the operator's uncommitted work with it. An open PR
+   * gets the uploaded videos in its description.
+   */
+  async recordDemoNow(taskId: string): Promise<void> {
+    const { store, tracker, config, repoRoot } = this.deps
+    const forge = this.deps.forge ?? makePrDriver(config.forge.kind, config.forge.remote, this.exec)
+    const stored = store.task(taskId)
+    const cwd = stored?.worktree
+    if (!stored || !cwd || !existsSync(cwd)) throw new Error(`task ${taskId} has no worktree`)
+    if ((await this.exec(['git', 'status', '--porcelain'], { cwd })).stdout.trim() !== '') {
+      throw new Error(`worktree ${cwd} has uncommitted changes; commit them before recording`)
+    }
+    const issue = await tracker.get(taskId)
+    if (issue === null) throw new Error(`unknown task ${taskId}`)
+    const budget = new TaskBudget(
+      Date.now(),
+      config.loop.maxRunMinutes * 60_000,
+      config.loop.maxCostUsd,
+    )
+    const clips = await this.recordDemo(issue, cwd, budget, forge)
+    const { prNumber, branch } = stored
+    if (clips.length === 0 || prNumber === null || branch === null) return
+    await withPrWriteLock(repoRoot, config.forge.remote, branch, async () => {
+      const body = await forge.getPrBody(cwd, prNumber)
+      await forge.updatePr(cwd, prNumber, {
+        title: prTitle(issue),
+        body: withDemoSection(body, clips),
+      })
+    })
   }
 
   /**
@@ -2166,10 +2411,7 @@ export class Runner {
   }
 
   private async preflight(taskId: string, cwd: string): Promise<void> {
-    const { format, lint } = this.deps.config.checks
-    const commands = [format, lint].filter(
-      (command): command is string => command !== null && command !== '',
-    )
+    const commands = beforeCheckCommands(this.deps.config.checks)
     const results: CheckResult[] = []
     for (const command of commands) {
       const result = await this.runCheckCommand(taskId, cwd, command)
@@ -2230,16 +2472,32 @@ export class Runner {
     const cancelWatch = setInterval(() => {
       if (this.deps.store.task(taskId)?.state === 'cancelled') this.checksAbort.abort()
     }, 500)
+    let pending = `$ ${command}\n`
+    const flush = (all: boolean) => {
+      const end = all ? pending.length : pending.lastIndexOf('\n') + 1
+      if (end === 0) return
+      this.deps.store.append(taskId, { type: 'checks.output', text: pending.slice(0, end) })
+      pending = pending.slice(end)
+    }
+    flush(false)
+    const flushTimer = setInterval(() => flush(false), CHECK_OUTPUT_FLUSH_MS)
     try {
-      const isolated = sandboxProjectCommand(command, cwd)
-      return await this.exec(isolated.command, {
+      const isolated = await sandboxProjectCommand(command, cwd)
+      pending += isolated.servicesLog
+      const result = await this.exec(isolated.command, {
         cwd,
         env: isolated.env,
         timeoutMs: this.deps.config.checks.timeoutSec * 1000,
         signal: this.checksAbort.signal,
+        onOutput: (text) => {
+          pending += text
+        },
       })
+      return { ...result, stdout: `${isolated.servicesLog}${result.stdout}` }
     } finally {
       clearInterval(cancelWatch)
+      clearInterval(flushTimer)
+      flush(true)
     }
   }
 
@@ -2421,10 +2679,17 @@ export class Runner {
     task: TrackerTask,
     cwd: string,
     base: string,
-    run: { summary: string; model: string | null; effort: string | null },
+    run: { summary: string; authored: string | null; model: string | null; effort: string | null },
   ): Promise<boolean> {
     rmSync(join(cwd, SCRATCH_DIR), { recursive: true, force: true })
-    await stageAndCommit(this.exec, task, cwd, run.summary, this.commitMeta(run.model, run.effort))
+    await stageAndCommit(
+      this.exec,
+      task,
+      cwd,
+      run.summary,
+      this.commitMeta(run.model, run.effort),
+      run.authored,
+    )
 
     // A clean worktree may still hold the agent's own commit from the session;
     // HEAD ahead of the base is work worth a PR, not the no_changes case.
@@ -2433,10 +2698,11 @@ export class Runner {
     if (ahead.exitCode !== 0 || Number(ahead.stdout.trim()) === 0) return false
 
     const sha = (await this.exec(['git', 'rev-parse', 'HEAD'], { cwd })).stdout.trim()
+    const subject = (await this.exec(['git', 'log', '-1', '--format=%s'], { cwd })).stdout.trim()
     this.deps.store.append(task.id, {
       type: 'commit.created',
       sha,
-      subject: `[${task.id}] ${task.title}`,
+      subject: subject === '' ? `[${ticketRef(task)}] ${task.title}` : subject,
     })
     return true
   }

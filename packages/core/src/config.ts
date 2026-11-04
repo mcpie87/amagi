@@ -9,7 +9,7 @@ import { MAX_HARNESS_PROCESSES, MAX_WORKERS } from './limits.ts'
 import { cacheHome, expandTilde, globalConfigPath, repoConfigPath } from './paths.ts'
 
 export const TrackerKind = z.enum(['beads', 'github', 'forgejo'])
-export const HarnessKind = z.enum(['claude', 'codex', 'opencode'])
+export const HarnessKind = z.enum(['claude', 'codex', 'opencode', 'omp'])
 export const ForgeKind = z.enum(['github', 'gitlab', 'forgejo'])
 
 export const ProfileConfig = z.object({
@@ -86,6 +86,7 @@ export const WorkerConfig = z
   .object({
     id: z.string().regex(/^[a-z0-9-]+$/),
     name: z.string().min(1),
+    profile: z.string().min(1).optional(),
     kind: HarnessKind,
     model: z.string().optional(),
     effort: z.string().optional(),
@@ -211,7 +212,7 @@ export const Config = z
       .refine((seats) => new Set(seats.map(({ name }) => name)).size === seats.length, {
         message: 'seat names must be unique',
       }),
-    /** The fleet: `[[worker]]` tables, global config only. */
+    /** Workers configured for this repository. */
     worker: z
       .array(WorkerConfig)
       .max(MAX_WORKERS)
@@ -384,7 +385,7 @@ export const Config = z
         contextMaxRestarts: z.number().int().min(0).default(1),
         /**
          * Per-harness context budget overrides, keyed by harness kind
-         * (claude/codex/opencode), since context windows differ between them.
+         * (claude/codex/opencode/omp), since context windows differ between them.
          * Unset fields fall back to contextWarnTokens/contextMaxTokens.
          */
         contextOverrides: z
@@ -423,15 +424,34 @@ export const Config = z
       .prefault({}),
     checks: z
       .object({
-        commands: z.array(z.string()).default([]),
+        commands: z.array(z.string().trim().min(1)).default([]),
+        /** Commands run on the untouched worktree before agent work; null runs `commands` there too. */
+        before: z.array(z.string().trim().min(1)).nullable().default(null),
         /** Seconds one check command may run before its process tree is killed and it fails. */
         timeoutSec: z.number().int().min(1).max(86_400).default(1800),
-        /** Repository formatter. It runs before lint, tests, and extra commands. */
+        /** Legacy checks are read until the operator saves the unified command list. */
         format: z.string().nullable().default(null),
-        /** Repository lint check. It runs after format and before tests. */
+
         lint: z.string().nullable().default(null),
-        /** Repository test check. It runs after format and lint. */
+
         test: z.string().nullable().default(null),
+      })
+      .prefault({}),
+    /**
+     * Containers a worktree's setup and checks need (databases, queues). `start`
+     * and `stop` run on the host from the repository checkout with
+     * COMPOSE_PROJECT_NAME set per worktree and AMAGI_PORT_<port> naming a free
+     * host port per entry of `ports`; `start` must publish each port there.
+     * Setup and checks then reach them as 127.0.0.1:<port> in their own network.
+     */
+    services: z
+      .object({
+        start: z.string().trim().min(1).nullable().default(null),
+        stop: z.string().trim().min(1).nullable().default(null),
+        ports: z.array(z.number().int().min(1).max(65_535)).default([]),
+      })
+      .refine((services) => (services.start === null) === (services.stop === null), {
+        message: 'services.start and services.stop must be set together',
       })
       .prefault({}),
     difficulty: DifficultyConfig.prefault({}),
@@ -529,6 +549,7 @@ const HARNESS_LABEL: Record<z.infer<typeof HarnessKind>, string> = {
   claude: 'Claude',
   codex: 'Codex',
   opencode: 'OpenCode',
+  omp: 'Oh My Pi',
 }
 
 /** Short slug not already taken by `taken`; never derived from the name, so a rename cannot move it. */
@@ -589,36 +610,60 @@ export function hasPinnedForgeRemote(repoRoot: string): boolean {
   })
 }
 
-/** Reads repository checks even when required commands have not been configured yet. */
+/** Reads repository checks without requiring a runnable workspace. */
 export function readRepoChecks(repoRoot: string): Config['checks'] {
   return Config.shape.checks.parse(readToml(repoConfigPath(repoRoot)).checks)
 }
 
-export function loadConfig(repoRoot: string): LoadedConfig {
+/** Reads repository services from the repository checkout, never from a worktree. */
+export function readRepoServices(repoRoot: string): Config['services'] {
+  return Config.shape.services.parse(readToml(repoConfigPath(repoRoot)).services)
+}
+
+export function configSettingOrigins(repoRoot: string | null, paths: readonly string[]) {
+  const repo = repoRoot === null ? {} : readToml(repoConfigPath(repoRoot))
+  const global = readToml(globalConfigPath())
+  const has = (source: Json, path: string): boolean => {
+    let node: unknown = source
+    for (const key of path.split('.')) {
+      if (!isPlainObject(node) || !(key in node)) return false
+      node = node[key]
+    }
+    return true
+  }
+  return Object.fromEntries(
+    paths.map((path) => [
+      path,
+      has(repo, path) ? 'repo' : has(global, path) ? 'global' : 'default',
+    ]),
+  ) as Record<string, 'repo' | 'global' | 'default'>
+}
+
+export function loadConfig(
+  repoRoot: string,
+  options: { allowIncompleteChecks?: boolean; repoPatch?: Json; globalPatch?: Json } = {},
+): LoadedConfig {
   const candidates = [globalConfigPath(), repoConfigPath(repoRoot)]
   const sources = candidates.filter((p) => existsSync(p))
-  const globalToml = readToml(globalConfigPath())
+  const globalToml = deepMerge(readToml(globalConfigPath()), options.globalPatch ?? {})
   if ('checks' in globalToml) {
     throw new Error(`${globalConfigPath()}: [checks] belongs in the repo config`)
   }
-  const repoToml = readToml(repoConfigPath(repoRoot))
+  const repoToml = deepMerge(readToml(repoConfigPath(repoRoot)), options.repoPatch ?? {})
   if ('profiles' in repoToml) {
     throw new Error(
       `${repoConfigPath(repoRoot)}: [[profiles]] belongs in the global config (${globalConfigPath()}), not a repo config`,
     )
   }
-  if ('worker' in repoToml) {
-    throw new Error(
-      `${repoConfigPath(repoRoot)}: [[worker]] belongs in the global config (${globalConfigPath()}), not a repo config`,
-    )
-  }
   const repoChecks = isPlainObject(repoToml.checks) ? repoToml.checks : {}
-  const missingChecks = ['format', 'lint', 'test'].filter(
-    (name) => typeof repoChecks[name] !== 'string' || repoChecks[name].trim() === '',
-  )
-  if (missingChecks.length > 0) {
+  const declared =
+    'commands' in repoChecks ||
+    ['format', 'lint', 'test'].some(
+      (name) => typeof repoChecks[name] === 'string' && repoChecks[name].trim() !== '',
+    )
+  if (!declared && !options.allowIncompleteChecks) {
     throw new Error(
-      `${repoConfigPath(repoRoot)}: [checks] must declare non-empty ${missingChecks.join(', ')}`,
+      `${repoConfigPath(repoRoot)}: [checks] must declare commands (use commands = [] to explicitly choose no checks)`,
     )
   }
   const merged = deepMerge(globalToml, repoToml)
@@ -630,6 +675,12 @@ export function loadConfig(repoRoot: string): LoadedConfig {
   }
 
   const config = parsed.data
+  config.worker = config.worker.map((worker) => {
+    if (worker.profile === undefined) return worker
+    const profile = config.profiles.find((entry) => entry.profile_name === worker.profile)
+    if (profile === undefined) throw new Error(`unknown worker profile "${worker.profile}"`)
+    return { ...worker, kind: profile.harness, model: profile.model, effort: profile.effort }
+  })
   config.repo.worktreeRoot = expandTilde(config.repo.worktreeRoot)
   if (!(isPlainObject(merged.forge) && 'remote' in merged.forge)) {
     config.forge.remote = matchForgeRemote(repoRoot, config.forge.kind) ?? 'origin'
@@ -641,9 +692,9 @@ export function loadConfig(repoRoot: string): LoadedConfig {
  * The server-wide settings (host, port) come from the global config alone,
  * because `serve` now hosts every registered repo, not just the cwd one.
  */
-export function loadGlobalConfig(): Config {
+export function loadGlobalConfig(patch: Json = {}): Config {
   const path = globalConfigPath()
-  const merged = existsSync(path) ? readToml(path) : {}
+  const merged = deepMerge(existsSync(path) ? readToml(path) : {}, patch)
   if ('checks' in merged) {
     throw new Error(`${path}: [checks] belongs in the repo config`)
   }

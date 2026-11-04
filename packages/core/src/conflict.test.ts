@@ -78,6 +78,10 @@ function fakeDriver(
       return []
     },
     async postComment(_cwd: string, _number: number, _body: string): Promise<void> {},
+    async getPrBody(): Promise<string> {
+      return ''
+    },
+    async updatePr(): Promise<void> {},
     async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {},
     async addLabel(_cwd: string, _number: number, label: string): Promise<void> {
       added.push(label)
@@ -222,6 +226,7 @@ describe('resolveConflict', () => {
       lint: 'lint-code',
       test: 'test-code',
       commands: [],
+      before: null,
       timeoutSec: 1800,
     }
     const { exec, calls } = fake((c) => {

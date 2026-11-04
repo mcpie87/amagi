@@ -83,9 +83,11 @@ export const IssueListQuery = z.object({ label: z.string().min(1).optional() })
 
 /** Every repo-scoped route starts with the workspace key. */
 export const RepoParam = z.object({ repo: z.string().min(1) })
+export const RepoHarnessParam = RepoParam.extend({ kind: HarnessKind })
 
 /** Combined because hono's zValidator replaces, not merges, a validated target. */
 export const RepoTaskIdParam = z.object({ repo: z.string().min(1), id: z.string().min(1) })
+export const DemoClipParam = RepoTaskIdParam.extend({ name: z.string().min(1) })
 export const RepoCommitParam = z.object({
   repo: z.string().min(1),
   hash: z.string().regex(/^[0-9a-f]{7,40}$/i),
@@ -248,11 +250,18 @@ export const ChatConversationBody = z
   .strict()
 export type ChatConversationBody = z.infer<typeof ChatConversationBody>
 
-export const ChecksBody = z.strictObject({
-  format: z.string().trim().min(1),
-  lint: z.string().trim().min(1),
-  test: z.string().trim().min(1),
-})
+export const ChecksBody = z.union([
+  z.strictObject({
+    commands: z.array(z.string().trim().min(1)),
+    before: z.array(z.string().trim().min(1)).optional(),
+    timeoutSec: z.number().int().min(1).max(86_400).optional(),
+  }),
+  z.strictObject({
+    format: z.string().trim().min(1),
+    lint: z.string().trim().min(1),
+    test: z.string().trim().min(1),
+  }),
+])
 
 export const SettingsBody = z
   .object({

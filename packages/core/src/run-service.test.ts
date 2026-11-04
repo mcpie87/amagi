@@ -263,6 +263,10 @@ class FakePr implements PrDriver {
     return []
   }
   async postComment(_cwd: string, _number: number, _body: string): Promise<void> {}
+  async getPrBody(): Promise<string> {
+    return ''
+  }
+  async updatePr(): Promise<void> {}
   async closePr(): Promise<void> {}
   async addLabel(): Promise<void> {}
   async removeLabel(): Promise<void> {}
@@ -407,6 +411,28 @@ describe('RunService', () => {
     service.setAutoQueue(false)
     expect(service.claimSkip(hard.id)).toBeNull()
     service.dispose()
+  })
+
+  test('automatic dispatch hands a task gated for the first idle worker to the next', async () => {
+    const hard = { ...TASK, difficulty: 'high' }
+    const service = makeService(
+      new FakeTracker([hard]),
+      new BlockingHarness(),
+      1,
+      config({
+        worker: [
+          { id: 'easy', name: 'Easy', kind: 'codex', difficulties: ['low'] },
+          { id: 'hard', name: 'Hard', kind: 'claude', difficulties: ['high'] },
+        ],
+        difficulty: { enabled: true },
+      }),
+      { makeHarness: () => new BlockingHarness() },
+    )
+
+    expect(await service.start()).toEqual({ ok: true, taskId: hard.id })
+    await waitFor(() => store.task(hard.id)?.state === 'implementing')
+    expect((await service.status()).tasks[hard.id]).toMatchObject({ workerId: 'hard' })
+    await service.stop(hard.id)
   })
 
   test('does not claim a ready task while its harness and model are held', async () => {

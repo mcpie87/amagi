@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0006
+---
+
 # Every repository declares its project checks
 
 Each repository config must declare non-empty formatter, lint, and test

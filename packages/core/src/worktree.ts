@@ -4,6 +4,7 @@ import { sandboxProjectCommand } from './drivers/harness/sandbox.ts'
 import { CommandError, exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { configHome, expandTilde, stateHome } from './paths.ts'
 import { findRegistryEntryByPath } from './registry.ts'
+import { stopServices } from './services.ts'
 
 const MAX_SLUG_WORDS = 5
 
@@ -181,7 +182,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     await applyRepoIdentity(run, path, opts.repoRoot, opts.persona)
 
     if (opts.setupCmd) {
-      const isolated = sandboxProjectCommand(opts.setupCmd, path)
+      const isolated = await sandboxProjectCommand(opts.setupCmd, path)
       const cmd = isolated.command
       opts.onSetupStarted?.(opts.setupCmd)
       const started = Date.now()
@@ -190,7 +191,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
         command: opts.setupCmd,
         exitCode: result.exitCode,
         durationMs: Date.now() - started,
-        output: `${result.stdout}${result.stderr}`.slice(-SETUP_OUTPUT_TAIL),
+        output: `${isolated.servicesLog}${result.stdout}${result.stderr}`.slice(-SETUP_OUTPUT_TAIL),
       })
       if (result.exitCode !== 0) throw new CommandError(cmd, result)
     }
@@ -198,6 +199,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     // The caller records the worktree only after this returns, so a worktree
     // this call added would otherwise leak; an adopted one may hold work.
     if (added) {
+      await stopServices(opts.repoRoot, path, run).catch(() => undefined)
       await run(['git', 'worktree', 'remove', '--force', path], { cwd: opts.repoRoot }).catch(
         () => undefined,
       )

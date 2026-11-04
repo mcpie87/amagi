@@ -508,13 +508,22 @@ export class RunService implements RunServiceApi {
     if (taskId !== undefined && this.runs.has(taskId)) {
       return { ok: false, status: 409, error: `task ${taskId} is already running` }
     }
-    const selected =
+    // Each distinct idle worker gets a turn: the first one may be gated off a
+    // task (difficulty, usage hold) that a later one takes. Copies of one
+    // worker gate identically, so only the first copy is tried.
+    const tried = new Set<string>()
+    const candidates =
       opts?.workerId === undefined
-        ? this.availableWorkers()[0]
-        : this.workers().find(
+        ? this.availableWorkers().filter((worker) => {
+            const key = JSON.stringify([worker.kind, worker.model, worker.difficulties])
+            if (tried.has(key)) return false
+            tried.add(key)
+            return true
+          })
+        : this.workers().filter(
             (worker) => worker.id === opts.workerId && worker.roles.includes('implement'),
           )
-    if (selected === undefined) {
+    if (candidates.length === 0) {
       const staffed = this.workers().some(
         (worker) => worker.enabled && worker.roles.includes('implement'),
       )
@@ -524,20 +533,26 @@ export class RunService implements RunServiceApi {
       })
       return { ok: false, status: 409, error: 'no available worker' }
     }
-    if (!selected.enabled)
-      return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
-    const seat = this.workerSeat(selected)
-    if (this.seats.has(seat)) {
-      return { ok: false, status: 409, error: `worker ${selected.id} seat is busy` }
+    let result: StartResult = { ok: false, status: 409, error: 'no available worker' }
+    for (const selected of candidates) {
+      if (!selected.enabled)
+        return { ok: false, status: 409, error: `worker ${selected.id} is disabled` }
+      const seat = this.workerSeat(selected)
+      if (this.seats.has(seat)) {
+        result = { ok: false, status: 409, error: `worker ${selected.id} seat is busy` }
+        continue
+      }
+      // Held across the tracker awaits so another repo's runner cannot take the seat meanwhile.
+      const hold = `${this.opts.repoName}/pending`
+      this.seats.set(seat, hold)
+      try {
+        result = await this.claimAndLaunch(selected, taskId, opts, dispatching)
+      } finally {
+        if (this.seats.get(seat) === hold) this.seats.delete(seat)
+      }
+      if (result.ok) return result
     }
-    // Held across the tracker awaits so another repo's runner cannot take the seat meanwhile.
-    const hold = `${this.opts.repoName}/pending`
-    this.seats.set(seat, hold)
-    try {
-      return await this.claimAndLaunch(selected, taskId, opts, dispatching)
-    } finally {
-      if (this.seats.get(seat) === hold) this.seats.delete(seat)
-    }
+    return result
   }
 
   private async claimAndLaunch(

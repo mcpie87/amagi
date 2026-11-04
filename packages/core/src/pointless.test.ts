@@ -69,6 +69,10 @@ class FakePr implements PrDriver {
   async postComment(_cwd: string, _number: number, body: string): Promise<void> {
     this.postedComments.push(body)
   }
+  async getPrBody(): Promise<string> {
+    return ''
+  }
+  async updatePr(): Promise<void> {}
   async closePr(_cwd: string, _number: number, _reason: string): Promise<void> {}
   async addLabel(_cwd: string, _number: number, label: string): Promise<void> {
     this.addedLabels.push(label)

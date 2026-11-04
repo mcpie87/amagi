@@ -8,7 +8,7 @@ import {
   workerSeat,
 } from '@amagi/core'
 
-const KINDS = ['claude', 'codex', 'opencode'] as const
+const KINDS = ['claude', 'codex', 'opencode', 'omp'] as const
 
 export type SelectOption<T> = { label: string; value: T }
 

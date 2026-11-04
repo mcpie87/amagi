@@ -153,11 +153,19 @@ describe('AgentLogStore', () => {
     })
     store.append('am-1', 'implement', 3, { kind: 'text', text: 'live' })
     store.backfill('am-1', [
-      { role: 'implement', ts: 1, event: { kind: 'text', text: 'one\ntwo' } },
+      { type: 'agent.stream', role: 'implement', ts: 1, event: { kind: 'text', text: 'one\ntwo' } },
+      { type: 'checks.output', ts: 2, text: '$ make ci\nok\n' },
     ])
     for (const flush of scheduled) flush()
 
     const buffer = store.get('am-1')
-    expect([0, 1, 2].map((index) => buffer.at(index)?.text)).toEqual(['one', 'two', 'live'])
+    expect([0, 1, 2, 3, 4].map((index) => buffer.at(index)?.text)).toEqual([
+      'one',
+      'two',
+      '$ make ci',
+      'ok',
+      'live',
+    ])
+    expect(buffer.at(2)?.kind).toBe('check')
   })
 })

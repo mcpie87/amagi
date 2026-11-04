@@ -1,6 +1,6 @@
 import { COMMIT_FOOTER_PREFIX } from './footer.ts'
 
-const SUBJECT = /^\[[^\]\s]+\] \S/
+const SUBJECT = /^\[[^\]\s][^\]]*\] \S/
 const FOOTER = new RegExp(`^${COMMIT_FOOTER_PREFIX}( · .+)?$`)
 /** The per-file `Changes:` list older amagi commits carried. */
 const FILE_STAT = /^- `[^`]+` (\+\d+ -\d+|binary)$/

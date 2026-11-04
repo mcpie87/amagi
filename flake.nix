@@ -27,11 +27,13 @@
       # Tools amagi *drives* at runtime. Attribute names drift between nixpkgs
       # revisions and some are not packaged at all, so resolve them leniently
       # and report what is missing instead of failing evaluation.
+      # claude-code is left out on purpose: the locked nixpkgs lags its
+      # releases, and a devshell copy shadows the user's claude, which new
+      # models refuse when it is too old.
       optionalNames = [
         "gh"
         "tea"
         "beads"
-        "claude-code"
         "codex"
         "opencode"
         "libnotify"
@@ -41,7 +43,6 @@
       # Some harnesses ship under an unfree license. Allow exactly those rather
       # than opening the whole package set.
       unfreeAllowed = [
-        "claude-code"
         "codex"
       ];
 
@@ -175,7 +176,14 @@
         in
         {
           default = pkgs.mkShell {
-            packages = resolved ++ [ devAmagi ];
+            packages =
+              resolved
+              ++ [ devAmagi ]
+              ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.bubblewrap
+                pkgs.passt
+                pkgs.procps
+              ];
             shellHook = ''
               export AMAGI_DEV_ROOT="$(git rev-parse --show-toplevel)"
               ${lib.optionalString (gaps != [ ]) ''

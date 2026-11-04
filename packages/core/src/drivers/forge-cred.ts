@@ -1,16 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import * as z from 'zod'
-import { exec as defaultExec, type Exec, execOk } from '../exec.ts'
+import { type Exec, execOk } from '../exec.ts'
 import { stateHome } from '../paths.ts'
 
 /** The forges Amagi can talk to; mirrors ForgeKind from config.ts. */
 const FORGE_KINDS = ['github', 'gitlab', 'forgejo'] as const
 type ForgeKind = (typeof FORGE_KINDS)[number]
-
-/** Tea login name in the Amagi-provisioned profile; a single login per isolated config. */
-export const TEA_LOGIN = 'amagi'
 
 const FORGE_LABELS: Record<ForgeKind, string> = {
   github: 'GitHub',
@@ -258,8 +255,7 @@ export function forgeTokenStates(repoRoot: string): Record<ForgeKind, ForgeToken
 /**
  * Bot token for a forge: the credential the repo `cwd` belongs to picked,
  * else the only credential for that forge, else the Amagi process
- * environment. Never a CLI login: gh, glab and tea are used strictly
- * non-interactively with it.
+ * environment.
  */
 export function forgeToken(kind: ForgeKind, cwd?: string): string | null {
   const root = cwd === undefined ? null : repoRootOf(cwd)
@@ -274,42 +270,6 @@ export function forgeToken(kind: ForgeKind, cwd?: string): string | null {
 export function forgeUrl(kind: ForgeKind, cwd?: string): string | null {
   const root = cwd === undefined ? null : repoRootOf(cwd)
   return resolveCredential(readTokenStore(), root, kind)?.credential.url ?? null
-}
-
-/** Where Amagi keeps gh's own config, so gh never reads the operator's ~/.config/gh. */
-export function ghConfigDir(): string {
-  return join(forgeStateDir(), 'github')
-}
-
-/**
- * The XDG_CONFIG_HOME Amagi points tea at, so tea never reads the operator's
- * config. One profile per token: tea keeps a single login per config, and
- * repos may carry different tokens.
- */
-export function teaXdgHome(token: string | null, url: string | null = null): string {
-  const base = join(forgeStateDir(), 'tea')
-  if (token === null) return base
-  // Keyed on the URL too, so re-pointing a credential provisions a fresh login.
-  const key = url === null ? token : `${url}\n${token}`
-  return join(base, createHash('sha256').update(key).digest('hex').slice(0, 16))
-}
-
-/**
- * `owner/repo` and web base URL of `remote` in the repo at `cwd`, or null when
- * the remote is missing or unparseable. Synchronous so the env builders below
- * stay usable from sync call sites; one local git call, no network.
- */
-function remoteRepo(cwd: string, remote: string): { base: string; ownerRepo: string } | null {
-  try {
-    const r = Bun.spawnSync(['git', 'remote', 'get-url', remote], {
-      cwd,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    return r.exitCode === 0 ? parseRemote(r.stdout.toString()) : null
-  } catch {
-    return null
-  }
 }
 
 /** Where each forge lives when its credential names no URL; Forgejo has no public default. */
@@ -364,60 +324,10 @@ export function matchForgeRemote(cwd: string, kind: ForgeKind): string | null {
 }
 
 /**
- * Env for a gh subprocess: Chise's token and an Amagi-owned GH_CONFIG_DIR.
- * The config dir is set even without a token so gh fails closed instead of
- * silently falling back to whatever the operator has in ~/.config/gh.
- * GH_REPO pins gh to `remote`: left alone, gh prefers a remote named
- * upstream or github over origin.
- */
-export function ghEnv(cwd: string, remote: string): Record<string, string> {
-  const dir = ghConfigDir()
-  mkdirSync(dir, { recursive: true })
-  const env: Record<string, string> = { GH_CONFIG_DIR: dir }
-  const token = forgeToken('github', cwd)
-  if (token !== null) env.GH_TOKEN = token
-  const repo = remoteRepo(cwd, remote)
-  if (repo !== null) env.GH_REPO = `${new URL(repo.base).host}/${repo.ownerRepo}`
-  return env
-}
-
-/** Where Amagi keeps glab's own config, so glab never reads the operator's ~/.config/glab-cli. */
-export function glabConfigDir(): string {
-  return join(forgeStateDir(), 'gitlab')
-}
-
-/**
- * Env for a glab subprocess: the repo's GitLab token and an Amagi-owned
- * GLAB_CONFIG_DIR, set even without a token so glab fails closed.
- * REMOTE_ALIAS and GLAB_REMOTE_ALIAS pin glab to `remote` instead of its remote-name
- * preference. A credential URL sends API calls there instead of to the
- * remote's host.
- */
-export function glabEnv(cwd: string, remote: string): Record<string, string> {
-  const dir = glabConfigDir()
-  mkdirSync(dir, { recursive: true })
-  const env: Record<string, string> = {
-    GLAB_CONFIG_DIR: dir,
-    GLAB_NO_PROMPT: 'true',
-    // glab 1.x reads REMOTE_ALIAS; 2.x prefers GLAB_REMOTE_ALIAS.
-    REMOTE_ALIAS: remote,
-    GLAB_REMOTE_ALIAS: remote,
-  }
-  const token = forgeToken('gitlab', cwd)
-  if (token !== null) env.GITLAB_TOKEN = token
-  const url = forgeUrl('gitlab', cwd)
-  if (url !== null) {
-    const { protocol, host, pathname } = new URL(url)
-    env.GITLAB_API_HOST = `${host}${pathname.replace(/\/+$/, '')}`
-    env.GLAB_API_PROTOCOL = protocol.replace(/:$/, '')
-  }
-  return env
-}
-
-/**
  * Splits a git remote URL into the forge base URL (https unless the remote
  * says http) and the owner/repo slug. Handles https, http, ssh:// and the
- * git@host:owner/repo.git scp form.
+ * git@host:owner/repo.git scp form. An ssh port is dropped: it serves ssh,
+ * never the web.
  */
 export function parseRemote(url: string): { base: string; ownerRepo: string } | null {
   const s = url
@@ -430,7 +340,7 @@ export function parseRemote(url: string): { base: string; ownerRepo: string } | 
   const isPort = colon !== -1 && /^\d+$/.test(s.slice(colon + 1, portEnd))
   const scp = !isPort && colon !== -1 && (slash === -1 || colon < slash)
   const host = isPort || scp ? s.slice(0, colon) : slash !== -1 ? s.slice(0, slash) : s
-  const port = isPort ? s.slice(colon, portEnd) : ''
+  const port = isPort && /^https?:\/\//.test(url.trim()) ? s.slice(colon, portEnd) : ''
   const path = isPort
     ? s.slice(portEnd + 1)
     : scp
@@ -510,58 +420,4 @@ export async function gitTokenConfig(
     GIT_CONFIG_KEY_0: `url.${rewrite.to}.insteadOf`,
     GIT_CONFIG_VALUE_0: rewrite.from,
   }
-}
-
-/** Base URL of `remote`, for provisioning a tea login. */
-async function remoteBaseUrl(exec: Exec, cwd: string, remote: string): Promise<string | null> {
-  const url = await execOk(exec, ['git', 'remote', 'get-url', remote], { cwd }).catch(() => '')
-  return parseRemote(url.trim())?.base ?? null
-}
-
-/**
- * Provisions a single tea login into Amagi's own XDG_CONFIG_HOME from the
- * token, so the operator never needs `tea login`. Best effort: an existing
- * profile (or a missing server URL or token) is left alone, and tea then
- * fails closed with "no available login" instead of touching operator config.
- */
-async function ensureTeaLogin(
-  exec: Exec,
-  cwd: string,
-  remote: string,
-  token: string | null,
-  configured: string | null,
-): Promise<void> {
-  const cfg = join(teaXdgHome(token, configured), 'tea', 'config.yml')
-  if (existsSync(cfg)) return
-  const url = configured ?? process.env.GITEA_SERVER_URL ?? (await remoteBaseUrl(exec, cwd, remote))
-  if (token === null || url === null) return
-  mkdirSync(dirname(cfg), { recursive: true, mode: 0o700 })
-  writeFileSync(
-    cfg,
-    `${JSON.stringify({ logins: [{ name: TEA_LOGIN, url, token, default: true }] }, null, 2)}\n`,
-    { mode: 0o600 },
-  )
-}
-
-/** Env for a tea subprocess: Amagi's XDG_CONFIG_HOME with a login provisioned from the token. */
-export async function teaEnv(
-  exec: Exec = defaultExec,
-  cwd: string,
-  remote: string,
-): Promise<Record<string, string>> {
-  const token = forgeToken('forgejo', cwd)
-  const url = forgeUrl('forgejo', cwd)
-  const env: Record<string, string> = { XDG_CONFIG_HOME: teaXdgHome(token, url) }
-  await ensureTeaLogin(exec, cwd, remote, token, url)
-  return env
-}
-
-/**
- * tea flags that pin a command to `remote`'s repository through Amagi's
- * login. Without them tea picks the repo from whichever remote matches a
- * login's host, which is not necessarily `remote`.
- */
-export function teaRepoArgs(cwd: string, remote: string): string[] {
-  const repo = remoteRepo(cwd, remote)
-  return repo === null ? [] : ['--login', TEA_LOGIN, '--repo', repo.ownerRepo]
 }

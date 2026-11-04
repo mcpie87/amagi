@@ -98,7 +98,8 @@ export function canChatTask(state: TaskState | null): boolean {
 const FORWARD: Partial<Record<TaskState, readonly TaskState[]>> = {
   queued: ['worktree_ready'],
   claimed: ['worktree_ready', 'chatting'],
-  worktree_ready: ['implementing'],
+  // A reclaimed worktree whose work already passed checks skips implement.
+  worktree_ready: ['implementing', 'checks'],
   implementing: ['awaiting_answer', 'checks', 'retrying'],
   awaiting_answer: ['implementing'],
   checks: ['implementing', 'reviewing', 'committed'],
@@ -340,6 +341,12 @@ export const EventBody = z.discriminatedUnion('type', [
     contextTokens: z.number().int(),
     summary: z.string(),
   }),
+  /**
+   * Whole lines of stdout and stderr from a project check while it runs,
+   * batched; the first one of each command is its `$ command` header.
+   * checks.finished still carries each command's tail.
+   */
+  z.object({ type: z.literal('checks.output'), text: z.string() }),
   z.object({ type: z.literal('checks.finished'), ok: z.boolean(), results: z.array(CheckResult) }),
   z.object({
     type: z.literal('review.started'),
@@ -381,6 +388,11 @@ export const EventBody = z.discriminatedUnion('type', [
     url: z.string().nullable(),
   }),
   z.object({ type: z.literal('commit.created'), sha: z.string(), subject: z.string() }),
+  /** Demo videos the demo agent recorded; `url` is the forge upload, null when it failed or is unsupported. */
+  z.object({
+    type: z.literal('demo.recorded'),
+    clips: z.array(z.object({ name: z.string().min(1), url: z.string().nullable() })),
+  }),
   z.object({ type: z.literal('pr.created'), url: z.string(), number: z.number().int() }),
   z.object({ type: z.literal('pr.status'), mergeStatus: MergeStatus }),
   /**

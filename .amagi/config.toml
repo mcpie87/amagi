@@ -8,7 +8,6 @@ kind = "beads"
 
 [forge]
 kind = "github"
-remote = "origin"
 
 [checks]
 format = "just fmt"

@@ -12,7 +12,7 @@ export const continueCommand = defineCommand({
     task: { type: 'positional', description: 'Task id to resume', required: true },
     harness: {
       type: 'string',
-      description: 'Harness kind to use (claude/codex/opencode)',
+      description: 'Harness kind to use (claude/codex/opencode/omp)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
   },

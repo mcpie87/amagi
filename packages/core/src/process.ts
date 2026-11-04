@@ -43,6 +43,21 @@ function signal(pid: number, sig: NodeJS.Signals): void {
   }
 }
 
+/**
+ * Watch-mode reloads do not await async signal handlers. Stop descendants
+ * synchronously before the runtime resets, or agents outlive their runner.
+ */
+export function killDescendantsSync(pid: number): void {
+  const result = Bun.spawnSync(['pgrep', '-P', String(pid)], { stdout: 'pipe', stderr: 'pipe' })
+  if (result.exitCode !== 0) return
+  for (const line of result.stdout.toString().split('\n')) {
+    const child = Number.parseInt(line, 10)
+    if (!Number.isInteger(child) || child <= 0) continue
+    killDescendantsSync(child)
+    signal(child, 'SIGKILL')
+  }
+}
+
 /** /proc/<pid>/stat state letter, or null off Linux; comm may contain spaces, so it follows the last ')'. */
 function procState(pid: number): string | null {
   try {

@@ -13,7 +13,7 @@ export const triageCommand = defineCommand({
     once: { type: 'boolean', description: 'Triage a single task and exit', default: true },
     harness: {
       type: 'string',
-      description: 'Harness kind to use (claude/codex/opencode)',
+      description: 'Harness kind to use (claude/codex/opencode/omp)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
     effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },
@@ -27,7 +27,7 @@ export const triageCommand = defineCommand({
       ...config.harness.triage,
       ...(args.harness === undefined
         ? {}
-        : { kind: args.harness as 'claude' | 'codex' | 'opencode' }),
+        : { kind: args.harness as 'claude' | 'codex' | 'opencode' | 'omp' }),
       ...(args.model === undefined ? {} : { model: args.model }),
       ...(args.effort === undefined ? {} : { effort: args.effort }),
     }

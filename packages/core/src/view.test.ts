@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { StoredEvent } from './events.ts'
+import { type StoredEvent, TASK_STATES, type TaskState } from './events.ts'
 import {
   activeTasks,
   chatInFlight,
@@ -15,10 +15,12 @@ import {
   reviewWaitingSeat,
   runHealth,
   runHealthNearLimit,
+  type Stage,
   scorecard,
   stateAtAttempt,
   statusLog,
   taskEvents,
+  taskStage,
   tasksNeedingAttention,
   watcherRunsFor,
 } from './view.ts'
@@ -1290,5 +1292,57 @@ describe('scorecard', () => {
       ...finished('new', 'opus', 'abandoned', 0, 5000),
     ])
     expect(scorecard(state, 2000)).toMatchObject([{ finished: 1, merged: 0, abandoned: 1 }])
+  })
+})
+
+describe('taskStage', () => {
+  const claimable = { status: 'open', ready: true } as const
+  const blocked = { status: 'open', ready: false } as const
+
+  const byState: Record<TaskState, Stage> = {
+    queued: 'Ready',
+    claimed: 'Running',
+    worktree_ready: 'Running',
+    implementing: 'Running',
+    awaiting_answer: 'Needs you',
+    checks: 'Running',
+    reviewing: 'Review',
+    fixing: 'Review',
+    committed: 'PR open',
+    pr_open: 'PR open',
+    pr_flagged: 'PR open',
+    pr_merge_conflict: 'Needs you',
+    pr_conflict_fixing: 'PR open',
+    retrying: 'Running',
+    chatting: 'Running',
+    done: 'Done',
+    no_pr: 'Needs you',
+    needs_human: 'Needs you',
+    abandoned: 'Done',
+    cancelled: 'Done',
+  }
+
+  test('maps every task state to one stage', () => {
+    for (const state of TASK_STATES) {
+      expect(taskStage(claimable, state)).toBe(byState[state])
+    }
+  })
+
+  test('issue without a run: Ready when claimable, Backlog otherwise', () => {
+    expect(taskStage(claimable, null)).toBe('Ready')
+    expect(taskStage(blocked, null)).toBe('Backlog')
+    expect(taskStage({ status: 'in_progress', ready: true }, null)).toBe('Backlog')
+    expect(taskStage({ status: 'blocked', ready: true }, null)).toBe('Backlog')
+  })
+
+  test('closed issue is Done whatever the run state', () => {
+    expect(taskStage({ status: 'closed', ready: false }, null)).toBe('Done')
+    expect(taskStage({ status: 'closed', ready: false }, 'pr_open')).toBe('Done')
+    expect(taskStage({ status: 'closed', ready: false }, 'needs_human')).toBe('Done')
+  })
+
+  test('run state decides the stage of an open issue', () => {
+    expect(taskStage(blocked, 'implementing')).toBe('Running')
+    expect(taskStage(claimable, 'needs_human')).toBe('Needs you')
   })
 })

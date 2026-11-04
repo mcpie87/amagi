@@ -90,7 +90,7 @@ export function spawnAgent(
   const done: Promise<AgentOutcome> = (async () => {
     const leases: SeatLease[] = []
     const waitOptions = {
-      ...(opts.seatMaxWaitMs === undefined ? {} : { maxWaitMs: opts.seatMaxWaitMs }),
+      maxWaitMs: opts.seatMaxWaitMs ?? null,
       ...(opts.seatPriority === undefined ? {} : { priority: opts.seatPriority }),
       signal: abort.signal,
     }

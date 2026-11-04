@@ -132,3 +132,52 @@ test('a persona must name an existing persona file', async () => {
   expect((await patch({ 'repo.persona': 'bot' })).status).toBe(200)
   expect(workspace().config.repo.persona).toBe('bot')
 })
+
+test('setup remains editable before project checks exist, without opening a workspace', async () => {
+  const entry = ws.workspaces.list()[0]
+  if (entry === undefined) throw new Error('repo missing')
+  ws.workspaces.close()
+  writeFileSync(join(entry.path, '.amagi', 'config.toml'), '[repo]\nbaseBranch = "main"\n')
+  expect((await app().request('/api/repos/repo1/config')).status).toBe(200)
+  expect((await patch({ 'tracker.kind': 'github', 'repo.baseBranch': 'develop' })).status).toBe(200)
+  expect(readFileSync(join(entry.path, '.amagi', 'config.toml'), 'utf8')).toContain(
+    'kind = "github"',
+  )
+  expect(() => ws.workspaces.get('repo1')).toThrow('must declare commands')
+})
+
+test('origins distinguish defaults, global values and repository overrides, and reset inherits', async () => {
+  mkdirSync(join(home, 'amagi'), { recursive: true })
+  writeFileSync(join(home, 'amagi', 'config.toml'), '[repo]\nbaseBranch = "develop"\n')
+  await patch({ 'repo.baseBranch': 'topic' })
+  const before = await (await app().request('/api/repos/repo1/config')).json()
+  expect(before.origins['repo.baseBranch']).toBe('repo')
+  const res = await patch({ 'repo.baseBranch': null })
+  const after = await res.json()
+  expect(after.values['repo.baseBranch']).toBe('develop')
+  expect(after.origins['repo.baseBranch']).toBe('global')
+  expect(after.origins['loop.maxRetries']).toBe('default')
+})
+
+test('global configuration can be edited with no repository, without borrowing repository overrides', async () => {
+  const get = await app().request('/api/config')
+  expect(get.status).toBe(200)
+  expect((await get.json()).values['difficulty.enabled']).toBe(false)
+  const res = await app().request('/api/config', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ values: { 'difficulty.enabled': true } }),
+  })
+  expect(res.status).toBe(200)
+  expect(loadGlobalConfig().difficulty.enabled).toBe(true)
+  expect(workspace().config.difficulty.enabled).toBe(true)
+  expect(
+    (
+      await app().request('/api/config', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ values: { 'repo.baseBranch': 'bad' } }),
+      })
+    ).status,
+  ).toBe(400)
+})

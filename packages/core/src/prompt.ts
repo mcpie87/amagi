@@ -1,3 +1,4 @@
+import { HUMAN_ONLY_LABEL, PROPOSED_LABEL } from './beads-labels.ts'
 import type { PrChanges } from './drivers/pr.ts'
 import type { TrackerTask } from './drivers/types.ts'
 import { type CheckResult, MENTION_KIND_NAMES, type MentionKind } from './events.ts'
@@ -56,10 +57,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
       ? [
           '- When you finish, the orchestrator runs these checks in order as a mandatory',
           `  gate and sends any failure back to you: ${checks.map((c) => `\`${c}\``).join(', ')}.`,
-          '  Run the formatter and lint check yourself before finishing and fix every',
-          '  failure; you do not need to run the slow ones to discover them.',
+          '  Use the configured commands to verify your changes; do not invent checks.',
         ]
-      : []),
+      : ['- The operator explicitly configured no project checks. Do not invent check commands.']),
     '- While iterating, run the narrowest test that covers your change, not the whole suite.',
     '- Never pipe check or lint output through head/tail: it aborts the tool',
     '  (SIGABRT on BrokenPipe) and truncates the report. Redirect to a file instead.',
@@ -75,9 +75,9 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     '  still write your findings, evidence, and conclusion in your final message.',
     '',
     'Your final message feeds the pull request description. Write it as:',
-    '1. A short summary of what was done. It is the body of the commit the orchestrator',
-    '   makes, the PR summary when the task has no description, and the reason shown',
-    '   when no pull request is opened. Write it against the actual change',
+    '1. A short summary of what was done. It is the PR summary when the task has no',
+    '   description, the commit body when you give no commit message, and the reason',
+    '   shown when no pull request is opened. Write it against the actual change',
     `   (\`git diff ${base}\`), not against what you intended: open with the problem as a`,
     '   reader who has not seen the code would understand it, then what the change does',
     '   about it and why that matters rather than which mechanism it uses. Describe',
@@ -96,12 +96,25 @@ export function implementSystemPrompt(ctx: PromptContext): string {
     'Whenever the summary or Conclusion refers to more than one file, use a markdown',
     'bullet list with one file per line. Put each path in `backticks`; you may add a',
     'short note after it. Never join multiple file paths with commas in a sentence.',
-    '4. A mandatory verdict line, also when you changed nothing. A run with no changes',
+    '4. When you changed files, a `### Commit message` section after the Conclusion:',
+    '   the message the orchestrator commits your work with, in a ```text fenced block.',
+    "   Write it the way this repository's coding standards say commits are written,",
+    `   else in the style of its history (\`git log -15 ${base}\`): language, subject`,
+    '   wording and casing, line width, and whether and how the body is written.',
+    '   Start the subject with the ticket reference in square brackets, as',
+    '   `[REF] subject`: the issue labels given with the task, as the history writes',
+    '   ticket references, or the task id when the task has no labels. Add no trailers',
+    '   or footer: the orchestrator appends its own.',
+    '5. A mandatory verdict line, also when you changed nothing. A run with no changes',
     '   opens no pull request, so the verdict is what tells the operator what to do next.',
     ...verdictPromptLines().map((l) => `   ${l}`),
+    'Write the summary, the Conclusion and the commit message in the language the',
+    'repository asks for: the one its coding standards (AGENTS.md, CLAUDE.md,',
+    'CONTRIBUTING.md or a similar guide) set for commits and pull requests, else the',
+    `language of \`git log -15 ${base}\`. Keep the section headings as given here.`,
     'The final message is rendered as markdown. Before finishing, check its prose',
     'and wrap references to code identifiers, environment variables, paths and',
-    'commands in `backticks` (for example `ensureTeaLogin`, `GIT_CONFIG_COUNT`,',
+    'commands in `backticks` (for example `forgeFetch`, `GIT_CONFIG_COUNT`,',
     '`/proc/<pid>/cmdline` and `tea logins add --token TOKEN`). Use the meaning',
     'in context to decide what is code, rather than spelling alone.',
   ]
@@ -131,6 +144,8 @@ export function implementSystemPrompt(ctx: PromptContext): string {
 /** Notes and comments the tracker carries, so the agent never needs bd to see them. */
 function trackerContext(task: TrackerTask): string[] {
   const parts: string[] = []
+  const labels = (task.labels ?? []).filter((l) => l !== HUMAN_ONLY_LABEL && l !== PROPOSED_LABEL)
+  if (labels.length > 0) parts.push('', `Issue labels: ${labels.join(', ')}`)
   const notes = task.notes?.trim()
   if (notes !== undefined && notes !== '') parts.push('', 'Issue notes:', '', notes)
   const comments = (task.comments ?? []).map((c) => c.trim()).filter((c) => c !== '')
@@ -159,6 +174,28 @@ export function implementAfterVerifyPrompt(ctx: PromptContext): string {
     '',
     implementPrompt(ctx),
   ].join('\n')
+}
+
+/**
+ * Asks for the final message again over finished work: after an implement run
+ * whose message lacked a commit message, and when the operator redoes an open
+ * PR whose message and description miss the repository's conventions.
+ */
+export function rewriteFinalMessagePrompt(ctx: PromptContext, problem: string): string {
+  const base = ctx.baseBranch ?? '<base>'
+  const parts = [`Task ${ctx.task.id}: ${ctx.task.title}`]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push(...trackerContext(ctx.task))
+  parts.push(
+    '',
+    problem,
+    'The code is final: change no files and run no checks. Read the whole change',
+    `(\`git diff ${base}...HEAD\` plus \`git status\`), then write your final message again`,
+    'in full in the format the rules give (summary, `### Conclusion`, `### Commit message`,',
+    'verdict), in the language and style they ask for. The commit message must include a',
+    'body and match the recent commit history; do not use the opening summary as its body.',
+  )
+  return parts.join('\n')
 }
 
 /** A previously interrupted run was reclaimed and its worktree resumed. */
@@ -213,8 +250,8 @@ export function answerPrompt(question: string, answer: string): string {
  */
 export const WHOLE_TASK_FINAL_MESSAGE = [
   'Your final message replaces your earlier one as the commit and PR summary: write',
-  'it again in full in the same format (summary, `### Conclusion`, verdict) for the',
-  'whole change against the base, not only this fix.',
+  'it again in full in the same format (summary, `### Conclusion`, `### Commit message`,',
+  'verdict) for the whole change against the base, not only this fix.',
 ] as const
 
 export function fixChecksPrompt(results: readonly CheckResult[]): string {
@@ -235,7 +272,7 @@ export type TaskChatPromptContext = {
   worktree: string
   branch: string
   baseBranch: string
-  /** The repository's format, lint and test commands, in order. */
+  /** The operator's project check commands, in order. */
   checks: readonly string[]
   prUrl: string | null
 }
@@ -270,7 +307,7 @@ export function taskChatSystemPrompt(ctx: TaskChatPromptContext): string {
     '   split it, close it as done or obsolete, or ask the operator. Say which and why.',
     '2. Implement: make the change in this worktree, following the conventions of the',
     '   surrounding code.',
-    `3. Check: run ${ctx.checks.length > 0 ? ctx.checks.map((c) => `\`${c}\``).join(', ') : 'the project formatter, lint and tests'} and fix every failure.`,
+    `3. Check: run ${ctx.checks.length > 0 ? ctx.checks.map((c) => `\`${c}\``).join(', ') : 'no project checks (explicitly disabled by the operator)'} and fix every failure.`,
     '   Never pipe check output through head/tail; redirect it to a file and grep it.',
     '4. Review: read your own `git diff` as a strict reviewer would, for correctness,',
     '   missed cases and needless code, and fix what you find. Report the findings.',
@@ -318,27 +355,55 @@ export function commitSummary(finalMessage: string | null | undefined): string {
 }
 
 /**
- * `[task-id] title`, the summary, and the PR body's amagi footer in plain
+ * The message in the `### Commit message` fenced block of the implementing
+ * run's final message; null when the agent wrote none.
+ */
+export function agentCommitMessage(finalMessage: string | null | undefined): string | null {
+  const match = (finalMessage ?? '').match(/^###\s+Commit message\s*\n+```[^\n]*\n([\s\S]*?)\n```/m)
+  const message = match?.[1]?.trim() ?? ''
+  return message === '' ? null : message
+}
+
+/** An agent-written commit message with the amagi footer appended. */
+export function withCommitFooter(message: string, meta: PrBodyMeta): string {
+  return `${message.trim()}\n\n${commitFooter(meta.harness, meta.model, meta.effort)}\n`
+}
+
+/** A tracker-style ticket key such as `WEWAI-6040`, as an issue label carries it. */
+const TICKET_LABEL = /^[A-Z][A-Z0-9]*-\d+$/
+
+/**
+ * What goes in the `[...]` of a commit subject or PR title: the ticket keys
+ * among the issue labels, comma separated, else the task id.
+ */
+export function ticketRef(task: Pick<TrackerTask, 'id' | 'labels' | 'externalRef'>): string {
+  const tickets = (task.labels ?? []).filter((label) => TICKET_LABEL.test(label))
+  if (tickets.length > 0) return tickets.join(', ')
+  return task.externalRef && TICKET_LABEL.test(task.externalRef) ? task.externalRef : task.id
+}
+
+/**
+ * `[ticket] title`, the summary, and the PR body's amagi footer in plain
  * text. commit-lint.ts checks this shape on every amagi commit.
  */
 export function commitMessage(
-  task: Pick<TrackerTask, 'id' | 'title'>,
+  task: Pick<TrackerTask, 'id' | 'title' | 'labels' | 'externalRef'>,
   summary: string,
   meta: PrBodyMeta,
 ): string {
   const footer = commitFooter(meta.harness, meta.model, meta.effort)
-  return `[${task.id}] ${task.title}\n\n${summary.trim()}\n\n${footer}\n`
+  return `[${ticketRef(task)}] ${task.title}\n\n${summary.trim()}\n\n${footer}\n`
 }
 
 /**
- * PR title in `[code] short name` form. Drop milestone prefixes and trailing
+ * PR title in `[ticket] short name` form. Drop milestone prefixes and trailing
  * clauses while preserving comma-separated scopes such as `core, dashboard:`.
  */
 export function prTitle(task: TrackerTask): string {
   const withoutMilestone = task.title.replace(/^M\d+(?:\.\d+)*\s*:\s*/, '')
   const scope = withoutMilestone.match(/^\w+(?:,\s*\w+)*:\s*/)?.[0] ?? ''
   const shortName = `${scope}${withoutMilestone.slice(scope.length).split(/[.,;]/)[0]?.trim() ?? ''}`
-  return `[${task.id}] ${shortName}`
+  return `[${ticketRef(task)}] ${shortName}`
 }
 
 export type ConflictPromptContext = {
@@ -737,6 +802,55 @@ export function prFailurePrompt(task: TrackerTask, branch: string, error: string
   ]
   if (task.description.trim() !== '') parts.push('', task.description.trim())
   parts.push(...trackerContext(task))
+  return parts.join('\n')
+}
+
+export type DemoPromptContext = {
+  task: TrackerTask
+  /** Directory the recorded videos must end up in; outside the worktree. */
+  outputDir: string
+  /** Repository service ports and the host ports they are published on. */
+  services: readonly { port: number; hostPort: number }[]
+}
+
+export function demoSystemPrompt(): string {
+  return [
+    'You record a short demo video of a change an autonomous coding agent (amagi) just',
+    'committed. The video goes into the pull request so a reviewer sees the feature work.',
+    '',
+    'Rules:',
+    '- Derive the scenario from the task: walk through each acceptance criterion a user',
+    '  can see in the running app, in a real browser, at a pace a human can follow.',
+    '- Use Playwright with video recording (recordVideo on the browser context, or',
+    "  video: 'on' in a config). One video per scenario, at most a few minutes in total.",
+    '- Leave the committed change alone: do not edit tracked files, do not commit. Put',
+    '  scratch specs and configs in the output directory or delete them before finishing;',
+    '  amagi discards anything left in the worktree.',
+    '- Work out how this repository runs its app yourself: its agent docs (AGENTS.md,',
+    '  CLAUDE.md), README, task runners (justfile, Makefile), package scripts, compose files',
+    '  and Playwright configs. Log in with whatever test account or fixture its tests use.',
+    '- Start whatever the app needs (servers, migrations, seed data) yourself and stop',
+    '  every process you started before finishing.',
+    '- Move the final videos into the output directory as .webm or .mp4 with short',
+    '  descriptive file names (e.g. 01-delete-from-list.webm); nothing else goes there.',
+    '- If the app cannot be started or the scenario fails, do not fake a video: leave the',
+    '  output directory without videos and explain what blocked you.',
+    '- Reply with one line per video: its file name and what it shows.',
+  ].join('\n')
+}
+
+export function demoPrompt(ctx: DemoPromptContext): string {
+  const parts = [`Task ${ctx.task.id}: ${ctx.task.title}`]
+  if (ctx.task.description.trim() !== '') parts.push('', ctx.task.description.trim())
+  parts.push(...trackerContext(ctx.task))
+  if (ctx.services.length > 0) {
+    parts.push(
+      '',
+      'Repository services are already running; reach them on these host ports:',
+      ...ctx.services.map(({ port, hostPort }) => `- ${port} -> 127.0.0.1:${hostPort}`),
+    )
+  }
+  parts.push('', `Output directory: ${ctx.outputDir}`, '', 'Record the demo of this task now.')
   return parts.join('\n')
 }
 

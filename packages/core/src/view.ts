@@ -1,3 +1,4 @@
+import type { TrackerStatus } from './drivers/types.ts'
 import {
   type AgentRole,
   currentAttemptEvents,
@@ -41,8 +42,8 @@ export const initialDashboardState = (): DashboardState => ({
 
 /**
  * What a compact replay carries for this event, or null when it leaves it out:
- * agent log lines other than usage and task chat (log views backfill them per
- * task), watcher history (paged per watcher) and transient notices. Check
+ * agent log lines other than usage and task chat, and running check output
+ * (log views backfill both per task), watcher history (paged per watcher) and transient notices. Check
  * output is emptied; the task page fetches its run's output by seq. The
  * store's `withoutAgentLog`/`withoutWatcherRuns` SQL filter must agree.
  */
@@ -53,6 +54,7 @@ export function compactReplayEvent(event: StoredEvent): StoredEvent | null {
     case 'watcher.run.started':
     case 'watcher.action':
     case 'watcher.run.finished':
+    case 'checks.output':
       return null
     case 'agent.stream':
       return event.event.kind === 'usage' || (event.taskId !== null && event.role === 'chat')
@@ -136,6 +138,71 @@ export function activeTasks(state: DashboardState): ProjectedTask[] {
   return Object.values(state.tasks)
     .filter((t) => t.state !== 'queued' && !isTerminal(t.state))
     .sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+export const STAGES = [
+  'Backlog',
+  'Ready',
+  'Running',
+  'Review',
+  'Needs you',
+  'PR open',
+  'Done',
+] as const
+
+export type Stage = (typeof STAGES)[number]
+
+export type StageIssue = {
+  status: TrackerStatus
+  /**
+   * Whether the tracker's ready queue lists the issue: no open blockers, not
+   * deferred, not human-only. Only read for an open issue without a run.
+   */
+  ready: boolean
+}
+
+/**
+ * Where a task sits on its path to a merged PR, from its tracker issue and its
+ * projected run state (`null` before any run). A closed issue is Done whatever
+ * the run says. An open issue without a run is Ready when claimable; an issue
+ * claimed or blocked outside amagi, with no run, is Backlog. Exhaustive over
+ * TaskState: a new state fails typecheck here.
+ */
+export function taskStage(issue: StageIssue, state: TaskState | null): Stage {
+  if (issue.status === 'closed') return 'Done'
+  if (state === null) return issue.status === 'open' && issue.ready ? 'Ready' : 'Backlog'
+  switch (state) {
+    case 'queued':
+      return 'Ready'
+    case 'claimed':
+    case 'worktree_ready':
+    case 'implementing':
+    case 'checks':
+    case 'retrying':
+    case 'chatting':
+      return 'Running'
+    case 'reviewing':
+    case 'fixing':
+      return 'Review'
+    case 'awaiting_answer':
+    case 'needs_human':
+    case 'no_pr':
+    case 'pr_merge_conflict':
+      return 'Needs you'
+    case 'committed':
+    case 'pr_open':
+    case 'pr_flagged':
+    case 'pr_conflict_fixing':
+      return 'PR open'
+    case 'done':
+    case 'abandoned':
+    case 'cancelled':
+      return 'Done'
+    default: {
+      const unmapped: never = state
+      return unmapped
+    }
+  }
 }
 
 export function tasksNeedingAttention(state: DashboardState): ProjectedTask[] {

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { TERMINAL_STATES } from './events.ts'
 import { exec as defaultExec, type Exec } from './exec.ts'
+import { stopServices } from './services.ts'
 import type { Store } from './store/store.ts'
 import { branchExists } from './worktree.ts'
 
@@ -24,8 +25,8 @@ export type RemoveWorktreeOptions = {
 }
 
 /**
- * Removes one task's worktree and branch (idempotent when the path or branch
- * is already gone) and records `worktree.removed` so the store projection
+ * Stops the worktree's services, then removes one task's worktree and branch
+ * (idempotent when the path or branch is already gone) and records `worktree.removed` so the store projection
  * drops them. Shared by the terminal-task clean and the instant close action.
  */
 export async function removeWorktree(
@@ -34,6 +35,7 @@ export async function removeWorktree(
   opts: RemoveWorktreeOptions,
 ): Promise<void> {
   const run = opts.exec ?? defaultExec
+  await stopServices(opts.repoRoot, opts.path, run)
   if (existsSync(opts.path)) {
     const r = await run(['git', 'worktree', 'remove', '--force', opts.path], {
       cwd: opts.repoRoot,

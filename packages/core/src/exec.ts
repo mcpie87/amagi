@@ -14,6 +14,8 @@ export type ExecOptions = {
   timeoutMs?: number
   /** Kills the whole process tree on abort. */
   signal?: AbortSignal
+  /** Receives stdout and stderr text as it arrives; the result still carries all of it. */
+  onOutput?: (text: string) => void
 }
 
 export type Exec = (cmd: readonly string[], opts?: ExecOptions) => Promise<ExecResult>
@@ -65,8 +67,8 @@ export const exec: Exec = async (cmd, opts = {}) => {
   else opts.signal?.addEventListener('abort', kill, { once: true })
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
-      readText(proc.stdout, streams.signal),
-      readText(proc.stderr, streams.signal),
+      readText(proc.stdout, streams.signal, opts.onOutput),
+      readText(proc.stderr, streams.signal, opts.onOutput),
       proc.exited,
     ])
     if (timedOut) {
@@ -98,6 +100,7 @@ export async function execOk(
 export async function readText(
   stream: ReadableStream<Uint8Array>,
   signal: AbortSignal,
+  onText?: (text: string) => void,
 ): Promise<string> {
   const reader = stream.getReader()
   const decoder = new TextDecoder()
@@ -108,9 +111,13 @@ export async function readText(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      text += decoder.decode(value, { stream: true })
+      const chunk = decoder.decode(value, { stream: true })
+      text += chunk
+      if (chunk !== '') onText?.(chunk)
     }
-    return text + decoder.decode()
+    const rest = decoder.decode()
+    if (rest !== '') onText?.(rest)
+    return text + rest
   } finally {
     signal.removeEventListener('abort', cancel)
     reader.releaseLock()

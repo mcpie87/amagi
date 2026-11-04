@@ -7,6 +7,7 @@ import {
   formatPrBody,
   taskIdFromPrBody,
   withAgentSections,
+  withDemoSection,
 } from './pr-body.ts'
 
 type Call = readonly string[]
@@ -348,6 +349,14 @@ describe('formatPrBody', () => {
 })
 
 describe('withAgentSections', () => {
+  test('keeps the commit message out of the conclusion written back to the issue', () => {
+    const final =
+      'Did it.\n\n### Conclusion\n\n- `hello.txt`: new\n\n### Commit message\n\n```text\n[WEWAI-1] Temat\n```'
+    const sections = withAgentSections('Write hello.txt', final)
+    expect(sections?.description).toContain('- `hello.txt`: new')
+    expect(sections?.description).not.toContain('WEWAI-1')
+  })
+
   test('is null when the final message has no sections', () => {
     expect(withAgentSections('Write hello.txt', 'Did it.')).toBeNull()
     expect(withAgentSections('Write hello.txt', null)).toBeNull()
@@ -388,5 +397,27 @@ describe('taskIdFromPrBody', () => {
 
   test('is null for a body that names no task', () => {
     expect(taskIdFromPrBody('## Some PR\n\nMentions am-1 in passing.\n')).toBeNull()
+  })
+})
+
+describe('withDemoSection', () => {
+  const clip = (name: string) => ({ name, url: `https://gitlab.example.com/${name}` })
+
+  test('replaces an earlier demo block instead of stacking a second one', () => {
+    const body = withDemoSection(
+      '## ✨ Title\n\n### 🎬 Demo\n\n**old.webm**\n\n![old.webm](https://x/old.webm)\n\n### 🧠 Conclusion\n\nDone.',
+      [clip('new.webm')],
+    )
+    expect(body).not.toContain('old.webm')
+    expect(body).toContain('### 🎬 Demo\n\n**new.webm**')
+    expect(body.endsWith('### 🧠 Conclusion\n\nDone.')).toBe(true)
+  })
+
+  test('goes before the changed-files list when the body has no demo yet', () => {
+    const body = withDemoSection('## ✨ Title\n\n### 🛠️ What changed\n\n- `a.ts` +1 -0', [
+      clip('new.webm'),
+    ])
+    expect(body.indexOf('### 🎬 Demo')).toBeLessThan(body.indexOf('### 🛠️ What changed'))
+    expect(body).toContain('![new.webm](https://gitlab.example.com/new.webm)')
   })
 })

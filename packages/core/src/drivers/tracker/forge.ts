@@ -1,5 +1,11 @@
-import { exec as defaultExec, type Exec, execOk } from '../../exec.ts'
-import { ghEnv, teaEnv, teaRepoArgs } from '../forge-cred.ts'
+import { exec as defaultExec, type Exec } from '../../exec.ts'
+import {
+  ForgeApiError,
+  type ForgeEndpoint,
+  forgeJson,
+  forgePages,
+  resolveForge,
+} from '../forge-api.ts'
 import {
   type CreateTrackerTask,
   type GateRef,
@@ -14,7 +20,7 @@ import {
 
 export type ForgeOptions = {
   cwd: string
-  /** The configured forge remote (`[forge] remote`); every gh/tea call targets its repository. */
+  /** The configured forge remote (`[forge] remote`); every API call targets its repository. */
   remote: string
   exec?: Exec
 }
@@ -63,18 +69,36 @@ function parseGate(ref: GateRef): { taskId: string; questionId: string } {
   return { taskId: ref.id.slice(0, i), questionId: ref.id.slice(i + 1) }
 }
 
+function isNotFound(err: unknown): boolean {
+  return err instanceof ForgeApiError && err.status === 404
+}
+
+/** GitHub and Forgejo share the issue JSON: `number`, `html_url`, RFC 3339 `created_at`. */
+function restIssue(raw: Record<string, unknown>): ForgeIssue {
+  return {
+    id: String(raw.number),
+    title: String(raw.title ?? ''),
+    body: String(raw.body ?? ''),
+    state: raw.state === 'closed' ? 'closed' : 'open',
+    url: typeof raw.html_url === 'string' ? raw.html_url : null,
+    labels: ((raw.labels as Array<{ name?: string }>) ?? []).map((l) => ({ name: l.name ?? '' })),
+    createdAt: typeof raw.created_at === 'string' ? Date.parse(raw.created_at) : null,
+  }
+}
+
 /**
- * Shared Tracker over gh issue and tea issues. Both lack bd's lease and gate
- * primitives: heartbeat is a no-op and a question gate is advisory, an issue
- * comment the runner polls instead of a blocker the tracker enforces.
+ * Shared Tracker over the forge issue REST API. Neither host has bd's lease or
+ * gate primitives: heartbeat is a no-op and a question gate is advisory, an
+ * issue comment the runner polls instead of a blocker the tracker enforces.
  */
 export abstract class ForgeTracker implements Tracker {
-  abstract readonly kind: string
+  abstract readonly kind: 'github' | 'forgejo'
   readonly leaseTtlMs = LEASE_TTL_MS
   readonly capabilities: TrackerCapabilities = { create: true, edit: false, dependencies: false }
   protected readonly cwd: string
   protected readonly remote: string
   protected readonly exec: Exec
+  private endpoint: ForgeEndpoint | null = null
 
   constructor(opts: ForgeOptions) {
     this.cwd = opts.cwd
@@ -82,26 +106,17 @@ export abstract class ForgeTracker implements Tracker {
     this.exec = opts.exec ?? defaultExec
   }
 
-  protected abstract listOpen(limit: number): Promise<ForgeIssue[]>
-  protected abstract getIssue(id: string): Promise<ForgeIssue | null>
-  protected abstract postComment(id: string, body: string): Promise<void>
-  protected abstract commentBodies(id: string): Promise<string[]>
-  protected abstract addClaimLabel(id: string): Promise<void>
-  protected abstract removeClaimLabel(id: string): Promise<void>
-  protected abstract setState(id: string, closed: boolean): Promise<void>
-  protected abstract createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue>
+  /** Every open issue, pull requests excluded. */
+  protected abstract listOpen(): Promise<ForgeIssue[]>
+  /** A label's write-API reference: its name, or its id on Forgejo. Null when the repository lacks it. */
+  protected abstract labelRef(name: string): Promise<string | number | null>
 
   async ready(limit = 20): Promise<TrackerTask[]> {
-    // Filtered here, not in the query: tea cannot exclude labels, and GitHub's search index lags
-    // label edits, so a just-claimed issue could come back. Widen the window until enough remain
-    // or every open issue has been listed.
-    for (let window = Math.max(limit, 1); ; window *= 2) {
-      const issues = await this.listOpen(window)
-      const ready = issues.filter(
-        (i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'),
-      )
-      if (ready.length >= limit || issues.length < window) return ready.slice(0, limit).map(toTask)
-    }
+    // Filtered here: the list endpoints can include labels but not exclude them.
+    const ready = (await this.listOpen()).filter(
+      (i) => !isClaimed(i) && !i.labels.some((label) => label.name === 'proposed'),
+    )
+    return ready.slice(0, limit).map(toTask)
   }
 
   async claim(id?: string): Promise<TrackerTask | null> {
@@ -130,7 +145,8 @@ export abstract class ForgeTracker implements Tracker {
       ...(input.parent === null ? [] : [`Parent: #${input.parent}`]),
       ...(input.priority === null ? [] : [`Priority: P${input.priority}`]),
     ].join('\n\n')
-    return toTask(await this.createIssue(input, body))
+    const labels = await Promise.all(input.labels.map((name) => this.writableLabel(name)))
+    return toTask(restIssue(await this.api('POST', 'issues', { title: input.title, body, labels })))
   }
 
   async updateTask(_id: string, _input: UpdateTrackerTask): Promise<TrackerTask> {
@@ -156,7 +172,7 @@ export abstract class ForgeTracker implements Tracker {
   }
 
   async openIds(limit = 500): Promise<string[]> {
-    return (await this.listOpen(limit)).map((i) => i.id)
+    return (await this.listOpen()).slice(0, limit).map((i) => i.id)
   }
 
   async close(id: string, _reason?: string): Promise<void> {
@@ -182,296 +198,106 @@ export abstract class ForgeTracker implements Tracker {
     const { taskId, questionId } = parseGate(ref)
     await this.postComment(taskId, `${ANSWER_MARK}${questionId}`)
   }
-}
 
-const GH_FIELDS = 'number,title,body,state,url,labels,createdAt'
+  private async forge(): Promise<ForgeEndpoint> {
+    this.endpoint ??= await resolveForge(this.kind, this.cwd, this.remote, this.exec)
+    return this.endpoint
+  }
 
-function ghIssue(raw: Record<string, unknown>): ForgeIssue {
-  return {
-    id: String(raw.number),
-    title: String(raw.title ?? ''),
-    body: String(raw.body ?? ''),
-    state: raw.state === 'CLOSED' ? 'closed' : 'open',
-    url: typeof raw.url === 'string' ? raw.url : null,
-    labels: ((raw.labels as Array<{ name?: string }>) ?? []).map((l) => ({ name: l.name ?? '' })),
-    createdAt: typeof raw.createdAt === 'string' ? Date.parse(raw.createdAt) : null,
+  /** One call on `repos/{owner}/{repo}/{rest}`; a body-less answer reads as an empty object. */
+  protected async api(
+    method: string,
+    rest: string,
+    body?: unknown,
+  ): Promise<Record<string, unknown>> {
+    const forge = await this.forge()
+    const raw = await forgeJson(forge, method, `repos/${forge.ownerRepo}/${rest}`, body)
+    return (raw ?? {}) as Record<string, unknown>
+  }
+
+  /** Every item of the collection `repos/{owner}/{repo}/{rest}`. */
+  protected async pages(rest: string): Promise<Array<Record<string, unknown>>> {
+    const forge = await this.forge()
+    return forgePages(forge, `repos/${forge.ownerRepo}/${rest}`)
+  }
+
+  protected async getIssue(id: string): Promise<ForgeIssue | null> {
+    try {
+      return restIssue(await this.api('GET', `issues/${id}`))
+    } catch (err) {
+      if (isNotFound(err)) return null
+      throw err
+    }
+  }
+
+  protected async postComment(id: string, body: string): Promise<void> {
+    await this.api('POST', `issues/${id}/comments`, { body })
+  }
+
+  protected async commentBodies(id: string): Promise<string[]> {
+    return (await this.pages(`issues/${id}/comments`)).map((c) => String(c.body ?? ''))
+  }
+
+  protected async addClaimLabel(id: string): Promise<void> {
+    const label = await this.writableLabel(CLAIM_LABEL)
+    await this.api('POST', `issues/${id}/labels`, { labels: [label] })
+  }
+
+  protected async removeClaimLabel(id: string): Promise<void> {
+    const label = await this.labelRef(CLAIM_LABEL)
+    if (label === null) return
+    try {
+      await this.api('DELETE', `issues/${id}/labels/${encodeURIComponent(String(label))}`)
+    } catch (err) {
+      // The issue may never have been claimed, so a label that is not on it is not an error.
+      if (!isNotFound(err)) throw err
+    }
+  }
+
+  protected async setState(id: string, closed: boolean): Promise<void> {
+    await this.api('PATCH', `issues/${id}`, { state: closed ? 'closed' : 'open' })
+  }
+
+  /**
+   * Best effort: an existing label, or no right to create one, must not fail
+   * the write. A label still missing afterwards fails in writableLabel.
+   */
+  private async ensureLabel(name: string): Promise<void> {
+    await this.api('POST', 'labels', { name, color: 'A0A0A0' }).catch(() => undefined)
+  }
+
+  private async writableLabel(name: string): Promise<string | number> {
+    await this.ensureLabel(name)
+    const label = await this.labelRef(name)
+    if (label === null) throw new Error(`${this.kind} has no label ${name} and could not create it`)
+    return label
   }
 }
 
 export class GithubTracker extends ForgeTracker {
   readonly kind = 'github'
 
-  protected async createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue> {
-    const url = (
-      await execOk(
-        this.exec,
-        [
-          'gh',
-          'issue',
-          'create',
-          '--title',
-          input.title,
-          '--body-file',
-          '-',
-          ...input.labels.flatMap((label) => ['--label', label]),
-        ],
-        { cwd: this.cwd, stdin: body, env: ghEnv(this.cwd, this.remote) },
-      )
-    ).trim()
-    const id = url.match(/\/issues\/(\d+)\/?$/)?.[1]
-    if (id === undefined) throw new Error('gh issue create returned no issue URL')
-    const issue = await this.getIssue(id)
-    if (issue === null) throw new Error(`gh issue ${id} disappeared after creation`)
-    return issue
+  protected async listOpen(): Promise<ForgeIssue[]> {
+    // The issues endpoint also lists pull requests, which are marked by a pull_request key.
+    const raw = await this.pages('issues?state=open')
+    return raw.filter((i) => !('pull_request' in i)).map(restIssue)
   }
 
-  protected async listOpen(limit: number): Promise<ForgeIssue[]> {
-    const out = await execOk(
-      this.exec,
-      ['gh', 'issue', 'list', '--state', 'open', '--limit', String(limit), '--json', GH_FIELDS],
-      { cwd: this.cwd, env: ghEnv(this.cwd, this.remote) },
-    )
-    return (JSON.parse(out) as Array<Record<string, unknown>>).map(ghIssue)
-  }
-
-  protected async getIssue(id: string): Promise<ForgeIssue | null> {
-    const out = await execOk(this.exec, ['gh', 'issue', 'view', id, '--json', GH_FIELDS], {
-      cwd: this.cwd,
-      env: ghEnv(this.cwd, this.remote),
-    })
-    return ghIssue(JSON.parse(out) as Record<string, unknown>)
-  }
-
-  protected async postComment(id: string, body: string): Promise<void> {
-    await execOk(this.exec, ['gh', 'issue', 'comment', id, '--body-file', '-'], {
-      cwd: this.cwd,
-      stdin: body,
-      env: ghEnv(this.cwd, this.remote),
-    })
-  }
-
-  protected async commentBodies(id: string): Promise<string[]> {
-    const out = await execOk(this.exec, ['gh', 'issue', 'view', id, '--json', 'comments'], {
-      cwd: this.cwd,
-      env: ghEnv(this.cwd, this.remote),
-    })
-    const parsed = JSON.parse(out) as { comments?: Array<{ body?: string }> }
-    return (parsed.comments ?? []).map((c) => c.body ?? '')
-  }
-
-  protected async addClaimLabel(id: string): Promise<void> {
-    await this.ensureClaimLabel()
-    await execOk(this.exec, ['gh', 'issue', 'edit', id, '--add-label', CLAIM_LABEL], {
-      cwd: this.cwd,
-      env: ghEnv(this.cwd, this.remote),
-    })
-  }
-
-  protected async removeClaimLabel(id: string): Promise<void> {
-    await execOk(this.exec, ['gh', 'issue', 'edit', id, '--remove-label', CLAIM_LABEL], {
-      cwd: this.cwd,
-      env: ghEnv(this.cwd, this.remote),
-    })
-  }
-
-  protected async setState(id: string, closed: boolean): Promise<void> {
-    await execOk(this.exec, closed ? ['gh', 'issue', 'close', id] : ['gh', 'issue', 'reopen', id], {
-      cwd: this.cwd,
-      env: ghEnv(this.cwd, this.remote),
-    })
-  }
-
-  private async ensureClaimLabel(): Promise<void> {
-    // --force makes create idempotent; failure (e.g. no write perms) is best effort
-    await this.exec(['gh', 'label', 'create', CLAIM_LABEL, '--force'], {
-      cwd: this.cwd,
-      env: ghEnv(this.cwd, this.remote),
-    })
-  }
-}
-
-const TEA_FIELDS = 'index,state,title,body,url,labels,created'
-
-function teaIssue(raw: Record<string, unknown>): ForgeIssue {
-  return {
-    id: String(raw.index),
-    title: String(raw.title ?? ''),
-    body: String(raw.body ?? ''),
-    state: raw.state === 'closed' ? 'closed' : 'open',
-    url: typeof raw.url === 'string' ? raw.url : null,
-    labels: ((raw.labels as Array<{ name?: string }>) ?? []).map((l) => ({ name: l.name ?? '' })),
-    // gitea/forgejo report creation as a Unix timestamp in seconds
-    createdAt: typeof raw.created === 'number' && raw.created > 0 ? raw.created * 1000 : null,
+  protected async labelRef(name: string): Promise<string> {
+    return name
   }
 }
 
 export class ForgejoTracker extends ForgeTracker {
   readonly kind = 'forgejo'
 
-  protected async createIssue(input: CreateTrackerTask, body: string): Promise<ForgeIssue> {
-    const output = await execOk(
-      this.exec,
-      [
-        'tea',
-        'issues',
-        'create',
-        ...teaRepoArgs(this.cwd, this.remote),
-        '--title',
-        input.title,
-        '--description',
-        body,
-        ...(input.labels.length === 0 ? [] : ['--labels', input.labels.join(',')]),
-      ],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
-    )
-    const id = output.match(/\/issues\/(\d+)\b/)?.[1]
-    if (id === undefined) throw new Error('tea issues create returned no issue URL')
-    const issue = await this.getIssue(id)
-    if (issue === null) throw new Error(`tea issue ${id} disappeared after creation`)
-    return issue
+  protected async listOpen(): Promise<ForgeIssue[]> {
+    return (await this.pages('issues?state=open&type=issues')).map(restIssue)
   }
 
-  protected async listOpen(limit: number): Promise<ForgeIssue[]> {
-    // tea does not paginate and Forgejo caps a page at 50 issues by default.
-    const pageSize = Math.min(limit, 50)
-    const env = await teaEnv(this.exec, this.cwd, this.remote)
-    const issues: ForgeIssue[] = []
-    for (let page = 1; issues.length < limit; page++) {
-      const out = await execOk(
-        this.exec,
-        [
-          'tea',
-          'issues',
-          'list',
-          ...teaRepoArgs(this.cwd, this.remote),
-          '--state',
-          'open',
-          '--limit',
-          String(pageSize),
-          '--page',
-          String(page),
-          '--fields',
-          TEA_FIELDS,
-          '--output',
-          'json',
-        ],
-        { cwd: this.cwd, env },
-      )
-      const parsed = JSON.parse(out)
-      if (!Array.isArray(parsed) || parsed.length === 0) break
-      issues.push(...parsed.map(teaIssue))
-    }
-    return issues.slice(0, limit)
-  }
-
-  protected async getIssue(id: string): Promise<ForgeIssue | null> {
-    const out = await execOk(
-      this.exec,
-      [
-        'tea',
-        'issues',
-        ...teaRepoArgs(this.cwd, this.remote),
-        id,
-        '--fields',
-        TEA_FIELDS,
-        '--output',
-        'json',
-      ],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
-    )
-    return teaIssue(JSON.parse(out) as Record<string, unknown>)
-  }
-
-  protected async postComment(id: string, body: string): Promise<void> {
-    await execOk(
-      this.exec,
-      ['tea', 'comments', 'add', ...teaRepoArgs(this.cwd, this.remote), id, '--description', body],
-      {
-        cwd: this.cwd,
-        env: await teaEnv(this.exec, this.cwd, this.remote),
-      },
-    )
-  }
-
-  protected async commentBodies(id: string): Promise<string[]> {
-    const out = await execOk(
-      this.exec,
-      ['tea', 'comments', 'list', ...teaRepoArgs(this.cwd, this.remote), id, '--output', 'json'],
-      {
-        cwd: this.cwd,
-        env: await teaEnv(this.exec, this.cwd, this.remote),
-      },
-    )
-    const parsed = JSON.parse(out) as Array<{ content?: string; body?: string }>
-    return parsed.map((c) => c.content ?? c.body ?? '')
-  }
-
-  protected async addClaimLabel(id: string): Promise<void> {
-    await this.ensureClaimLabel()
-    await execOk(
-      this.exec,
-      [
-        'tea',
-        'issues',
-        'edit',
-        ...teaRepoArgs(this.cwd, this.remote),
-        id,
-        '--add-labels',
-        CLAIM_LABEL,
-      ],
-      {
-        cwd: this.cwd,
-        env: await teaEnv(this.exec, this.cwd, this.remote),
-      },
-    )
-  }
-
-  protected async removeClaimLabel(id: string): Promise<void> {
-    await execOk(
-      this.exec,
-      [
-        'tea',
-        'issues',
-        'edit',
-        ...teaRepoArgs(this.cwd, this.remote),
-        id,
-        '--remove-labels',
-        CLAIM_LABEL,
-      ],
-      {
-        cwd: this.cwd,
-        env: await teaEnv(this.exec, this.cwd, this.remote),
-      },
-    )
-  }
-
-  protected async setState(id: string, closed: boolean): Promise<void> {
-    await execOk(
-      this.exec,
-      closed
-        ? ['tea', 'issues', 'close', ...teaRepoArgs(this.cwd, this.remote), id]
-        : ['tea', 'issues', 'reopen', ...teaRepoArgs(this.cwd, this.remote), id],
-      { cwd: this.cwd, env: await teaEnv(this.exec, this.cwd, this.remote) },
-    )
-  }
-
-  private async ensureClaimLabel(): Promise<void> {
-    // best effort: creating an existing label fails, which is fine
-    await this.exec(
-      [
-        'tea',
-        'labels',
-        'create',
-        ...teaRepoArgs(this.cwd, this.remote),
-        '--name',
-        CLAIM_LABEL,
-        '--color',
-        'A0A0A0',
-      ],
-      {
-        cwd: this.cwd,
-        env: await teaEnv(this.exec, this.cwd, this.remote),
-      },
-    )
+  // Forgejo takes label ids on issue and label writes, so names are looked up in the repository.
+  protected async labelRef(name: string): Promise<number | null> {
+    const label = (await this.pages('labels')).find((l) => l.name === name)
+    return typeof label?.id === 'number' ? label.id : null
   }
 }

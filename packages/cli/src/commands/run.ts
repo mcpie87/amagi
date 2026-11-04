@@ -232,7 +232,7 @@ export const runCommand = defineCommand({
     worker: { type: 'string', description: 'Worker id from the global fleet' },
     harness: {
       type: 'string',
-      description: 'Harness kind to use (claude/codex/opencode)',
+      description: 'Harness kind to use (claude/codex/opencode/omp)',
     },
     model: { type: 'string', description: 'Model to pass to the harness' },
     effort: { type: 'string', description: 'Reasoning effort to pass to the harness' },

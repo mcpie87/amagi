@@ -2,190 +2,269 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Exec, ExecResult } from '../../exec.ts'
+import type { Exec } from '../../exec.ts'
 import { CLAIM_LABEL, ForgejoTracker, GithubTracker } from './forge.ts'
 
-const GH_READY = `[
-  {
-    "number": 3,
-    "title": "Add SSE endpoint",
-    "body": "Stream events to the dashboard",
-    "state": "OPEN",
-    "url": "https://github.com/acme/amagi/issues/3",
-    "labels": [],
-    "createdAt": "2026-09-20T14:02:53Z"
-  },
-  {
-    "number": 5,
-    "title": "Claimed elsewhere",
-    "body": "",
-    "state": "OPEN",
-    "url": "https://github.com/acme/amagi/issues/5",
-    "labels": [{ "name": "${CLAIM_LABEL}" }]
-  }
-]`
+type Req = { method: string; path: string; query: URLSearchParams; body: unknown }
 
-const GH_VIEW = `{
-  "number": 3,
-  "title": "Add SSE endpoint",
-  "body": "Stream events to the dashboard",
-  "state": "OPEN",
-  "url": "https://github.com/acme/amagi/issues/3",
-  "labels": [],
-  "createdAt": "2026-09-20T14:02:53Z"
-}`
+const GH_REMOTE = 'git@github.com:acme/amagi.git'
+const FJ_REMOTE = 'https://gitea.local/acme/amagi.git'
+const REPO = 'repos/acme/amagi'
 
-const GH_PROPOSED = GH_VIEW.replace('"labels": []', '"labels": [{ "name": "proposed" }]')
-const GH_READY_PROPOSED = GH_READY.replace('"labels": []', '"labels": [{ "name": "proposed" }]')
-
-const GH_COMMENTS = `{
-  "comments": [
-    { "body": "[amagi] question q-1\\n\\nRetries per-request or per-connection?" },
-    { "body": "[amagi] answer q-1" }
-  ]
-}`
-
-const TEA_READY = `[
-  {
-    "index": 7,
-    "state": "open",
-    "title": "Add Forgejo driver",
-    "body": "Implement tea issues",
-    "url": "https://gitea.local/acme/amagi/issues/7",
-    "labels": [],
-    "created": 1789912973
-  }
-]`
-
-const TEA_COMMENTS = `[
-  { "content": "[amagi] question q-2\\n\\nWhich base?" }
-]`
-
-const TEA_COMMENTS_ANSWERED = `[
-  { "content": "[amagi] question q-2\\n\\nWhich base?" },
-  { "content": "[amagi] answer q-2" }
-]`
-
-type Call = readonly string[]
-
-/** Serves a list call the way the host does: one page of at most --limit issues. */
-function listPage(cmd: Call, stdout: string): string {
-  const limitAt = cmd.indexOf('--limit')
-  if (limitAt === -1) return stdout
-  const issues: unknown = JSON.parse(stdout)
-  if (!Array.isArray(issues)) return stdout
-  const limit = Number(cmd[limitAt + 1])
-  const pageAt = cmd.indexOf('--page')
-  const start = pageAt === -1 ? 0 : (Number(cmd[pageAt + 1]) - 1) * limit
-  return JSON.stringify(issues.slice(start, start + limit))
+const GH_ISSUE = {
+  number: 3,
+  title: 'Add SSE endpoint',
+  body: 'Stream events to the dashboard',
+  state: 'open',
+  html_url: 'https://github.com/acme/amagi/issues/3',
+  labels: [],
+  created_at: '2026-09-20T14:02:53Z',
 }
 
-function fake(routes: (cmd: Call) => ExecResult | undefined): { exec: Exec; calls: Call[] } {
-  const calls: Call[] = []
-  const exec: Exec = async (cmd, opts) => {
-    calls.push(cmd)
-    if (opts?.stdin !== undefined) calls.push(['<stdin>', opts.stdin])
-    const hit = routes(cmd)
-    if (hit) return { ...hit, stdout: listPage(cmd, hit.stdout) }
-    return { exitCode: 0, stdout: '', stderr: '' }
-  }
-  return { exec, calls }
+const GH_CLAIMED = {
+  ...GH_ISSUE,
+  number: 5,
+  title: 'Claimed elsewhere',
+  body: null,
+  html_url: 'https://github.com/acme/amagi/issues/5',
+  labels: [{ name: CLAIM_LABEL }],
 }
 
-const ok = (stdout: string): ExecResult => ({ exitCode: 0, stdout, stderr: '' })
+const GH_PR = { ...GH_ISSUE, number: 9, title: 'A pull request', pull_request: { url: 'x' } }
+
+const GH_PROPOSED = { ...GH_ISSUE, labels: [{ name: 'proposed' }] }
+
+const FJ_ISSUE = {
+  number: 7,
+  title: 'Add Forgejo driver',
+  body: 'Implement the REST tracker',
+  state: 'open',
+  html_url: 'https://gitea.local/acme/amagi/issues/7',
+  labels: [],
+  created_at: '2026-09-20T14:02:53Z',
+}
+
+const json = (body: unknown, init?: ResponseInit): Response =>
+  new Response(JSON.stringify(body), init)
+
+/** A list answer paged as the host does it: a Link header on GitHub, x-total-count on Forgejo. */
+function collection(req: Req, items: unknown[]): Response {
+  const github = req.query.has('per_page')
+  const size = Number(req.query.get(github ? 'per_page' : 'limit'))
+  const page = Number(req.query.get('page'))
+  const headers = github
+    ? { link: page * size < items.length ? '<next>; rel="next"' : '' }
+    : { 'x-total-count': String(items.length) }
+  return json(items.slice((page - 1) * size, page * size), { headers })
+}
+
+/** Answers the `git remote get-url` that resolves the forge endpoint. */
+const remoteExec =
+  (url: string): Exec =>
+  async () => ({ exitCode: 0, stdout: `${url}\n`, stderr: '' })
+
+const github = (): GithubTracker =>
+  new GithubTracker({ cwd: '/repo', remote: 'origin', exec: remoteExec(GH_REMOTE) })
+const forgejo = (): ForgejoTracker =>
+  new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec: remoteExec(FJ_REMOTE) })
+
+/**
+ * Stubs fetch while `fn` runs. `route` answers each request (path relative to
+ * the API root, query split out); an unanswered request fails the test.
+ */
+async function withFetch<T>(
+  route: (req: Req) => Response | undefined,
+  fn: () => Promise<T>,
+): Promise<{ value: T; requests: Req[] }> {
+  const original = globalThis.fetch
+  const requests: Req[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input))
+    const req: Req = {
+      method: init?.method ?? 'GET',
+      path: url.pathname.replace(/^\/(api\/v\d\/)?/, ''),
+      query: url.searchParams,
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    }
+    requests.push(req)
+    const res = route(req)
+    if (res === undefined) throw new Error(`unfaked ${req.method} ${req.path}`)
+    return res
+  }) as typeof fetch
+  try {
+    return { value: await fn(), requests }
+  } finally {
+    globalThis.fetch = original
+  }
+}
 
 const savedState = process.env.XDG_STATE_HOME
 let stateHome: string
 
 beforeEach(() => {
+  // Stored forge credentials would otherwise leak in from the operator's state dir.
   stateHome = mkdtempSync(join(tmpdir(), 'amagi-forge-tracker-'))
   process.env.XDG_STATE_HOME = stateHome
+  delete process.env.GITHUB_TOKEN
+  delete process.env.GITLAB_TOKEN
+  process.env.GH_TOKEN = 'ghp_test'
+  process.env.FORGEJO_TOKEN = 'fj_test'
 })
 
 afterEach(() => {
+  delete process.env.GH_TOKEN
+  delete process.env.FORGEJO_TOKEN
   if (savedState === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = savedState
   rmSync(stateHome, { recursive: true, force: true })
 })
 
 describe('GithubTracker', () => {
-  test('parses open issues and skips claimed ones', async () => {
-    const { exec } = fake(() => ok(GH_READY))
-    const tasks = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).ready()
+  test('parses open issues, skipping claimed ones and pull requests', async () => {
+    const { value: tasks, requests } = await withFetch(
+      (req) =>
+        req.path === `${REPO}/issues` ? collection(req, [GH_ISSUE, GH_CLAIMED, GH_PR]) : undefined,
+      () => github().ready(),
+    )
 
-    expect(tasks).toHaveLength(1)
-    expect(tasks[0]).toEqual({
-      id: '3',
-      title: 'Add SSE endpoint',
-      description: 'Stream events to the dashboard',
-      status: 'open',
-      priority: null,
-      type: null,
-      url: 'https://github.com/acme/amagi/issues/3',
-      createdAt: Date.parse('2026-09-20T14:02:53Z'),
-    })
+    expect(requests[0]?.query.get('state')).toBe('open')
+    expect(tasks).toEqual([
+      {
+        id: '3',
+        title: 'Add SSE endpoint',
+        description: 'Stream events to the dashboard',
+        status: 'open',
+        priority: null,
+        type: null,
+        url: 'https://github.com/acme/amagi/issues/3',
+        createdAt: Date.parse('2026-09-20T14:02:53Z'),
+      },
+    ])
   })
 
   test('openIds includes claimed issues too, unlike ready', async () => {
-    const { exec } = fake(() => ok(GH_READY))
-    const ids = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).openIds()
+    const { value: ids } = await withFetch(
+      (req) =>
+        req.path === `${REPO}/issues` ? collection(req, [GH_ISSUE, GH_CLAIMED]) : undefined,
+      () => github().openIds(),
+    )
     expect(ids).toEqual(['3', '5'])
   })
 
   test('proposed issues are hidden from ready and rejected by explicit claim', async () => {
-    const { exec, calls } = fake((c) =>
-      c.includes('view') ? ok(GH_PROPOSED) : ok(GH_READY_PROPOSED),
-    )
-    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
-    expect(await tracker.ready()).toEqual([])
-    expect(await tracker.claim('3')).toBeNull()
-    expect(calls.some((call) => call.includes('edit'))).toBe(false)
+    const route = (req: Req): Response | undefined => {
+      if (req.path === `${REPO}/issues`) return collection(req, [GH_PROPOSED])
+      if (req.path === `${REPO}/issues/3`) return json(GH_PROPOSED)
+      return undefined
+    }
+    const ready = await withFetch(route, () => github().ready())
+    expect(ready.value).toEqual([])
+    const claim = await withFetch(route, () => github().claim('3'))
+    expect(claim.value).toBeNull()
+    expect(claim.requests.map((r) => r.method)).toEqual(['GET'])
   })
 
-  test('claim marks the issue with the claim label', async () => {
-    const { exec, calls } = fake((c) => (c.includes('view') ? ok(GH_VIEW) : undefined))
-    const task = await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).claim('3')
+  test('a missing issue reads as null', async () => {
+    const { value } = await withFetch(
+      () => new Response('{"message":"Not Found"}', { status: 404 }),
+      () => github().get('99'),
+    )
+    expect(value).toBeNull()
+  })
+
+  test('claim adds the claim label, creating it first', async () => {
+    const { value: task, requests } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/3`) return json(GH_ISSUE)
+        if (req.path === `${REPO}/labels`) return json({}, { status: 201 })
+        if (req.path === `${REPO}/issues/3/labels`) return json([])
+        return undefined
+      },
+      () => github().claim('3'),
+    )
 
     expect(task?.id).toBe('3')
-    const edit = calls.find((c) => c.includes('edit'))
-    expect(edit).toEqual(['gh', 'issue', 'edit', '3', '--add-label', CLAIM_LABEL])
+    expect(requests.find((r) => r.path === `${REPO}/labels`)?.body).toEqual({
+      name: CLAIM_LABEL,
+      color: 'A0A0A0',
+    })
+    expect(requests.find((r) => r.path === `${REPO}/issues/3/labels`)?.body).toEqual({
+      labels: [CLAIM_LABEL],
+    })
+  })
+
+  test('a label that cannot be created does not stop the claim', async () => {
+    const { value: task } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/3`) return json(GH_ISSUE)
+        if (req.path === `${REPO}/labels`) return json({ message: 'exists' }, { status: 422 })
+        if (req.path === `${REPO}/issues/3/labels`) return json([])
+        return undefined
+      },
+      () => github().claim('3'),
+    )
+    expect(task?.id).toBe('3')
   })
 
   test('heartbeat is a no-op on a host without leases', async () => {
-    const { exec } = fake(() => ok(''))
-    expect(await new GithubTracker({ cwd: '/repo', remote: 'origin', exec }).heartbeat('3')).toBe(
-      true,
-    )
+    expect(await github().heartbeat('3')).toBe(true)
   })
 
   test('a question gate is advisory and resolves via the answer comment', async () => {
-    const { exec } = fake((c) => {
-      if (c.includes('--json') && c.includes('comments')) return ok(GH_COMMENTS)
-      return ok(GH_VIEW)
-    })
-    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
-
-    const ref = await tracker.openGate('3', {
-      id: 'q-1',
-      text: 'Retries per-request or per-connection?',
-      options: ['per-request', 'per-connection'],
-    })
-    expect(ref).toEqual({ id: '3#q-1', advisory: true })
-    expect(await tracker.gateResolved(ref)).toBe(true)
+    const comments = [
+      { body: '[amagi] question q-1\n\nRetries per-request or per-connection?' },
+      { body: '[amagi] answer q-1' },
+    ]
+    await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/3`) return json(GH_ISSUE)
+        if (req.path === `${REPO}/issues/3/comments`) {
+          return req.method === 'POST' ? json({}, { status: 201 }) : collection(req, comments)
+        }
+        return undefined
+      },
+      async () => {
+        const tracker = github()
+        const ref = await tracker.openGate('3', {
+          id: 'q-1',
+          text: 'Retries per-request or per-connection?',
+          options: ['per-request', 'per-connection'],
+        })
+        expect(ref).toEqual({ id: '3#q-1', advisory: true })
+        expect(await tracker.gateResolved(ref)).toBe(true)
+      },
+    )
   })
 
   test('an unanswered question keeps blocking', async () => {
-    const { exec } = fake(() => ok('{"comments": []}'))
-    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
-    expect(await tracker.gateResolved({ id: '3#q-9', advisory: true })).toBe(false)
+    const { value } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/3`) return json(GH_ISSUE)
+        if (req.path === `${REPO}/issues/3/comments`) return collection(req, [])
+        return undefined
+      },
+      () => github().gateResolved({ id: '3#q-9', advisory: true }),
+    )
+    expect(value).toBe(false)
   })
 
-  test('creates an issue and rejects unsupported fields', async () => {
-    const { exec, calls } = fake((cmd) =>
-      cmd.includes('create') ? ok('https://github.com/acme/amagi/issues/3\n') : ok(GH_VIEW),
+  test('an answer on a later comment page resolves the gate', async () => {
+    const comments = [
+      ...Array.from({ length: 100 }, (_, i) => ({ body: `note ${i}` })),
+      { body: '[amagi] answer q-1' },
+    ]
+    const { value } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/3`) return json(GH_ISSUE)
+        if (req.path === `${REPO}/issues/3/comments`) return collection(req, comments)
+        return undefined
+      },
+      () => github().gateResolved({ id: '3#q-1', advisory: true }),
     )
-    const tracker = new GithubTracker({ cwd: '/repo', remote: 'origin', exec })
-    expect(tracker.capabilities).toEqual({ create: true, edit: false, dependencies: false })
+    expect(value).toBe(true)
+  })
+
+  test('creates an issue, with its description sections in the body', async () => {
     const input = {
       title: 'x',
       description: 'Why',
@@ -195,21 +274,29 @@ describe('GithubTracker', () => {
       dependencies: [],
       parent: null,
     }
-    expect((await tracker.createTask(input)).id).toBe('3')
-    expect(calls).toContainEqual([
-      'gh',
-      'issue',
-      'create',
-      '--title',
-      'x',
-      '--body-file',
-      '-',
-      '--label',
-      'task',
-    ])
-    expect(calls).toContainEqual(['<stdin>', 'Why\n\n## Acceptance\nDone'])
-    await tracker.createTask({ ...input, acceptanceCriteria: null, priority: 1, parent: '2' })
-    expect(calls).toContainEqual(['<stdin>', 'Why\n\nParent: #2\n\nPriority: P1'])
+    const route = (req: Req): Response | undefined => {
+      if (req.path === `${REPO}/labels`) return json({}, { status: 201 })
+      if (req.path === `${REPO}/issues`) return json(GH_ISSUE, { status: 201 })
+      return undefined
+    }
+    const tracker = github()
+    expect(tracker.capabilities).toEqual({ create: true, edit: false, dependencies: false })
+
+    const first = await withFetch(route, () => tracker.createTask(input))
+    expect(first.value.id).toBe('3')
+    expect(first.requests.find((r) => r.path === `${REPO}/issues`)?.body).toEqual({
+      title: 'x',
+      body: 'Why\n\n## Acceptance\nDone',
+      labels: ['task'],
+    })
+
+    const second = await withFetch(route, () =>
+      tracker.createTask({ ...input, acceptanceCriteria: null, priority: 1, parent: '2' }),
+    )
+    expect(second.requests.find((r) => r.path === `${REPO}/issues`)?.body).toMatchObject({
+      body: 'Why\n\nParent: #2\n\nPriority: P1',
+    })
+
     await expect(tracker.createTask({ ...input, dependencies: ['2'] })).rejects.toThrow(
       /cannot create issues/,
     )
@@ -217,84 +304,187 @@ describe('GithubTracker', () => {
       /does not support editing issues/,
     )
   })
+
+  test('close and reopen patch the issue state', async () => {
+    const route = (req: Req): Response | undefined =>
+      req.path === `${REPO}/issues/3` && req.method === 'PATCH' ? json(GH_ISSUE) : undefined
+    const { requests } = await withFetch(route, async () => {
+      await github().close('3')
+      await github().setStatus('3', 'open')
+    })
+    expect(requests.map((r) => r.body)).toEqual([{ state: 'closed' }, { state: 'open' }])
+  })
+
+  test('release removes the claim label, tolerating an issue that lacks it', async () => {
+    const { requests } = await withFetch(
+      () => new Response('{"message":"Label does not exist"}', { status: 404 }),
+      () => github().release('3'),
+    )
+    expect(requests[0]?.method).toBe('DELETE')
+    expect(requests[0]?.path).toBe(`${REPO}/issues/3/labels/${CLAIM_LABEL}`)
+  })
 })
 
 describe('ForgejoTracker', () => {
-  test('creates an issue through tea', async () => {
-    const { exec, calls } = fake((cmd) =>
-      cmd.includes('create')
-        ? ok('https://gitea.local/acme/amagi/issues/7\n')
-        : ok(TEA_READY.slice(1, -1).trim()),
+  test('parses open issues, asking the API for issues only', async () => {
+    const { value: tasks, requests } = await withFetch(
+      (req) => (req.path === `${REPO}/issues` ? collection(req, [FJ_ISSUE]) : undefined),
+      () => forgejo().ready(),
     )
-    const tracker = new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec })
-    const task = await tracker.createTask({
-      title: 'Follow up',
-      description: 'From the PR',
-      acceptanceCriteria: null,
-      priority: null,
-      labels: [],
-      dependencies: [],
-      parent: null,
+
+    expect(requests[0]?.query.get('type')).toBe('issues')
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({
+      id: '7',
+      status: 'open',
+      url: 'https://gitea.local/acme/amagi/issues/7',
+      createdAt: Date.parse('2026-09-20T14:02:53Z'),
     })
-    expect(task.id).toBe('7')
-    expect(calls).toContainEqual([
-      'tea',
-      'issues',
-      'create',
-      '--title',
-      'Follow up',
-      '--description',
-      'From the PR',
-    ])
   })
 
-  test('parses open issues from tea', async () => {
-    const { exec } = fake(() => ok(TEA_READY))
-    const tasks = await new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec }).ready()
+  test('creates an issue, mapping label names to ids', async () => {
+    const { value: task, requests } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/labels`) {
+          return req.method === 'GET'
+            ? collection(req, [{ id: 4, name: 'task' }])
+            : json({ message: 'exists' }, { status: 409 })
+        }
+        if (req.path === `${REPO}/issues`) return json(FJ_ISSUE, { status: 201 })
+        return undefined
+      },
+      () =>
+        forgejo().createTask({
+          title: 'Follow up',
+          description: 'From the PR',
+          acceptanceCriteria: null,
+          priority: null,
+          labels: ['task'],
+          dependencies: [],
+          parent: null,
+        }),
+    )
 
-    expect(tasks).toHaveLength(1)
-    expect(tasks[0]?.id).toBe('7')
-    expect(tasks[0]?.status).toBe('open')
-    expect(tasks[0]?.createdAt).toBe(Date.parse('2026-09-20T14:02:53Z'))
+    expect(task.id).toBe('7')
+    expect(requests.find((r) => r.path === `${REPO}/issues`)?.body).toEqual({
+      title: 'Follow up',
+      body: 'From the PR',
+      labels: [4],
+    })
+  })
+
+  test('a label missing from the repository and not creatable fails the create', async () => {
+    await expect(
+      withFetch(
+        (req) => {
+          if (req.path === `${REPO}/labels`) {
+            return req.method === 'GET'
+              ? collection(req, [])
+              : json({ message: 'forbidden' }, { status: 403 })
+          }
+          return undefined
+        },
+        () =>
+          forgejo().createTask({
+            title: 'Proposal',
+            description: '',
+            acceptanceCriteria: null,
+            priority: null,
+            labels: ['proposed'],
+            dependencies: [],
+            parent: null,
+          }),
+      ),
+    ).rejects.toThrow(/has no label proposed/)
+  })
+
+  test('claim adds the claim label by id and release removes it by id', async () => {
+    const labels = [{ id: 9, name: CLAIM_LABEL }]
+    const route = (req: Req): Response | undefined => {
+      if (req.path === `${REPO}/issues/7`) return json(FJ_ISSUE)
+      if (req.path === `${REPO}/labels`) {
+        return req.method === 'GET' ? collection(req, labels) : json({}, { status: 409 })
+      }
+      if (req.path === `${REPO}/issues/7/labels`) return json([])
+      if (req.path === `${REPO}/issues/7/labels/9`) return new Response(null, { status: 204 })
+      return undefined
+    }
+
+    const claim = await withFetch(route, () => forgejo().claim('7'))
+    expect(claim.value?.id).toBe('7')
+    expect(claim.requests.find((r) => r.path === `${REPO}/issues/7/labels`)?.body).toEqual({
+      labels: [9],
+    })
+
+    const release = await withFetch(route, () => forgejo().release('7'))
+    expect(release.requests.map((r) => `${r.method} ${r.path}`)).toContain(
+      `DELETE ${REPO}/issues/7/labels/9`,
+    )
   })
 
   test('an unanswered question keeps blocking', async () => {
-    const { exec } = fake((c) => {
-      if (c.includes('comments') && c.includes('list')) return ok(TEA_COMMENTS)
-      return ok(TEA_READY)
-    })
-    const tracker = new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec })
-    expect(await tracker.gateResolved({ id: '7#q-2', advisory: true })).toBe(false)
+    const { value } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/7`) return json(FJ_ISSUE)
+        if (req.path === `${REPO}/issues/7/comments`) {
+          return collection(req, [{ body: '[amagi] question q-2\n\nWhich base?' }])
+        }
+        return undefined
+      },
+      () => forgejo().gateResolved({ id: '7#q-2', advisory: true }),
+    )
+    expect(value).toBe(false)
   })
 
   test('the answer comment resolves the gate', async () => {
-    const { exec } = fake((c) => {
-      if (c.includes('comments') && c.includes('list')) return ok(TEA_COMMENTS_ANSWERED)
-      return ok(TEA_READY)
-    })
-    const tracker = new ForgejoTracker({ cwd: '/repo', remote: 'origin', exec })
-    expect(await tracker.gateResolved({ id: '7#q-2', advisory: true })).toBe(true)
+    const { value } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues/7`) return json(FJ_ISSUE)
+        if (req.path === `${REPO}/issues/7/comments`) {
+          return collection(req, [
+            { body: '[amagi] question q-2\n\nWhich base?' },
+            { body: '[amagi] answer q-2' },
+          ])
+        }
+        return undefined
+      },
+      () => forgejo().gateResolved({ id: '7#q-2', advisory: true }),
+    )
+    expect(value).toBe(true)
   })
 })
 
-for (const Driver of [GithubTracker, ForgejoTracker]) {
-  test(`${Driver.name} claims the next eligible issue past newer claimed ones`, async () => {
+for (const { name, Driver, remote } of [
+  { name: 'GithubTracker', Driver: GithubTracker, remote: GH_REMOTE },
+  { name: 'ForgejoTracker', Driver: ForgejoTracker, remote: FJ_REMOTE },
+]) {
+  test(`${name} claims the next eligible issue past newer claimed ones`, async () => {
     const issues = Array.from({ length: 121 }, (_, i) => ({
       number: 121 - i,
-      index: 121 - i,
       title: 'task',
       body: '',
       state: 'open',
+      html_url: null,
       labels: i < 120 ? [{ name: CLAIM_LABEL }] : [],
     }))
-    const { exec, calls } = fake((cmd) => {
-      if (cmd.includes('list')) return ok(JSON.stringify(issues))
-      if (cmd.includes('view') || cmd.includes('--fields')) return ok(JSON.stringify(issues[120]))
-      return undefined
-    })
-    const task = await new Driver({ cwd: '/repo', remote: 'origin', exec }).claim()
+    const { value: task, requests } = await withFetch(
+      (req) => {
+        if (req.path === `${REPO}/issues`) return collection(req, issues)
+        if (req.path === `${REPO}/issues/1`) return json(issues[120])
+        if (req.path === `${REPO}/labels`) {
+          return req.method === 'GET'
+            ? collection(req, [{ id: 9, name: CLAIM_LABEL }])
+            : json({}, { status: 409 })
+        }
+        if (req.path === `${REPO}/issues/1/labels`) return json([])
+        return undefined
+      },
+      () => new Driver({ cwd: '/repo', remote: 'origin', exec: remoteExec(remote) }).claim(),
+    )
 
     expect(task?.id).toBe('1')
-    expect(calls.find((c) => c.includes('edit'))).toContain('1')
+    expect(requests.some((r) => r.method === 'POST' && r.path === `${REPO}/issues/1/labels`)).toBe(
+      true,
+    )
   })
 }

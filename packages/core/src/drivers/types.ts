@@ -18,6 +18,10 @@ export type TrackerTask = {
   notes?: string
   /** Comment bodies on the issue, oldest first; beads populates it, others leave it unset. */
   comments?: string[]
+  /** Labels the issue was filed with; beads populates it, others leave it unset. */
+  labels?: string[]
+  /** External ticket reference, when the tracker links this task to another system. */
+  externalRef?: string | null
   /** Difficulty level assigned at creation (e.g. low/medium/high); absent when the tracker did not classify it. */
   difficulty?: string | null
 }
@@ -152,7 +156,7 @@ export type AgentStartOptions = {
   extraArgs?: readonly string[]
   /** Path to a JSON schema passed to harnesses that support constrained output. */
   outputSchema?: string
-  /** Seat wait limit in ms, or null to wait without a timeout. */
+  /** Seat and process-cap wait limit in ms. Omitted or null waits until capacity frees or the launch is killed. */
   seatMaxWaitMs?: number | null
   /** Queue priority for this harness launch. Defaults to high. */
   seatPriority?: SeatRequestPriority

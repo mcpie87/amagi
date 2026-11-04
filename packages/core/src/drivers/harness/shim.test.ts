@@ -371,25 +371,15 @@ describe('defense-in-depth limits', () => {
 })
 
 describe('amagi shim', () => {
-  test('allows only ask and git-request', () => {
-    const fakeBin = join(home, 'fakebin')
-    mkdirSync(fakeBin, { recursive: true })
-    const fake = join(fakeBin, 'amagi')
-    writeFileSync(fake, '#!/bin/sh\necho "REAL: $*"\nexit 0\n')
-    chmodSync(fake, 0o755)
-    const withFake = prepareShim()
-    const amagi = join(withFake, 'amagi')
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` }
-
-    const run = (args: string[]) => {
-      const r = Bun.spawnSync([amagi, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
-      return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }
-    }
-
-    expect(run(['ask', 'a question']).stdout).toBe('REAL: ask a question\n')
-    expect(run(['git-request', 'commit']).stdout).toBe('REAL: git-request commit\n')
+  test('rejects orchestration commands', () => {
     for (const args of [[], ['run'], ['continue'], ['clean'], ['status'], ['--help']]) {
-      expect(run(args).exitCode, `amagi ${args.join(' ')} should be rejected`).not.toBe(0)
+      const result = Bun.spawnSync([join(shim, 'amagi'), ...args], {
+        env: baseEnv(),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      expect(result.exitCode, `amagi ${args.join(' ')} should be rejected`).not.toBe(0)
+      expect(result.stderr.toString()).toContain('is not allowed to agents')
     }
   })
 })

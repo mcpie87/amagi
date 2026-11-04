@@ -53,9 +53,10 @@ fresh-check:
 status:
     bun run packages/cli/src/index.ts status
 
-# Serve the API and dashboard (dev, watch mode)
+# Serve the API and dashboard (dev, watch mode). With nix, always inside the
+# flake dev shell: a stale direnv env would leave the server without pasta.
 serve:
-    bun serve
+    if command -v nix >/dev/null 2>&1; then exec nix develop -c bun serve; else exec bun serve; fi
 
 # Terminal view of the queue, task detail, and pending questions
 tui:

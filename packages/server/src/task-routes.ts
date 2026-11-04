@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import {
   CHECKPOINT_COMMIT_SUMMARY,
   type ChatService,
@@ -9,6 +11,7 @@ import {
   forgeToken,
   HARDCODED_EFFORTS,
   HARDCODED_MODELS,
+  type Harness,
   HUMAN_ONLY_LABEL,
   isTerminal,
   type LiveRun,
@@ -18,11 +21,14 @@ import {
   PR_TASK_STATES,
   PRIMARY_FORGE,
   type Question,
+  Runner,
   type RunServiceApi,
   reconcilePr,
+  redoPr,
   removeWorktree,
   runApprovedGitRequest,
   runMandatoryWorkerChecks,
+  runStateDir,
   type Store,
   type StoredEvent,
   stageAndCommit,
@@ -44,6 +50,7 @@ import {
   AwaitQuery,
   ChatBody,
   CloseTaskBody,
+  DemoClipParam,
   GitDecisionBody,
   GitRequestBody,
   RepoGitRequestParam,
@@ -66,6 +73,8 @@ export type TaskRouteDeps = {
     | ((repo: string, prNumber: number, prUrl: string | null) => ConflictQueueResult)
     | undefined
   chatFor: (ws: Workspace) => ChatService
+  /** The implement harness for agent runs the routes start themselves. */
+  harnessFor: (ws: Workspace) => Harness
   liveTaskChats: Map<string, () => Promise<void>>
   authorized: (c: import('hono').Context, store: Store, id: string) => boolean
   openQuestionGate: (
@@ -91,6 +100,7 @@ export function createTaskRoutes({
   liveRuns,
   queueConflictResolution,
   chatFor,
+  harnessFor,
   liveTaskChats,
   authorized,
   openQuestionGate,
@@ -312,6 +322,79 @@ export function createTaskRoutes({
       // caller's live state picks up a merge/close without a page reload.
       await reconcilePr(ws.store, driver, ws.tracker, ws.root, config.forge.remote, task)
       return c.json({ task: ws.store.task(id) })
+    })
+
+    .post('/api/repos/:repo/tasks/:id/redo-pr', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (task.state !== 'pr_open') {
+        return c.json({ error: `task ${id} has no open pull request (state ${task.state})` }, 409)
+      }
+      if (task.prNumber === null || task.worktree === null || !existsSync(task.worktree)) {
+        return c.json({ error: `task ${id} has no worktree or pull request number to redo` }, 409)
+      }
+      if (ws.prForge === null) return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      if (taskBusy(ws.store, ws.key, id)) {
+        return c.json({ error: `an agent is already working on ${id}` }, 409)
+      }
+      const { driver, config } = ws.prForge(task.prUrl)
+      // The rewrite streams into the task log; a failure lands there as an error.
+      void redoPr(
+        {
+          store: ws.store,
+          tracker: ws.tracker,
+          harness: harnessFor(ws),
+          config,
+          forge: driver,
+          repoRoot: ws.root,
+        },
+        id,
+      ).catch((err) =>
+        ws.store.append(id, { type: 'error', message: `PR redo: ${errMsg(err)}`, fatal: false }),
+      )
+      return c.json({ taskId: id }, 202)
+    })
+
+    .get('/api/repos/:repo/tasks/:id/demo/:name', valid('param', DemoClipParam), (c) => {
+      const { id, name } = c.req.valid('param')
+      const file = join(runStateDir(id), 'demo', name)
+      if (basename(name) !== name || !/\.(webm|mp4)$/i.test(name) || !existsSync(file)) {
+        return c.json({ error: `no demo clip ${name} for ${id}` }, 404)
+      }
+      return new Response(Bun.file(file))
+    })
+
+    .post('/api/repos/:repo/tasks/:id/record-demo', valid('param', RepoTaskIdParam), (c) => {
+      const { repo, id } = c.req.valid('param')
+      const ws = resolveWorkspace(workspaces, repo)
+      const task = ws.store.task(id)
+      if (!task) return c.json({ error: `unknown task ${id}` }, 404)
+      if (task.worktree === null || !existsSync(task.worktree)) {
+        return c.json({ error: `task ${id} has no worktree to record in` }, 409)
+      }
+      if (taskBusy(ws.store, ws.key, id)) {
+        return c.json({ error: `an agent is already working on ${id}` }, 409)
+      }
+      if (ws.prForge === null) return c.json({ error: `forge driver unavailable for ${repo}` }, 501)
+      const { driver } = ws.prForge(task.prUrl)
+      const runner = new Runner({
+        store: ws.store,
+        tracker: ws.tracker,
+        harness: harnessFor(ws),
+        config: ws.config,
+        repoRoot: ws.root,
+        repoName: repo,
+        forge: driver,
+      })
+      // The recording streams into the task log; a failure lands there as an error.
+      void runner
+        .recordDemoNow(id)
+        .catch((err) =>
+          ws.store.append(id, { type: 'error', message: `demo: ${errMsg(err)}`, fatal: false }),
+        )
+      return c.json({ taskId: id }, 202)
     })
 
     .post('/api/repos/:repo/tasks/:id/resolve-conflicts', valid('param', RepoTaskIdParam), (c) => {

@@ -1,6 +1,13 @@
 import { resolve, sep } from 'node:path'
 import type { Notifier, RunServiceApi, WorkerActivity, Workspace, Workspaces } from '@amagi/core'
-import { BeadsTracker, errMsg, InteractionTimings, loadLiveRuns, RequestTimings } from '@amagi/core'
+import {
+  BeadsTracker,
+  errMsg,
+  InteractionTimings,
+  loadLiveRuns,
+  pidAlive,
+  RequestTimings,
+} from '@amagi/core'
 import { hostAllowed } from './access.ts'
 import { createApp } from './app.ts'
 import { startBeadsGcPoller } from './beads-gc-poller.ts'
@@ -14,7 +21,7 @@ import {
   startPrConflictWatcher,
 } from './pr-conflict-watcher.ts'
 import { type PrPoller, startPrPoller } from './pr-poller.ts'
-import { type StallWatcher, startStallWatcher } from './stall-watcher.ts'
+import { STALLED_STATES, type StallWatcher, startStallWatcher } from './stall-watcher.ts'
 
 export type ServeOptions = {
   workspaces: Workspaces
@@ -62,6 +69,34 @@ async function staticAsset(dir: string, pathname: string): Promise<Response> {
   const index = Bun.file(resolve(root, 'index.html'))
   if (await index.exists()) return new Response(index)
   return new Response('dashboard not built', { status: 404 })
+}
+
+/**
+ * Releases the tracker claim of every task a previous server process was
+ * running, so auto-queue re-claims it and the runner resumes its worktree
+ * instead of the task sitting in an active state until the stall watcher's
+ * timeout. Only safe on a fresh server, which owns no runs yet; tasks of a
+ * live `amagi run` CLI process are left alone.
+ */
+async function recoverOrphanedRuns(workspace: Workspace): Promise<void> {
+  const live = new Set(
+    loadLiveRuns()
+      .filter((run) => run.repoKey === workspace.key && pidAlive(run.pid))
+      .map((run) => run.taskId),
+  )
+  for (const task of workspace.store.stalledTasks(STALLED_STATES, Number.MAX_SAFE_INTEGER)) {
+    if (live.has(task.id)) continue
+    try {
+      await workspace.tracker.release(task.id)
+    } catch (err) {
+      console.warn(`recover ${task.id}: ${errMsg(err)}`)
+      continue
+    }
+    workspace.store.append(task.id, {
+      type: 'task.reclaimed',
+      reason: 'recovered at startup: the server restarted while it was running',
+    })
+  }
 }
 
 /**
@@ -344,6 +379,7 @@ export function serve({
   const runnerAutoQueue = new Map<string, boolean>()
   const runnerErrors = new Map<string, string>()
   const retiredRunners = new Set<Promise<void>>()
+  let starting = true
   const syncRunners = () => {
     const entries = workspaces.list()
     const keys = new Set(entries.map((entry) => entry.key))
@@ -379,6 +415,12 @@ export function serve({
           runners.set(entry.key, service)
           runnerAutoQueue.set(entry.key, workspace.config.loop.autoQueue && entry.workers)
           runnerErrors.delete(entry.key)
+          // A runner created later may share the repo with a retiring one whose runs are still live.
+          if (starting) {
+            recoverOrphanedRuns(workspace).catch((err: unknown) =>
+              console.warn(`recover ${entry.key}: ${errMsg(err)}`),
+            )
+          }
         }
       } catch (err) {
         const detail = errMsg(err)
@@ -391,6 +433,7 @@ export function serve({
     }
   }
   syncRunners()
+  starting = false
   const runnerSupervisor = runnerFactory === undefined ? null : setInterval(syncRunners, 1000)
   const runnerForRepo = (repo: string) => {
     const service = runners.get(repo)

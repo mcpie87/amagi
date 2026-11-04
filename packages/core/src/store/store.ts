@@ -47,6 +47,7 @@ type RawTask = {
   review_stop_reason: string | null
   review_unresolved: number
   review_skipped: string | null
+  demo: string | null
   created_at: number
   updated_at: number
   last_heartbeat_at: number | null
@@ -90,6 +91,7 @@ const toTask = (r: RawTask): ProjectedTask => ({
   reviewStopReason: r.review_stop_reason as ReviewStopReason | null,
   reviewUnresolved: r.review_unresolved,
   reviewSkipped: r.review_skipped,
+  demo: r.demo === null ? [] : (JSON.parse(r.demo) as ProjectedTask['demo']),
   attempt: r.attempt,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -140,6 +142,7 @@ const taskRow = (t: ProjectedTask): Row => ({
   review_stop_reason: t.reviewStopReason,
   review_unresolved: t.reviewUnresolved,
   review_skipped: t.reviewSkipped,
+  demo: JSON.stringify(t.demo),
 })
 
 const questionRow = (q: ProjectedQuestion): Row => ({
@@ -371,8 +374,9 @@ export class Store {
   }
 
   /**
-   * `withoutAgentLog` drops the agent.stream lines a dashboard keeps only in
-   * its log buffers, leaving usage and task chat, which it folds into state.
+   * `withoutAgentLog` drops the agent.stream and checks.output lines a
+   * dashboard keeps only in its log buffers, leaving usage and task chat,
+   * which it folds into state.
    * Those lines are most of a long-lived store's bytes; `agentLog` serves them
    * per task instead. `withoutWatcherRuns` likewise drops watcher history,
    * which `watcherRuns` pages per watcher.
@@ -390,7 +394,8 @@ export class Store {
     const limit = opts.limit ?? 500
     const logFilter =
       (opts.withoutAgentLog
-        ? ` and (type != 'agent.stream' or json_extract(body, '$.event.kind') = 'usage'
+        ? ` and type != 'checks.output'
+          and (type != 'agent.stream' or json_extract(body, '$.event.kind') = 'usage'
           or (task_id is not null and json_extract(body, '$.role') = 'chat'))`
         : '') +
       (opts.withoutWatcherRuns
@@ -423,9 +428,9 @@ export class Store {
   }
 
   /**
-   * The latest `limit` agent.stream events of one attempt of a task (attempts
-   * count up from 1 at each task.reset), in seq order, after `sinceSeq` and up
-   * to `untilSeq`.
+   * The latest `limit` agent.stream and checks.output events of one attempt
+   * of a task (attempts count up from 1 at each task.reset), in seq order,
+   * after `sinceSeq` and up to `untilSeq`.
    */
   agentLog(
     taskId: string,
@@ -442,7 +447,7 @@ export class Store {
     const rows = this.db
       .query(
         `select * from events where task_id = ? and seq > ? and seq <= ?
-           and type in ('agent.stream', 'task.reset') order by seq`,
+           and type in ('agent.stream', 'checks.output', 'task.reset') order by seq`,
       )
       .all(taskId, sinceSeq, untilSeq) as {
       seq: number

@@ -62,8 +62,8 @@ describe('addRegistryEntry', () => {
     expect(entry.path).toBe(repo)
     expect(entry.key).toBe('alpha')
     expect(entry.name).toBe('alpha')
-    expect(entry.workers).toBe(true)
-    expect(entry.watchers).toBe(true)
+    expect(entry.workers).toBe(false)
+    expect(entry.watchers).toBe(false)
     expect(loadRegistry(registry)).toHaveLength(1)
   })
 
@@ -74,8 +74,13 @@ describe('addRegistryEntry', () => {
 
   test('dedupes an already registered path', () => {
     const repo = makeRepo('alpha')
-    addRegistryEntry(repo, undefined, registry)
-    addRegistryEntry(repo, undefined, registry)
+    const first = addRegistryEntry(repo, undefined, registry)
+    updateRegistryParticipation(first.key, { workers: true }, registry)
+    expect(addRegistryEntry(repo, undefined, registry)).toMatchObject({
+      key: first.key,
+      workers: true,
+      watchers: false,
+    })
     expect(loadRegistry(registry)).toHaveLength(1)
   })
 

@@ -9,6 +9,7 @@ import { exec as defaultExec, type Exec, execOk } from './exec.ts'
 import { configuredCheckCommands } from './mandatory-checks.ts'
 import type { PrInfo } from './pr-check.ts'
 import { withPrWriteLock } from './pr-write-lock.ts'
+import { stopServices } from './services.ts'
 import { applyRepoIdentity } from './worktree.ts'
 
 /** Replays only the observed PR head, validates it, and refuses concurrent remote edits. */
@@ -65,11 +66,11 @@ export async function rebasePr(opts: {
       if (diff.exitCode === 0) return 'unchanged'
       if (diff.exitCode !== 1) throw new Error('cannot inspect rebased PR diff')
       if (config.repo.setupCmd !== null && config.repo.setupCmd !== '') {
-        const isolated = sandboxProjectCommand(config.repo.setupCmd, path)
+        const isolated = await sandboxProjectCommand(config.repo.setupCmd, path)
         await execOk(run, isolated.command, { cwd: path, env: isolated.env })
       }
       for (const command of configuredCheckCommands(config.checks)) {
-        const isolated = sandboxProjectCommand(command, path)
+        const isolated = await sandboxProjectCommand(command, path)
         await execOk(run, isolated.command, {
           cwd: path,
           env: isolated.env,
@@ -96,6 +97,7 @@ export async function rebasePr(opts: {
     } finally {
       // A cleanup failure must not replace the original error or skip the rmSync.
       if (added) {
+        await stopServices(root, path, run).catch(() => undefined)
         await run(['git', 'worktree', 'remove', '--force', path], { cwd: root }).catch(
           () => undefined,
         )

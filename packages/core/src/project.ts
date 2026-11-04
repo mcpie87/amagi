@@ -43,6 +43,8 @@ export type ProjectedTask = {
   /** Epoch ms when the current deferred automatic retry fires; null when none is scheduled. */
   retryAt: number | null
   lastCommit: { sha: string; subject: string } | null
+  /** Clips from the latest demo recording; `url` is null while a clip is only on disk. */
+  demo: { name: string; url: string | null }[]
   checks: CheckResult[] | null
   checksOk: boolean | null
   /** Most recent review round, or zero before review begins in this attempt. */
@@ -289,6 +291,7 @@ function fold(state: Projection, event: StoredEvent, scope: FoldScope): Projecti
             retryCount: 0,
             retryAt: null,
             lastCommit: null,
+            demo: [],
             checks: null,
             checksOk: null,
             reviewRound: 0,
@@ -318,6 +321,7 @@ function fold(state: Projection, event: StoredEvent, scope: FoldScope): Projecti
           retryCount: 0,
           retryAt: null,
           lastCommit: null,
+          demo: [],
           checks: null,
           checksOk: null,
           reviewRound: 0,
@@ -439,6 +443,16 @@ function fold(state: Projection, event: StoredEvent, scope: FoldScope): Projecti
         writeTasks()[event.taskId] = {
           ...current,
           lastCommit: { sha: event.sha, subject: event.subject },
+          updatedAt: event.ts,
+        }
+      }
+      break
+
+    case 'demo.recorded':
+      if (current) {
+        writeTasks()[event.taskId] = {
+          ...current,
+          demo: event.clips,
           updatedAt: event.ts,
         }
       }

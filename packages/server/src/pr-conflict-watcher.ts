@@ -26,6 +26,7 @@ import {
   type PrPriority,
   pidAlive,
   prForgeRouter,
+  prRedoInFlight,
   type ResolveConflictResult,
   readConflictWatch,
   rebasePr,
@@ -80,6 +81,7 @@ const DEFAULT_INTERVAL_MS = 300_000
 export function taskBusy(store: Store, repo: string, taskId: string): boolean {
   return (
     store.activeChatAgents().some((agent) => agent.taskId === taskId) ||
+    prRedoInFlight(store, taskId) ||
     loadLiveRuns().some(
       (live) => live.repoKey === repo && live.taskId === taskId && pidAlive(live.pid),
     )
