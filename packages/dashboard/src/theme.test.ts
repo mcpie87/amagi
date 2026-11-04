@@ -51,6 +51,18 @@ describe('theme', () => {
     expect(document.documentElement.dataset.theme).toBe('light')
   })
 
+  test('selects and exports the built-in neutral theme', async () => {
+    const store = installGlobals(false)
+    const { getSelectedThemeForExport, setSelectedTheme, setThemePref } = await import('./theme.ts')
+    setThemePref('dark')
+    setSelectedTheme('neutral')
+    expect(store.get('amagi:theme-selection')).toBe('neutral')
+    expect(document.documentElement.dataset.palette).toBe('neutral')
+    expect(getSelectedThemeForExport().variants.dark.app).toBe('#18181b')
+    setSelectedTheme('default')
+    expect(document.documentElement.dataset.palette).toBe('default')
+  })
+
   test('setThemePref("system") clears the stored choice', async () => {
     const store = installGlobals(true)
     const { setThemePref } = await import('./theme.ts')

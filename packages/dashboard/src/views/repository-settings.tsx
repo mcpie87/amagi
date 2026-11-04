@@ -1,6 +1,9 @@
+import { Link } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { apiBase } from '../api.ts'
+import { type RepoInfo, useDashboard } from '../store.tsx'
+import { ConfigSettings } from './config-settings.tsx'
 import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
 type Repo = { key: string; name: string; workers: boolean; watchers: boolean }
@@ -22,22 +25,19 @@ export type ForgeCredential = { id: string; kind: ForgeKind; name: string; url: 
 const FORGES: {
   kind: ForgeKind
   label: string
-  cli: string
   env: string
   urlPlaceholder: string | null
 }[] = [
-  { kind: 'github', label: 'GitHub', cli: 'gh', env: 'GH_TOKEN', urlPlaceholder: null },
+  { kind: 'github', label: 'GitHub', env: 'GH_TOKEN', urlPlaceholder: null },
   {
     kind: 'gitlab',
     label: 'GitLab',
-    cli: 'glab',
     env: 'GITLAB_TOKEN',
     urlPlaceholder: 'https://gitlab.example.com',
   },
   {
     kind: 'forgejo',
     label: 'Forgejo',
-    cli: 'tea',
     env: 'FORGEJO_TOKEN',
     urlPlaceholder: 'https://git.example.com',
   },
@@ -323,92 +323,220 @@ function RepositoryReview({ repo }: { repo: Pick<Repo, 'key'> }) {
   )
 }
 
-type CheckCommands = { format: string; lint: string; test: string }
+type ProjectChecks = {
+  before: string[]
+  commands: string[]
+  timeoutSec: number
+  configured: boolean
+}
+type CommandRow = { id: string; command: string }
+type CheckDraft = Omit<ProjectChecks, 'before' | 'commands'> & {
+  before: CommandRow[]
+  commands: CommandRow[]
+}
+const commandRows = (commands: string[]): CommandRow[] =>
+  commands.map((command) => ({ id: crypto.randomUUID(), command }))
+const checkDraft = (checks: ProjectChecks): CheckDraft => ({
+  ...checks,
+  before: commandRows(checks.before),
+  commands: commandRows(checks.commands),
+})
 
-function RepositoryChecks({ repo, onChanged }: { repo: Pick<Repo, 'key'>; onChanged: () => void }) {
-  const [checks, setChecks] = useState<CheckCommands>({ format: '', lint: '', test: '' })
-  const [loaded, setLoaded] = useState(false)
+function CheckCommandList({
+  title,
+  help,
+  rows,
+  onChange,
+}: {
+  title: string
+  help: string
+  rows: CommandRow[]
+  onChange: (rows: CommandRow[]) => void
+}) {
+  const move = (index: number, offset: number) => {
+    const next = [...rows]
+    const current = next[index]
+    const other = next[index + offset]
+    if (current === undefined || other === undefined) return
+    next[index] = other
+    next[index + offset] = current
+    onChange(next)
+  }
+  return (
+    <fieldset className="space-y-2">
+      <legend className="font-medium text-fg-strong text-sm">{title}</legend>
+      <p className="text-xs text-fg-faint">{help}</p>
+      {rows.length === 0 && <p className="text-sm text-fg-dim">No commands.</p>}
+      {rows.map((row, index) => (
+        <div key={row.id} className="flex flex-wrap items-center gap-2">
+          <label className="min-w-48 flex-1">
+            <span className="sr-only">
+              {title} command {index + 1}
+            </span>
+            <input
+              required
+              value={row.command}
+              onChange={(event) =>
+                onChange(
+                  rows.map((value, i) =>
+                    i === index ? { ...value, command: event.currentTarget.value } : value,
+                  ),
+                )
+              }
+              className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm"
+            />
+          </label>
+          <button
+            type="button"
+            className={secondary}
+            aria-label={`Move ${title.toLowerCase()} command ${index + 1} up`}
+            disabled={index === 0}
+            onClick={() => move(index, -1)}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            className={secondary}
+            aria-label={`Move ${title.toLowerCase()} command ${index + 1} down`}
+            disabled={index === rows.length - 1}
+            onClick={() => move(index, 1)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            className={secondary}
+            aria-label={`Remove ${title.toLowerCase()} command ${index + 1}`}
+            onClick={() => onChange(rows.filter((_, i) => i !== index))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className={secondary}
+        onClick={() => onChange([...rows, { id: crypto.randomUUID(), command: '' }])}
+      >
+        Add command
+      </button>
+    </fieldset>
+  )
+}
+
+export function RepositoryChecks({
+  repo,
+  onChanged,
+}: {
+  repo: Pick<Repo, 'key'>
+  onChanged: () => void
+}) {
+  const [checks, setChecks] = useState<CheckDraft | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-
   useEffect(() => {
     let active = true
     fetch(`${apiBase}/api/repos/${repo.key}/checks`)
       .then(async (response) => {
         if (!response.ok) throw new Error(await responseError(response))
-        return (await response.json()) as Record<keyof CheckCommands, string | null>
+        return (await response.json()) as ProjectChecks
       })
       .then((body) => {
-        if (!active) return
-        setChecks({ format: body.format ?? '', lint: body.lint ?? '', test: body.test ?? '' })
-        setLoaded(true)
+        if (active) setChecks(checkDraft(body))
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : String(err))
+        if (active) setError(String(err))
       })
     return () => {
       active = false
     }
   }, [repo.key])
-
-  const save = async () => {
-    setBusy(true)
-    setError(null)
+  const edit = (patch: Partial<CheckDraft>) => {
+    setChecks((current) => (current === null ? null : { ...current, ...patch }))
     setSaved(false)
+  }
+  const save = async () => {
+    if (checks === null) return
+    setBusy(true)
+    setSaved(false)
+    setError(null)
     try {
       const response = await fetch(`${apiBase}/api/repos/${repo.key}/checks`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(checks),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          before: checks.before.map(({ command }) => command),
+          commands: checks.commands.map(({ command }) => command),
+          timeoutSec: checks.timeoutSec,
+        }),
       })
       if (!response.ok) throw new Error(await responseError(response))
-      setChecks((await response.json()) as CheckCommands)
+      setChecks(checkDraft((await response.json()) as ProjectChecks))
       setSaved(true)
       onChanged()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(String(err))
     } finally {
       setBusy(false)
     }
   }
-
   return (
     <div className={card}>
-      <h2 className="mb-1 text-sm text-fg-muted">Project checks</h2>
+      <h3 className="mb-1 font-medium text-fg-strong">Project checks</h3>
       <p className="mb-3 text-sm text-fg-faint">
-        Required shell commands in this repository's .amagi/config.toml. Run in order: format, lint,
-        test, then any extra check commands. Use true to explicitly skip a check.
+        Your commands, in your order, run from the worktree root. Either list may be empty. Amagi
+        supplies no commands.
       </p>
-      {!loaded && error === null && <p className="text-sm text-fg-faint">Loading…</p>}
-      {loaded && (
+      {checks === null && error === null && <p>Loading…</p>}
+      {checks !== null && (
         <form
           onSubmit={(event) => {
             event.preventDefault()
             void save()
           }}
         >
-          <fieldset disabled={busy} className="space-y-3">
-            <legend className="sr-only">Project check commands</legend>
-            {(['format', 'lint', 'test'] as const).map((name) => (
-              <label key={name} className="block text-sm text-fg-muted">
-                {name === 'format' ? 'Format' : name === 'lint' ? 'Lint' : 'Test'}
-                <input
-                  type="text"
-                  required
-                  value={checks[name]}
-                  onChange={(event) => {
-                    setChecks({ ...checks, [name]: event.currentTarget.value })
-                    setSaved(false)
-                  }}
-                  className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
-                />
-              </label>
-            ))}
+          <fieldset disabled={busy} className="space-y-4">
+            <legend className="sr-only">Project checks</legend>
+            {!checks.configured && (
+              <p className="text-sm text-amber-ink">
+                Save the checks to finish setup; leave both lists empty to run no checks.
+              </p>
+            )}
+            <CheckCommandList
+              title="Before checks"
+              help="Run on the untouched worktree before agent work. A failure parks the task."
+              rows={checks.before}
+              onChange={(before) => edit({ before })}
+            />
+            <CheckCommandList
+              title="After checks"
+              help="Run after agent work and each fix. A failure starts a fix round; passing gates the commit."
+              rows={checks.commands}
+              onChange={(commands) => edit({ commands })}
+            />
+            <label className="block text-sm">
+              Timeout per command, seconds
+              <input
+                type="number"
+                min={1}
+                max={86400}
+                required
+                value={checks.timeoutSec}
+                onChange={(event) => edit({ timeoutSec: event.currentTarget.valueAsNumber })}
+                className="ml-3 w-28 rounded border border-line-strong bg-app px-3 py-2"
+              />
+            </label>
+            <p className="text-xs text-fg-faint">
+              Saved in this repository's .amagi/config.toml. A failing check stops the sequence.
+            </p>
             <button
               type="submit"
               className={secondary}
-              disabled={Object.values(checks).some((command) => command.trim() === '')}
+              disabled={[...checks.before, ...checks.commands].some(
+                ({ command }) => command.trim() === '',
+              )}
             >
               {busy ? 'Saving…' : 'Save checks'}
             </button>
@@ -421,7 +549,7 @@ function RepositoryChecks({ repo, onChanged }: { repo: Pick<Repo, 'key'>; onChan
         </p>
       )}
       {saved && (
-        <p role="status" className="mt-2 text-sm text-fg-muted">
+        <p role="status" className="mt-2 text-sm text-emerald-ink">
           Saved
         </p>
       )}
@@ -638,6 +766,11 @@ function NewTokenForm({
   const [token, setToken] = useState('')
   const [showToken, setShowToken] = useState(false)
   const [url, setUrl] = useState('')
+  const [projectPath, setProjectPath] = useState('')
+  const [gitlabSetup, setGitlabSetup] = useState<{
+    personal: string
+    project: string | null
+  } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -673,6 +806,7 @@ function NewTokenForm({
           onChange={(event) => {
             setSelectedKind(event.currentTarget.value as ForgeKind)
             setUrl('')
+            setGitlabSetup(null)
           }}
           className="w-full rounded border border-line-strong bg-app px-3 py-2 text-sm text-fg"
         >
@@ -682,6 +816,108 @@ function NewTokenForm({
             </option>
           ))}
         </select>
+      )}
+      {urlPlaceholder !== null && (
+        <input
+          type="url"
+          aria-label={`${label} server URL`}
+          disabled={busy}
+          value={url}
+          onChange={(event) => {
+            setUrl(event.currentTarget.value)
+            setGitlabSetup(null)
+          }}
+          placeholder={`${urlPlaceholder} (empty: from origin)`}
+          className={urlInput}
+        />
+      )}
+      {activeKind === 'gitlab' && (
+        <div className="space-y-2 text-sm text-fg-muted">
+          <p>
+            Enter the GitLab server URL above and, for a project token, its group and project path.
+          </p>
+          <input
+            type="text"
+            aria-label="GitLab project path"
+            value={projectPath}
+            onChange={(event) => {
+              setProjectPath(event.currentTarget.value)
+              setGitlabSetup(null)
+            }}
+            placeholder="group/project (optional)"
+            className="w-full rounded border border-line-strong bg-app px-3 py-2 text-sm text-fg"
+          />
+          <button
+            type="button"
+            className={secondary}
+            onClick={() => {
+              try {
+                const server = new URL(url.trim())
+                if (!['http:', 'https:'].includes(server.protocol) || server.search || server.hash)
+                  throw new Error()
+                const base = server.href.replace(/\/+$/, '')
+                const path = projectPath.trim().replace(/^\/+|\/+$/g, '')
+                if (
+                  path &&
+                  (path.split('/').length < 2 ||
+                    path.split('/').some((part) => !part || part === '.' || part === '..'))
+                )
+                  throw new Error()
+                setGitlabSetup({
+                  personal: `${base}/-/user_settings/personal_access_tokens`,
+                  project: path
+                    ? `${base}/${path.split('/').map(encodeURIComponent).join('/')}/-/settings/access_tokens`
+                    : null,
+                })
+                setError(null)
+              } catch {
+                setError('Enter a valid GitLab server URL and project path (group/project).')
+              }
+            }}
+          >
+            Set setup URL
+          </button>
+          {gitlabSetup !== null && (
+            <p>
+              <a
+                href={gitlabSetup.personal}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sky-ink hover:underline"
+              >
+                Create a personal token
+              </a>
+              {gitlabSetup.project !== null && (
+                <>
+                  {' '}
+                  {' · '}
+                  <a
+                    href={gitlabSetup.project}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sky-ink hover:underline"
+                  >
+                    Create a project token
+                  </a>
+                </>
+              )}
+            </p>
+          )}
+          <p>
+            For a personal token, select Fine-grained token and limit it to the project. For a
+            project token, select the Developer role and the <code>api</code> and{' '}
+            <code>write_repository</code> scopes. See the{' '}
+            <Link
+              to="/manual"
+              search={{ page: 'forge-tokens' }}
+              hash="gitlab-project-access-token"
+              className="text-sky-ink hover:underline"
+            >
+              token setup guide
+            </Link>{' '}
+            for the required fine-grained permissions and other details, then paste the token below.
+          </p>
+        </div>
       )}
       <input
         type="text"
@@ -713,17 +949,6 @@ function NewTokenForm({
           {showToken ? 'Hide token' : 'Show token'}
         </button>
       </div>
-      {urlPlaceholder !== null && (
-        <input
-          type="url"
-          aria-label={`${label} server URL`}
-          disabled={busy}
-          value={url}
-          onChange={(event) => setUrl(event.currentTarget.value)}
-          placeholder={`${urlPlaceholder} (empty: from origin)`}
-          className={urlInput}
-        />
-      )}
       <div className="flex justify-end gap-2">
         {onCancel !== undefined && (
           <button type="button" disabled={busy} onClick={onCancel} className={secondary}>
@@ -948,12 +1173,7 @@ export function ForgeCredentials({
   )
 }
 
-function tokenStatus(
-  state: ForgeTokenState,
-  credentials: ForgeCredential[],
-  cli: string,
-  env: string,
-): string {
+function tokenStatus(state: ForgeTokenState, credentials: ForgeCredential[], env: string): string {
   const name = credentials.find((credential) => credential.id === state.credential)?.name
   switch (state.source) {
     case 'picked':
@@ -963,7 +1183,7 @@ function tokenStatus(
     case 'environment':
       return `Using ${env} from the environment`
     case null:
-      return `No token (${cli}, ${env})`
+      return `No token (${env})`
   }
 }
 
@@ -971,10 +1191,12 @@ export function RepositoryForge({
   repo,
   credentials,
   onCredentialsChanged,
+  onChanged,
 }: {
   repo: Pick<Repo, 'key'>
   credentials: ForgeCredential[]
   onCredentialsChanged: () => void
+  onChanged: () => void
 }) {
   const [settings, setSettings] = useState<ForgeSettings | null>(null)
   const [adding, setAdding] = useState<ForgeKind | null>(null)
@@ -1019,6 +1241,7 @@ export function RepositoryForge({
       if (!response.ok) throw new Error(await responseError(response))
       const body = (await response.json()) as ForgeSettings
       setSettings(forgeSettings(body))
+      onChanged()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -1069,7 +1292,7 @@ export function RepositoryForge({
             </span>
           </label>
           <ul className="divide-y divide-line">
-            {FORGES.map(({ kind, label, cli, env }) => {
+            {FORGES.map(({ kind, label, env }) => {
               const state = settings.forgeCredentials[kind]
               const picked = state.source === 'picked' ? (state.credential ?? '') : ''
               return (
@@ -1110,7 +1333,7 @@ export function RepositoryForge({
                       <option value={ADD_TOKEN}>Add token…</option>
                     </select>
                     <span className="text-xs text-fg-faint">
-                      {tokenStatus(state, credentials, cli, env)}
+                      {tokenStatus(state, credentials, env)}
                     </span>
                   </div>
                   {adding === kind && (
@@ -1142,31 +1365,289 @@ export function RepositoryForge({
   )
 }
 
+const SETUP_SECTIONS = [
+  ['connection', '1. Connection'],
+  ['tracker', '2. Tracker'],
+  ['checks', '3. Checks'],
+  ['activation', '4. Activation'],
+  ['automation', 'Automation'],
+  ['advanced', 'Advanced'],
+] as const
+
+function readinessSection(name: string, detail = ''): string {
+  if (name === 'checks' || (name === 'config' && detail.includes('[checks]'))) return 'checks'
+  if (name.startsWith('tracker')) return 'tracker'
+  if (name.startsWith('harness') || name.startsWith('worker') || name.startsWith('watcher'))
+    return 'automation'
+  return 'connection'
+}
+
 export function RepositorySettingsCard({
   repo,
   credentials,
   onChanged,
   onCredentialsChanged,
+  children,
 }: {
-  repo: Repo
+  repo: RepoInfo
   credentials: ForgeCredential[]
   onChanged: () => void
   onCredentialsChanged: () => void
+  children?: ReactNode
 }) {
+  const [ready, setReady] = useState(repo.ready)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => setReady(repo.ready), [repo.ready])
+  const refresh = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const response = await fetch(`${apiBase}/api/repos/${repo.key}/ready`)
+      if (!response.ok) throw new Error(await responseError(response))
+      setReady((await response.json()) as RepoInfo['ready'])
+      onChanged()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const changed = () => {
+    void refresh()
+  }
+  const blockers = ready.filter((check) => !check.ok && !check.advisory)
+  const sectionProblems = (section: string) =>
+    ready.filter((check) => !check.ok && readinessSection(check.name, check.detail) === section)
+  const activate = async () => {
+    setBusy(true)
+    setError(null)
+    const error = await send('PATCH', `/api/repos/${repo.key}/participation`, {
+      workers: true,
+      watchers: true,
+    })
+    setBusy(false)
+    await refresh()
+    if (error !== null) setError(error)
+  }
+  const section = (id: string, title: string, content: ReactNode) => (
+    <section id={`repository-${id}`} className="scroll-mt-4 space-y-4">
+      <h2 className="text-lg font-semibold text-fg-strong">{title}</h2>
+      {sectionProblems(id).map((check) => (
+        <p
+          key={check.name}
+          role="status"
+          className="rounded border border-amber-ink/30 bg-surface p-3 text-sm text-amber-ink"
+        >
+          {check.name}: {check.detail ?? 'Needs attention'}
+        </p>
+      ))}
+      {content}
+    </section>
+  )
   return (
-    <div className="mt-6 space-y-4">
-      <RepositoryParticipation repo={repo} onChanged={onChanged} />
-      <RepositoryEpicClose key={`epic-close:${repo.key}`} repo={repo} />
-      <RepositoryReview key={`review:${repo.key}`} repo={repo} />
-      <RepositoryChecks key={`checks:${repo.key}`} repo={repo} onChanged={onChanged} />
-      <RepositoryForge
-        key={`forge:${repo.key}`}
-        repo={repo}
-        credentials={credentials}
-        onCredentialsChanged={onCredentialsChanged}
-      />
-      <RepositoryGitIdentity repo={repo} />
+    <div className="mt-6 space-y-8">
+      <div className={card}>
+        <h2 className="text-lg font-semibold">{repo.name}</h2>
+        <p className="mt-1 break-all font-mono text-sm text-fg-muted">{repo.path}</p>
+        <p className="mt-3 text-sm">
+          {blockers.length > 0 ? `${blockers.length} setup problem(s)` : 'Configuration ready'} ·{' '}
+          {repo.workers || repo.watchers ? 'Participating' : 'Paused'}
+        </p>
+        <p className="mt-1 text-xs text-fg-faint">
+          Readiness checks configuration and available tools. Project commands run in task
+          worktrees.
+        </p>
+        <nav aria-label="Repository setup" className="mt-4 flex flex-wrap gap-3 text-sm">
+          {SETUP_SECTIONS.map(([id, label]) => (
+            <a key={id} href={`#repository-${id}`} className="underline">
+              {label}
+            </a>
+          ))}
+        </nav>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void refresh()}
+          className={`${secondary} mt-4`}
+        >
+          {busy ? 'Checking…' : 'Recheck readiness'}
+        </button>
+        {error !== null && (
+          <p role="alert" className="mt-2 text-sm text-red-ink">
+            {error}
+          </p>
+        )}
+      </div>
+      {section(
+        'connection',
+        '1. Connect the repository',
+        <>
+          <RepositoryForge
+            key={`forge:${repo.key}`}
+            repo={repo}
+            credentials={credentials}
+            onChanged={changed}
+            onCredentialsChanged={() => {
+              onCredentialsChanged()
+              changed()
+            }}
+          />
+          <ConfigSettings repo={repo.key} groups={['Repository']} onChanged={changed} />
+          <RepositoryGitIdentity repo={repo} />
+        </>,
+      )}
+      {section(
+        'tracker',
+        '2. Choose the issue tracker',
+        <ConfigSettings repo={repo.key} groups={['Tracker']} onChanged={changed} />,
+      )}
+      {section(
+        'checks',
+        '3. Define project checks',
+        <RepositoryChecks key={`checks:${repo.key}`} repo={repo} onChanged={changed} />,
+      )}
+      {section(
+        'activation',
+        '4. Activate when ready',
+        <div className={card}>
+          <p className="mb-3 text-sm text-fg-muted">
+            New repositories stay paused while you configure them. Activation allows workers to
+            claim tasks and watchers to react to pull requests.
+          </p>
+          {blockers.length > 0 && (
+            <ul className="mb-3 space-y-2 text-sm text-amber-ink">
+              {blockers.map((check) => (
+                <li key={check.name}>
+                  <a
+                    className="underline"
+                    href={`#repository-${readinessSection(check.name, check.detail)}`}
+                  >
+                    {check.name}: {check.detail ?? 'Needs attention'}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(!repo.workers || !repo.watchers) && (
+            <button
+              type="button"
+              className={secondary}
+              disabled={busy || blockers.length > 0}
+              onClick={() => void activate()}
+            >
+              Activate repository
+            </button>
+          )}
+          <RepositoryParticipation repo={repo} onChanged={changed} />
+        </div>,
+      )}
+      {section(
+        'automation',
+        'Automation',
+        <>
+          <p className="text-sm text-fg-muted">
+            Manage seats and watchers in{' '}
+            <Link to="/settings" search={{ repo: repo.key, tab: 'workers' }} className="underline">
+              Workers
+            </Link>{' '}
+            and execution settings in{' '}
+            <Link to="/settings" search={{ repo: repo.key, tab: 'profiles' }} className="underline">
+              Profiles
+            </Link>
+            .
+          </p>
+          <RepositoryEpicClose key={`epic-close:${repo.key}`} repo={repo} />
+          <RepositoryReview key={`review:${repo.key}`} repo={repo} />
+          {children}
+          <ConfigSettings
+            repo={repo.key}
+            groups={['Review', 'Notifications']}
+            onChanged={changed}
+          />
+        </>,
+      )}
+      {section(
+        'advanced',
+        'Advanced settings',
+        <details>
+          <summary className="cursor-pointer text-sm text-fg-muted">
+            Run limits, watcher intervals, recovery, and context budgets
+          </summary>
+          <ConfigSettings
+            repo={repo.key}
+            groups={[
+              'Checks and run limits',
+              'Watcher intervals',
+              'Stall and doom-loop guard',
+              'Questions and retries',
+              'Context budget',
+            ]}
+            onChanged={changed}
+          />
+        </details>,
+      )}
     </div>
+  )
+}
+
+export function AddRepository({
+  open = false,
+  onAdded,
+}: {
+  open?: boolean
+  onAdded: (repo: string) => void
+}) {
+  const { addRepo } = useDashboard()
+  const [path, setPath] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  return (
+    <details open={open} className={`${card} mt-6`}>
+      <summary className="cursor-pointer font-medium text-fg-strong">Add repository</summary>
+      <p className="my-3 text-sm text-fg-muted">
+        Choose an existing checkout on the Amagi server. You will configure its connection, tracker,
+        and checks before activation.
+      </p>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (busy || path.trim() === '') return
+          setBusy(true)
+          setError(null)
+          void addRepo(path.trim())
+            .then((result) => {
+              if ('error' in result) setError(result.error)
+              else {
+                setPath('')
+                onAdded(result.key)
+              }
+            })
+            .catch(() => setError('Could not reach the Amagi server'))
+            .finally(() => setBusy(false))
+        }}
+        className="flex flex-wrap items-end gap-3"
+      >
+        <label className="min-w-48 flex-1 text-sm">
+          Checkout path
+          <input
+            required
+            value={path}
+            onChange={(event) => setPath(event.currentTarget.value)}
+            placeholder="/path/to/repository"
+            className="mt-1 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono"
+          />
+        </label>
+        <button type="submit" className={secondary} disabled={busy || path.trim() === ''}>
+          {busy ? 'Opening…' : 'Continue setup'}
+        </button>
+      </form>
+      {error !== null && (
+        <p role="alert" className="mt-2 text-sm text-red-ink">
+          {error}
+        </p>
+      )}
+    </details>
   )
 }
 

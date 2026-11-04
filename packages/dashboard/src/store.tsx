@@ -143,21 +143,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const addRepo = useCallback(
-    async (path: string): Promise<RepoInfo | { error: string }> => {
-      const res = await fetch(`${apiBase}/api/repos`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path }),
-      })
-      const body = (await res.json()) as RepoInfo | { error: string }
-      if (!res.ok) return body
-      refreshRepos()
-      if ('key' in body) selectRepo(body.key)
-      return body
-    },
-    [selectRepo],
-  )
+  const addRepo = useCallback(async (path: string): Promise<RepoInfo | { error: string }> => {
+    const res = await fetch(`${apiBase}/api/repos`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    const body = (await res.json()) as RepoInfo | { error: string }
+    if (!res.ok) return body
+    refreshRepos()
+    return body
+  }, [])
 
   return (
     <ReposContext.Provider
@@ -245,6 +241,16 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
           // panel. Null-task watcher text and tool events stay out of state.
           if (parsed.event.kind === 'usage' || (parsed.taskId !== null && parsed.role === 'chat'))
             enqueue(parsed)
+        } else if (parsed.type === 'checks.output') {
+          const live = replayedRef.current !== null && parsed.seq > replayedRef.current
+          if (parsed.taskId !== null && live) {
+            const attempt = attemptsRef.current.get(parsed.taskId) ?? 1
+            agentLogStore.appendCheckOutput(
+              agentLogKey(repo, parsed.taskId, attempt),
+              parsed.ts,
+              parsed.text,
+            )
+          }
         } else {
           enqueue(parsed)
         }
@@ -284,6 +290,12 @@ function RepoStream({ repo, children }: { repo: string; children: ReactNode }) {
 
 const OTHER_REPO_LOG_POLL_MS = 4000
 
+function isLogEvent(
+  event: StoredEvent,
+): event is Extract<StoredEvent, { type: 'agent.stream' | 'checks.output' }> {
+  return event.type === 'agent.stream' || event.type === 'checks.output'
+}
+
 /** The replayed seq each agent log buffer was backfilled up to. */
 const backfills = new Map<string, number>()
 
@@ -316,13 +328,17 @@ export function useAgentLogBackfill(repo: string, taskId: string, attempt: numbe
         })
         .then((events) => {
           if (!alive) return
-          const lines = events.flatMap((event) => (event.type === 'agent.stream' ? [event] : []))
+          const lines = events.filter(isLogEvent)
           if (sinceSeq === 0) {
             // The buffer may hold lines from an earlier visit or stream.
             agentLogStore.get(key).clear()
             agentLogStore.backfill(key, lines)
           } else {
-            for (const line of lines) agentLogStore.append(key, line.role, line.ts, line.event)
+            for (const line of lines) {
+              if (line.type === 'checks.output')
+                agentLogStore.appendCheckOutput(key, line.ts, line.text)
+              else agentLogStore.append(key, line.role, line.ts, line.event)
+            }
           }
           sinceSeq = events.at(-1)?.seq ?? sinceSeq
         })
@@ -353,10 +369,7 @@ export function useAgentLogBackfill(repo: string, taskId: string, attempt: numbe
       .then((events) => {
         // A reconnect since the request cleared the buffer and asked again.
         if (backfills.get(key) !== untilSeq) return
-        agentLogStore.backfill(
-          key,
-          events.flatMap((event) => (event.type === 'agent.stream' ? [event] : [])),
-        )
+        agentLogStore.backfill(key, events.filter(isLogEvent))
       })
       .catch(() => backfills.delete(key))
   }, [streamed, repo, taskId, attempt, untilSeq])

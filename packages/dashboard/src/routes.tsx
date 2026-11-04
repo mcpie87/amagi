@@ -1,18 +1,17 @@
-import { createRootRoute, createRoute, createRouter } from '@tanstack/react-router'
+import { createRootRoute, createRoute, createRouter, redirect } from '@tanstack/react-router'
 import { RootLayout } from './layout.tsx'
 import { SessionsView } from './SessionsView.tsx'
 import { ActivityView } from './views/activity.tsx'
-import { QueueView } from './views/board.tsx'
 import { ChatView } from './views/chat.tsx'
 import { DiagnosticsView } from './views/diagnostics.tsx'
 import { CommitDetailView, GitHistoryView } from './views/git.tsx'
 import { InboxView } from './views/inbox.tsx'
-import { IssuesView } from './views/issues.tsx'
 import { ManualView } from './views/manual.tsx'
 import { OverviewView } from './views/overview.tsx'
 import { SeatsView } from './views/seats.tsx'
 import { SettingsView } from './views/settings.tsx'
 import { TaskDetailView } from './views/task-detail.tsx'
+import { TasksView } from './views/tasks.tsx'
 
 const rootRoute = createRootRoute({ component: RootLayout })
 const indexRoute = createRoute({
@@ -36,16 +35,30 @@ export const chatRoute = createRoute({
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/board',
-  component: QueueView,
+  beforeLoad: () => {
+    throw redirect({ to: '/tasks' })
+  },
 })
-export const issuesRoute = createRoute({
+const issuesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/issues',
-  validateSearch: (search: Record<string, unknown>): { issue?: string; epic?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { issue?: string } =>
+    typeof search.issue === 'string' ? { issue: search.issue } : {},
+  beforeLoad: ({ search }) => {
+    throw redirect({ to: '/tasks', search })
+  },
+})
+export const tasksRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/tasks',
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { issue?: string; repo?: string; epic?: string } => ({
     ...(typeof search.issue === 'string' ? { issue: search.issue } : {}),
+    ...(typeof search.repo === 'string' ? { repo: search.repo } : {}),
     ...(typeof search.epic === 'string' ? { epic: search.epic } : {}),
   }),
-  component: IssuesView,
+  component: TasksView,
 })
 const inboxRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -67,11 +80,29 @@ const diagnosticsRoute = createRoute({
   path: '/diagnostics',
   component: DiagnosticsView,
 })
+const settingsTabs = [
+  'general',
+  'configuration',
+  'appearance',
+  'profiles',
+  'workers',
+  'repositories',
+  'credentials',
+] as const
+type SettingsTab = (typeof settingsTabs)[number]
+
 export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings',
-  validateSearch: (search: Record<string, unknown>): { repo?: string } =>
-    typeof search.repo === 'string' ? { repo: search.repo } : {},
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { repo?: string; tab?: SettingsTab; add?: boolean } => ({
+    ...(search.add === true ? { add: true } : {}),
+    ...(typeof search.repo === 'string' ? { repo: search.repo } : {}),
+    ...(typeof search.tab === 'string' && settingsTabs.includes(search.tab as SettingsTab)
+      ? { tab: search.tab as SettingsTab }
+      : {}),
+  }),
   component: SettingsView,
 })
 export const manualRoute = createRoute({
@@ -107,6 +138,7 @@ const routeTree = rootRoute.addChildren([
   chatRoute,
   boardRoute,
   issuesRoute,
+  tasksRoute,
   inboxRoute,
   activityRoute,
   sessionsRoute,

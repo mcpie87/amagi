@@ -140,6 +140,16 @@ function activityItems(state: DashboardState): ActivityItem[] {
           tone: 'normal',
         })
         break
+      case 'demo.recorded':
+        items.push({
+          key: `dm${event.seq}`,
+          ts: event.ts,
+          taskId: event.taskId,
+          text: `demo recorded: ${event.clips.map((clip) => clip.name).join(', ')}`,
+          icon: 'check',
+          tone: event.clips.every((clip) => clip.url !== null) ? 'green' : 'amber',
+        })
+        break
       case 'pr.created':
         items.push({
           key: `p${event.seq}`,

@@ -14,6 +14,7 @@ import {
 import { apiBase } from '../api.ts'
 import claudeHarnessIcon from '../assets/harness-icons/claude.svg'
 import codexHarnessIcon from '../assets/harness-icons/codex.svg'
+import ompHarnessIcon from '../assets/harness-icons/omp.svg'
 import opencodeHarnessIcon from '../assets/harness-icons/opencode.svg'
 import logoGlyph from '../assets/logo-glyph.png'
 import {
@@ -130,6 +131,7 @@ function harnessLabel(kind: string): string {
   if (kind === 'claude') return 'Claude'
   if (kind === 'codex') return 'Codex'
   if (kind === 'opencode') return 'OpenCode'
+  if (kind === 'omp') return 'Oh My Pi'
   return kind
 }
 
@@ -141,9 +143,11 @@ function HarnessMark({ kind }: { kind: string }) {
         ? codexHarnessIcon
         : kind === 'opencode'
           ? opencodeHarnessIcon
-          : null
+          : kind === 'omp'
+            ? ompHarnessIcon
+            : null
   if (icon === null) return null
-  if (kind === 'claude') {
+  if (kind === 'claude' || kind === 'omp') {
     return <img src={icon} alt="" aria-hidden="true" className="size-4 shrink-0" />
   }
   return (
@@ -201,18 +205,38 @@ function newThread(options: ChatOptions): ChatThread | null {
   }
 }
 
+function fuzzyScore(candidate: string, query: string): number | null {
+  const text = candidate.toLowerCase()
+  const needle = query.toLowerCase().trim()
+  if (needle === '') return 0
+  const substring = text.indexOf(needle)
+  if (substring !== -1) return substring
+
+  let position = -1
+  let gaps = 0
+  for (const character of needle) {
+    const next = text.indexOf(character, position + 1)
+    if (next === -1) return null
+    if (position !== -1) gaps += next - position - 1
+    position = next
+  }
+  return 100 + gaps
+}
+
 const pickerItemClass =
   'flex min-h-9 w-full items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-left text-sm text-fg hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink'
 
 function ChatOptionsBar({
   thread,
   options,
+  modelsStatus,
   disabled,
   harnessLocked,
   onChange,
 }: {
   thread: ChatThread
   options: ChatOptions
+  modelsStatus: 'loading' | 'ready' | 'error' | undefined
   disabled: boolean
   harnessLocked: boolean
   onChange: (patch: Partial<ChatThread>) => void
@@ -221,8 +245,10 @@ function ChatOptionsBar({
   const [open, setOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [harnessOpen, setHarnessOpen] = useState(false)
+  const [modelQuery, setModelQuery] = useState('')
   const pickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
+  const modelSearchRef = useRef<HTMLInputElement>(null)
   const customModelInputRef = useRef<HTMLInputElement>(null)
   const harnessPickerRef = useRef<HTMLDivElement>(null)
   const harnessButtonRef = useRef<HTMLButtonElement>(null)
@@ -231,8 +257,14 @@ function ChatOptionsBar({
     (model): model is string => model !== undefined,
   )
   const customModel = thread.customModel ?? (thread.model !== '' && !models.includes(thread.model))
+  const filteredModels = models
+    .map((model) => ({ model, score: fuzzyScore(model, modelQuery) }))
+    .filter((item): item is { model: string; score: number } => item.score !== null)
+    .sort((a, b) => a.score - b.score)
   useLayoutEffect(() => {
-    if (open && customModel) customModelInputRef.current?.focus()
+    if (!open) return
+    if (customModel) customModelInputRef.current?.focus()
+    else modelSearchRef.current?.focus()
   }, [open, customModel])
   const modelLabel = customModel
     ? thread.model || 'Custom model'
@@ -348,7 +380,9 @@ function ChatOptionsBar({
           aria-controls={`${id}-picker`}
           disabled={disabled}
           onClick={() => {
-            setOpen(!open)
+            const nextOpen = !open
+            setOpen(nextOpen)
+            if (nextOpen) setModelQuery('')
             setEffortOpen(false)
           }}
           className="flex h-8 min-w-0 max-w-64 items-center gap-2 rounded-lg px-2 text-xs text-fg-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-ink disabled:opacity-50"
@@ -364,20 +398,41 @@ function ChatOptionsBar({
             id={`${id}-picker`}
             className="absolute bottom-full left-0 z-50 mb-2 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-surface p-2 shadow-xl"
           >
+            <input
+              ref={modelSearchRef}
+              aria-label="Search models"
+              type="search"
+              value={modelQuery}
+              onChange={(event) => setModelQuery(event.target.value)}
+              placeholder="Search models…"
+              className="mb-1.5 h-9 w-full rounded-lg border border-line-strong bg-sunken px-2.5 text-sm text-fg outline-none placeholder:text-fg-faint focus-visible:border-fg-dim focus-visible:outline-none!"
+            />
+            {modelsStatus === 'loading' && (
+              <p role="status" className="px-2.5 py-2 text-xs text-fg-muted">
+                Refreshing models…
+              </p>
+            )}
+            {modelsStatus === 'error' && (
+              <p role="status" className="px-2.5 py-2 text-xs text-fg-muted">
+                Could not refresh models. Use a cached model or enter a custom model ID.
+              </p>
+            )}
             <div className="max-h-56 overflow-y-auto">
-              <button
-                type="button"
-                aria-pressed={thread.model === ''}
-                onClick={() => {
-                  onChange({ model: '', customModel: false })
-                  setOpen(false)
-                }}
-                className={pickerItemClass}
-              >
-                <span>Default model</span>
-                {thread.model === '' && <span aria-hidden="true">✓</span>}
-              </button>
-              {models.map((model) => (
+              {fuzzyScore('Default model', modelQuery) !== null && (
+                <button
+                  type="button"
+                  aria-pressed={thread.model === ''}
+                  onClick={() => {
+                    onChange({ model: '', customModel: false })
+                    setOpen(false)
+                  }}
+                  className={pickerItemClass}
+                >
+                  <span>Default model</span>
+                  {thread.model === '' && <span aria-hidden="true">✓</span>}
+                </button>
+              )}
+              {filteredModels.map(({ model }) => (
                 <button
                   key={model}
                   type="button"
@@ -392,6 +447,9 @@ function ChatOptionsBar({
                   {thread.model === model && <span aria-hidden="true">✓</span>}
                 </button>
               ))}
+              {fuzzyScore('Default model', modelQuery) === null && filteredModels.length === 0 && (
+                <p className="px-2.5 py-2 text-sm text-fg-muted">No matching models</p>
+              )}
             </div>
             <div className="my-1.5 border-t border-line" />
             <button
@@ -640,6 +698,10 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   const [activeId, setActiveId] = useState<string | null>(null)
   const activeIdRef = useRef<string | null>(null)
   const [options, setOptions] = useState<ChatOptions | null>(null)
+  const modelRequests = useRef(new Map<string, Promise<string[]>>())
+  const [modelStatuses, setModelStatuses] = useState<Record<string, 'loading' | 'ready' | 'error'>>(
+    {},
+  )
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   // State lags a render: an approve and a send in the same tick would both see `sending` false.
@@ -655,6 +717,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
   // Follow the stream only while the reader is at the bottom; scrolling up pins the view.
   const stickToBottom = useRef(true)
   const activeThread = threads.find((thread) => thread.id === activeId)
+  const activeHarness = activeThread?.harness
   const activeMessages = activeThread?.messages ?? []
   const lastMessage = activeMessages.at(-1)
   const isEmpty = activeMessages.length === 0
@@ -692,6 +755,49 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
       active = false
     }
   }, [repo])
+
+  useEffect(() => {
+    if (repo === null || activeHarness === undefined) return
+    let active = true
+    let request = modelRequests.current.get(activeHarness)
+    if (request === undefined) {
+      request = fetch(
+        `${apiBase}/api/repos/${encodeURIComponent(repo)}/chat/models/${encodeURIComponent(activeHarness)}`,
+      ).then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const body: unknown = await res.json()
+        if (
+          body === null ||
+          typeof body !== 'object' ||
+          !('models' in body) ||
+          !Array.isArray(body.models) ||
+          !body.models.every((model): model is string => typeof model === 'string')
+        ) {
+          throw new Error('invalid model catalog')
+        }
+        return body.models
+      })
+      modelRequests.current.set(activeHarness, request)
+    }
+    setModelStatuses((current) => ({ ...current, [activeHarness]: 'loading' }))
+    request
+      .then((models) => {
+        if (!active) return
+        setOptions((current) =>
+          current === null
+            ? current
+            : { ...current, models: { ...current.models, [activeHarness]: models } },
+        )
+        setModelStatuses((current) => ({ ...current, [activeHarness]: 'ready' }))
+      })
+      .catch(() => {
+        modelRequests.current.delete(activeHarness)
+        if (active) setModelStatuses((current) => ({ ...current, [activeHarness]: 'error' }))
+      })
+    return () => {
+      active = false
+    }
+  }, [repo, activeHarness])
 
   useEffect(() => () => abortRef.current?.abort(), [])
 
@@ -1348,6 +1454,7 @@ function ChatWorkspace({ repo, threadTarget }: { repo: string | null; threadTarg
                   <ChatOptionsBar
                     thread={activeThread}
                     options={options}
+                    modelsStatus={modelStatuses[activeThread.harness]}
                     disabled={sending}
                     harnessLocked={
                       activeThread.sessionId !== undefined || activeThread.messages.length > 0

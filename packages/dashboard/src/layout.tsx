@@ -3,7 +3,6 @@ import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-route
 import { ChevronRight, FolderGit2, Moon, Sun } from 'lucide-react'
 import { Popover as PopoverPrimitive } from 'radix-ui'
 import {
-  type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
@@ -361,7 +360,11 @@ function BlockedBanner() {
             </li>
           ))}
         </ul>
-        <Link to="/settings" className="mt-1 inline-block underline">
+        <Link
+          to="/settings"
+          search={{ repo: repo.key, tab: 'repositories' }}
+          className="mt-1 inline-block underline"
+        >
           Open settings
         </Link>
       </div>
@@ -370,60 +373,14 @@ function BlockedBanner() {
 }
 
 function AddRepoForm() {
-  const { addRepo } = useDashboard()
-  const [path, setPath] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<RepoInfo | { error: string } | null>(null)
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    if (path.trim() === '' || busy) return
-    setBusy(true)
-    setResult(null)
-    try {
-      setResult(await addRepo(path.trim()))
-    } catch {
-      setResult({ error: 'could not reach the amagi server' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const ready = result !== null && 'ready' in result
   return (
-    <div>
-      <form onSubmit={submit} className="flex gap-2">
-        <input
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          placeholder="/path/to/repository"
-          className="flex-1 rounded border border-line-strong bg-sunken px-3 py-1.5 text-sm"
-        />
-        <button
-          type="submit"
-          disabled={busy || path.trim() === ''}
-          className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
-        >
-          Add repository
-        </button>
-      </form>
-      {result !== null && 'error' in result && (
-        <p className="mt-2 text-sm text-red-ink">{result.error}</p>
-      )}
-      {ready && (
-        <ul className="mt-3 rounded-lg border border-line bg-surface px-4 py-3 text-sm">
-          {result.ready.map((d) => (
-            <li key={d.name} className="flex gap-2 py-0.5">
-              <span className={d.ok ? 'text-emerald-ink' : 'text-red-ink'}>
-                {d.ok ? 'ok' : '!!'}
-              </span>
-              <span className="w-40 shrink-0 text-fg-muted">{d.name}</span>
-              <span className="min-w-0 break-all text-fg">{d.detail ?? ''}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <Link
+      to="/settings"
+      search={{ tab: 'repositories', add: true }}
+      className="block rounded border border-line-strong bg-surface px-3 py-2 text-center text-sm font-medium text-fg hover:bg-raised"
+    >
+      Add repository
+    </Link>
   )
 }
 
@@ -483,6 +440,7 @@ function AppSidebar() {
   const selectedRepo = repos?.find((repo) => repo.key === selected)
   const attention = useAttentionCount()
   const [adding, setAdding] = useState(false)
+  const navigate = useNavigate()
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const { isMobile, setOpenMobile } = useSidebar()
   const onNavigate = () => {
@@ -553,7 +511,15 @@ function AppSidebar() {
               aria-label="Repository"
               title={`Repository: ${selectedRepo?.name ?? 'select one'}`}
               value={selected ?? ''}
-              onChange={(e) => selectRepo(e.target.value)}
+              onChange={(event) => {
+                const key = event.currentTarget.value
+                if (pathname === '/settings')
+                  void navigate({
+                    to: '/settings',
+                    search: (previous: Record<string, unknown>) => ({ ...previous, repo: key }),
+                  })
+                else selectRepo(key)
+              }}
               className="w-full rounded border border-line-strong bg-surface px-2 py-1 text-sm group-data-[collapsible=icon]:absolute group-data-[collapsible=icon]:inset-0 group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:cursor-pointer group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:focus-visible:ring-2"
             >
               {repos.map((repo) => (
@@ -589,7 +555,9 @@ export function RootLayout() {
   const { repos, reposError } = useDashboard()
   const attention = useAttentionCount()
   // Chat renders a full-bleed sidebar that must sit flush against the nav, so it drops the column cap.
-  const fullBleed = useRouterState({ select: (state) => state.location.pathname === '/chat' })
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const fullBleed = pathname === '/chat'
+  const settings = useRouterState({ select: (state) => state.location.pathname === '/settings' })
   const [idleNotice, setIdleNotice] = useState<{ title: string; body: string } | null>(null)
   const [desktopFailure, setDesktopFailure] = useState<{ title: string; body: string } | null>(null)
 
@@ -667,7 +635,7 @@ export function RootLayout() {
           />
           <BlockedBanner />
           <main
-            className={`mx-auto w-full flex-1 px-4 py-6 sm:px-6${fullBleed ? '' : ' pt-16 md:pt-6 max-w-6xl'}`}
+            className={`mx-auto w-full flex-1 px-4 py-6 sm:px-6${fullBleed ? '' : ' pt-16 md:pt-6'}${fullBleed || pathname === '/tasks' ? '' : ' max-w-6xl'}`}
           >
             {repos === null ? (
               <p className="text-fg-faint">
@@ -675,12 +643,12 @@ export function RootLayout() {
                   ? 'loading repositories...'
                   : `could not load repositories (${reposError}), retrying...`}
               </p>
-            ) : repos.length === 0 ? (
+            ) : repos.length === 0 && !settings ? (
               <section className="mx-auto max-w-xl pt-12">
                 <h1 className="text-xl font-semibold">Add a repository to start</h1>
                 <p className="mt-1 text-sm text-fg-faint">
-                  Point amagi at a git repository; its own .amagi/config.toml picks the tracker,
-                  forge, harness and checks. No restart needed.
+                  Open an existing checkout, choose its connection, tracker, and checks, then
+                  activate it when ready.
                 </p>
                 <div className="mt-4">
                   <AddRepoForm />

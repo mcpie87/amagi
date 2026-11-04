@@ -1,4 +1,5 @@
-import { type BeadsBlocker, HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { HUMAN_ONLY_LABEL } from '@amagi/core/beads-labels'
+import type { BeadsBlocker } from '@amagi/core/drivers/tracker/beads'
 import { Link } from '@tanstack/react-router'
 import type { Issue } from './issue-model.ts'
 
@@ -32,7 +33,7 @@ function DependencyList({
       {items.map((d) => (
         <li key={d.id}>
           <Link
-            to="/issues"
+            to="/tasks"
             search={{ issue: d.id }}
             className="flex items-center gap-2 py-1 text-sm hover:underline"
           >

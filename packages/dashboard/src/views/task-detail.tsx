@@ -32,7 +32,9 @@ import { fmtDateTime, fmtRetryIn } from '../format.ts'
 import { Markdown } from '../markdown.tsx'
 import { taskRoute } from '../routes.tsx'
 import { useDashboard, useReadyQueue, useRunner } from '../store.tsx'
-import { Blockers, Unblocks } from './issue-dependencies.tsx'
+import { IssueCloseButton } from './issue-close.tsx'
+import { IssueBadge, IssueSpec } from './issue-details.tsx'
+import { IssueFormModal } from './issue-form.tsx'
 import { fetchIssue, type Issue, IssueDetailUnsupported } from './issue-model.ts'
 import {
   AnswerBox,
@@ -42,6 +44,8 @@ import {
   FullTriageButton,
   RecheckPrButton,
   ReclaimButton,
+  RecordDemoButton,
+  RedoPrButton,
   ResetButton,
   ResolveConflictsButton,
   RetryNowButton,
@@ -110,96 +114,6 @@ const VERDICT_STATES: readonly TaskState[] = [
   'done',
 ]
 
-/** Beads priority scale: 0 = most urgent. Fallback keeps unknown levels legible. */
-const PRIORITY_SEVERITY = ['Critical', 'High', 'Medium', 'Low', 'Backlog']
-
-/**
- * The tracker's full issue metadata behind a task - description, acceptance
- * criteria, priority, type, assignee, labels, parent, blockers and dependents.
- */
-function TaskIssueDetails({ repo, issueId }: { repo: string; issueId: string }) {
-  const [issue, setIssue] = useState<Issue | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [unsupported, setUnsupported] = useState(false)
-
-  useEffect(() => {
-    let active = true
-    setIssue(null)
-    setError(null)
-    setUnsupported(false)
-    fetchIssue(repo, issueId)
-      .then((detail) => {
-        if (active) setIssue(detail)
-      })
-      .catch((err: unknown) => {
-        if (!active) return
-        if (err instanceof IssueDetailUnsupported) setUnsupported(true)
-        else setError(errMsg(err))
-      })
-    return () => {
-      active = false
-    }
-  }, [repo, issueId])
-
-  if (unsupported) return null
-
-  return (
-    <>
-      <div className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">Issue</h2>
-        {error !== null ? (
-          <p className="text-sm text-red-ink">{error}</p>
-        ) : issue === null ? (
-          <p className="text-sm text-fg-faint">loading issue...</p>
-        ) : (
-          <IssueBody issue={issue} />
-        )}
-      </div>
-      {issue !== null && (
-        <div className="mt-4 rounded-lg border border-line bg-surface px-4 py-4">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-            Description
-          </h2>
-          <Collapsible clampClass="summary-clamp" noun="description">
-            <Markdown text={issue.description || 'No description.'} />
-          </Collapsible>
-        </div>
-      )}
-    </>
-  )
-}
-
-function IssueBody({ issue }: { issue: Issue }) {
-  return (
-    <>
-      <dl>
-        <DetailRow
-          label="priority"
-          value={
-            issue.priority === null
-              ? null
-              : `P${issue.priority} - ${PRIORITY_SEVERITY[issue.priority] ?? 'Unknown'}`
-          }
-        />
-        <DetailRow label="type" value={issue.type} />
-        <DetailRow label="assignee" value={issue.assignee} />
-        <DetailRow label="labels" value={issue.labels.join(', ') || null} />
-        <DetailRow label="parent" value={issue.parent} />
-      </dl>
-      <Blockers issue={issue} />
-      <Unblocks issue={issue} />
-      {issue.acceptanceCriteria !== null && (
-        <div className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-            Acceptance criteria
-          </h2>
-          <p className="whitespace-pre-wrap text-fg">{issue.acceptanceCriteria}</p>
-        </div>
-      )}
-    </>
-  )
-}
-
 /** Clips its content to `clampClass` with a toggle that only shows when the content overflows. */
 function Collapsible({
   clampClass,
@@ -238,9 +152,11 @@ function Collapsible({
 }
 
 /** Why a task stopped, in plain language, when the operator actually needs it. */
-function SummaryPanel({ task }: { task: ProjectedTask }) {
+function SummaryPanel({ task, onShowReview }: { task: ProjectedTask; onShowReview: () => void }) {
   const needsHuman = task.state === 'needs_human'
   const done = task.state === 'done'
+  const stoppedReview =
+    needsHuman && task.statusReason?.startsWith('review ended unresolved (') === true
   if (!needsHuman && (task.statusReason === null || !VERDICT_STATES.includes(task.state))) {
     return null
   }
@@ -261,11 +177,26 @@ function SummaryPanel({ task }: { task: ProjectedTask }) {
       >
         {needsHuman ? 'Needs human attention' : done ? 'Verdict' : 'Summary'}
       </h2>
-      {task.statusReason !== null && (
+      {stoppedReview ? (
+        <>
+          <p className="text-sm text-fg">
+            Automated review stopped before resolving all findings
+            {task.statusReason?.includes('(tokens)') ? ' because it ran out of tokens' : ''}. A
+            human decision is needed before this task can continue.
+          </p>
+          <button
+            type="button"
+            onClick={onShowReview}
+            className="mt-1 text-sm text-sky-ink hover:underline"
+          >
+            See unresolved findings
+          </button>
+        </>
+      ) : task.statusReason !== null ? (
         <Collapsible clampClass="summary-clamp" noun="summary">
           <Markdown text={task.statusReason} />
         </Collapsible>
-      )}
+      ) : null}
     </div>
   )
 }
@@ -485,7 +416,7 @@ function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: s
       </section>
     )
   }
-  if (history.rounds.length === 0) return null
+  if (history.rounds.length === 0) return <p className="text-sm text-fg-faint">No review yet.</p>
   return (
     <section className="mt-6 rounded-lg border border-line bg-surface px-4 py-4">
       <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-fg-muted">Review</h2>
@@ -515,6 +446,8 @@ function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: s
                             {finding.path}:{finding.line} · {finding.outcome}
                           </span>
                         </p>
+                        <p className="text-fg-muted">{finding.evidence}</p>
+                        <p className="text-fg-faint">If not addressed: {finding.failureScenario}</p>
                         {finding.outcomeReason !== null && (
                           <p className="text-fg-muted">{finding.outcomeReason}</p>
                         )}
@@ -549,11 +482,60 @@ function ReviewHistoryView({ state, taskId }: { state: DashboardState; taskId: s
   )
 }
 
-type DetailTab = 'log' | 'status' | 'checks'
+type DetailTab = 'spec' | 'run' | 'review' | 'pr' | 'log'
 
-export function TaskDetailView() {
-  const { id } = useParams({ from: taskRoute.id })
-  const { state: liveState, selected } = useDashboard()
+const DETAIL_TABS: { key: DetailTab; label: string }[] = [
+  { key: 'spec', label: 'Spec' },
+  { key: 'run', label: 'Run' },
+  { key: 'review', label: 'Review' },
+  { key: 'pr', label: 'PR' },
+  { key: 'log', label: 'Log' },
+]
+
+/** The tracker issue behind a task, reloaded on `refresh`; `unsupported` for trackers without issue detail. */
+function useIssue(repo: string, id: string, refresh: number) {
+  const [issue, setIssue] = useState<Issue | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [unsupported, setUnsupported] = useState(false)
+
+  useEffect(() => {
+    void refresh
+    let active = true
+    setError(null)
+    setUnsupported(false)
+    fetchIssue(repo, id)
+      .then((detail) => {
+        if (active) setIssue(detail)
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        if (err instanceof IssueDetailUnsupported) setUnsupported(true)
+        else setError(errMsg(err))
+      })
+    return () => {
+      active = false
+    }
+  }, [repo, id, refresh])
+
+  return { issue: issue?.id === id ? issue : null, error, unsupported }
+}
+
+/**
+ * A task as one detail view: its tracker issue (Spec) and amagi's run for it
+ * (Run, Review, PR, Log). An issue that has never run shows Spec only. Run
+ * state comes from the selected repository's event stream, so `repo` must be
+ * that repository.
+ */
+export function TaskDetail({
+  repo,
+  id,
+  onChanged,
+}: {
+  repo: string
+  id: string
+  onChanged?: () => void
+}) {
+  const { state: liveState } = useDashboard()
   const { status } = useRunner()
   const claimSkip = useReadyQueue().find((ready) => ready.id === id)?.claimSkip
   // null follows the current attempt, so a reset moves the view along with it.
@@ -571,7 +553,10 @@ export function TaskDetailView() {
   const currentAgent = currentAgentFor(state, id)
   const runnerTask = past ? undefined : status?.tasks?.[id]
   const waitingSeat = reviewWaitingSeat(state, id)
-  const [tab, setTab] = useState<DetailTab>('log')
+  const [tab, setTab] = useState<DetailTab | null>(null)
+  const [issueRefresh, setIssueRefresh] = useState(0)
+  const [editing, setEditing] = useState(false)
+  const { issue, error: issueError, unsupported } = useIssue(repo, id, issueRefresh)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
@@ -591,54 +576,32 @@ export function TaskDetailView() {
       : `${fmtTokens(effIn)} in · ${fmtTokens(effOut)} out` +
         (effCost > 0 ? ` · $${effCost.toFixed(2)}` : '')
 
-  if (!task) {
-    return (
-      <section>
-        <Link to="/" className="text-sm text-sky-ink hover:underline">
-          &larr; overview
-        </Link>
-        <p className="mt-4 text-fg-faint">No events yet for {id}.</p>
-        {claimSkip !== undefined && (
-          <p className="mt-2 text-sm text-fg-muted">
-            {claimSkip.state}: {claimSkip.reason}
-          </p>
-        )}
-        {selected !== null && (
-          <div className="mt-3">
-            <FullTriageButton taskId={id} state={null} />
-          </div>
-        )}
-      </section>
-    )
-  }
-
-  const tabs: { key: DetailTab; label: string }[] = [
-    { key: 'log', label: 'Log' },
-    { key: 'status', label: 'Status' },
-    ...(task.checks !== null
-      ? [{ key: 'checks', label: `Checks ${task.checksOk ? '(passed)' : '(failed)'}` } as const]
-      : []),
-  ]
-
   // The chat is live while the task is a chattable no_pr run; a settled task
   // keeps the panel only when a conversation was actually recorded, so the
   // operator does not lose it by completing the task.
   const chatAvailable =
-    !past &&
-    ((task.state === 'no_pr' &&
+    task !== undefined &&
+    ((!past &&
+      task.state === 'no_pr' &&
       task.statusReason !== null &&
       task.sessionId !== null &&
       task.worktree !== null) ||
       taskEvents(state, task.id).some((e) => e.type === 'chat.message'))
 
+  // An issue without a run has only its Spec.
+  const activeTab = task === undefined ? 'spec' : (tab ?? 'run')
+  const issueChanged = () => {
+    setEditing(false)
+    setIssueRefresh((value) => value + 1)
+    onChanged?.()
+  }
+
   return (
     <section>
-      <Link to="/" className="text-sm text-sky-ink hover:underline">
-        &larr; overview
-      </Link>
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold">{task.title}</h1>
-        <Badge state={task.state} />
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-xl font-semibold">{task?.title ?? issue?.title ?? id}</h1>
+        {issue !== null && <IssueBadge issue={issue} />}
+        {task !== undefined && <Badge state={task.state} />}
         {!past && claimSkip !== undefined && (
           <span className="text-sm text-fg-muted">
             {claimSkip.state}: {claimSkip.reason}
@@ -647,188 +610,49 @@ export function TaskDetailView() {
         {waitingSeat !== null && (
           <span className="text-sm text-fg-muted">waiting for seat {waitingSeat}</span>
         )}
-        {selected !== null && !past && (
-          <ReclaimButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            worktree={task.worktree}
-          />
+        {task !== undefined && !past && (
+          <>
+            <ReclaimButton repo={repo} taskId={task.id} state={task.state} />
+            <FileAsErrorButton
+              repo={repo}
+              taskId={task.id}
+              state={task.state}
+              statusReason={task.statusReason}
+            />
+            <ResetButton repo={repo} taskId={task.id} state={task.state} worktree={task.worktree} />
+            <RetryNowButton repo={repo} taskId={task.id} state={task.state} />
+            <RecheckPrButton repo={repo} taskId={task.id} state={task.state} />
+            <RedoPrButton repo={repo} taskId={task.id} state={task.state} />
+            <RecordDemoButton repo={repo} taskId={task.id} worktree={task.worktree} />
+            <ResolveConflictsButton repo={repo} taskId={task.id} state={task.state} />
+            <FullTriageButton taskId={task.id} state={task.state} />
+            <CloseButtons repo={repo} taskId={task.id} state={task.state} />
+          </>
         )}
-        {selected !== null && !past && (
-          <FileAsErrorButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            statusReason={task.statusReason}
-          />
+        {task === undefined && <FullTriageButton taskId={id} state={null} />}
+        {task !== undefined && (
+          <CopyReportButton repo={repo} task={task} elapsedMs={health.elapsedMs} />
         )}
-        {selected !== null && !past && (
-          <ResetButton
-            repo={selected}
-            taskId={task.id}
-            state={task.state}
-            worktree={task.worktree}
-          />
-        )}
-        {selected !== null && !past && (
-          <RetryNowButton repo={selected} taskId={task.id} state={task.state} />
-        )}
-        {selected !== null && !past && (
-          <RecheckPrButton repo={selected} taskId={task.id} state={task.state} />
-        )}
-        {selected !== null && !past && (
-          <ResolveConflictsButton repo={selected} taskId={task.id} state={task.state} />
-        )}
-        {selected !== null && !past && <FullTriageButton taskId={task.id} state={task.state} />}
-        {selected !== null && !past && (
-          <CloseButtons repo={selected} taskId={task.id} state={task.state} />
-        )}
-        {selected !== null && (
-          <CopyReportButton repo={selected} task={task} elapsedMs={health.elapsedMs} />
-        )}
-        {!past && <StopButton taskId={task.id} />}
+        {task !== undefined && !past && <StopButton taskId={task.id} />}
       </div>
       <p className="mt-1 text-sm text-fg-faint">
-        <TaskReference task={task} />
+        {task === undefined ? id : <TaskReference task={task} />}
       </p>
 
-      {selected !== null && <TaskIssueDetails repo={selected} issueId={task.id} />}
-
-      <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-fg-muted">
-        {currentAttempt < 2 ? 'Attempt' : 'Attempts'}
-      </h2>
-      <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
+      {task !== undefined && (
+        <AttemptSwitcher current={currentAttempt} viewing={attempt} onSelect={setViewAttempt} />
+      )}
       {past && (
         <p className="mt-2 text-sm text-fg-muted">
           Viewing attempt #{attempt}, which was reset. Actions apply to the current attempt.
         </p>
       )}
 
-      <SummaryPanel task={task} />
+      {task !== undefined && <SummaryPanel task={task} onShowReview={() => setTab('review')} />}
 
-      <RetryPanel task={task} />
+      {task !== undefined && <RetryPanel task={task} />}
 
-      <ReviewHistoryView state={state} taskId={id} />
-
-      {selected !== null && chatAvailable && <ChatPanel repo={selected} taskId={task.id} />}
-
-      <dl className="mt-6 rounded-lg border border-line bg-surface px-4 py-3">
-        <DetailRow label="tracker" value={task.tracker} />
-        <DetailRow
-          label="agent"
-          value={
-            currentAgent
-              ? `${currentAgent.role}: ${currentAgent.harness}`
-              : runnerTask?.harness
-                ? `implement: ${runnerTask.harness}`
-                : null
-          }
-        />
-        <DetailRow label="model" value={currentAgent?.model ?? runnerTask?.model ?? 'unknown'} />
-        <DetailRow label="effort" value={currentAgent?.effort ?? runnerTask?.effort ?? 'unknown'} />
-        <DetailRow label="usage" value={usage} />
-        <DetailRow
-          label="context"
-          value={
-            health.contextTokens === null
-              ? 'no usage reported yet'
-              : health.contextWarnTokens === null
-                ? fmtTokens(health.contextTokens)
-                : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn · ${fmtTokens(health.contextMaxTokens ?? 0)} max`
-          }
-        />
-        <DetailRow
-          label="cost"
-          value={
-            !health.costSeen
-              ? 'not reported by harness'
-              : health.maxCostUsd > 0
-                ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
-                : `$${health.costUsd.toFixed(2)}`
-          }
-        />
-        <DetailRow
-          label="elapsed"
-          value={
-            health.maxRunMs === null
-              ? fmtDuration(health.elapsedMs)
-              : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
-          }
-        />
-        <DetailRow label="worktree" value={task.worktree} />
-        <DetailRow label="branch" value={task.branch} />
-        <DetailRow
-          label="PR"
-          value={
-            task.prUrl === null ? null : (
-              <span className="flex items-center gap-2">
-                <PrLink url={task.prUrl} />
-                {task.prMergeStatus !== null && <PrStatusChip status={task.prMergeStatus} />}
-              </span>
-            )
-          }
-        />
-        {task.lastCommit !== null && (
-          <DetailRow
-            label="commit"
-            value={`${task.lastCommit.sha.slice(0, 7)} ${task.lastCommit.subject}`}
-          />
-        )}
-        <DetailRow label="session" value={task.sessionId} />
-        <DetailRow label="error" value={task.lastError} />
-      </dl>
-
-      {health.warnings.length > 0 && (
-        <div className="mt-4 rounded-lg border border-amber-edge bg-amber-soft px-4 py-3">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
-            Guard warnings
-          </h2>
-          <ul className="space-y-1">
-            {health.warnings.map((w, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: warnings are plain strings that may repeat.
-              <li key={i} className="font-mono text-xs text-fg">
-                {w}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="mt-6">
-        {tabs.length > 1 && (
-          <div className="detail-tabs mb-3 flex gap-1 border-b border-line">
-            {tabs.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setTab(t.key)}
-                className={`rounded-t px-3 py-1.5 text-sm ${
-                  tab === t.key
-                    ? 'border-b-2 border-accent text-fg-strong'
-                    : 'text-fg-muted hover:text-fg'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        )}
-        {tab === 'log' && selected !== null && (
-          <AgentLogView repo={selected} taskId={id} attempt={attempt} />
-        )}
-        {tab === 'status' && <StatusLogView entries={statusLog(state, id, past ? null : now)} />}
-        {tab === 'checks' && task.checks !== null && selected !== null && (
-          <CheckResults
-            repo={selected}
-            taskId={id}
-            seq={taskEvents(state, id).findLast((e) => e.type === 'checks.finished')?.seq ?? null}
-            checks={task.checks}
-          />
-        )}
-      </div>
-
-      {questions.length > 0 && selected !== null && (
+      {questions.length > 0 && (
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
             Questions
@@ -840,12 +664,268 @@ export function TaskDetailView() {
                 className="rounded-lg border border-amber-edge bg-amber-soft px-4 py-3"
               >
                 <p className="font-medium">{q.question}</p>
-                <AnswerBox repo={selected} taskId={id} question={q} />
+                <AnswerBox repo={repo} taskId={id} question={q} />
               </li>
             ))}
           </ul>
         </div>
       )}
+
+      {task !== undefined && (
+        <div className="detail-tabs mt-6 flex gap-1 border-b border-line">
+          {DETAIL_TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setTab(t.key)}
+              className={`rounded-t px-3 py-1.5 text-sm ${
+                activeTab === t.key
+                  ? 'border-b-2 border-accent text-fg-strong'
+                  : 'text-fg-muted hover:text-fg'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-4">
+        {activeTab === 'spec' && (
+          <div>
+            {issue !== null && (
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised"
+                >
+                  Edit
+                </button>
+                {issue.status !== 'closed' && (
+                  <IssueCloseButton
+                    key={issue.id}
+                    repo={repo}
+                    issue={issue}
+                    onClosed={issueChanged}
+                  />
+                )}
+              </div>
+            )}
+            {unsupported ? (
+              <p className="text-sm text-fg-faint">This tracker has no issue detail view.</p>
+            ) : issueError !== null ? (
+              <p className="text-sm text-red-ink">{issueError}</p>
+            ) : issue === null ? (
+              <p className="text-sm text-fg-faint">loading issue...</p>
+            ) : (
+              <>
+                <IssueSpec issue={issue} />
+                <div className="mt-6">
+                  <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+                    Description
+                  </h2>
+                  <Collapsible clampClass="summary-clamp" noun="description">
+                    <Markdown text={issue.description || 'No description.'} />
+                  </Collapsible>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'run' && task !== undefined && (
+          <>
+            {health.warnings.length > 0 && (
+              <div className="mb-4 rounded-lg border border-amber-edge bg-amber-soft px-4 py-3">
+                <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-amber-ink">
+                  Guard warnings
+                </h2>
+                <ul className="space-y-1">
+                  {health.warnings.map((w, i) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: warnings are plain strings that may repeat.
+                    <li key={i} className="font-mono text-xs text-fg">
+                      {w}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <dl className="rounded-lg border border-line bg-surface px-4 py-3">
+              <DetailRow label="tracker" value={task.tracker} />
+              <DetailRow
+                label="agent"
+                value={
+                  currentAgent
+                    ? `${currentAgent.role}: ${currentAgent.harness}`
+                    : runnerTask?.harness
+                      ? `implement: ${runnerTask.harness}`
+                      : null
+                }
+              />
+              <DetailRow
+                label="model"
+                value={currentAgent?.model ?? runnerTask?.model ?? 'unknown'}
+              />
+              <DetailRow
+                label="effort"
+                value={currentAgent?.effort ?? runnerTask?.effort ?? 'unknown'}
+              />
+              <DetailRow label="usage" value={usage} />
+              <DetailRow
+                label="context"
+                value={
+                  health.contextTokens === null
+                    ? 'no usage reported yet'
+                    : health.contextWarnTokens === null
+                      ? fmtTokens(health.contextTokens)
+                      : `${fmtTokens(health.contextTokens)} / ${fmtTokens(health.contextWarnTokens)} warn · ${fmtTokens(health.contextMaxTokens ?? 0)} max`
+                }
+              />
+              <DetailRow
+                label="cost"
+                value={
+                  !health.costSeen
+                    ? 'not reported by harness'
+                    : health.maxCostUsd > 0
+                      ? `$${health.costUsd.toFixed(2)} / $${health.maxCostUsd.toFixed(2)}`
+                      : `$${health.costUsd.toFixed(2)}`
+                }
+              />
+              <DetailRow
+                label="elapsed"
+                value={
+                  health.maxRunMs === null
+                    ? fmtDuration(health.elapsedMs)
+                    : `${fmtDuration(health.elapsedMs)} / ${fmtDuration(health.maxRunMs)}`
+                }
+              />
+              <DetailRow label="worktree" value={task.worktree} />
+              <DetailRow label="session" value={task.sessionId} />
+              <DetailRow label="error" value={task.lastError} />
+            </dl>
+            <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+              State changes
+            </h2>
+            <StatusLogView entries={statusLog(state, id, past ? null : now)} />
+            {chatAvailable && <ChatPanel repo={repo} taskId={task.id} />}
+          </>
+        )}
+
+        {activeTab === 'review' && task !== undefined && (
+          <ReviewHistoryView state={state} taskId={id} />
+        )}
+
+        {activeTab === 'pr' && task !== undefined && (
+          <>
+            <dl className="rounded-lg border border-line bg-surface px-4 py-3">
+              <DetailRow label="branch" value={task.branch} />
+              <DetailRow
+                label="PR"
+                value={
+                  task.prUrl === null ? null : (
+                    <span className="flex items-center gap-2">
+                      <PrLink url={task.prUrl} />
+                      {task.prMergeStatus !== null && <PrStatusChip status={task.prMergeStatus} />}
+                    </span>
+                  )
+                }
+              />
+              {task.lastCommit !== null && (
+                <DetailRow
+                  label="commit"
+                  value={`${task.lastCommit.sha.slice(0, 7)} ${task.lastCommit.subject}`}
+                />
+              )}
+            </dl>
+            {task.demo.length > 0 && (
+              <>
+                <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+                  Demo
+                </h2>
+                <div className="grid gap-4">
+                  {task.demo.map((clip) => (
+                    <figure key={clip.name} className="space-y-1">
+                      <figcaption className="text-sm text-fg-muted">
+                        {clip.name}
+                        {clip.url !== null && (
+                          <>
+                            {' · '}
+                            <a
+                              href={clip.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline"
+                            >
+                              uploaded to PR
+                            </a>
+                          </>
+                        )}
+                      </figcaption>
+                      {/* biome-ignore lint/a11y/useMediaCaption: demo clips are silent screen recordings */}
+                      <video
+                        controls
+                        preload="metadata"
+                        className="w-full rounded-lg border border-line"
+                        src={`${apiBase}/api/repos/${encodeURIComponent(repo)}/tasks/${encodeURIComponent(id)}/demo/${encodeURIComponent(clip.name)}`}
+                      />
+                    </figure>
+                  ))}
+                </div>
+              </>
+            )}
+            <h2 className="mb-2 mt-6 text-sm font-semibold uppercase tracking-wide text-fg-muted">
+              Checks
+            </h2>
+            {task.checks === null ? (
+              <p className="text-sm text-fg-faint">No checks run yet.</p>
+            ) : (
+              <CheckResults
+                repo={repo}
+                taskId={id}
+                seq={
+                  taskEvents(state, id).findLast((e) => e.type === 'checks.finished')?.seq ?? null
+                }
+                checks={task.checks}
+              />
+            )}
+          </>
+        )}
+
+        {activeTab === 'log' && task !== undefined && (
+          <AgentLogView repo={repo} taskId={id} attempt={attempt} />
+        )}
+      </div>
+
+      {editing && issue !== null && (
+        <IssueFormModal
+          repo={repo}
+          mode="edit"
+          initial={issue}
+          onClose={() => setEditing(false)}
+          onSaved={issueChanged}
+        />
+      )}
+    </section>
+  )
+}
+
+/** The full-page /tasks/$id view; the /tasks side panel renders the same TaskDetail. */
+export function TaskDetailView() {
+  const { id } = useParams({ from: taskRoute.id })
+  const { selected } = useDashboard()
+  return (
+    <section>
+      <Link to="/tasks" className="text-sm text-sky-ink hover:underline">
+        &larr; tasks
+      </Link>
+      <div className="mt-3">
+        {selected === null ? (
+          <p className="text-fg-faint">Select a repository first.</p>
+        ) : (
+          <TaskDetail key={id} repo={selected} id={id} />
+        )}
+      </div>
     </section>
   )
 }

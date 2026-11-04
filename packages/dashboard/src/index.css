@@ -149,6 +149,34 @@
   --shadow-color: rgb(0 43 54 / 0.16);
 }
 
+:root[data-palette="neutral"][data-theme="dark"] {
+  --color-app: #18181b;
+  --color-sidebar: #111113;
+  --color-sunken: #111113;
+  --color-surface: #202024;
+  --color-raised: #2c2c31;
+  --color-raised-strong: #3b3b42;
+  --color-line: #323238;
+  --color-line-strong: #484850;
+  --color-fg-strong: #fafafa;
+  --color-fg: #e4e4e7;
+  --color-fg-muted: #b8b8c0;
+  --color-fg-faint: #a1a1aa;
+  --color-fg-dim: #858590;
+  --color-on-solid: #18181b;
+  --color-accent: #8ab4f8;
+  --color-neutral-ink: #b8b8c0;
+  --color-sky-ink: #7dd3fc;
+  --color-blue-ink: #8ab4f8;
+  --color-amber-ink: #fbbf24;
+  --color-violet-ink: #c4a5fd;
+  --color-cyan-ink: #67e8f9;
+  --color-orange-ink: #fb923c;
+  --color-emerald-ink: #6ee7a0;
+  --color-red-ink: #f87171;
+  --color-teal-ink: #5eead4;
+}
+
 :root[data-custom-theme="true"] {
   --color-neutral-soft: color-mix(in srgb, var(--color-neutral-ink) 15%, transparent);
   --color-neutral-edge: color-mix(in srgb, var(--color-neutral-ink) 30%, transparent);
@@ -587,6 +615,12 @@ textarea::placeholder {
 .agent-log-header button:hover {
   background: var(--color-raised-strong);
   color: var(--color-fg-strong);
+}
+.agent-log-ts {
+  margin-right: 10px;
+  color: var(--color-fg-faint);
+  font-style: normal;
+  user-select: none;
 }
 .agent-log-scroll {
   height: 460px;

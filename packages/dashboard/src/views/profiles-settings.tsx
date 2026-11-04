@@ -113,6 +113,7 @@ function ProfileForm({
               <option value="claude">Claude</option>
               <option value="codex">Codex</option>
               <option value="opencode">OpenCode</option>
+              <option value="omp">Oh My Pi</option>
             </select>
           </label>
           <div>

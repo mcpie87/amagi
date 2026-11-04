@@ -95,6 +95,41 @@ export const DEFAULT_THEME_COLORS: Record<ThemeVariant, ThemeColors> = {
   },
 }
 
+export const NEUTRAL_THEME: ThemeDefinition = {
+  id: 'neutral',
+  name: 'Neutral dark',
+  variants: {
+    light: DEFAULT_THEME_COLORS.light,
+    dark: {
+      app: '#18181b',
+      sidebar: '#111113',
+      sunken: '#111113',
+      surface: '#202024',
+      raised: '#2c2c31',
+      'raised-strong': '#3b3b42',
+      line: '#323238',
+      'line-strong': '#484850',
+      'fg-strong': '#fafafa',
+      fg: '#e4e4e7',
+      'fg-muted': '#b8b8c0',
+      'fg-faint': '#a1a1aa',
+      'fg-dim': '#858590',
+      'on-solid': '#18181b',
+      accent: '#8ab4f8',
+      'neutral-ink': '#b8b8c0',
+      'sky-ink': '#7dd3fc',
+      'blue-ink': '#8ab4f8',
+      'amber-ink': '#fbbf24',
+      'violet-ink': '#c4a5fd',
+      'cyan-ink': '#67e8f9',
+      'orange-ink': '#fb923c',
+      'emerald-ink': '#6ee7a0',
+      'red-ink': '#f87171',
+      'teal-ink': '#5eead4',
+    },
+  },
+}
+
 const HEX_COLOR = /^#[0-9a-f]{6}$/i
 const BASE16_KEYS = [
   'base00',

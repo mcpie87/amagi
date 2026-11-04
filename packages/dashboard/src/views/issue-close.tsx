@@ -12,7 +12,7 @@ const CLOSE_REASONS = [
   '__other',
 ]
 
-type IssueCloseAction = 'manual' | 'done' | 'close'
+type IssueCloseAction = 'done' | 'close'
 
 export function IssueCloseButton({
   repo,
@@ -68,7 +68,7 @@ export function IssueCloseButton({
   const customId = `issue-${action}-custom-${issue.id}`
 
   return (
-    <div className={action === 'manual' ? 'ml-auto' : undefined}>
+    <div>
       <button
         type="button"
         disabled={busy}

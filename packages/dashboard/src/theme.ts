@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import {
   DEFAULT_THEME_COLORS,
+  NEUTRAL_THEME,
   THEME_COLOR_ROLES,
   type ThemeColorKey,
   type ThemeColors,
@@ -65,7 +66,9 @@ let themes = readThemes()
 let selectedThemeId = (() => {
   try {
     const id = localStorage.getItem(SELECTION_KEY)
-    return id !== null && themes.some((theme) => theme.id === id) ? id : DEFAULT_THEME_ID
+    return id !== null && (id === NEUTRAL_THEME.id || themes.some((theme) => theme.id === id))
+      ? id
+      : DEFAULT_THEME_ID
   } catch {
     return DEFAULT_THEME_ID
   }
@@ -80,13 +83,16 @@ function effective(): Theme {
 }
 
 function selectedTheme(): ThemeDefinition | undefined {
-  return themes.find((theme) => theme.id === selectedThemeId)
+  return selectedThemeId === NEUTRAL_THEME.id
+    ? NEUTRAL_THEME
+    : themes.find((theme) => theme.id === selectedThemeId)
 }
 
 function apply(): AppearanceSnapshot {
   const mode = effective()
   const root = document.documentElement
   root.dataset.theme = mode
+  root.dataset.palette = selectedThemeId
   for (const property of STYLE_PROPERTIES) root.style.removeProperty(property)
 
   const colors = selectedTheme()?.variants[mode]
@@ -158,7 +164,12 @@ export function setThemePref(next: ThemePref) {
 }
 
 export function setSelectedTheme(id: string) {
-  if (id !== DEFAULT_THEME_ID && !themes.some((theme) => theme.id === id)) return
+  if (
+    id !== DEFAULT_THEME_ID &&
+    id !== NEUTRAL_THEME.id &&
+    !themes.some((theme) => theme.id === id)
+  )
+    return
   selectedThemeId = id
   persistThemes()
   announce()
@@ -170,12 +181,13 @@ function makeThemeId() {
 
 export function createCustomTheme(): string {
   const id = makeThemeId()
+  const source = getSelectedThemeForExport()
   const theme: ThemeDefinition = {
     id,
     name: 'Custom theme',
     variants: {
-      light: { ...DEFAULT_THEME_COLORS.light },
-      dark: { ...DEFAULT_THEME_COLORS.dark },
+      light: { ...source.variants.light },
+      dark: { ...source.variants.dark },
     },
   }
   themes = [...themes, theme].slice(-32)
@@ -217,7 +229,7 @@ export function updateThemeColor(mode: Theme, key: ThemeColorKey, value: string)
 }
 
 export function deleteSelectedTheme() {
-  if (selectedThemeId === DEFAULT_THEME_ID) return
+  if (selectedThemeId === DEFAULT_THEME_ID || selectedThemeId === NEUTRAL_THEME.id) return
   themes = themes.filter(({ id }) => id !== selectedThemeId)
   selectedThemeId = DEFAULT_THEME_ID
   persistThemes()

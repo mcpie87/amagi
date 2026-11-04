@@ -1,4 +1,4 @@
-import { HUMAN_ONLY_LABEL } from '@amagi/core/drivers/tracker/beads'
+import { HUMAN_ONLY_LABEL } from '@amagi/core/beads-labels'
 import { type ProjectedTask, tasksNeedingAttention } from '@amagi/core/view'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'

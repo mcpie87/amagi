@@ -28,6 +28,7 @@
         let appColor = theme === 'light' ? '#fdf6e3' : '#282828'
         try {
           const selected = localStorage.getItem('amagi:theme-selection')
+          root.dataset.palette = selected ?? 'default'
           const themes = JSON.parse(localStorage.getItem('amagi:custom-themes') ?? '[]')
           const custom = Array.isArray(themes)
             ? themes.find((entry) => entry?.id === selected)
@@ -49,6 +50,10 @@
           }
         } catch {
           // Ignore invalid or unavailable stored custom themes.
+        }
+        if (root.dataset.palette === 'neutral' && theme === 'dark') {
+          root.dataset.customTheme = 'true'
+          appColor = '#18181b'
         }
         document.querySelector('meta[name="theme-color"]')?.setAttribute('content', appColor)
       })()

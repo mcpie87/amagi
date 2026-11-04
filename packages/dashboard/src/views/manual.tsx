@@ -449,8 +449,9 @@ const PAGES: ManualPage[] = [
               <code>~/.local/state/amagi/forge/tokens.json</code>, mode 600), never in{' '}
               <code>.amagi/config.toml</code>, which is committed. Without a stored token amagi
               falls back to <code>GH_TOKEN</code>/<code>GITHUB_TOKEN</code>,{' '}
-              <code>GITLAB_TOKEN</code> or <code>FORGEJO_TOKEN</code> in its own environment. It
-              never uses your own <code>gh</code>, <code>glab</code> or <code>tea</code> login.
+              <code>GITLAB_TOKEN</code> or <code>FORGEJO_TOKEN</code> in its own environment. amagi
+              calls the forge API with that token directly; it never goes through a <code>gh</code>,{' '}
+              <code>glab</code> or <code>tea</code> login.
             </p>
             <p>
               amagi does not guess which forge a repository lives on: pick GitHub, GitLab or Forgejo
@@ -458,11 +459,10 @@ const PAGES: ManualPage[] = [
               <code>[forge] kind</code> in <code>.amagi/config.toml</code>, GitHub when unset). Next
               to it, <strong>Git remote</strong> (<code>[forge] remote</code>, default{' '}
               <code>origin</code>) picks the remote amagi fetches from and pushes to, and the
-              repository <code>gh</code>, <code>glab</code> and <code>tea</code> work on. With
-              GitHub as <code>origin</code> and GitLab as <code>gitlab</code>, pick{' '}
-              <code>gitlab</code> to open merge requests there. The server address comes from that
-              remote: <code>git@git.example.com:owner/repo.git</code> becomes{' '}
-              <code>https://git.example.com</code>. When that is wrong, fill in the token's{' '}
+              repository its forge API calls target. With GitHub as <code>origin</code> and GitLab
+              as <code>gitlab</code>, pick <code>gitlab</code> to open merge requests there. The
+              server address comes from that remote: <code>git@git.example.com:owner/repo.git</code>{' '}
+              becomes <code>https://git.example.com</code>. When that is wrong, fill in the token's{' '}
               <strong>Server URL</strong> (GitLab and Forgejo only), for example when SSH runs on
               another host or port than the web UI, the instance lives under a path like{' '}
               <code>https://example.com/gitlab</code>, or it only speaks plain <code>http</code>.
@@ -668,19 +668,20 @@ const PAGES: ManualPage[] = [
                 all projects.
               </li>
               <li>
-                <strong>Add resource permissions</strong>: pick the resource in the left panel, the
-                permission in the right one. On the <strong>Group and project</strong> tab:
+                <strong>Add resource permissions</strong>: on the left, expand each category and
+                select the resource, then select its permissions on the right. You can also search
+                for a resource by name. On the <strong>Group and project</strong> tab:
                 <table className="mt-2 w-full text-left text-xs">
                   <thead className="text-fg-muted">
                     <tr>
-                      <th className="py-1 pr-3 font-medium">Resource</th>
+                      <th className="py-1 pr-3 font-medium">Category → resource</th>
                       <th className="py-1 pr-3 font-medium">Permissions</th>
                       <th className="py-1 font-medium">What amagi does with it</th>
                     </tr>
                   </thead>
                   <tbody className="align-top">
                     <tr>
-                      <td className="py-1 pr-3">Code</td>
+                      <td className="py-1 pr-3">Repository → Code</td>
                       <td className="py-1 pr-3">Download, Push</td>
                       <td className="py-1">
                         fetch, push <code>amagi/…</code> branches, delete them after the merge
@@ -688,30 +689,31 @@ const PAGES: ManualPage[] = [
                       </td>
                     </tr>
                     <tr>
-                      <td className="py-1 pr-3">Merge Request</td>
+                      <td className="py-1 pr-3">Repository → Merge Request</td>
                       <td className="py-1 pr-3">Create, Read, Update</td>
                       <td className="py-1">
                         open, list, read and diff merge requests; labels and closing are updates
                       </td>
                     </tr>
                     <tr>
-                      <td className="py-1 pr-3">Work Item</td>
+                      <td className="py-1 pr-3">Project Planning → Work Item</td>
                       <td className="py-1 pr-3">Create, Read</td>
                       <td className="py-1">
                         read and post merge request comments (GitLab files notes under work items)
                       </td>
                     </tr>
                     <tr>
-                      <td className="py-1 pr-3">Project</td>
+                      <td className="py-1 pr-3">Projects → Project</td>
                       <td className="py-1 pr-3">Read</td>
                       <td className="py-1">
-                        <code>glab</code> looks the project up before it opens a merge request
+                        amagi looks the project up before it opens a merge request
                       </td>
                     </tr>
                   </tbody>
                 </table>
-                On the <strong>User</strong> tab: <em>User: Read</em>, which <code>glab</code> uses
-                to look up who it is. Nothing on the <strong>Global</strong> tab.
+                On the <strong>User</strong> tab, expand <strong>System Access</strong>, select{' '}
+                <strong>User</strong>, and select <strong>Read</strong>. This permits{' '}
+                <code>GET /user</code>. Nothing on the <strong>Global</strong> tab.
               </li>
               <li>
                 <strong>Generate token</strong>, and copy it now: GitLab never shows it again.
@@ -841,9 +843,9 @@ const PAGES: ManualPage[] = [
               </li>
             </ol>
             <p>
-              amagi logs <code>tea</code> in with this token itself. If that login fails with a 403
-              on <code>/api/v1/user</code>, your Forgejo needs <code>user: Read</code> for it, which
-              a <em>Specific repositories</em> token cannot carry: create an <em>All</em> token with{' '}
+              amagi calls the Forgejo API with this token directly. If <code>/api/v1/user</code>
+              answers 403, your Forgejo needs <code>user: Read</code> for it, which a{' '}
+              <em>Specific repositories</em> token cannot carry: create an <em>All</em> token with{' '}
               <code>issue</code>, <code>repository</code> and <code>user: Read</code>. See{' '}
               <Ext href="https://forgejo.org/docs/latest/user/token-scope/">
                 Forgejo token scopes

@@ -101,12 +101,10 @@ export function ReclaimButton({
   repo,
   taskId,
   state,
-  worktree,
 }: {
   repo: string
   taskId: string
   state: TaskState
-  worktree: string | null
 }) {
   const { status } = useRunner()
   const [busy, setBusy] = useState(false)
@@ -114,7 +112,7 @@ export function ReclaimButton({
   // A retrying task is still owned by its runner, which will retry on its own;
   // reclaiming it here would hand the tracker claim to a second worker.
   // A queued task already has no tracker claim to release.
-  if (worktree === null || isTerminal(state) || state === 'retrying' || state === 'queued') {
+  if (state === 'done' || state === 'abandoned' || state === 'retrying' || state === 'queued') {
     return null
   }
 
@@ -444,10 +442,14 @@ export function ResetButton({
   const [error, setError] = useState<string | null>(null)
   if (!canReset(state, worktree !== null)) return null
 
+  // With no worktree there is nothing to throw away, so this is a plain retry.
+  const retry = worktree === null
   const reset = async () => {
     if (
       !window.confirm(
-        `Reset ${taskId}? Its worktree and branch are deleted and it reruns from scratch.`,
+        retry
+          ? `Retry ${taskId}? It reruns from scratch as a new attempt.`
+          : `Reset ${taskId}? Its worktree and branch are deleted and it reruns from scratch.`,
       )
     ) {
       return
@@ -478,11 +480,15 @@ export function ResetButton({
         type="button"
         disabled={busy}
         onClick={() => void reset()}
-        title="deletes the worktree, branch and agent session, then reruns the task from scratch as a new attempt"
+        title={
+          retry
+            ? 'reruns the task from scratch as a new attempt'
+            : 'deletes the worktree, branch and agent session, then reruns the task from scratch as a new attempt'
+        }
         className="rounded border border-line-strong bg-raised px-3 py-1 text-sm text-fg hover:bg-raised-strong disabled:opacity-50"
       >
         <Icon name="refresh" size={15} />
-        {busy ? 'Resetting...' : 'Reset'}
+        {busy ? (retry ? 'Retrying...' : 'Resetting...') : retry ? 'Retry' : 'Reset'}
       </button>
       {error !== null && (
         <p className="reset-error" role="alert">
@@ -612,6 +618,130 @@ export function RecheckPrButton({
         {busy ? 'Checking…' : 'Check PR status now'}
       </button>
       {error !== null && <p className="mt-1 text-sm text-red-ink">{error}</p>}
+    </div>
+  )
+}
+
+/**
+ * Has an agent rewrite an open PR's commit message, title and description over
+ * the same code; the branch is squashed and force-pushed. Progress streams into
+ * the task log.
+ */
+export function RedoPrButton({
+  repo,
+  taskId,
+  state,
+}: {
+  repo: string
+  taskId: string
+  state: TaskState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (state !== 'pr_open') return null
+
+  const redo = async () => {
+    if (
+      !window.confirm(
+        `Redo the PR of ${taskId}? An agent rewrites the commit message, title and description; the branch is squashed into one commit and force-pushed. The code stays as it is.`,
+      )
+    )
+      return
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/redo-pr`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setResult({ kind: 'error', text: (await res.json())?.error ?? `HTTP ${res.status}` })
+      } else {
+        setResult({ kind: 'ok', text: 'started: follow it in the task log' })
+      }
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void redo()}
+        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised disabled:opacity-50"
+      >
+        {busy ? 'Starting…' : 'Redo PR'}
+      </button>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Records a demo of the task's acceptance in its worktree; the videos go into
+ * the PR description when the task has one. Needs demo recording on and a
+ * clean worktree. Progress streams into the task log.
+ */
+export function RecordDemoButton({
+  repo,
+  taskId,
+  worktree,
+}: {
+  repo: string
+  taskId: string
+  worktree: string | null
+}) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  if (worktree === null) return null
+
+  const record = async () => {
+    if (
+      !window.confirm(
+        `Record a demo of ${taskId}? An agent runs the app in the worktree and records the acceptance; the videos go into the PR description.`,
+      )
+    )
+      return
+    setBusy(true)
+    setResult(null)
+    try {
+      const res = await fetch(`${apiBase}/api/repos/${repo}/tasks/${taskId}/record-demo`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        setResult({ kind: 'error', text: (await res.json())?.error ?? `HTTP ${res.status}` })
+      } else {
+        setResult({ kind: 'ok', text: 'started: follow it in the task log' })
+      }
+    } catch {
+      setResult({ kind: 'error', text: 'could not reach the amagi server' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void record()}
+        className="rounded border border-line-strong bg-surface px-3 py-1 text-sm hover:bg-raised disabled:opacity-50"
+      >
+        {busy ? 'Starting…' : 'Record demo'}
+      </button>
+      {result !== null && (
+        <p className={`mt-1 text-sm ${result.kind === 'ok' ? 'text-emerald-ink' : 'text-red-ink'}`}>
+          {result.text}
+        </p>
+      )}
     </div>
   )
 }

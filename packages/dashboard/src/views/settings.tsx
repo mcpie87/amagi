@@ -1,4 +1,4 @@
-import { useSearch } from '@tanstack/react-router'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { type ChangeEvent, useEffect, useState } from 'react'
 import { apiBase } from '../api.ts'
 import { setDateFormatPref, useDateFormatPref } from '../date-format.ts'
@@ -24,10 +24,12 @@ import {
   THEME_COLOR_ROLES,
 } from '../theme-colors.ts'
 import { ConfigSettings } from './config-settings.tsx'
-import { FleetWorkersSettings } from './fleet.tsx'
+import { FleetWorkersSettings, RepositoryWorkersSettings } from './fleet.tsx'
 import { ProfilesSettings } from './profiles-settings.tsx'
 import {
+  AddRepository,
   ForgeCredentials,
+  RepositoryChecks,
   RepositorySettingsCard,
   useForgeCredentials,
 } from './repository-settings.tsx'
@@ -163,13 +165,14 @@ function Appearance() {
             className="min-w-52 rounded border border-line-strong bg-app px-3 py-2 text-sm text-fg"
           >
             <option value="default">Default: Gruvbox dark / Solarized light</option>
+            <option value="neutral">Neutral dark / Solarized light</option>
             {appearance.themes.map((theme) => (
               <option key={theme.id} value={theme.id}>
                 {theme.name}
               </option>
             ))}
           </select>
-          {appearance.selectedThemeId === 'default' ? (
+          {appearance.selectedThemeId === 'default' || appearance.selectedThemeId === 'neutral' ? (
             <button
               type="button"
               onClick={() => {
@@ -178,7 +181,7 @@ function Appearance() {
               }}
               className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-fg hover:bg-raised"
             >
-              Customize default
+              Customize theme
             </button>
           ) : (
             <button
@@ -324,19 +327,23 @@ function Appearance() {
 }
 
 export function SettingsView() {
-  const { repos, refreshRepos, selected } = useDashboard()
-  const { repo: linkedRepo } = useSearch({ from: settingsRoute.id })
-  const [activeTab, setActiveTab] = useState<
-    'general' | 'configuration' | 'appearance' | 'profiles' | 'workers' | 'repositories'
-  >(linkedRepo === undefined ? 'general' : 'repositories')
-  const [selectedRepo, setSelectedRepo] = useState<string | null>(linkedRepo ?? null)
+  const { repos, refreshRepos, selected: dashboardSelected, selectRepo } = useDashboard()
+  const { repo: linkedRepo, tab, add } = useSearch({ from: settingsRoute.id })
+  const navigate = useNavigate()
+  const selected = linkedRepo ?? dashboardSelected ?? repos?.[0]?.key ?? null
+  const activeTab = tab === 'general' ? 'repositories' : (tab ?? 'repositories')
   useEffect(() => {
-    if (linkedRepo === undefined) return
-    setSelectedRepo(linkedRepo)
-    setActiveTab('repositories')
-  }, [linkedRepo])
+    if (
+      linkedRepo !== undefined &&
+      linkedRepo !== dashboardSelected &&
+      repos?.some((repo) => repo.key === linkedRepo)
+    )
+      selectRepo(linkedRepo)
+  }, [linkedRepo, dashboardSelected, repos, selectRepo])
+  const [repositoryTab, setRepositoryTab] = useState<'settings' | 'workers'>('settings')
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [settingsVersion, setSettingsVersion] = useState(0)
   const [autoRebase, setAutoRebase] = useState(false)
   const [rebaseBusy, setRebaseBusy] = useState(false)
   const [rebaseResult, setRebaseResult] = useState<string | null>(null)
@@ -353,7 +360,9 @@ export function SettingsView() {
   const [desktopResult, setDesktopResult] = useState<string | null>(null)
   const [ntfyTestBusy, setNtfyTestBusy] = useState(false)
   const [ntfyTestResult, setNtfyTestResult] = useState<string | null>(null)
-  const repo = repos?.find(({ key }) => key === selectedRepo) ?? repos?.[0]
+  const [removeBusy, setRemoveBusy] = useState(false)
+  const [removeError, setRemoveError] = useState<string | null>(null)
+  const repo = repos?.find(({ key }) => key === selected)
   const forgeCredentials = useForgeCredentials()
 
   useEffect(() => {
@@ -366,7 +375,7 @@ export function SettingsView() {
     setRebaseResult(null)
     setDesktopResult(null)
     setNtfyTestResult(null)
-    fetch(`${apiBase}/api/repos/${selected}/settings`)
+    fetch(`${apiBase}/api/repos/${selected}/settings?version=${settingsVersion}`)
       .then(async (res) => {
         if (!res.ok) {
           const body = (await res.json().catch(() => null)) as { error?: string } | null
@@ -399,7 +408,7 @@ export function SettingsView() {
     return () => {
       active = false
     }
-  }, [selected])
+  }, [selected, settingsVersion])
 
   const saveNtfy = async () => {
     if (selected === null) return
@@ -481,16 +490,16 @@ export function SettingsView() {
       <div
         role="tablist"
         aria-label="Settings sections"
-        className="mt-4 flex gap-1 border-b border-line"
+        className="mt-4 flex flex-wrap gap-1 border-b border-line"
       >
         {(
           [
-            ['general', 'General'],
-            ['configuration', 'Configuration'],
+            ['repositories', 'Repositories'],
+            ['configuration', 'Global'],
+            ['credentials', 'Credentials'],
             ['appearance', 'Appearance'],
             ['profiles', 'Profiles'],
             ['workers', 'Workers'],
-            ['repositories', 'Repositories'],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -500,7 +509,9 @@ export function SettingsView() {
             role="tab"
             aria-selected={activeTab === id}
             aria-controls={`settings-panel-${id}`}
-            onClick={() => setActiveTab(id)}
+            onClick={() =>
+              void navigate({ to: '/settings', search: { repo: selected ?? undefined, tab: id } })
+            }
             className={`rounded-t px-3 py-2 text-sm ${
               activeTab === id
                 ? 'bg-raised text-fg-strong'
@@ -517,11 +528,7 @@ export function SettingsView() {
         aria-labelledby="settings-tab-configuration"
         hidden={activeTab !== 'configuration'}
       >
-        {selected === null ? (
-          <p className="mt-6 text-fg-faint">no repository selected</p>
-        ) : (
-          activeTab === 'configuration' && <ConfigSettings repo={selected} />
-        )}
+        {activeTab === 'configuration' && <ConfigSettings scope="global" />}
       </div>
       <div
         id="settings-panel-appearance"
@@ -530,161 +537,6 @@ export function SettingsView() {
         hidden={activeTab !== 'appearance'}
       >
         <Appearance />
-      </div>
-      <div
-        id="settings-panel-general"
-        role="tabpanel"
-        aria-labelledby="settings-tab-general"
-        hidden={activeTab !== 'general'}
-      >
-        {loadError !== null && (
-          <p role="alert" className="mt-6 text-sm text-red-ink">
-            Could not load settings for {selected}: {loadError}
-          </p>
-        )}
-        {selected !== null && loaded && (
-          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
-            <h2 className="mb-1 text-sm text-fg-muted">Automatic rebasing</h2>
-            <p className="mb-3 text-sm text-fg-faint">
-              Rebase idle Amagi PR branches onto the latest base for {selected}, across all forges.
-              Setup and checks must pass before pushing. Conflicts or failed checks stop the rebase.
-              Requires repository watchers to be enabled.
-            </p>
-            <Toggle
-              on={autoRebase}
-              label="Automatically rebase PR branches"
-              title="Persisted for this repository, disabled by default."
-              disabled={rebaseBusy}
-              onClick={() => {
-                const enabled = !autoRebase
-                setRebaseBusy(true)
-                setRebaseResult(null)
-                void send('PATCH', `/api/repos/${selected}/settings`, { autoRebase: enabled })
-                  .then((error) => {
-                    if (error === null) setAutoRebase(enabled)
-                    setRebaseResult(error ?? 'Saved')
-                  })
-                  .finally(() => setRebaseBusy(false))
-              }}
-            />
-            {rebaseResult !== null && (
-              <p role="status" className="mt-2 text-sm text-fg-faint">
-                {rebaseResult}
-              </p>
-            )}
-          </div>
-        )}
-        {selected !== null && loaded && (
-          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
-            <h2 className="mb-1 text-sm text-fg-muted">Desktop notifications</h2>
-            <p className="mb-3 text-sm text-fg-faint">
-              Desktop delivery stays enabled. Choose whether delivery failures appear in the
-              dashboard.
-            </p>
-            <label className="flex items-center gap-2 text-sm text-fg">
-              <input
-                type="checkbox"
-                checked={desktopFailureAlerts}
-                disabled={desktopBusy}
-                onChange={(event) => void saveDesktopFailureAlerts(event.currentTarget.checked)}
-              />
-              Show desktop delivery failures in the dashboard
-            </label>
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                type="button"
-                disabled={desktopBusy}
-                onClick={() => void testNotification('desktop')}
-                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
-              >
-                {desktopBusy ? 'Sending…' : 'Send test desktop notification'}
-              </button>
-              {desktopResult !== null && (
-                <span role="status" className="text-sm text-fg-faint">
-                  {desktopResult}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-        {selected !== null && loaded && (
-          <div className="mt-6 rounded-lg border border-line bg-surface p-4">
-            <h2 className="mb-1 text-sm text-fg-muted">ntfy notifications</h2>
-            <p className="mb-3 text-sm text-fg-faint">
-              Configure ntfy for {selected}. Leave the topic empty to disable ntfy notifications.
-            </p>
-            <label htmlFor="ntfy-topic" className="mb-1 block text-sm text-fg-muted">
-              Topic
-            </label>
-            <input
-              id="ntfy-topic"
-              type="text"
-              value={ntfyTopic}
-              onChange={(event) => {
-                setNtfyTopic(event.currentTarget.value)
-                setNtfySaved(false)
-              }}
-              className="mb-3 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
-            />
-            <label htmlFor="ntfy-server" className="mb-1 block text-sm text-fg-muted">
-              Server URL
-            </label>
-            <input
-              id="ntfy-server"
-              type="url"
-              value={ntfyServer}
-              onChange={(event) => {
-                setNtfyServer(event.currentTarget.value)
-                setNtfySaved(false)
-              }}
-              className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
-            />
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                type="button"
-                disabled={ntfyBusy || ntfyServer.trim() === ''}
-                onClick={() => void saveNtfy()}
-                className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
-              >
-                {ntfyBusy ? 'Saving…' : 'Save'}
-              </button>
-              {ntfySaved && <span className="text-sm text-fg-faint">Saved</span>}
-            </div>
-            <button
-              type="button"
-              disabled={
-                ntfyTestBusy ||
-                savedNtfyTopic === '' ||
-                ntfyTopic.trim() !== savedNtfyTopic ||
-                ntfyServer.trim() !== savedNtfyServer
-              }
-              onClick={() => void testNotification('ntfy')}
-              className="mt-3 rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
-            >
-              {ntfyTestBusy ? 'Sending…' : 'Send test ntfy notification'}
-            </button>
-            {ntfyTestResult !== null && (
-              <p role="status" className="mt-2 text-sm text-fg-faint">
-                {ntfyTestResult}
-              </p>
-            )}
-            {ntfyError !== null && (
-              <p role="alert" className="mt-2 text-sm text-red-ink">
-                {ntfyError}
-              </p>
-            )}
-          </div>
-        )}
-        {selected === null ? (
-          <p className="mt-6 text-fg-faint">no repository selected</p>
-        ) : (
-          loaded &&
-          staleMaxParallel && (
-            <p className="mt-6 text-sm text-amber-ink">
-              Notice: loop.maxParallel is ignored; configure workers in the global fleet.
-            </p>
-          )
-        )}
       </div>
       <div
         id="settings-panel-profiles"
@@ -708,53 +560,298 @@ export function SettingsView() {
         aria-labelledby="settings-tab-repositories"
         hidden={activeTab !== 'repositories'}
       >
-        <ForgeCredentials
-          credentials={forgeCredentials.credentials}
-          onChanged={forgeCredentials.reload}
+        <AddRepository
+          open={add === true || repos?.length === 0}
+          onAdded={(key) => {
+            void navigate({ to: '/settings', search: { repo: key, tab: 'repositories' } })
+          }}
         />
-        {repos !== null && repos.length > 1 && (
+        {repos !== null && repos.length > 0 && (
+          <label className="mt-6 block text-sm text-fg-muted">
+            Repository
+            <select
+              value={selected ?? ''}
+              onChange={(event) => {
+                void navigate({
+                  to: '/settings',
+                  search: { repo: event.currentTarget.value, tab: 'repositories' },
+                })
+              }}
+              className="ml-3 rounded border border-line-strong bg-app px-3 py-2 text-fg"
+            >
+              {repos.map((entry) => (
+                <option key={entry.key} value={entry.key}>
+                  {entry.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {repo !== undefined && (
+          <div className="mt-4">
+            <button
+              type="button"
+              disabled={removeBusy}
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    `Remove ${repo.name} from Amagi? The repository files will remain on disk.`,
+                  )
+                )
+                  return
+                setRemoveBusy(true)
+                setRemoveError(null)
+                void send('DELETE', `/api/repos/${encodeURIComponent(repo.key)}`).then((error) => {
+                  setRemoveBusy(false)
+                  if (error !== null) {
+                    setRemoveError(error)
+                    return
+                  }
+                  const next = repos?.find((entry) => entry.key !== repo.key)?.key
+                  if (next !== undefined) selectRepo(next)
+                  void navigate({ to: '/settings', search: { repo: next, tab: 'repositories' } })
+                  refreshRepos()
+                })
+              }}
+              className="rounded border border-line-strong bg-surface px-3 py-2 text-sm text-red-ink hover:bg-raised disabled:opacity-50"
+            >
+              {removeBusy ? 'Removing…' : 'Remove repository'}
+            </button>
+            {removeError !== null && (
+              <p role="alert" className="mt-2 text-sm text-red-ink">
+                {removeError}
+              </p>
+            )}
+          </div>
+        )}
+        {repo !== undefined && (
           <div
             role="tablist"
-            aria-label="Repositories"
-            className="mt-4 flex gap-1 border-b border-line"
+            aria-label="Repository settings"
+            className="mt-6 flex gap-4 border-b border-line"
           >
-            {repos.map((entry) => (
+            {(['settings', 'workers'] as const).map((section) => (
               <button
-                key={entry.key}
-                id={`repository-tab-${entry.key}`}
+                key={section}
+                id={`repository-tab-${section}`}
                 type="button"
                 role="tab"
-                aria-selected={repo?.key === entry.key}
-                aria-controls="repository-panel"
-                onClick={() => setSelectedRepo(entry.key)}
-                className={`rounded-t px-3 py-2 text-sm ${
-                  repo?.key === entry.key
-                    ? 'bg-raised text-fg-strong'
-                    : 'text-fg-muted hover:bg-raised hover:text-fg'
-                }`}
+                aria-selected={repositoryTab === section}
+                aria-controls={`repository-panel-${section}`}
+                onClick={() => setRepositoryTab(section)}
+                className={`border-b-2 px-3 py-2 text-sm ${repositoryTab === section ? 'border-accent text-fg-strong' : 'border-transparent text-fg-muted'}`}
               >
-                {entry.name}
+                {section === 'settings' ? 'Settings' : 'Workers'}
               </button>
             ))}
           </div>
         )}
-        {repo !== undefined && repos !== null && repos.length > 1 ? (
-          <div id="repository-panel" role="tabpanel" aria-labelledby={`repository-tab-${repo.key}`}>
+        {repo !== undefined && repositoryTab === 'workers' && (
+          <div
+            id="repository-panel-workers"
+            role="tabpanel"
+            aria-labelledby="repository-tab-workers"
+            className="mt-6"
+          >
+            <RepositoryWorkersSettings key={repo.key} repo={repo.key} onChanged={refreshRepos} />
+          </div>
+        )}
+        {repo !== undefined && repositoryTab === 'settings' && (
+          <div
+            id="repository-panel-settings"
+            role="tabpanel"
+            aria-labelledby="repository-tab-settings"
+          >
             <RepositorySettingsCard
+              key={repo.key}
               repo={repo}
               credentials={forgeCredentials.credentials}
-              onChanged={refreshRepos}
+              onChanged={() => {
+                refreshRepos()
+                if (!loaded) setSettingsVersion((version) => version + 1)
+              }}
               onCredentialsChanged={forgeCredentials.reload}
-            />
+            >
+              {loadError !== null && (
+                <div className="mt-6 space-y-4">
+                  <p role="alert" className="text-sm text-red-ink">
+                    Could not load settings for {selected}: {loadError}
+                  </p>
+                  {selected !== null && (
+                    <RepositoryChecks
+                      key={selected}
+                      repo={{ key: selected }}
+                      onChanged={() => {
+                        refreshRepos()
+                        if (!loaded) setSettingsVersion((version) => version + 1)
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+              {selected !== null && loaded && (
+                <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+                  <h2 className="mb-1 text-sm text-fg-muted">Automatic rebasing</h2>
+                  <p className="mb-3 text-sm text-fg-faint">
+                    Rebase idle Amagi PR branches onto the latest base for {selected}, across all
+                    forges. Setup and checks must pass before pushing. Conflicts or failed checks
+                    stop the rebase. Requires repository watchers to be enabled.
+                  </p>
+                  <Toggle
+                    on={autoRebase}
+                    label="Automatically rebase PR branches"
+                    title="Persisted for this repository, disabled by default."
+                    disabled={rebaseBusy}
+                    onClick={() => {
+                      const enabled = !autoRebase
+                      setRebaseBusy(true)
+                      setRebaseResult(null)
+                      void send('PATCH', `/api/repos/${selected}/settings`, {
+                        autoRebase: enabled,
+                      })
+                        .then((error) => {
+                          if (error === null) setAutoRebase(enabled)
+                          setRebaseResult(error ?? 'Saved')
+                        })
+                        .finally(() => setRebaseBusy(false))
+                    }}
+                  />
+                  {rebaseResult !== null && (
+                    <p role="status" className="mt-2 text-sm text-fg-faint">
+                      {rebaseResult}
+                    </p>
+                  )}
+                </div>
+              )}
+              {selected !== null && loaded && (
+                <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+                  <h2 className="mb-1 text-sm text-fg-muted">Desktop notifications</h2>
+                  <p className="mb-3 text-sm text-fg-faint">
+                    Desktop delivery stays enabled. Choose whether delivery failures appear in the
+                    dashboard.
+                  </p>
+                  <label className="flex items-center gap-2 text-sm text-fg">
+                    <input
+                      type="checkbox"
+                      checked={desktopFailureAlerts}
+                      disabled={desktopBusy}
+                      onChange={(event) =>
+                        void saveDesktopFailureAlerts(event.currentTarget.checked)
+                      }
+                    />
+                    Show desktop delivery failures in the dashboard
+                  </label>
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={desktopBusy}
+                      onClick={() => void testNotification('desktop')}
+                      className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+                    >
+                      {desktopBusy ? 'Sending…' : 'Send test desktop notification'}
+                    </button>
+                    {desktopResult !== null && (
+                      <span role="status" className="text-sm text-fg-faint">
+                        {desktopResult}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {selected !== null && loaded && (
+                <div className="mt-6 rounded-lg border border-line bg-surface p-4">
+                  <h2 className="mb-1 text-sm text-fg-muted">ntfy notifications</h2>
+                  <p className="mb-3 text-sm text-fg-faint">
+                    Configure ntfy for {selected}. Leave the topic empty to disable ntfy
+                    notifications.
+                  </p>
+                  <label htmlFor="ntfy-topic" className="mb-1 block text-sm text-fg-muted">
+                    Topic
+                  </label>
+                  <input
+                    id="ntfy-topic"
+                    type="text"
+                    value={ntfyTopic}
+                    onChange={(event) => {
+                      setNtfyTopic(event.currentTarget.value)
+                      setNtfySaved(false)
+                    }}
+                    className="mb-3 w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                  />
+                  <label htmlFor="ntfy-server" className="mb-1 block text-sm text-fg-muted">
+                    Server URL
+                  </label>
+                  <input
+                    id="ntfy-server"
+                    type="url"
+                    value={ntfyServer}
+                    onChange={(event) => {
+                      setNtfyServer(event.currentTarget.value)
+                      setNtfySaved(false)
+                    }}
+                    className="w-full rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm text-fg"
+                  />
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={ntfyBusy || ntfyServer.trim() === ''}
+                      onClick={() => void saveNtfy()}
+                      className="rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+                    >
+                      {ntfyBusy ? 'Saving…' : 'Save'}
+                    </button>
+                    {ntfySaved && <span className="text-sm text-fg-faint">Saved</span>}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={
+                      ntfyTestBusy ||
+                      savedNtfyTopic === '' ||
+                      ntfyTopic.trim() !== savedNtfyTopic ||
+                      ntfyServer.trim() !== savedNtfyServer
+                    }
+                    onClick={() => void testNotification('ntfy')}
+                    className="mt-3 rounded border border-line-strong bg-surface px-3 py-1 text-sm text-fg hover:bg-raised disabled:opacity-50"
+                  >
+                    {ntfyTestBusy ? 'Sending…' : 'Send test ntfy notification'}
+                  </button>
+                  {ntfyTestResult !== null && (
+                    <p role="status" className="mt-2 text-sm text-fg-faint">
+                      {ntfyTestResult}
+                    </p>
+                  )}
+                  {ntfyError !== null && (
+                    <p role="alert" className="mt-2 text-sm text-red-ink">
+                      {ntfyError}
+                    </p>
+                  )}
+                </div>
+              )}
+              {selected === null ? (
+                <p className="mt-6 text-fg-faint">no repository selected</p>
+              ) : (
+                loaded &&
+                staleMaxParallel && (
+                  <p className="mt-6 text-sm text-amber-ink">
+                    Notice: loop.maxParallel is ignored; configure workers in the repository Workers
+                    tab.
+                  </p>
+                )
+              )}
+            </RepositorySettingsCard>
           </div>
-        ) : repo !== undefined ? (
-          <RepositorySettingsCard
-            repo={repo}
-            credentials={forgeCredentials.credentials}
-            onChanged={refreshRepos}
-            onCredentialsChanged={forgeCredentials.reload}
-          />
-        ) : null}
+        )}
+      </div>
+      <div
+        id="settings-panel-credentials"
+        role="tabpanel"
+        aria-labelledby="settings-tab-credentials"
+        hidden={activeTab !== 'credentials'}
+      >
+        <ForgeCredentials
+          credentials={forgeCredentials.credentials}
+          onChanged={forgeCredentials.reload}
+        />
       </div>
     </section>
   )

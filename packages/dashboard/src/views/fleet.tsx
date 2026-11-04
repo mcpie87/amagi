@@ -4,7 +4,7 @@ import { useRunner } from '../store.tsx'
 import { ProcessCapSettings, SeatsSettings } from './seats-settings.tsx'
 import { card, secondary, send, Toggle } from './settings-ui.tsx'
 
-const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
+const HARNESS_KINDS = ['claude', 'codex', 'opencode', 'omp'] as const
 type HarnessKind = (typeof HARNESS_KINDS)[number]
 const WORKER_ROLES = ['implement', 'review'] as const
 type WorkerRole = (typeof WORKER_ROLES)[number]
@@ -13,12 +13,14 @@ const HARNESS_LABEL: Record<HarnessKind, string> = {
   claude: 'Claude',
   codex: 'Codex',
   opencode: 'OpenCode',
+  omp: 'Oh My Pi',
 }
 
 type Worker = {
   id: string
   name: string
   kind: HarnessKind
+  profile?: string
   model?: string
   effort?: string
   seat?: string
@@ -244,7 +246,11 @@ function defaultName(workers: Worker[], kind: HarnessKind): string {
   }
 }
 
+type NamedProfile = { profile_name: string; harness: HarnessKind; model: string; effort: string }
+
 function WorkerFormModal({
+  repo,
+  profiles,
   initial,
   workers,
   seats,
@@ -252,6 +258,8 @@ function WorkerFormModal({
   onClose,
   onSaved,
 }: {
+  repo: string
+  profiles: NamedProfile[]
   initial: Worker | null
   workers: Worker[]
   seats: string[]
@@ -264,48 +272,44 @@ function WorkerFormModal({
   const [count, setCount] = useState(String(initial?.count ?? 1))
   const [roles, setRoles] = useState<WorkerRole[]>(initial?.roles ?? ['implement'])
   const [difficulties, setDifficulties] = useState<string[]>(initial?.difficulties ?? levels)
-  const [harness, setHarness] = useState<HarnessValues>({
-    kind: initial?.kind ?? 'claude',
-    model: initial?.model ?? '',
-    effort: initial?.effort ?? '',
-    seat: initial?.seat ?? '',
-  })
+  const [profileName, setProfileName] = useState(initial?.profile ?? '')
+  const [seat, setSeat] = useState(initial?.seat ?? '')
+  const selectedProfile = profiles.find((profile) => profile.profile_name === profileName)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const workerCount = Number(count)
   const validCount = Number.isInteger(workerCount) && workerCount >= 1 && workerCount <= 16
 
-  const changeHarness = (next: HarnessValues) => {
-    if (!nameTouched && next.kind !== '' && next.kind !== harness.kind) {
-      setName(defaultName(workers, next.kind))
-    }
-    setHarness(next)
-  }
-
   const save = async () => {
     setBusy(true)
     setError(null)
+    if (selectedProfile === undefined) return
+    const id = initial?.id ?? `worker-${crypto.randomUUID()}`
     const fields = {
+      id,
       name: name.trim(),
-      kind: harness.kind,
-      model: orNull(harness.model),
-      effort: orNull(harness.effort),
-      seat: orNull(harness.seat),
+      profile: selectedProfile.profile_name,
+      kind: selectedProfile.harness,
+      model: selectedProfile.model,
+      effort: selectedProfile.effort,
+      ...(seat === '' ? {} : { seat }),
       count: workerCount,
+      seatCount: Math.min(initial?.seatCount ?? 1, workerCount),
+      enabled: initial?.enabled ?? false,
       roles,
-      // Every level checked is saved as unset, so levels added later are taken too.
-      difficulties: levels.every((level) => difficulties.includes(level))
-        ? null
-        : levels.filter((level) => difficulties.includes(level)),
+      ...(levels.every((level) => difficulties.includes(level))
+        ? {}
+        : {
+            difficulties: levels.filter((level) => difficulties.includes(level)),
+          }),
     }
-    const err =
+    const next =
       initial === null
-        ? await send(
-            'POST',
-            '/api/workers',
-            Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== null)),
-          )
-        : await send('PATCH', `/api/workers/${initial.id}`, fields)
+        ? [...workers, fields]
+        : workers.map((worker) => (worker.id === id ? fields : worker))
+    const err = await send('PUT', `/api/repos/${encodeURIComponent(repo)}/workers`, {
+      workers: next,
+    })
     setBusy(false)
     if (err !== null) setError(err)
     else onSaved()
@@ -317,7 +321,7 @@ function WorkerFormModal({
       error={error}
       busy={busy}
       submitLabel={initial === null ? 'Create worker' : 'Save changes'}
-      canSubmit={name.trim() !== '' && validCount}
+      canSubmit={name.trim() !== '' && validCount && selectedProfile !== undefined}
       onSubmit={() => void save()}
       onClose={onClose}
     >
@@ -353,7 +357,49 @@ function WorkerFormModal({
       {!validCount && (
         <p className="text-sm text-red-ink">Worker count must be between 1 and 16.</p>
       )}
-      <HarnessFields values={harness} onChange={changeHarness} seats={seats} />
+      <div>
+        <label className={label} htmlFor="worker-profile">
+          Profile
+        </label>
+        <select
+          id="worker-profile"
+          className={input}
+          value={profileName}
+          onChange={(event) => {
+            const next = event.currentTarget.value
+            setProfileName(next)
+            const profile = profiles.find((entry) => entry.profile_name === next)
+            if (!nameTouched && profile !== undefined)
+              setName(defaultName(workers, profile.harness))
+          }}
+        >
+          <option value="">Select a profile</option>
+          {profiles.map((profile) => (
+            <option key={profile.profile_name} value={profile.profile_name}>
+              {profile.profile_name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className={label} htmlFor="worker-seat">
+          Seat
+        </label>
+        <select
+          id="worker-seat"
+          className={input}
+          value={seat}
+          onChange={(event) => setSeat(event.currentTarget.value)}
+        >
+          <option value="">Harness default</option>
+          {seat !== '' && !seats.includes(seat) && <option value={seat}>{seat}</option>}
+          {seats.map((entry) => (
+            <option key={entry} value={entry}>
+              {entry}
+            </option>
+          ))}
+        </select>
+      </div>
       <fieldset>
         <legend className={label}>Applicable roles</legend>
         <div className="flex flex-wrap gap-4">
@@ -485,10 +531,14 @@ function Profile({
 }
 
 function WorkerCard({
+  repo,
+  workers,
   worker,
   onEdit,
   onChanged,
 }: {
+  repo: string
+  workers: Worker[]
   worker: Worker
   onEdit: () => void
   onChanged: () => void
@@ -499,7 +549,15 @@ function WorkerCard({
   const act = async (method: string, body?: unknown) => {
     setBusy(true)
     setError(null)
-    const err = await send(method, `/api/workers/${worker.id}`, body)
+    const next =
+      method === 'DELETE'
+        ? workers.filter((entry) => entry.id !== worker.id)
+        : workers.map((entry) =>
+            entry.id === worker.id ? { ...entry, ...(body as object) } : entry,
+          )
+    const err = await send('PUT', `/api/repos/${encodeURIComponent(repo)}/workers`, {
+      workers: next,
+    })
     setBusy(false)
     if (err !== null) setError(err)
     onChanged()
@@ -516,6 +574,9 @@ function WorkerCard({
           <h3 className="font-medium text-fg-strong">
             {worker.name} <span className="text-xs text-fg-faint">{worker.id}</span>
           </h3>
+          {worker.profile !== undefined && (
+            <p className="text-sm text-fg-muted">Profile: {worker.profile}</p>
+          )}
           <Profile
             kind={worker.kind}
             model={worker.model}
@@ -614,22 +675,16 @@ function WatcherCard({
 
 /** The global fleet editor: workers, seats and watchers. */
 export function FleetWorkersSettings() {
-  const [workers, setWorkers] = useState<Worker[] | null>(null)
   const [watchers, setWatchers] = useState<Watchers | null>(null)
   const [seatNames, setSeatNames] = useState<string[]>([])
-  const [difficultyLevels, setDifficultyLevels] = useState<string[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [editing, setEditing] = useState<Worker | 'new' | null>(null)
   const [editingWatcher, setEditingWatcher] = useState<AgentWatcherKind | null>(null)
 
   const refresh = useCallback(() => {
-    Promise.all([fetch(`${apiBase}/api/workers`), fetch(`${apiBase}/api/watchers`)])
-      .then(async ([w, v]) => {
-        if (!w.ok || !v.ok) throw new Error(`HTTP ${w.ok ? v.status : w.status}`)
-        const body = (await w.json()) as { workers: Worker[]; difficultyLevels: string[] }
-        setWorkers(body.workers)
-        setDifficultyLevels(body.difficultyLevels)
-        setWatchers((await v.json()) as Watchers)
+    fetch(`${apiBase}/api/watchers`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        setWatchers((await response.json()) as Watchers)
         setLoadError(null)
       })
       .catch((err: unknown) =>
@@ -658,43 +713,13 @@ export function FleetWorkersSettings() {
   }, [refresh, refreshSeats])
 
   const saved = () => {
-    setEditing(null)
     setEditingWatcher(null)
     refresh()
   }
 
   return (
     <>
-      <div className="mt-6">
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm text-fg-muted">Workers</h2>
-          <button
-            type="button"
-            onClick={() => setEditing('new')}
-            disabled={workers === null}
-            className="rounded bg-accent px-3 py-1 text-sm font-medium text-on-solid hover:bg-accent/90 disabled:opacity-50"
-          >
-            Add worker
-          </button>
-        </div>
-        <p className="mb-3 text-sm text-fg-faint">
-          Workers live in the global config and serve every repository. Capacity is one run per free
-          seat among the enabled workers.
-        </p>
-        {loadError !== null && <p className="text-sm text-red-ink">{loadError}</p>}
-        {workers?.length === 0 && <p className="text-sm text-fg-faint">no workers configured</p>}
-        <div className="space-y-2">
-          {workers?.map((worker) => (
-            <WorkerCard
-              key={worker.id}
-              worker={worker}
-              onEdit={() => setEditing(worker)}
-              onChanged={refresh}
-            />
-          ))}
-        </div>
-      </div>
-
+      {loadError !== null && <p className="text-sm text-red-ink">{loadError}</p>}
       <SeatsSettings onSaved={refreshSeats} />
 
       <ProcessCapSettings />
@@ -720,16 +745,6 @@ export function FleetWorkersSettings() {
         </div>
       )}
 
-      {editing !== null && workers !== null && (
-        <WorkerFormModal
-          initial={editing === 'new' ? null : editing}
-          workers={workers}
-          seats={seatNames}
-          levels={difficultyLevels}
-          onClose={() => setEditing(null)}
-          onSaved={saved}
-        />
-      )}
       {editingWatcher !== null && watchers !== null && (
         <WatcherFormModal
           kind={editingWatcher}
@@ -740,5 +755,91 @@ export function FleetWorkersSettings() {
         />
       )}
     </>
+  )
+}
+
+export function RepositoryWorkersSettings({
+  repo,
+  onChanged,
+}: {
+  repo: string
+  onChanged: () => void
+}) {
+  const [workers, setWorkers] = useState<Worker[] | null>(null)
+  const [profiles, setProfiles] = useState<NamedProfile[]>([])
+  const [seats, setSeats] = useState<string[]>([])
+  const [levels, setLevels] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [editing, setEditing] = useState<Worker | 'new' | null>(null)
+  const refresh = useCallback(() => {
+    Promise.all([
+      fetch(`${apiBase}/api/repos/${encodeURIComponent(repo)}/workers`),
+      fetch(`${apiBase}/api/seat-names`),
+    ])
+      .then(async ([response, seatResponse]) => {
+        if (!response.ok || !seatResponse.ok) throw new Error('Could not load workers')
+        const body = (await response.json()) as {
+          workers: Worker[]
+          profiles: NamedProfile[]
+          difficultyLevels: string[]
+        }
+        const seatBody = (await seatResponse.json()) as { seats: { name: string }[] }
+        setWorkers(body.workers)
+        setProfiles(body.profiles)
+        setLevels(body.difficultyLevels)
+        setSeats(seatBody.seats.map(({ name }) => name))
+        setError(null)
+      })
+      .catch((err: unknown) => setError(String(err)))
+  }, [repo])
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+  const changed = () => {
+    setEditing(null)
+    refresh()
+    onChanged()
+  }
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-medium">Workers</h3>
+        <button
+          type="button"
+          className={secondary}
+          disabled={workers === null || profiles.length === 0}
+          onClick={() => setEditing('new')}
+        >
+          Add worker
+        </button>
+      </div>
+      {profiles.length === 0 && (
+        <p className="text-sm text-fg-muted">Create a profile before adding a worker.</p>
+      )}
+      {error !== null && <p className="text-sm text-red-ink">{error}</p>}
+      {workers?.length === 0 && <p className="text-sm text-fg-muted">No workers configured.</p>}
+      {workers?.map((worker) => (
+        <WorkerCard
+          key={worker.id}
+          repo={repo}
+          workers={workers}
+          worker={worker}
+          onEdit={() => setEditing(worker)}
+          onChanged={changed}
+        />
+      ))}
+      {editing !== null && workers !== null && (
+        <WorkerFormModal
+          repo={repo}
+          profiles={profiles}
+          initial={editing === 'new' ? null : editing}
+          workers={workers}
+          seats={seats}
+          levels={levels}
+          onClose={() => setEditing(null)}
+          onSaved={changed}
+        />
+      )}
+    </div>
   )
 }

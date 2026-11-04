@@ -13,6 +13,7 @@ type ConfigView = {
   server: { host: string; port: number }
   personas: string[]
   running: boolean
+  origins: Record<string, 'repo' | 'global' | 'default'>
 }
 
 type Harness = {
@@ -28,6 +29,7 @@ type Harness = {
 
 type Group =
   | 'Repository'
+  | 'Tracker'
   | 'Review'
   | 'Checks and run limits'
   | 'Watcher intervals'
@@ -39,13 +41,13 @@ type Group =
   | 'Harnesses (all repositories)'
 
 type Field = { group: Group; label: string; help?: string } & (
-  | { kind: 'bool' | 'int' | 'number' | 'text' | 'optionalText' | 'list' | 'persona' }
+  | { kind: 'bool' | 'int' | 'number' | 'text' | 'optionalText' | 'list' | 'ports' | 'persona' }
   | { kind: 'select'; options: readonly string[] }
   | { kind: 'harness'; optional?: true }
   | { kind: 'harnesses' | 'contextOverrides' }
 )
 
-const HARNESS_KINDS = ['claude', 'codex', 'opencode'] as const
+const HARNESS_KINDS = ['claude', 'codex', 'opencode', 'omp'] as const
 
 const FIELDS: Record<EditableSettingPath, Field> = {
   'repo.baseBranch': { group: 'Repository', label: 'Base branch', kind: 'text' },
@@ -56,6 +58,24 @@ const FIELDS: Record<EditableSettingPath, Field> = {
     help: 'Runs in every fresh worktree before the agent starts.',
     kind: 'optionalText',
   },
+  'services.start': {
+    group: 'Repository',
+    label: 'Services start command',
+    help: 'Runs on the host from the repository checkout before setup and checks, with COMPOSE_PROJECT_NAME per worktree and AMAGI_PORT_<port> host ports to publish on.',
+    kind: 'optionalText',
+  },
+  'services.stop': {
+    group: 'Repository',
+    label: 'Services stop command',
+    help: 'Runs with the same COMPOSE_PROJECT_NAME when the worktree is removed.',
+    kind: 'optionalText',
+  },
+  'services.ports': {
+    group: 'Repository',
+    label: 'Service ports',
+    help: 'Ports setup and checks reach on 127.0.0.1; each forwards to its AMAGI_PORT_<port> host port.',
+    kind: 'ports',
+  },
   'repo.persona': {
     group: 'Repository',
     label: 'Git persona',
@@ -63,7 +83,7 @@ const FIELDS: Record<EditableSettingPath, Field> = {
     kind: 'persona',
   },
   'tracker.kind': {
-    group: 'Repository',
+    group: 'Tracker',
     label: 'Tracker',
     kind: 'select',
     options: ['beads', 'github', 'forgejo'],
@@ -76,8 +96,14 @@ const FIELDS: Record<EditableSettingPath, Field> = {
   },
   'checks.commands': {
     group: 'Checks and run limits',
-    label: 'Extra check commands',
-    help: 'Run after format, lint and test.',
+    label: 'After checks',
+    help: 'Run in order after agent work and each fix.',
+    kind: 'list',
+  },
+  'checks.before': {
+    group: 'Checks and run limits',
+    label: 'Before checks',
+    help: 'Run in order on the untouched worktree before agent work.',
     kind: 'list',
   },
   'checks.timeoutSec': {
@@ -259,14 +285,28 @@ const RULES = new Map<string, EditableSetting>(
 )
 
 /** Every setting without a dedicated control elsewhere in Settings, grouped into cards. */
-export function ConfigSettings({ repo }: { repo: string }) {
+export function ConfigSettings({
+  repo,
+  scope = 'repo',
+  groups,
+  onChanged,
+}: {
+  repo?: string | undefined
+  scope?: 'repo' | 'global'
+  groups?: readonly Group[]
+  onChanged?: () => void
+}) {
   const [view, setView] = useState<ConfigView | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let active = true
     setView(null)
     setError(null)
-    fetch(`${apiBase}/api/repos/${encodeURIComponent(repo)}/config`)
+    fetch(
+      scope === 'global'
+        ? `${apiBase}/api/config`
+        : `${apiBase}/api/repos/${encodeURIComponent(repo ?? '')}/config`,
+    )
       .then(async (res) => {
         if (!res.ok)
           throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`)
@@ -282,7 +322,7 @@ export function ConfigSettings({ repo }: { repo: string }) {
     return () => {
       active = false
     }
-  }, [repo])
+  }, [repo, scope])
 
   if (error !== null) {
     return (
@@ -294,16 +334,38 @@ export function ConfigSettings({ repo }: { repo: string }) {
   if (view === null) return <p className="mt-6 text-fg-faint">loading configuration...</p>
   return (
     <div className="mt-6 space-y-4">
-      {GROUPS.map((group) => (
-        <GroupCard key={group} repo={repo} group={group} view={view} onSaved={setView} />
+      {GROUPS.filter(
+        (group) =>
+          (groups === undefined || groups.includes(group)) &&
+          (Object.keys(FIELDS) as EditableSettingPath[]).some(
+            (path) =>
+              FIELDS[path].group === group &&
+              RULES.get(path)?.layer === scope &&
+              !path.startsWith('checks.'),
+          ),
+      ).map((group) => (
+        <GroupCard
+          key={group}
+          repo={repo}
+          group={group}
+          scope={scope}
+          view={view}
+          onSaved={(next) => {
+            setView(next)
+            onChanged?.()
+          }}
+        />
       ))}
-      <div className={card}>
-        <h2 className="mb-1 text-sm text-fg-muted">Server</h2>
-        <p className="text-sm text-fg-faint">
-          Listening on {view.server.host}:{view.server.port}. Set server.host and server.port in the
-          user config and restart amagi serve: a change from here could lock the dashboard out.
-        </p>
-      </div>
+      {scope === 'global' && (
+        <div className={card}>
+          <h2 className="mb-1 text-sm text-fg-muted">Server</h2>
+          <p className="text-sm text-fg-faint">
+            Listening on {view.server.host}:{view.server.port}. Set server.host and server.port in
+            the user config and restart amagi serve: a change from here could lock the dashboard
+            out.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -311,16 +373,21 @@ export function ConfigSettings({ repo }: { repo: string }) {
 function GroupCard({
   repo,
   group,
+  scope,
   view,
   onSaved,
 }: {
-  repo: string
+  repo?: string | undefined
   group: Group
+  scope: 'repo' | 'global'
   view: ConfigView
   onSaved: (view: ConfigView) => void
 }) {
   const paths = (Object.keys(FIELDS) as EditableSettingPath[]).filter(
-    (path) => FIELDS[path].group === group,
+    (path) =>
+      FIELDS[path].group === group &&
+      RULES.get(path)?.layer === scope &&
+      !path.startsWith('checks.'),
   )
   const [draft, setDraft] = useState<Partial<Values>>({})
   const [busy, setBusy] = useState(false)
@@ -342,11 +409,16 @@ function GroupCard({
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(`${apiBase}/api/repos/${encodeURIComponent(repo)}/config`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ values: draft }),
-      })
+      const res = await fetch(
+        scope === 'global'
+          ? `${apiBase}/api/config`
+          : `${apiBase}/api/repos/${encodeURIComponent(repo ?? '')}/config`,
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ values: draft }),
+        },
+      )
       const body = (await res.json().catch(() => null)) as (ConfigView & { error?: string }) | null
       if (!res.ok || body === null) {
         setError(body?.error ?? `HTTP ${res.status}`)
@@ -377,6 +449,18 @@ function GroupCard({
                 personas={view.personas}
                 onChange={(next) => set(path, next)}
               />
+              <p className="mt-1 text-xs text-fg-faint">
+                {view.origins[path] === 'repo'
+                  ? 'Repository override'
+                  : view.origins[path] === 'global'
+                    ? 'Global configuration'
+                    : 'Default'}
+                {scope === 'repo' && view.origins[path] === 'repo' && (
+                  <button type="button" className="ml-2 underline" onClick={() => set(path, null)}>
+                    Use inherited value
+                  </button>
+                )}
+              </p>
               {(FIELDS[path].help !== undefined || rule?.idleOnly || rule?.restart) && (
                 <p className="mt-1 text-xs text-fg-faint">
                   {[
@@ -509,6 +593,14 @@ function FieldControl({
           label={spec.label}
           items={Array.isArray(value) ? (value as string[]) : []}
           onChange={onChange}
+        />
+      )
+    case 'ports':
+      return (
+        <ListEditor
+          label={spec.label}
+          items={Array.isArray(value) ? (value as number[]).map(String) : []}
+          onChange={(items) => onChange(items.map(Number))}
         />
       )
     case 'harness':

@@ -129,7 +129,8 @@ const lastMergeablePrs = new Map<string, PrInfo[]>()
  * poll is one forge call, not one per PR.
  */
 function MergeablePrsPanel() {
-  const { selected } = useDashboard()
+  const { selected, repos } = useDashboard()
+  const watchersOff = repos?.find((r) => r.key === selected)?.watchers === false
   const dateFormat = useDateFormatPref()
   const [prs, setPrs] = useState<PrInfo[] | null>(() =>
     selected === null ? null : (lastMergeablePrs.get(selected) ?? null),
@@ -168,6 +169,12 @@ function MergeablePrsPanel() {
         </h2>
         <span className="text-xs text-fg-faint">from the forge, refreshed every 10s</span>
       </div>
+      {watchersOff && (
+        <p className="mb-2 text-xs text-orange-ink">
+          Watchers are off for this repository, so PRs merged or closed on the forge are not
+          tracked: their tasks stay open here and in the tracker until watchers are turned on.
+        </p>
+      )}
       {prs.length === 0 ? (
         <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-fg-faint">
           No open PRs are mergeable right now.
@@ -300,7 +307,8 @@ function SeatUsagePanel() {
           Harness calls by seat
         </h2>
         <span className="text-xs text-fg-faint">
-          last 60s across registered repos; Claude/Codex turns, OpenCode steps; refreshed every 10s
+          last 60s across registered repos; Claude/Codex turns, OpenCode steps and omp calls;
+          refreshed every 10s
         </span>
       </div>
       {rates === null ? (

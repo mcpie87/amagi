@@ -1,6 +1,8 @@
 import { type AgentLogLine, agentLogKey, agentLogStore } from '@amagi/core/agent-log'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useDateFormatPref } from './date-format.ts'
+import { fmtDateTime } from './format.ts'
 import { useAgentLogBackfill } from './store.tsx'
 import { EmptyState, Time } from './ui.tsx'
 
@@ -18,6 +20,7 @@ const kindClass: Record<AgentLogLine['kind'], string> = {
   result: 'text-emerald-ink',
   error: 'text-red-ink',
   status: 'text-fg-dim',
+  check: 'text-fg-muted',
 }
 
 /**
@@ -41,6 +44,7 @@ export function AgentLogView({
   const stickToBottom = useRef(true)
   const logKey = agentLogKey(repo, taskId, attempt)
   const [following, setFollowing] = useState(true)
+  const dateFormat = useDateFormatPref()
   useAgentLogBackfill(repo, taskId, attempt)
 
   useSyncExternalStore(
@@ -119,6 +123,13 @@ export function AgentLogView({
                 }}
                 className={`truncate whitespace-pre px-3 ${kindClass[line.kind]}`}
               >
+                <time
+                  dateTime={new Date(line.ts).toISOString()}
+                  title={fmtDateTime(line.ts, dateFormat)}
+                  className="agent-log-ts"
+                >
+                  {fmtDateTime(line.ts, 'hh:mm:ss')}
+                </time>
                 {line.text === '' ? ' ' : line.text}
               </div>
             )
