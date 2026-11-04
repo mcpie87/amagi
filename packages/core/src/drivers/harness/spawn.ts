@@ -153,6 +153,9 @@ export function spawnAgent(
       return child?.model ?? (options.model ? options.model() : null)
     },
     effort: options.effort ?? null,
+    get sessionId() {
+      return child?.sessionId ?? null
+    },
   }
 }
 
@@ -224,5 +227,8 @@ function spawnUnlocked(
       return options.model ? options.model() : null
     },
     effort: options.effort ?? null,
+    get sessionId() {
+      return translator.sessionId
+    },
   }
 }

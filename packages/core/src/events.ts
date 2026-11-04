@@ -280,6 +280,8 @@ export const EventBody = z.discriminatedUnion('type', [
     worker: z.string().optional(),
     cwd: z.string(),
     resumed: z.boolean(),
+    /** The harness process a task runner spawned, so a restarted server can tell its agent still runs. */
+    pid: z.number().int().optional(),
     /** Unique watcher invocation key; task runs leave this unset. */
     watcherRunId: z.string().optional(),
     /** Human-readable origin for a watcher session. */
@@ -299,6 +301,15 @@ export const EventBody = z.discriminatedUnion('type', [
     sessionId: z.string().nullable(),
     watcherRunId: z.string().optional(),
     watcherSource: z.string().optional(),
+  }),
+  /**
+   * The harness reported the run's session id. Appended as soon as it is known,
+   * not only on exit, so a run interrupted mid-flight can still be resumed.
+   */
+  z.object({
+    type: z.literal('agent.session'),
+    role: AgentRole,
+    sessionId: z.string(),
   }),
   /**
    * The run's running peak input context as context events stream in. Appended each time the peak grows; the last one of a run

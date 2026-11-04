@@ -74,6 +74,7 @@ import {
 } from './prompt.ts'
 import {
   backoffDelayMs,
+  isMissingSession,
   isSessionLimit,
   isTransientFailure,
   isUsageLimit,
@@ -385,7 +386,7 @@ type ReviewPrSummary = {
  * out a short lease and reverts the issue to ready once it lapses, so a long
  * agent run without this silently loses the task to `bd reclaim`.
  */
-class Lease {
+export class Lease {
   private timer: ReturnType<typeof setInterval> | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private lost = false
@@ -1356,26 +1357,30 @@ export class Runner {
     // A fresh run first verifies the task is still viable against the current
     // repository, so a task already satisfied on the base branch is stopped
     // before the implement agent writes anything or a no-op PR is opened. A
-    // resumed run skips the check: its worktree already holds in-progress work.
+    // resumed run skips the check: its worktree already holds in-progress work,
+    // and it continues the interrupted implement session when there is one, so
+    // the agent keeps its context instead of rebuilding it from the worktree.
     // Implement resumes the check's session so its exploration is not redone,
     // but only on a harness that swaps the system prompt on resume: elsewhere
     // the resumed session stays a read-only checker and never implements.
-    let verifySession: string | null = null
-    if (!resume) {
+    let resumeFrom: string | null = null
+    if (resume) {
+      resumeFrom = this.interruptedImplementSession(task.id)
+    } else {
       const verified = await this.verifyViability(task, cwd, branch, budget)
       if (verified === null) return null
       if (this.deps.harness.replacesSystemPromptOnResume === true) {
-        verifySession = verified.sessionId
+        resumeFrom = verified.sessionId
       }
     }
     const first = await this.runAgentWithRetry(
       task.id,
-      verifySession,
+      resumeFrom,
       {
         cwd,
         prompt: resume
           ? reclaimPrompt(promptCtx)
-          : verifySession !== null
+          : resumeFrom !== null
             ? implementAfterVerifyPrompt(promptCtx)
             : implementPrompt(promptCtx),
         systemPrompt: implementSystemPrompt(promptCtx),
@@ -1482,6 +1487,33 @@ export class Runner {
       }
     }
     return readyForChecks ? run : null
+  }
+
+  /**
+   * The implement session an interrupted attempt left behind, so a reclaimed
+   * run resumes it with its context instead of starting cold. Only a session
+   * that was cut off (no exit recorded: the server died under it) or that
+   * exited cleanly qualifies. A failed, cancelled or context-killed session, a
+   * task parked in a terminal state since, or a reset starts fresh.
+   */
+  private interruptedImplementSession(taskId: string): string | null {
+    let session: string | null = null
+    for (const event of this.deps.store.events({ taskId, limit: 1_000_000 })) {
+      if (
+        event.type === 'task.reset' ||
+        event.type === 'run.restarted' ||
+        (event.type === 'task.state' && isTerminal(event.to)) ||
+        (event.type === 'agent.started' &&
+          (event.role === 'verify' || (event.role === 'implement' && !event.resumed)))
+      ) {
+        session = null
+      } else if (event.type === 'agent.session' && event.role === 'implement') {
+        session = event.sessionId
+      } else if (event.type === 'agent.exited' && event.role === 'implement') {
+        session = event.exitCode === 0 ? (event.sessionId ?? session) : null
+      }
+    }
+    return session
   }
 
   /**
@@ -2036,6 +2068,7 @@ export class Runner {
       const effort = proc.effort ?? null
       let model = opts.model ?? null
       let started = false
+      let reportedSession: string | null = null
       let contextExceeded = false
       for await (const event of proc.events()) {
         if (event.kind === 'status' && event.message.startsWith('waiting for seat ')) {
@@ -2059,7 +2092,13 @@ export class Runner {
             ...(this.deps.workerName === undefined ? {} : { worker: this.deps.workerName }),
             cwd: opts.cwd,
             resumed: resumeFrom !== null,
+            ...(proc.pid > 0 ? { pid: proc.pid } : {}),
           })
+        }
+        const sessionId = started ? (proc.sessionId ?? null) : null
+        if (sessionId !== null && sessionId !== reportedSession) {
+          reportedSession = sessionId
+          store.append(taskId, { type: 'agent.session', role, sessionId })
         }
         if (event.kind === 'usage' && event.costUsd !== undefined) budget?.addCost(event.costUsd)
         switch (event.kind) {
@@ -2286,6 +2325,7 @@ export class Runner {
       const releaseProbe = await acquireUsageProbe(holdKey, () => this.isCancelled(taskId))
       if (waitingOnUsageHold && !this.isCancelled(taskId)) this.transition(taskId, retryState)
       let run: Awaited<ReturnType<Runner['runAgent']>>
+      const resumedFrom = sessionId
       try {
         run = await this.runAgent(taskId, sessionId, runOpts, phase, budget, role, harness)
       } catch (err) {
@@ -2344,6 +2384,20 @@ export class Runner {
       if (lease?.isLost) {
         releaseProbe?.()
         throw new LeaseLostError(taskId)
+      }
+      // A reclaimed run resumes the interrupted session, which the harness may
+      // have dropped since; the work is in the worktree, so start fresh on it.
+      if (resumedFrom !== null && isMissingSession(run.detail ?? '')) {
+        store.append(taskId, {
+          type: 'retry.scheduled',
+          attempt,
+          delayMs: 0,
+          reason: 'resumed session no longer exists; starting a fresh session',
+          detail: run.detail ?? '',
+        })
+        sessionId = null
+        releaseProbe?.()
+        continue
       }
 
       const usageLimited = isUsageLimit(run.detail ?? '')

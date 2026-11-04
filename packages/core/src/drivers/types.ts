@@ -190,6 +190,8 @@ export interface AgentProcess {
   readonly model: string | null
   /** The reasoning effort in effect, or null when unknown. */
   readonly effort: string | null
+  /** The session id once the harness reports it; unset where only the outcome carries it. */
+  readonly sessionId?: string | null
 }
 
 export interface Harness {
